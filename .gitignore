@@ -1,0 +1,30 @@
+# Donnees d'execution, sessions navigateur et bases : jamais versionnees
+agents/data/
+data/
+cache/
+businesses/short_video/data/*.db
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Sorties et builds
+out/
+build/
+dist/
+remotion/node_modules/
+remotion/out/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Journaux et sauvegardes locales
+cycle_gui.log
+cycle_gui.err
+jobs/*.bak
+
+# Secrets
+.env
+.env.*

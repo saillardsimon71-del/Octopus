@@ -1,0 +1,81 @@
+{
+  "offer_id": "cash_impayes_relance01",
+  "langue": "fr",
+  "duree_cible_s": 24,
+  "titre": "Relance impayés : 9€ pour récupérer votre cash",
+  "hook": "Votre facture est impayée. Ce n'est pas un oubli.",
+  "douleur": "Chaque jour, vous perdez du cash. Vos relances ne servent à rien. Le stress monte.",
+  "preuve": "Un modèle de relance juridique qui a fait ses preuves. 9 € seulement.",
+  "soulagement": "Enfin une solution simple et efficace. Le cash rentre. Vous respirez.",
+  "cta": "Téléchargez maintenant pour 9 €. Lien en description.",
+  "prix": "9 €",
+  "stripe_link": "https://buy.stripe.com/8x27sM0Dg9Ipf133X11oI0a",
+  "sub_id": "ai_prompts_freelance_short01_offre",
+  "voix": {
+    "moteur": "chatterbox",
+    "nom": "vivienne-fr"
+  },
+  "keywords": [
+    "facture impayée",
+    "relance",
+    "cash",
+    "modèle",
+    "juridique",
+    "9 €",
+    "description"
+  ],
+  "palette": {
+    "bgTop": "#ff9a3c",
+    "bgMid": "#f97316",
+    "bgBottom": "#c2410c",
+    "ink": "#2b1206",
+    "accent": "#ff6a00",
+    "highlight": "#fff1d6",
+    "pillBg": "#fff7ed",
+    "pillInk": "#c2410c"
+  },
+  "narration": [
+    {
+      "id": "hook",
+      "role": "hook",
+      "rate": "-8%",
+      "texte": "Votre facture est impayée."
+    },
+    {
+      "id": "hook2",
+      "role": "hook",
+      "rate": "-4%",
+      "texte": "Ce n'est pas un oubli."
+    },
+    {
+      "id": "douleur",
+      "role": "douleur",
+      "rate": "+4%",
+      "texte": "Chaque jour, vous perdez du cash. Vos relances ne servent à rien."
+    },
+    {
+      "id": "douleur2",
+      "role": "douleur",
+      "rate": "+7%",
+      "texte": "Le stress monte."
+    },
+    {
+      "id": "preuve",
+      "role": "preuve",
+      "rate": "+12%",
+      "texte": "Un modèle de relance juridique qui a fait ses preuves."
+    },
+    {
+      "id": "soulagement",
+      "role": "soulagement",
+      "rate": "+2%",
+      "texte": "Enfin une solution simple et efficace. Le cash rentre. Vous respirez."
+    },
+    {
+      "id": "cta",
+      "role": "cta",
+      "rate": "-1%",
+      "texte": "Téléchargez maintenant pour 9 €. Lien en description."
+    }
+  ]
+}

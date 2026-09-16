@@ -1,0 +1,114 @@
+# Groupe d'agents Podalux
+
+Orchestrateur de 6 agents pilotés par DeepSeek, qui produit des Shorts **sans intervention**.
+
+## Roster
+
+| Agent | Rôle | Modèle |
+|---|---|---|
+| **ORBIT** | CEO — arbitre, tient la barre qualité | `deepseek-v4-pro` (reasoning high) |
+| **GROWTH** | Acquisition/Distribution — **propriétaire du QC SHIP+WARM** | `deepseek-flash` (vision) |
+| **LEDGER** | Data/Finance — rubric /35, coûts, go/no-go | code + `deepseek-v4-pro` |
+| **FORGE** | Production — rendu vidéo (Chatterbox + Remotion + mux) | déterministe (pas de LLM) |
+| **CONVERT** | Monétisation — offre, prix, CTA, job.json | `deepseek-flash` |
+| **SOUT** | Recherche — sélection d'offres, **veille web (navigateur)** | `deepseek-flash` |
+
+## Cycle économique
+
+```
+SOUT → CONVERT → FORGE → GROWTH → LEDGER → ORBIT
+(recherche) (monétisation) (rendu) (QC) (rubric/coût) (arbitrage)
+```
+
+## Commandes
+
+```powershell
+$env:DEEPSEEK_API_KEY = [Environment]::GetEnvironmentVariable('DEEPSEEK_API_KEY','User')
+
+python -m agents.run cycle              # SOUT choisit l'offre
+python -m agents.run cycle --offer cash_devis_cgv01   # offre forcée
+python -m agents.run status             # coûts + dernières décisions
+python -m agents.run browser <url>      # teste le navigateur (navigation + vision)
+python -m agents.run goal "…"           # objectif libre (1 agent ORBIT, boucle ReAct)
+python -m agents.run mission "…"        # ORBIT planifie + délègue aux rôles (multi-agents)
+python -m agents.run msg SOUT "…"       # message direct à un agent (@ROLE dans la GUI)
+```
+
+## Runtime général + missions multi-agents (Phase 7)
+
+`agents/runtime.py` — les agents sont libres d'agir et d'apprendre via une boucle **ReAct**
+(penser → agir → observer) sur un **registre d'outils partagés** :
+
+| Outil | Effet |
+|---|---|
+| `search` | recherche web (Google News RSS + Wikipedia, ou Brave/Tavily si clé) |
+| `browse` | ouvre une page et la décrit (texte + vision) |
+| `render_offer` | produit la vidéo complète d'une offre |
+| `qc` | métriques ffmpeg d'une offre |
+| `ask_human` | demande confirmation/info à l'humain (non-bloquant en autonome) |
+| `publish` | plan de publication (dry-run) |
+| `send_message` | prospection (dry-run) |
+| `remember` / `recall` | mémoire d'apprentissage persistée (SQLite) |
+
+- `run_agent(role, goal)` — un rôle poursuit un objectif librement.
+- `run_mission(goal)` — **ORBIT planifie** (décompose l'objectif en sous-tâches assignées à des
+  rôles), **délègue** séquentiellement (chaque sous-tâche reçoit le contexte des précédentes),
+  puis **synthétise** le rapport final.
+- Garde anti-boucle : si un agent répète la même action sans progrès (CAPTCHA…), on lui demande
+  de changer d'approche ou de répondre.
+
+## Recherche web (anti-blocage)
+
+DuckDuckGo et Bing HTML bloquent l'automatisation par CAPTCHA. On contourne avec des sources
+bot-friendly, par ordre de priorité :
+
+1. **Brave Search API** (`BRAVE_API_KEY`) — vraie recherche web, 2000 req/mois gratuites.
+2. **Tavily API** (`TAVILY_API_KEY`) — recherche optimisée IA, 1000 crédits/mois gratuits.
+3. **Google News RSS** — actualités (keyless, XML), idéal pour la veille.
+4. **Wikipedia** — encyclopédie (keyless), idéal pour les concepts.
+
+Sans clé, la veille fonctionne via Google News + Wikipedia (résultats pertinents en français).
+
+## Navigateur (Phase 5)
+
+`agents/browser.py` — Playwright **persistant** :
+
+- **Profil persistant** (`agents/data/browser_profile`) : cookies/sessions conservés entre les runs.
+- **Deux modes** : `headless=True` (veille, recherche) / `headless=False` (visible, passation humaine).
+- **API** : `goto`, `snapshot` (texte), `links`, `click`, `type`, `wait_for`, `screenshot`, `download`, `see` (vision), `handoff`.
+- **Vision** : `see()` envoie la capture à `deepseek-flash` → l'agent « voit » la page.
+- **Veille** : `SOUT.research("sujet")` = recherche multi-sources + synthèse.
+
+### Navigateur Chromium (profil persistant)
+
+Le navigateur des agents est un **Chromium** (Playwright) avec un **profil persistant**
+(`agents/data/browser_profile`) : les connexions aux comptes (Stripe, Reddit, X, Fiverr,
+YouTube…) sont **conservées** entre les sessions.
+
+- **Visible par défaut** (`headless=False`) : l'humain regarde, interagit et se connecte.
+- **Connexion unique** : tu te connectes une fois dans la fenêtre, l'agent retrouve la session.
+- Bouton **« 🌐 Ouvrir le navigateur »** (GUI) ou `python -m agents.run browse-open`.
+
+⚠️ **ToS** : préférer les API officielles (YouTube Data API, Stripe API).
+L'automatisation de logins est fragile et peut violer les CGU → `handoff()` pour login/2FA/captcha.
+
+## Persistance (SQLite `agents/data/podalux.db`)
+
+- `messages` — salon + fil par agent (@mentions)
+- `costs` — chaque appel DeepSeek (agent, modèle, tokens, coût)
+- `metrics` — rubric /35 par offre (équivalent `cash_metrics.csv`)
+- `decisions` — audit des décisions (SOUT/CONVERT/GROWTH/LEDGER/ORBIT)
+
+## Garde-fous
+
+- **Secrets** : `DEEPSEEK_API_KEY` reste en variable d'environnement.
+- **Shell** : liste blanche stricte (`SHELL_WHITELIST`), aucun argument destructif.
+- **Coût** : plafond par cycle (`CYCLE_BUDGET_USD`), tout appel est loggé.
+- **Sortant** : rien ne sort de la machine (pas d'upload/email/achat) — à ajouter en `--dry-run`.
+
+## Prérequis
+
+- Serveur Chatterbox démarré (`127.0.0.1:4123`) — Phase 3.
+- Remotion installé (`remotion/`).
+- `playwright` installé + navigateurs (`%LOCALAPPDATA%\ms-playwright`).
+- `DEEPSEEK_API_KEY` posée en variable d'environnement utilisateur.

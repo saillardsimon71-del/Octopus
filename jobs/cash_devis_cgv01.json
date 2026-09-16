@@ -1,0 +1,81 @@
+{
+  "offer_id": "cash_devis_cgv01",
+  "langue": "fr",
+  "duree_cible_s": 24,
+  "titre": "Devis & CGV pro : passez pour un pro",
+  "hook": "Un client vous demande un devis ?",
+  "douleur": "Sans CGV, vous perdez en crédibilité.",
+  "preuve": "Devis pro + CGV : pack complet 37 €.",
+  "soulagement": "Vous envoyez, le client signe, vous êtes pro.",
+  "cta": "37 €, lien en description.",
+  "prix": "37 €",
+  "stripe_link": "https://buy.stripe.com/8x27sM0Dg9Ipf133X11oI0a",
+  "sub_id": "ai_prompts_freelance_short01_offre",
+  "voix": {
+    "moteur": "chatterbox",
+    "nom": "vivienne-fr"
+  },
+  "keywords": [
+    "devis",
+    "CGV",
+    "client",
+    "crédibilité",
+    "pro",
+    "pack",
+    "lien description"
+  ],
+  "palette": {
+    "bgTop": "#ff9a3c",
+    "bgMid": "#f97316",
+    "bgBottom": "#c2410c",
+    "ink": "#2b1206",
+    "accent": "#ff6a00",
+    "highlight": "#fff1d6",
+    "pillBg": "#fff7ed",
+    "pillInk": "#c2410c"
+  },
+  "narration": [
+    {
+      "id": "hook",
+      "role": "hook",
+      "rate": "-8%",
+      "texte": "Un client vous demande un devis ?"
+    },
+    {
+      "id": "hook2",
+      "role": "hook",
+      "rate": "-4%",
+      "texte": "Vous hésitez ?"
+    },
+    {
+      "id": "douleur",
+      "role": "douleur",
+      "rate": "+4%",
+      "texte": "Sans CGV, vous perdez en crédibilité."
+    },
+    {
+      "id": "douleur2",
+      "role": "douleur",
+      "rate": "+7%",
+      "texte": "Et le client peut disparaître."
+    },
+    {
+      "id": "preuve",
+      "role": "preuve",
+      "rate": "+12%",
+      "texte": "Devis pro + CGV : pack complet 37 €."
+    },
+    {
+      "id": "soulagement",
+      "role": "soulagement",
+      "rate": "+2%",
+      "texte": "Vous envoyez, le client signe, vous êtes pro."
+    },
+    {
+      "id": "cta",
+      "role": "cta",
+      "rate": "-1%",
+      "texte": "37 €, lien en description."
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "offer_id": "cash_linkedin_rdv01",
+  "langue": "fr",
+  "duree_cible_s": 24,
+  "titre": "LinkedIn RDV — Obtenir un rendez-vous",
+  "hook": "Le prospect qui ne répond jamais.",
+  "douleur": "Tu envoies des messages. Silence radio.",
+  "preuve": "Avec LinkedIn RDV, 1 rendez-vous obtenu en 48h.",
+  "soulagement": "Enfin des réponses. Simple et rapide.",
+  "cta": "19 € seulement, lien en description.",
+  "prix": "19 €",
+  "stripe_link": "https://buy.stripe.com/8x27sM0Dg9Ipf133X11oI0a",
+  "sub_id": "ai_prompts_freelance_short01_offre",
+  "voix": {
+    "moteur": "chatterbox",
+    "nom": "vivienne-fr"
+  },
+  "keywords": [
+    "prospect",
+    "répond",
+    "jamais",
+    "LinkedIn",
+    "RDV",
+    "rendez-vous",
+    "messages",
+    "48h"
+  ],
+  "palette": {
+    "bgTop": "#ff9a3c",
+    "bgMid": "#f97316",
+    "bgBottom": "#c2410c",
+    "ink": "#2b1206",
+    "accent": "#ff6a00",
+    "highlight": "#fff1d6",
+    "pillBg": "#fff7ed",
+    "pillInk": "#c2410c"
+  },
+  "narration": [
+    {
+      "id": "hook",
+      "role": "hook",
+      "rate": "-8%",
+      "texte": "Le prospect qui ne répond jamais."
+    },
+    {
+      "id": "hook2",
+      "role": "hook",
+      "rate": "-4%",
+      "texte": "Ça te parle ?"
+    },
+    {
+      "id": "douleur",
+      "role": "douleur",
+      "rate": "+4%",
+      "texte": "Tu envoies des messages."
+    },
+    {
+      "id": "douleur2",
+      "role": "douleur",
+      "rate": "+7%",
+      "texte": "Silence radio."
+    },
+    {
+      "id": "preuve",
+      "role": "preuve",
+      "rate": "+12%",
+      "texte": "Avec LinkedIn RDV, 1 rendez-vous obtenu en 48h."
+    },
+    {
+      "id": "soulagement",
+      "role": "soulagement",
+      "rate": "+2%",
+      "texte": "Enfin des réponses. Simple et rapide."
+    },
+    {
+      "id": "cta",
+      "role": "cta",
+      "rate": "-1%",
+      "texte": "19 € seulement, lien en description."
+    }
+  ]
+}
