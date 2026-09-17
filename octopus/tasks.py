@@ -115,8 +115,8 @@ def events(since_id: int = 0, task_id: int | None = None, limit: int = 200) -> l
 
 def claim(owner: str, *, lease_s: float = 60, kinds: list[str] | None = None) -> dict | None:
     """Prend la tâche prête la plus prioritaire dont la ressource est libre. None si rien à faire."""
-    now = time.time()
     with _tx() as conn:
+        now = time.time()
         busy = {r["resource"] for r in conn.execute(
             "SELECT resource FROM tasks WHERE status='running' AND lease_until > ? AND resource IS NOT NULL", (now,))}
         sql = "SELECT * FROM tasks WHERE status='queued' AND not_before <= ?"
@@ -140,7 +140,8 @@ def get_in(conn, task_id: int) -> dict | None:
 
 def _owned(conn, task_id: int, owner: str) -> sqlite3.Row:
     row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-    if row is None or row["status"] != "running" or row["lease_owner"] != owner:
+    if (row is None or row["status"] != "running" or row["lease_owner"] != owner
+            or row["lease_until"] is None or row["lease_until"] <= time.time()):
         raise LeaseLost(f"tâche #{task_id} : plus détenue par {owner}")
     return row
 
@@ -154,8 +155,10 @@ def heartbeat(task_id: int, owner: str, lease_s: float = 60) -> bool:
         return bool(row["cancel_requested"])
 
 
-def set_run(task_id: int, run_id: int | None) -> None:
+def set_run(task_id: int, run_id: int | None, *, owner: str | None = None) -> None:
     with _tx() as conn:
+        if owner is not None:
+            _owned(conn, task_id, owner)
         conn.execute("UPDATE tasks SET run_id=? WHERE id=?", (run_id, task_id))
 
 
@@ -232,8 +235,10 @@ def step_value(task_id: int, key: str, default=_MISSING):
     return default
 
 
-def save_step(task_id: int, key: str, value) -> None:
+def save_step(task_id: int, key: str, value, *, owner: str | None = None) -> None:
     with _tx() as conn:
+        if owner is not None:
+            _owned(conn, task_id, owner)
         conn.execute("INSERT OR REPLACE INTO task_steps (task_id, key, value, ts) VALUES (?, ?, ?, ?)",
                      (task_id, key, json.dumps(value, ensure_ascii=False, default=str), time.time()))
 
@@ -304,7 +309,7 @@ def reap(now: float | None = None) -> dict:
     now = now or time.time()
     out = {"requeued": [], "failed": [], "expired_requests": []}
     with _tx() as conn:
-        for row in conn.execute("SELECT * FROM tasks WHERE status='running' AND lease_until < ?", (now,)).fetchall():
+        for row in conn.execute("SELECT * FROM tasks WHERE status='running' AND lease_until <= ?", (now,)).fetchall():
             retry = row["attempts"] < row["max_attempts"] and not row["cancel_requested"]
             status = "queued" if retry else ("cancelled" if row["cancel_requested"] else "failed")
             conn.execute("UPDATE tasks SET status=?, error=?, lease_owner=NULL, lease_until=NULL, updated_at=?, "

@@ -48,7 +48,7 @@ Tables `tasks`, `events`, `human_requests`, `schedules` dans `data/octopus.db` (
 |---|---|
 | Prise de tâche | transaction `BEGIN IMMEDIATE` : un seul worker par tâche ; priorité puis ancienneté ; `not_before` pour les délais |
 | Ressources | une tâche `cpu_heavy` (TTS, rendu) à la fois ; les tâches sans ressource passent à côté |
-| Bail | renouvelé par le worker ; expiré (worker mort) : nouvelle tentative s'il en reste, sinon échec |
+| Bail | identifiant unique par exécution du worker, renouvelé avant expiration ; un bail expiré ne peut plus écrire ni être renouvelé ; reprise s'il reste des tentatives, sinon échec |
 | Échec | nouvelle tentative différée (`max_attempts`, `retry_delay_s` du handler) |
 | Annulation | immédiate en file ; coopérative en cours (`ctx.check_cancel()`, relayée à l'arrêt Podalux) |
 | Humain | `ctx.ask_human(clé, question)` met la tâche en attente ; `python -m octopus answer ID "texte"` la remet en file, le handler est rejoué et retrouve la réponse |
@@ -64,6 +64,14 @@ python -m octopus enqueue podalux podalux.video_cycle --input "{\"offer_id\": \"
 python -m octopus tasks / events / ask / answer 3 "oui" / cancel 12
 python -m octopus schedule octopus octopus.cost_report --every 86400
 ```
+
+### Garanties de reprise
+
+Le worker vérifie son bail lors des transitions, du rattachement du run et de l'enregistrement des étapes. Une ancienne exécution ne peut pas écraser le résultat de sa remplaçante, même si les deux workers portent le même nom. Un échec de validation du bail à la fin du handler clôt le run en erreur, pas en succès.
+
+`ctx.memo` conserve aussi les résultats `None`, `False` ou vides et contrôle le bail avant de démarrer le calcul. Les appels bas niveau à `save_step` et `set_run` acceptent `owner=` pour ce contrôle transactionnel ; leur signature historique sans propriétaire reste disponible, sans cette protection.
+
+Ces garanties concernent la persistance OCTOPUS : un bail ne tue pas un processus ni un outil externe. Un crash entre un effet externe et son checkpoint peut encore rejouer cet effet ; les handlers doivent rester coopératifs et utiliser l'idempotence de l'outil lorsqu'elle existe.
 
 ## Ajouter un fournisseur ou un modèle
 
