@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,16 +51,80 @@ class Catalog:
         return self.raw.get("budgets", {}).get("daily_usd")
 
 
+def _omniroute_enabled() -> bool:
+    return os.environ.get("OMNIROUTE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _overlay_omniroute(raw: dict) -> dict:
+    """Ajoute un modèle virtuel OmniRoute sans modifier le catalogue Git.
+
+    `auto/free` est résolu côté OmniRoute vers les providers réellement connectés ;
+    OCTOPUS ne prétend donc pas qu'un fournisseur précis sera toujours disponible.
+    """
+    if not _omniroute_enabled():
+        return raw
+    raw = json.loads(json.dumps(raw))
+    provider_id = "omniroute"
+    model_id = "omniroute/auto-free"
+    model_name = os.environ.get("OMNIROUTE_MODEL", "auto/free").strip() or "auto/free"
+    raw.setdefault("providers", {})[provider_id] = {
+        "kind": "local",
+        "base_url": os.environ.get("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1").rstrip("/"),
+        "api_key_env": "OMNIROUTE_API_KEY",
+        "timeout_s": float(os.environ.get("OMNIROUTE_TIMEOUT_S", "120")),
+        "max_retries": 0,
+        "health_path": "/models",
+        "health_timeout_s": 2.0,
+        "data_policy": "La passerelle est locale ; le contenu peut ensuite partir vers les providers connectés à OmniRoute. Respecter leurs conditions et quotas.",
+        "sources": ["https://github.com/diegosouzapw/OmniRoute/wiki/Free-Tiers-Guide", "https://github.com/diegosouzapw/OmniRoute/wiki/API-Reference"],
+    }
+    raw.setdefault("models", {})[model_id] = {
+        "provider": provider_id,
+        "api_model": model_name,
+        "cost_class": "free_quota",
+        "capabilities": ["json", "vision", "tools", "reasoning_effort"],
+        "notes": "Modèle virtuel OmniRoute : auto/free. La disponibilité et le provider réel dépendent des connexions OmniRoute.",
+    }
+
+    free_defaults = {
+        "podalux.select_offer": model_id,
+        "podalux.write_job": model_id,
+        "podalux.qc_vision": model_id,
+        "podalux.arbitrate": model_id,
+        "agent.react_step": model_id,
+        "agent.plan": model_id,
+        "agent.synthesize": model_id,
+        "web.summarize": model_id,
+        "veille.brief": model_id,
+    }
+    for task_name, selected_model in free_defaults.items():
+        task = raw.setdefault("tasks", {}).setdefault(task_name, {})
+        candidates = task.setdefault("candidates", {})
+        current = list(candidates.get("zero_cost", []))
+        if selected_model not in current:
+            candidates["zero_cost"] = [selected_model, *current]
+        current_low = list(candidates.get("low_cost", []))
+        if selected_model not in current_low:
+            candidates["low_cost"] = [selected_model, *current_low]
+        # Le baseline est le candidat de référence et ne requiert pas une preuve du banc.
+        # On utilise OmniRoute seulement lorsque le profil est explicitement zero_cost/low_cost.
+        if raw.get("profiles", {}).get("zero_cost", {}).get("fallback"):
+            task.setdefault("omniroute_bootstrap_baseline", {})["zero_cost"] = selected_model
+    return raw
+
+
 def load(path: Path | None = None) -> Catalog:
     p = Path(path) if path else paths.catalog_path()
     mtime = p.stat().st_mtime
-    cached = _cache.get(str(p))
+    cache_key = f"{p}|omni={_omniroute_enabled()}|model={os.environ.get('OMNIROUTE_MODEL','')}|base={os.environ.get('OMNIROUTE_BASE_URL','')}"
+    cached = _cache.get(cache_key)
     if cached and cached[0] == mtime:
         return cached[1]
     raw = json.loads(p.read_text(encoding="utf-8"))
+    raw = _overlay_omniroute(raw)
     validate(raw)
     cat = Catalog(raw=raw, path=p)
-    _cache[str(p)] = (mtime, cat)
+    _cache[cache_key] = (mtime, cat)
     return cat
 
 
