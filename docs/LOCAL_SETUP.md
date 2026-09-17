@@ -2,6 +2,17 @@
 
 Cette configuration garde le poste local léger : **contrôle OCTOPUS + GUI + navigateur + OmniRoute**. Les modèles vidéo lourds, MiniMax H3, Remotion/FFmpeg et le TTS cloud s'exécutent hors de la machine quand `PODALUX_VIDEO_RENDERER=cloud`.
 
+## 0. Bootstrap recommandé
+
+Depuis PowerShell à la racine du dépôt :
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\setup-local.ps1
+```
+
+Le script est idempotent : il crée `.venv` si nécessaire, installe `requirements-local.txt`, installe Chromium Playwright, prépare les variables non secrètes cloud-first et démarre/réutilise OmniRoute lorsque Docker Desktop est disponible. Il ne stocke aucun secret.
+
 ## 1. Préparer Python
 
 Utiliser Python 3.11+ :
@@ -80,7 +91,7 @@ La même recette audio historique reste utilisée : voix, mix, bed, SFX et capti
 Avant un vrai cycle :
 
 ```powershell
-python -m agents.run doctor
+.\.venv\Scripts\python.exe -m agents.run doctor
 ```
 
 En cloud-first, le diagnostic doit vérifier :
@@ -97,7 +108,7 @@ Les dépendances locales de rendu/Chatterbox sont informatives et non bloquantes
 ## 7. Lancer la GUI
 
 ```powershell
-python run_gui.py
+.\.venv\Scripts\python.exe run_gui.py
 ```
 
 Le bouton **Ouvrir le navigateur** lance le profil Chromium persistant. La connexion aux comptes est faite une fois par l'humain ; les actions sensibles (login, 2FA, CAPTCHA, confirmation) passent par un handoff humain.
@@ -107,7 +118,7 @@ Le bouton **Worker** lance la file OCTOPUS. La file utilise SQLite avec leases, 
 ## 8. Tests avant le premier cycle
 
 ```powershell
-python -m pytest -q tests/test_omniroute.py tests/test_minimax_h3_cloud.py tests/test_browser_integration.py tests/test_doctor.py tests/test_gateway.py tests/test_cycle_logic.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_omniroute.py tests/test_minimax_h3_cloud.py tests/test_browser_integration.py tests/test_doctor.py tests/test_gateway.py tests/test_cycle_logic.py
 ```
 
 Pour les tests de navigateur réel, Chromium doit être installé. Pour un test purement hors-réseau, la suite réseau utilise des doubles d'interception.
