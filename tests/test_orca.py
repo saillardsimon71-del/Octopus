@@ -61,8 +61,8 @@ def test_command_error_is_explicit(monkeypatch, tmp_path):
 def test_start_development_task_chains_run_task_worker(monkeypatch):
     calls = []
 
-    monkeypatch.setattr(orca, "run_create", lambda objective: calls.append(("run", objective)) or {"id": "run-1"})
-    monkeypatch.setattr(orca, "task_create", lambda spec: calls.append(("task", spec)) or {"task_id": "task-1"})
+    monkeypatch.setattr(orca, "run_create", lambda objective: calls.append(("run", objective)) or {"run":{"id": "run-1"}})
+    monkeypatch.setattr(orca, "task_create", lambda spec, *, run_id: calls.append(("task", spec, run_id)) or {"task_id": "task-1"})
     monkeypatch.setattr(
         orca,
         "worker_start",
@@ -78,14 +78,24 @@ def test_start_development_task_chains_run_task_worker(monkeypatch):
     )
 
     assert [c[0] for c in calls] == ["run", "task", "worker"]
+    assert calls[1][2] == "run-1"
     assert calls[2][1] == "task-1"
     assert calls[2][2]["agent"] == "codex"
+    assert calls[2][2]["run_id"] == "run-1"
+    assert result["run_id"] == "run-1"
     assert result["worker"]["dispatch"] == "dispatch-1"
+
+
+def test_missing_run_id_refuses_to_dispatch(monkeypatch):
+    monkeypatch.setattr(orca, "run_create", lambda _: {"ok": True})
+    monkeypatch.setattr(orca, "task_create", lambda *a, **k: pytest.fail("task must not start"))
+    with pytest.raises(orca.OrcaCommandError, match="run_id"):
+        orca.start_development_task(objective="x", spec="y", agent="codex")
 
 
 def test_missing_task_id_refuses_to_dispatch(monkeypatch):
     monkeypatch.setattr(orca, "run_create", lambda _: {"id": "run-1"})
-    monkeypatch.setattr(orca, "task_create", lambda _: {"ok": True})
+    monkeypatch.setattr(orca, "task_create", lambda spec, *, run_id: {"ok": True})
     monkeypatch.setattr(orca, "worker_start", lambda *a, **k: pytest.fail("worker must not start"))
     with pytest.raises(orca.OrcaCommandError, match="task_id"):
         orca.start_development_task(objective="x", spec="y", agent="codex")

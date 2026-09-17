@@ -53,16 +53,11 @@ python -m agents.run orca start `
   --worktree current
 ```
 
-Lister les workers :
+La sortie de `start` contient le `run_id`. Il est nécessaire pour superviser ce Run depuis un autre processus CLI :
 
 ```powershell
-python -m agents.run orca workers
-```
-
-Consommer les événements de supervision :
-
-```powershell
-python -m agents.run orca check --wait --timeout-ms 30000
+python -m agents.run orca workers --run <run_id>
+python -m agents.run orca check --run <run_id> --wait --timeout-ms 30000
 ```
 
 ## Règles d'intégration
@@ -72,4 +67,5 @@ python -m agents.run orca check --wait --timeout-ms 30000
 - Les rendus RunPod/H3 et les leases `octopus.tasks` restent sous l'autorité d'Octopus.
 - Une perte de contact avec un worker Orca est `unverifiable`, jamais une preuve de sortie.
 - Pour une tâche de développement, demander à Orca de travailler sur les fichiers explicitement visés et conserver les validations dans Octopus/CI.
-- Le pont crée `Run → Task → Worker` en s'appuyant sur les commandes publiques documentées d'Orca ; il ne lit ni n'écrit la base SQLite interne d'Orca.
+- Le pont crée `Run → Task → Worker` en utilisant les commandes publiques documentées d'Orca et transmet explicitement le `run_id` entre les appels CLI ; il ne lit ni n'écrit la base SQLite interne d'Orca.
+- Les arguments métier sont passés comme argv séparés ; aucune chaîne de commande libre n'est exécutée.

@@ -118,14 +118,15 @@ def run_create(objective: str) -> Any:
     return run(["orchestration", "run-create", "--objective", objective, "--json"])
 
 
-def task_create(spec: str) -> Any:
-    return run(["orchestration", "task-create", "--spec", spec, "--json"])
+def task_create(spec: str, *, run_id: str) -> Any:
+    return run(["orchestration", "task-create", "--run", run_id, "--spec", spec, "--json"])
 
 
 def worker_start(
     task_id: str,
     *,
     agent: str,
+    run_id: str,
     worktree: str = "current",
     model: str | None = None,
     effort: str | None = None,
@@ -133,6 +134,8 @@ def worker_start(
     args = [
         "orchestration",
         "worker-start",
+        "--run",
+        run_id,
         "--task",
         task_id,
         "--worktree",
@@ -148,16 +151,18 @@ def worker_start(
     return run(args)
 
 
-def worker_list(*, include_remote: bool = True) -> Any:
+def worker_list(*, run_id: str | None = None, include_remote: bool = True) -> Any:
     args = ["orchestration", "worker-list"]
+    if run_id:
+        args.extend(["--run", run_id])
     if include_remote:
         args.append("--include-remote")
     args.append("--json")
     return run(args)
 
 
-def check(*, wait: bool = False, timeout_ms: int = 1000) -> Any:
-    args = ["orchestration", "check", "--types", "worker_done,escalation,question"]
+def check(*, run_id: str, wait: bool = False, timeout_ms: int = 1000) -> Any:
+    args = ["orchestration", "check", "--run", run_id, "--types", "worker_done,escalation,question"]
     if wait:
         args.extend(["--wait", "--timeout-ms", str(timeout_ms)])
     args.append("--json")
@@ -175,18 +180,37 @@ def start_development_task(
 ) -> dict[str, Any]:
     """Crée Run → Task → Worker en une opération d'intégration explicite."""
     created_run = run_create(objective)
-    created_task = task_create(spec)
+    run_id = _extract_run_id(created_run)
+    if run_id is None:
+        raise OrcaCommandError("Orca a créé le Run mais aucun run_id exploitable n'a été renvoyé")
+    created_task = task_create(spec, run_id=run_id)
     task_id = _extract_task_id(created_task)
     if task_id is None:
         raise OrcaCommandError("Orca a créé la tâche mais aucun task_id exploitable n'a été renvoyé")
     started = worker_start(
         task_id,
         agent=agent,
+        run_id=run_id,
         worktree=worktree,
         model=model,
         effort=effort,
     )
-    return {"run": created_run, "task": created_task, "worker": started}
+    return {"run_id": run_id, "run": created_run, "task": created_task, "worker": started}
+
+
+def _extract_run_id(payload: Any) -> str | None:
+    if isinstance(payload, dict):
+        for key in ("run_id", "runId"):
+            if payload.get(key) is not None:
+                return str(payload[key])
+        nested = payload.get("run")
+        if nested is not None:
+            found = _extract_run_id(nested)
+            if found:
+                return found
+        if set(payload) == {"id"} and payload.get("id") is not None:
+            return str(payload["id"])
+    return None
 
 
 def _extract_task_id(payload: Any) -> str | None:

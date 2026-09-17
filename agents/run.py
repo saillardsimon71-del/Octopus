@@ -176,14 +176,14 @@ def cmd_orca_start(args):
     ))
 
 
-def cmd_orca_workers():
+def cmd_orca_workers(args):
     from . import orca
-    _print_orca(orca.worker_list(include_remote=True))
+    _print_orca(orca.worker_list(run_id=args.run, include_remote=True))
 
 
 def cmd_orca_check(args):
     from . import orca
-    _print_orca(orca.check(wait=args.wait, timeout_ms=args.timeout_ms))
+    _print_orca(orca.check(run_id=args.run, wait=args.wait, timeout_ms=args.timeout_ms))
 
 
 def main():
@@ -224,8 +224,10 @@ def main():
     p_ostart.add_argument("--worktree", default="current", help="workspace Orca, par défaut current")
     p_ostart.add_argument("--model", default=None, help="modèle facultatif")
     p_ostart.add_argument("--effort", default=None, help="niveau d'effort facultatif")
-    orca_sub.add_parser("workers", help="liste les workers Orca")
-    p_ocheck = orca_sub.add_parser("check", help="consomme les événements Orca")
+    p_oworkers = orca_sub.add_parser("workers", help="liste les workers Orca")
+    p_oworkers.add_argument("--run", default=None, help="limiter à un Run Orca")
+    p_ocheck = orca_sub.add_parser("check", help="consomme les événements d'un Run Orca")
+    p_ocheck.add_argument("--run", required=True, help="Run Orca à superviser")
     p_ocheck.add_argument("--wait", action="store_true", help="attendre des événements")
     p_ocheck.add_argument("--timeout-ms", type=int, default=30000)
 
@@ -267,7 +269,7 @@ def main():
             elif args.orca_cmd == "start":
                 cmd_orca_start(args)
             elif args.orca_cmd == "workers":
-                cmd_orca_workers()
+                cmd_orca_workers(args)
             elif args.orca_cmd == "check":
                 cmd_orca_check(args)
         except Exception as exc:

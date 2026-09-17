@@ -64,9 +64,11 @@ Commandes :
 ```powershell
 python -m agents.run orca status
 python -m agents.run orca start --objective "Audit CI" --spec "Corriger les tests cassés sans modifier le pipeline métier." --agent codex
-python -m agents.run orca workers
-python -m agents.run orca check --wait --timeout-ms 30000
+python -m agents.run orca workers --run <run_id>
+python -m agents.run orca check --run <run_id> --wait --timeout-ms 30000
 ```
+
+`orca start` retourne le `run_id`; les commandes de supervision le réutilisent explicitement et ne dépendent pas d'un binding de terminal entre deux processus CLI.
 
 Le pont n'écrit pas dans la base interne d'Orca. Il considère `live`, `unverifiable` et `exited` comme vocabulaire de lifecycle ; une perte de contact reste `unverifiable`.
 

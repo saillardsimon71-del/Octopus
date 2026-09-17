@@ -73,7 +73,7 @@ OCTOPUS_ORCA_ENABLED=1
 OCTOPUS_ORCA_CLI=orca
 ```
 
-Le flux exposé est `Run → Task → Worker`, avec supervision par `worker-list` / `check`. Voir `docs/ORCA_INTEGRATION.md`.
+Le flux exposé est `Run → Task → Worker`, avec un `run_id` transmis explicitement entre les appels CLI pour rester indépendant de l'état de session du terminal. Voir `docs/ORCA_INTEGRATION.md`.
 
 ## Vidéo
 
