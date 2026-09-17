@@ -28,6 +28,7 @@ class RenderState:
     provider: str
     state: str
     remote_id: str | None = None
+    attempt: int = 1
     updated_at: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -37,6 +38,7 @@ class RenderState:
             "provider": self.provider,
             "state": self.state,
             "remote_id": self.remote_id,
+            "attempt": self.attempt,
             "updated_at": self.updated_at,
         }
 
@@ -63,11 +65,15 @@ class RenderStateStore:
             raise RenderStateError(f"état de rendu illisible: {path}") from exc
         if not isinstance(data, dict) or str(data.get("job_id")) != job_id:
             raise RenderStateError(f"état de rendu incohérent: {path}")
+        attempt = int(data.get("attempt") or 1)
+        if attempt < 1:
+            raise RenderStateError(f"tentative de rendu invalide: {path}")
         return RenderState(
             job_id=job_id,
             provider=str(data.get("provider") or "unknown"),
             state=str(data.get("state") or "UNKNOWN"),
             remote_id=str(data["remote_id"]) if data.get("remote_id") else None,
+            attempt=attempt,
             updated_at=float(data.get("updated_at") or 0),
         )
 
@@ -77,18 +83,18 @@ class RenderStateStore:
         tmp.write_text(json.dumps(state.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)
 
-    def mark_submitting(self, job_id: str, provider: str) -> RenderState:
-        state = RenderState(job_id, provider, "SUBMITTING", None, time.time())
+    def mark_submitting(self, job_id: str, provider: str, *, attempt: int = 1) -> RenderState:
+        state = RenderState(job_id, provider, "SUBMITTING", None, max(1, attempt), time.time())
         self.save(state)
         return state
 
-    def mark_submitted(self, job_id: str, provider: str, remote_id: str, status: str) -> RenderState:
-        state = RenderState(job_id, provider, status, remote_id, time.time())
+    def mark_submitted(self, job_id: str, provider: str, remote_id: str, status: str, *, attempt: int = 1) -> RenderState:
+        state = RenderState(job_id, provider, status, remote_id, max(1, attempt), time.time())
         self.save(state)
         return state
 
     def mark_status(self, state: RenderState, status: str) -> RenderState:
-        updated = RenderState(state.job_id, state.provider, status, state.remote_id, time.time())
+        updated = RenderState(state.job_id, state.provider, status, state.remote_id, state.attempt, time.time())
         self.save(updated)
         return updated
 
@@ -96,8 +102,9 @@ class RenderStateStore:
         if state.state != "SUBMITTING":
             return
         age = max(0.0, time.time() - state.updated_at)
+        suffix = " (ancien état)" if age >= ambiguous_after_s else ""
         raise AmbiguousSubmissionError(
-            f"soumission cloud ambiguë pour {state.job_id} (sans remote_id depuis {age:.0f}s); "
+            f"soumission cloud ambiguë pour {state.job_id}{suffix} (sans remote_id depuis {age:.0f}s); "
             "ne pas resoumettre automatiquement, vérifier le fournisseur puis supprimer/"
             "réconcilier l'état local"
         )
