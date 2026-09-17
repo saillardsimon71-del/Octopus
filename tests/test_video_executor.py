@@ -41,18 +41,23 @@ def test_executor_produces_manifest_and_is_idempotent(tmp_path):
 
     def runner(cmd, cwd, timeout, env, log):
         calls.append(cmd)
-        offer_dir = Path(log).parent.parent
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text("ok")
         if "make_audio_chatterbox_full.py" in cmd:
+            offer = cmd[3]
+            offer_dir = Path(cwd) / "out" / offer
             out = offer_dir / "audio"
             out.mkdir(parents=True, exist_ok=True)
             (out / "mix.wav").write_bytes(b"wav")
+            (out / "vo.wav").write_bytes(b"wav")
+            (out / "captions.json").write_text("{}", encoding="utf-8")
             data = Path(cwd) / "remotion" / "src" / "data"
             data.mkdir(parents=True, exist_ok=True)
             (data / "captions.ts").write_text("x")
             (data / "job.ts").write_text("x")
         elif cmd[0] == "npx":
+            offer = cmd[4].split("../out/", 1)[-1].split("/video.mp4", 1)[0]
+            offer_dir = Path(cwd).parent / "out" / offer
             assert cmd[1:3] == ["remotion", "render"]
             assert cmd[3] == "CashShort"
             (offer_dir / "video.mp4").write_bytes(b"video")
@@ -61,6 +66,8 @@ def test_executor_produces_manifest_and_is_idempotent(tmp_path):
         elif cmd[0] == "ffmpeg":
             Path(cmd[-1]).write_bytes(b"final")
         elif "qc_metrics.py" in cmd:
+            offer = Path(cmd[2]).parent.name
+            offer_dir = Path(cmd[2]).parent
             (offer_dir / "frames").mkdir(parents=True, exist_ok=True)
             for i in range(2):
                 (offer_dir / "frames" / f"frame-{i}.jpg").write_bytes(b"jpg")
