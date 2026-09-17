@@ -13,11 +13,16 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from octopus import businesses as engine_businesses
+
 from .. import config, db
 
 STATE_KEY = "active_business"
 STORE_PATH = config.DATA_DIR / "workspaces.json"
 DEFAULT_BUSINESS_ID = "all"
+# jobs/ et agents/ appartiennent a l'activite historique declaree par businesses/podalux/business.toml.
+# Meme identifiant que tasks.business et le journal : un seul business, pas un par prefixe d'offre.
+LEGACY_BUSINESS_ID = "podalux"
 
 
 @dataclass(slots=True)
@@ -45,6 +50,11 @@ class WorkspaceRegistry:
             self._businesses = self._derive_from_jobs()
             if self._businesses:
                 self._save_file()
+            return
+        # Activites declarees au moteur mais absentes d'un fichier existant : visibles, sans reecrire le fichier.
+        for engine in engine_businesses.discover().values():
+            if engine.id != DEFAULT_BUSINESS_ID and engine.id not in self._businesses:
+                self._businesses[engine.id] = Business(engine.id, engine.name, engine.description)
 
     def all(self) -> list[Business]:
         return sorted(self._businesses.values(), key=lambda b: (b.id == DEFAULT_BUSINESS_ID, b.label().lower()))
@@ -101,14 +111,16 @@ class WorkspaceRegistry:
         return sorted(found)
 
     def _derive_from_jobs(self) -> dict[str, Business]:
-        grouped: dict[str, list[str]] = {}
-        for offer_id in self._all_offers():
-            business_id = offer_id.split("_", 1)[0].strip().lower() or "general"
-            grouped.setdefault(business_id, []).append(offer_id)
-        return {
-            key: Business(key, key.replace("_", " ").title(), "Contexte dérivé automatiquement des offres.", sorted(values))
-            for key, values in grouped.items()
-        }
+        """Premier lancement : activites declarees au moteur, offres de jobs/ rattachees a Podalux."""
+        derived = {engine.id: Business(engine.id, engine.name, engine.description)
+                   for engine in engine_businesses.discover().values() if engine.id != DEFAULT_BUSINESS_ID}
+        offers = self._all_offers()
+        if offers:
+            legacy = derived.get(LEGACY_BUSINESS_ID) or Business(
+                LEGACY_BUSINESS_ID, "Podalux", "Offres historiques de jobs/.")
+            legacy.offers = sorted(offers)
+            derived[LEGACY_BUSINESS_ID] = legacy
+        return derived
 
     def _load_file(self) -> dict[str, Business]:
         try:

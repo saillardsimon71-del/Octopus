@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from . import enabled, paths
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -224,7 +224,235 @@ CREATE TABLE IF NOT EXISTS media_runs (
 CREATE INDEX IF NOT EXISTS idx_media_runs_arch ON media_runs(architecture, gpu);
 """
 
-_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4))
+_SCHEMA_V5 = """
+CREATE TABLE IF NOT EXISTS strategy_objectives (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    status TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    statement TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
+    timeframe TEXT,
+    success_criteria TEXT,
+    created_by TEXT NOT NULL,
+    origin_task_id INTEGER,
+    origin_run_id INTEGER,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_objectives_business ON strategy_objectives(business, status);
+CREATE TABLE IF NOT EXISTS strategy_hypotheses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    objective_id INTEGER NOT NULL REFERENCES strategy_objectives(id),
+    status TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    statement TEXT NOT NULL,
+    expected_signal TEXT,
+    stop_criterion TEXT,
+    evidence_required TEXT,
+    created_by TEXT NOT NULL,
+    origin_task_id INTEGER,
+    origin_run_id INTEGER,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_hypotheses_business ON strategy_hypotheses(business, objective_id);
+CREATE TABLE IF NOT EXISTS strategy_experiments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    hypothesis_id INTEGER NOT NULL REFERENCES strategy_hypotheses(id),
+    status TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    action TEXT NOT NULL,
+    channel_id INTEGER,
+    metric TEXT,
+    target_value REAL,
+    stop_value REAL,
+    budget_limit REAL,
+    budget_currency TEXT,
+    deadline_at REAL,
+    expected_result TEXT,
+    actual_result TEXT,
+    outcome TEXT,
+    created_by TEXT NOT NULL,
+    origin_task_id INTEGER,
+    origin_run_id INTEGER,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_experiments_business ON strategy_experiments(business, hypothesis_id);
+CREATE TABLE IF NOT EXISTS strategy_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    status TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    rationale TEXT,
+    alternatives TEXT,
+    resulting_action TEXT,
+    spend_amount REAL,
+    spend_currency TEXT,
+    decided_by TEXT,
+    decided_at REAL,
+    created_by TEXT NOT NULL,
+    origin_task_id INTEGER,
+    origin_run_id INTEGER,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_decisions_business ON strategy_decisions(business, status);
+CREATE TABLE IF NOT EXISTS strategy_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    status TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    period_start REAL,
+    period_end REAL,
+    due_at REAL,
+    evidence_summary TEXT,
+    next_actions TEXT,
+    unresolved_risks TEXT,
+    created_by TEXT NOT NULL,
+    origin_task_id INTEGER,
+    origin_run_id INTEGER,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_reviews_business ON strategy_reviews(business, status);
+CREATE TABLE IF NOT EXISTS strategy_evidence (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    status TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    nature TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    source_ref TEXT,
+    captured_at REAL,
+    observation TEXT NOT NULL,
+    confidence TEXT,
+    experiment_id INTEGER,
+    channel_id INTEGER,
+    metric TEXT,
+    value REAL,
+    unit TEXT,
+    created_by TEXT NOT NULL,
+    origin_task_id INTEGER,
+    origin_run_id INTEGER,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_evidence_business ON strategy_evidence(business, nature);
+CREATE TABLE IF NOT EXISTS strategy_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    from_type TEXT NOT NULL,
+    from_id INTEGER NOT NULL,
+    to_type TEXT NOT NULL,
+    to_id INTEGER NOT NULL,
+    relation TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    UNIQUE(from_type, from_id, to_type, to_id, relation)
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_links_to ON strategy_links(to_type, to_id);
+CREATE INDEX IF NOT EXISTS idx_strategy_evidence_metric ON strategy_evidence(business, experiment_id, metric);
+CREATE TABLE IF NOT EXISTS economic_channels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    locator TEXT,
+    capabilities TEXT NOT NULL DEFAULT '[]',
+    access TEXT NOT NULL DEFAULT 'none',
+    status TEXT NOT NULL DEFAULT 'discovered',
+    nature TEXT NOT NULL,
+    source_ref TEXT,
+    notes TEXT,
+    created_by TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_channels_business ON economic_channels(business, status);
+CREATE TABLE IF NOT EXISTS ledger_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    experiment_id INTEGER,
+    channel_id INTEGER,
+    direction TEXT NOT NULL,
+    amount REAL NOT NULL,
+    currency TEXT NOT NULL,
+    category TEXT NOT NULL,
+    description TEXT,
+    nature TEXT NOT NULL,
+    source_ref TEXT,
+    occurred_at REAL NOT NULL,
+    reverses_id INTEGER,
+    spend_request_id INTEGER,
+    created_by TEXT NOT NULL,
+    origin_task_id INTEGER,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_business ON ledger_entries(business, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_ledger_experiment ON ledger_entries(experiment_id);
+CREATE TABLE IF NOT EXISTS spend_allowances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    experiment_id INTEGER,
+    amount REAL NOT NULL,
+    currency TEXT NOT NULL,
+    granted_by TEXT NOT NULL,
+    rationale TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    expires_at REAL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_allowances_business ON spend_allowances(business, status);
+CREATE TABLE IF NOT EXISTS spend_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    experiment_id INTEGER,
+    allowance_id INTEGER,
+    amount REAL NOT NULL,
+    currency TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT,
+    requested_by TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_spend_requests_business ON spend_requests(business, status);
+CREATE TABLE IF NOT EXISTS channel_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    channel_id INTEGER NOT NULL,
+    experiment_id INTEGER,
+    action TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL,
+    reason TEXT,
+    spend_request_id INTEGER,
+    result TEXT,
+    evidence_id INTEGER,
+    requested_by TEXT NOT NULL,
+    decided_by TEXT,
+    idempotency_key TEXT UNIQUE,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_channel_actions_business ON channel_actions(business, status);
+CREATE TABLE IF NOT EXISTS reinvest_policies (
+    business TEXT PRIMARY KEY,
+    share REAL NOT NULL,
+    max_amount REAL NOT NULL,
+    currency TEXT NOT NULL,
+    period_days REAL NOT NULL,
+    set_by TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+"""
+
+_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4), (5, _SCHEMA_V5))
 
 _LLM_COLUMNS = (
     "ts", "run_id", "root_run_id", "business", "agent", "task", "profile", "model", "provider",

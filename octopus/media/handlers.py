@@ -156,6 +156,10 @@ def _run_h3_cloud(ctx, inp: dict, prompt: str, variants: int, business: str):
                     seed=int(base_seed) + index, steps=steps,
                     output_prefix=f"octopus_{ctx.id}_{index + 1}",
                 )
+                # Appel payant : estimation fixée par l'humain + enveloppe de dépense, sinon aucune soumission.
+                from octopus import economy
+                economy.gate_paid_call(ctx.business, f"MiniMax H3 cloud {job_key}", estimate_env="OCTOPUS_H3_JOB_COST_ESTIMATE",
+                                       requested_by="media.h3", experiment_id=inp.get("experiment_id"))
                 state_path.write_text(json.dumps({"schema_version": "1", "remote_id": None, "status": "SUBMITTING"}), encoding="utf-8")
                 remote_id = client.submit(workflow)
                 state_path.write_text(json.dumps({"schema_version": "1", "remote_id": remote_id, "status": "QUEUED"}), encoding="utf-8")

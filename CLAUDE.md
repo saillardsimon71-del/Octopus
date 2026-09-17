@@ -8,6 +8,18 @@ The branch includes the cloud-first control-plane/video foundation, the integrat
 
 Orca is deliberately scoped to repository-development work: it is invoked only through its public CLI and remains disabled unless `OCTOPUS_ORCA_ENABLED=1` is set. It must not replace the Podalux business runtime, `octopus.tasks`, or RunPod video execution.
 
+### Autonomous-business foundation (branch `feat/autonomous-business-foundation`, 2026-09-17, uncommitted working tree)
+
+Implemented and tested locally (see `docs/AUTONOMOUS_SESSION_REPORT.md`, `docs/AUTONOMOUS_WORK_LOG.md`):
+- `octopus/strategy.py` + journal migration v5: objectives, hypotheses, experiments, decisions, reviews, evidence and links in `octopus.db`, strict business isolation, checked transitions, `strategy.*` events. Evidence nature is explicit (see economic loop below). Only `actor="human"` approves a decision that commits money (`spend_amount`); other decisions can be approved by a policy or an agent. Numbers are evidence values with a nature, never free metric columns.
+- `orbit.mission` task (any business, optional objective/hypothesis/experiment context) and `strategy.review` task (no LLM, one-off via `strategy.schedule_review`, recurring via `octopus schedule`).
+- Business propagation: `run_agent`/`run_mission` take `business` (default: enclosing run, else `podalux`); LLM costs follow the current run. `render_offer` is refused outside `podalux`; ORBIT plans are capped at 5 subtasks.
+- `octopus/connectors.py`: every external domain is "non configuré" until a probe is registered. Nothing is simulated.
+- CLI: `python -m octopus strategy add|list|show|move|link|mission|review|snapshot`.
+- GUI: Intelligence shows persisted strategy state; Workbench startup/layout/refresh crashes fixed and covered by `tests/test_gui_smoke.py`.
+- Economic loop (`octopus/economy.py`, `octopus/actions.py`, same v5 migration): free-form channels, immutable multi-currency ledger (only `observed` cash counts; CSV import of real exports), spend allowances + `authorize_spend` (no spend without an envelope granted by a human or a human-set reinvestment policy), experiment metrics and code-computed verdicts (`cash_net:<CUR>` or observed metric sums), learnings, reinvestment, opt-in ORBIT drive (`economy.cycle` with `drive`/`portfolio`). Evidence natures are now `observed/computed/inferred/hypothesis/unverified`. Paid cloud calls (RunPod video, H3) require `PODALUX_VIDEO_JOB_COST_ESTIMATE` / `OCTOPUS_H3_JOB_COST_ESTIMATE` and an allowance. Channel actions run only with human-granted `act` access and a registered executor (none shipped). Agents get generic tools: `economy_status`, `record_observation`, `propose_experiment`, `start_experiment`, `register_channel`, `act_on_channel`, `open_business`, `request_spend`. CLI: `python -m octopus economy ...`.
+- Tests are run with `.venv` (created as `setup-local.ps1` does). Browser integration tests need the Playwright build that matches an installed Chromium (the global Python 3.11 had it; `.venv` did not).
+
 ## Architecture to preserve
 
 ```text
@@ -143,6 +155,12 @@ Do not move business agents or cloud rendering into Orca merely because Orca can
 - `agents/gui/studio.py` — existing video studio window used by the Workbench
 - `docs/GUI.md` — cockpit/workbench and Intelligence workflow
 - `docs/HANDOFF-AUTONOMOUS-BUSINESS.md` — concrete implementation roadmap and acceptance criteria for the long-term autonomous-business layer
+- `octopus/strategy.py` — persisted strategic loop (objectives ... evidence, links, reviews, mission context)
+- `octopus/strategy_cli.py` — `python -m octopus strategy ...`
+- `octopus/connectors.py` — external data sources, unavailable unless a real probe is registered
+- `octopus/builtin_handlers.py` — engine tasks, including `strategy.review`
+- `agents/task_handlers.py` — `podalux.*` tasks and generic `orbit.mission`
+- `docs/AUTONOMOUS_SESSION_REPORT.md` / `docs/AUTONOMOUS_WORK_LOG.md` — last autonomous session, verified facts vs hypotheses
 - `octopus/catalog.py` — dynamic OmniRoute overlay + safe default profile
 - `octopus/llm.py` — LLM gateway
 - `agents/browser.py` — Chromium/Playwright tool
@@ -173,10 +191,10 @@ Do not move business agents or cloud rendering into Orca merely because Orca can
 
 ## Next work order
 
-1. Let the fresh CI run for the current HEAD finish and fix actual failures.
-2. Run the GUI on Windows and verify Business switching, business creation, Intelligence actions, mission launch, handoff replies and browser observation.
+1. Review and commit the uncommitted autonomous-business working tree (human decision), then let a fresh CI run finish and fix actual failures.
+2. Run the GUI on Windows with real data and verify Business switching, business creation, Intelligence actions, mission launch, handoff replies and browser observation (an isolated automated smoke of every page passes; real clicks were not exercised).
 3. Run the real local smoke test with OmniRoute + Chromium + `doctor` on Windows.
-4. Follow `docs/HANDOFF-AUTONOMOUS-BUSINESS.md`: first persist strategic objectives/hypotheses/experiments/decisions/reviews in the existing OCTOPUS persistence layer, then add evidence provenance and scheduler-backed reviews, then introduce CRM/finance/social/funnel connectors behind stable provider-neutral interfaces.
+4. Strategy persistence, evidence, scheduled reviews and connector boundaries exist (see `docs/AUTONOMOUS-BUSINESS-IMPLEMENTATION.md` status). Next: GUI forms to create/advance strategic objects, make Intelligence actions attach to a selected objective/experiment (`orbit.mission`), then real CRM/finance/social probes.
 5. Add real CRM/revenue/social data connectors before claiming full client-management, funnel execution or reinvestment automation.
 6. Deploy the real RunPod worker + object storage and execute one paid-safe/idempotent end-to-end video test.
 7. Only after that, run a real Podalux cycle and compare technical QC + visual QC.

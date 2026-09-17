@@ -65,3 +65,43 @@ def mission(ctx):
     from .runtime import run_mission
     result = _run(ctx, lambda: run_mission(str(ctx.input["goal"]), max_steps_per_agent=int(ctx.input.get("max_steps", 8))))
     return {"rapport": result.get("rapport"), "subtasks": len(result.get("plan") or [])}
+
+
+@handler("orbit.mission", resource="llm")
+def orbit_mission(ctx):
+    """Mission ORBIT pour n'importe quel business, rattachable à un objectif, une hypothèse ou une expérience.
+
+    Entrée : {"goal": "...", "objective_id"?, "hypothesis_id"?, "experiment_id"?, "max_steps"?}.
+    Le rapport est une inférence du modèle : il n'est jamais écrit comme résultat mesuré d'une expérience.
+    """
+    from octopus import strategy
+
+    from .runtime import run_mission
+    goal = str(ctx.input["goal"])
+    refs = {key: ctx.input.get(key) for key in ("objective_id", "hypothesis_id", "experiment_id")}
+    context = None
+    if any(value is not None for value in refs.values()):
+        context = strategy.mission_context(ctx.business, **refs)
+        for kind in ("objective", "hypothesis", "experiment"):
+            if context[f"{kind}_id"] is not None:
+                strategy.link(ctx.business, kind, context[f"{kind}_id"], "task", ctx.id, "executed_by")
+        goal = f"{context['brief']}\n\n{goal}"
+    result = _run(ctx, lambda: run_mission(goal, max_steps_per_agent=int(ctx.input.get("max_steps", 8)),
+                                           business=ctx.business))
+    output = {"business": ctx.business, "rapport": result.get("rapport"), "rapport_nature": "inferred",
+              "subtasks": len(result.get("plan") or [])}
+    if context and output["rapport"]:
+        output["strategy"] = {k: context[k] for k in ("objective_id", "hypothesis_id", "experiment_id")}
+        target = next(kind for kind in ("experiment", "hypothesis", "objective") if context[f"{kind}_id"] is not None)
+
+        def record():
+            evidence_id = strategy.create(
+                "evidence", ctx.business, f"Rapport de mission ORBIT (tâche #{ctx.id})", created_by="orbit",
+                origin_task_id=ctx.id, nature="inferred", source_type="task_output",
+                source_ref=f"task#{ctx.id}", observation=str(output["rapport"]), confidence="low")
+            strategy.link(ctx.business, "evidence", evidence_id, target, context[f"{target}_id"], "informs")
+            return evidence_id
+
+        output["strategy"]["evidence_id"] = ctx.memo("strategy_evidence", record)  # une seule preuve par tâche
+        ctx.emit("strategy.mission.done", output["strategy"])
+    return output

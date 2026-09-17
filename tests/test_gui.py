@@ -53,7 +53,9 @@ def test_workspace_registry_round_trip(tmp_path, monkeypatch):
     path = tmp_path / "workspaces.json"
 
     registry = WorkspaceRegistry(path)
-    assert [b.id for b in registry.all()] == ["cash"]
+    # Les offres de jobs/ appartiennent au business moteur "podalux", pas a un business par prefixe.
+    assert [b.id for b in registry.all()] == ["podalux"]
+    assert "cash_offer01" in registry.get("podalux").offers
     registry.upsert("agency_b2b", "Agence B2B", "Prospection", ["agency_offer01"])
 
     reloaded = WorkspaceRegistry(path)
@@ -71,3 +73,25 @@ def test_workspace_id_normalization_refuses_reserved_all(tmp_path):
         assert "réservé" in str(exc)
     else:
         raise AssertionError("le workspace réservé doit être refusé")
+
+
+def test_workspace_registry_uses_engine_business_ids(tmp_path, monkeypatch, isolated):
+    monkeypatch.setattr("agents.gui.workspaces.config.JOBS_DIR", tmp_path / "jobs")
+    (tmp_path / "jobs").mkdir()
+    (tmp_path / "jobs" / "cash_offer01.json").write_text("{}", encoding="utf-8")
+    declared = isolated / "businesses" / "veille"
+    declared.mkdir(parents=True)
+    (declared / "business.toml").write_text('id = "veille"\nname = "Veille sourcee"\n', encoding="utf-8")
+
+    registry = WorkspaceRegistry(tmp_path / "workspaces.json")
+    assert {b.id for b in registry.all()} == {"podalux", "veille"}
+    assert registry.get("veille").offers == [] and registry.get("cash") is None
+
+    # Fichier existant (ancienne derivation par prefixe) : conserve tel quel, activites moteur ajoutees.
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text('{"version": 1, "businesses": [{"id": "cash", "name": "Cash", "offers": ["cash_offer01"]}]}',
+                      encoding="utf-8")
+    before = legacy.read_text(encoding="utf-8")
+    registry = WorkspaceRegistry(legacy)
+    assert {b.id for b in registry.all()} == {"cash", "veille"}
+    assert legacy.read_text(encoding="utf-8") == before

@@ -16,6 +16,7 @@ remotion/node_modules/
 remotion/out/
 
 # Python
+.venv/
 __pycache__/
 *.pyc
 .pytest_cache/

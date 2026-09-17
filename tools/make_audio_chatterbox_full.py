@@ -4,6 +4,11 @@ Usage : python tools/make_audio_chatterbox_full.py <job.json> <offer_id> [voice]
 
 `CHATTERBOX_URL` permet de déplacer le backend TTS hors du poste local sans changer
 le reste du pipeline. Par défaut, la compatibilité locale 4123 est conservée.
+
+`CHATTERBOX_URL=hf-space:<owner/space>` utilise un Space Hugging Face public via son API Gradio
+documentée (ex. hf-space:ResembleAI/Chatterbox-Multilingual-TTS, modèle MIT) : aucun GPU local,
+aucun compte ; quota anonyme partagé, d'où les nouvelles tentatives espacées.
+`CHATTERBOX_REF_AUDIO` : voix de référence (fichier ou URL) ; `CHATTERBOX_LANG` : langue (fr par défaut).
 """
 import json
 import os
@@ -24,7 +29,32 @@ SFX_LEVEL = 0.45
 BASE = os.environ.get("CHATTERBOX_URL", "http://127.0.0.1:4123/v1/audio/speech").strip()
 
 
+HF_PREFIX = "hf-space:"
+DEFAULT_REF = "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav"
+
+
+def tts_hf_space(text, exaggeration, cfg_weight, attempts=4):
+    import time
+    from gradio_client import Client, handle_file
+    space = BASE[len(HF_PREFIX):]
+    ref = os.environ.get("CHATTERBOX_REF_AUDIO", "").strip() or DEFAULT_REF
+    lang = os.environ.get("CHATTERBOX_LANG", "fr").strip() or "fr"
+    last = None
+    for attempt in range(attempts):
+        try:
+            out = Client(space, verbose=False).predict(
+                text[:300], lang, handle_file(ref), exaggeration, 0.8, 0, cfg_weight, api_name="/generate_tts_audio")
+            return Path(out).read_bytes()
+        except Exception as exc:  # quota ZeroGPU ou Space en réveil : attendre puis réessayer
+            last = exc
+            print(f"tts hf-space tentative {attempt + 1}/{attempts} : {type(exc).__name__}: {str(exc)[:160]}")
+            time.sleep(20 * (attempt + 1))
+    raise RuntimeError(f"TTS hf-space indisponible après {attempts} tentatives : {last}")
+
+
 def tts(text, voice, exaggeration, cfg_weight):
+    if BASE.startswith(HF_PREFIX):
+        return tts_hf_space(text, exaggeration, cfg_weight)
     payload = json.dumps({
         "model": "chatterbox", "input": text, "voice": voice,
         "response_format": "wav", "exaggeration": exaggeration,

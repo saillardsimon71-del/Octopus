@@ -26,8 +26,11 @@ class VideoRenderer(ABC):
 
 class CloudVideoRenderer(VideoRenderer):
     def __init__(self, client: CloudVideoClient, *, provider: str = "cloud",
-                 state_store: RenderStateStore | None = None, max_attempts: int | None = None):
+                 state_store: RenderStateStore | None = None, max_attempts: int | None = None,
+                 spend_gate=None):
         self.client = client
+        # spend_gate(job, attempt) lève CloudVideoError si la soumission payante n'est pas autorisée.
+        self.spend_gate = spend_gate
         self.provider = provider
         self.state_store = state_store or RenderStateStore(
             Path(os.environ.get("PODALUX_ROOT", Path.cwd())) / "out" / ".cloud_video_state"
@@ -48,11 +51,17 @@ class CloudVideoRenderer(VideoRenderer):
                         f"job {job.job_id} a atteint la limite de {self.max_attempts} tentative(s)"
                     )
                 attempt = state.attempt + 1
+                self._authorize(job, attempt)
                 self.state_store.mark_submitting(job.job_id, self.provider, attempt=attempt)
                 return self._submit_and_wait(job, attempt)
 
+        self._authorize(job, 1)
         self.state_store.mark_submitting(job.job_id, self.provider, attempt=1)
         return self._submit_and_wait(job, 1)
+
+    def _authorize(self, job: VideoJob, attempt: int) -> None:
+        if self.spend_gate is not None:
+            self.spend_gate(job, attempt)
 
     def _wait_existing(self, job: VideoJob, state) -> VideoResult:
         try:
@@ -108,6 +117,18 @@ class LocalVideoRenderer(VideoRenderer):
         )
 
 
+def economy_spend_gate(job: VideoJob, attempt: int) -> None:
+    """Chaque soumission payante consomme une enveloppe (estimation PODALUX_VIDEO_JOB_COST_ESTIMATE, ex. "0.30 USD")."""
+    from octopus import economy, journal
+    from octopus.strategy import StrategyError
+    run = journal.current_run()
+    try:
+        economy.gate_paid_call(run.business if run else "podalux", f"rendu cloud {job.job_id} tentative {attempt}",
+                               estimate_env="PODALUX_VIDEO_JOB_COST_ESTIMATE", requested_by="video.cloud")
+    except StrategyError as exc:
+        raise CloudVideoError(str(exc)) from exc
+
+
 def get_renderer(*, mode: str | None = None, provider: str | None = None) -> VideoRenderer:
     # Cloud-first : le contrôle-plane doit nécessiter une sélection explicite du local.
     selected = (mode or os.environ.get("PODALUX_VIDEO_RENDERER", "cloud")).strip().lower()
@@ -122,11 +143,13 @@ def get_renderer(*, mode: str | None = None, provider: str | None = None) -> Vid
     state_store = RenderStateStore(state_root)
     if selected_provider == "runpod":
         return CloudVideoRenderer(
-            RunPodServerlessClient(RunPodConfig.from_env()), provider="runpod", state_store=state_store
+            RunPodServerlessClient(RunPodConfig.from_env()), provider="runpod", state_store=state_store,
+            spend_gate=economy_spend_gate,
         )
     if selected_provider == "http":
         from .client import CloudVideoConfig
         return CloudVideoRenderer(
-            CloudVideoClient(CloudVideoConfig.from_env()), provider="http", state_store=state_store
+            CloudVideoClient(CloudVideoConfig.from_env()), provider="http", state_store=state_store,
+            spend_gate=economy_spend_gate,
         )
     raise ValueError(f"PODALUX_VIDEO_PROVIDER inconnu: {selected_provider!r}; valeurs: runpod, http")

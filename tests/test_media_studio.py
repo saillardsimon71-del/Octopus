@@ -54,5 +54,6 @@ def test_model_choices_without_probe_and_hardware_summary():
     choices = studio.model_choices()
     assert choices[0] == (studio.AUTO_MODEL, "")
     assert [m for _, m in choices[1:3]] == ["t2v_nexus_1.3B", "t2v_1.3B"]
-    assert all("diagnostic à lancer" in label for label, m in choices if m.startswith("minimax_h3"))
+    h3 = [label for label, m in choices if m.startswith("minimax_h3")]
+    assert h3 and all("CLOUD" in label and "aucun téléchargement local" in label for label in h3)
     assert studio.hardware_summary() == "Diagnostic WanGP jamais lancé"

@@ -10,6 +10,7 @@ L'automatisation de logins est fragile et peut violer les CGU.
 """
 from __future__ import annotations
 
+import asyncio
 import atexit
 import time
 from pathlib import Path
@@ -125,7 +126,14 @@ class BrowserTool:
             allowed = False
         if not allowed:
             self.blocked.append(original_url)
-            websocket.close(code=1008, reason="WebSocket bloqué par le garde-fou OCTOPUS")
+            reason = "WebSocket bloqué par le garde-fou OCTOPUS"
+            impl = getattr(websocket, "_impl_obj", None)
+            if impl is None:
+                websocket.close(code=1008, reason=reason)
+            else:
+                # Le handler tourne dans la boucle de Playwright : le close() synchrone y attendrait
+                # sa propre boucle (blocage définitif). On planifie la fermeture sur cette boucle.
+                asyncio.get_running_loop().create_task(impl.close(code=1008, reason=reason))
             return
         websocket.connect_to_server()
 

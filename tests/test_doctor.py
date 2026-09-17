@@ -9,6 +9,7 @@ from agents import config, db, doctor
 def test_doctor_cloud_first_requires_omniroute_and_runpod(isolated, monkeypatch):
     monkeypatch.setenv("PODALUX_VIDEO_RENDERER", "cloud")
     monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    monkeypatch.delenv("OCTOPUS_PROFILE", raising=False)  # installation reelle : profil non force
     monkeypatch.setenv("OMNIROUTE_API_KEY", "test-key")
     monkeypatch.setenv("PODALUX_RUNPOD_ENDPOINT_ID", "endpoint")
     monkeypatch.setenv("PODALUX_RUNPOD_API_TOKEN", "runpod-test")

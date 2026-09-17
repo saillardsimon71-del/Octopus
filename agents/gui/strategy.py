@@ -5,6 +5,7 @@ structurés pour le runtime existant. Le cockpit reste ainsi une couche de pilot
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from .workspaces import Business, DEFAULT_BUSINESS_ID
@@ -75,6 +76,38 @@ def build_objective(action: StrategicAction, business: Business | None, *, offer
     if selected_offers:
         context += " Offres connues : " + ", ".join(selected_offers[:12]) + "."
     return f"{context}\n\nPhase : {action.phase}\nObjectif : {action.objective}"
+
+
+NATURE_LABELS = {"observed": "observé", "computed": "calculé", "inferred": "inféré", "hypothesis": "hypothèse",
+                 "unverified": "non vérifié"}
+
+
+def overview_lines(state: dict) -> list[str]:
+    """Texte d'affichage de `octopus.strategy.overview` : aucune donnée ajoutée, aucun chiffre inventé."""
+    def section(title: str, rows: list[dict], fmt) -> list[str]:
+        return [f"{title} ({len(rows)})"] + ([f"  {fmt(r)}" for r in rows] or ["  aucun"])
+
+    def when(ts) -> str:
+        return time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else "sans échéance"
+
+    lines = section("Objectifs actifs", state["objectives"], lambda r: f"#{r['id']} {r['summary']}")
+    lines += section("Hypothèses en test", state["hypotheses"], lambda r: f"#{r['id']} {r['summary']}")
+    lines += section("Expériences ouvertes", state["experiments"],
+                     lambda r: f"#{r['id']} [{r['status']}] {r['summary']} · {when(r['deadline_at'])}")
+    lines += section("Preuves récentes", state["evidence"],
+                     lambda r: f"#{r['id']} [{NATURE_LABELS.get(r['nature'], r['nature'])}] {r['summary']}")
+    lines += section("Décisions à valider par un humain", state["decisions"], lambda r: f"#{r['id']} {r['summary']}")
+    lines += section("Revues planifiées", state["reviews"], lambda r: f"#{r['id']} {r['summary']} · {when(r['due_at'])}")
+    lines.append(state.get("sources") or "Données externes : état inconnu")
+    return lines
+
+
+def portfolio_lines(rows: list[dict]) -> list[str]:
+    if not rows:
+        return ["Aucun objet stratégique enregistré.",
+                "Créer : python -m octopus strategy add objective <business> \"résumé\" --by human --set statement=\"...\""]
+    return [f"{r['business']} · objectifs actifs {r['objectives']} · expériences ouvertes {r['experiments']} · "
+            f"décisions en attente {r['decisions']}" for r in rows]
 
 
 def get_action(key: str) -> StrategicAction:

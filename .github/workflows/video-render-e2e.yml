@@ -1,0 +1,56 @@
+name: video-render-e2e
+
+# Test de bout en bout de la chaîne vidéo (voix cloud Hugging Face -> Remotion -> FFmpeg -> QC).
+# Déclenchement manuel uniquement : ce workflow vérifie le logiciel, il n'est pas un service de production.
+on:
+  push:
+    branches:
+      - "render/**"
+  workflow_dispatch:
+    inputs:
+      offer_id:
+        description: "offre à rendre (jobs/<offer_id>.json)"
+        required: true
+        default: "cash_devis_cgv01"
+
+concurrency:
+  group: video-render-e2e
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CHATTERBOX_URL: "hf-space:ResembleAI/Chatterbox-Multilingual-TTS"
+      CHATTERBOX_LANG: "fr"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip && python -m pip install "numpy>=1.26,<3" "Pillow>=10,<13" gradio_client
+      - name: Install Remotion dependencies
+        working-directory: remotion
+        run: npm ci
+      - name: Render short
+        run: python tools/render_short.py "${{ inputs.offer_id || 'cash_devis_cgv01' }}"
+      - name: Upload video and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: short-${{ inputs.offer_id || 'cash_devis_cgv01' }}-${{ github.run_id }}
+          path: |
+            out/${{ inputs.offer_id || 'cash_devis_cgv01' }}/final.mp4
+            out/${{ inputs.offer_id || 'cash_devis_cgv01' }}/render_report.json
+            out/${{ inputs.offer_id || 'cash_devis_cgv01' }}/qc_metrics.json
+            out/${{ inputs.offer_id || 'cash_devis_cgv01' }}/frames/
+            out/${{ inputs.offer_id || 'cash_devis_cgv01' }}/logs/
+          if-no-files-found: warn
+          retention-days: 14

@@ -100,3 +100,37 @@ def test_renderer_stops_after_attempt_limit(tmp_path):
     state.save(RenderState("video-state-1", "runpod", "FAILED", "remote-old", 2, time.time()))
     with pytest.raises(CloudVideoError, match="limite de 2"):
         CloudVideoRenderer(NoSubmitClient(), state_store=state, max_attempts=2).render(job())
+
+
+def test_spend_gate_refusal_leaves_no_submission_state(tmp_path):
+    from octopus.video.client import CloudVideoError
+    state = RenderStateStore(tmp_path)
+    calls = []
+
+    def refuse(job_, attempt):
+        calls.append(attempt)
+        raise CloudVideoError("dépense refusée")
+
+    class NeverClient:
+        def submit(self, job_):
+            raise AssertionError("aucune soumission ne doit partir")
+
+    with pytest.raises(CloudVideoError, match="dépense refusée"):
+        CloudVideoRenderer(NeverClient(), state_store=state, spend_gate=refuse).render(job())
+    assert calls == [1] and state.load(job().job_id) is None
+
+
+def test_economy_gate_requires_estimate_and_allowance(monkeypatch, isolated):
+    from octopus import economy
+    from octopus.video.client import CloudVideoError
+    from octopus.video.renderers import economy_spend_gate
+    monkeypatch.delenv("PODALUX_VIDEO_JOB_COST_ESTIMATE", raising=False)
+    with pytest.raises(CloudVideoError, match="non configuré"):
+        economy_spend_gate(job(), 1)
+    monkeypatch.setenv("PODALUX_VIDEO_JOB_COST_ESTIMATE", "0.30 USD")
+    with pytest.raises(CloudVideoError, match="aucune enveloppe"):
+        economy_spend_gate(job(), 1)
+    economy.grant_allowance("podalux", 0.5, "USD", granted_by="human", rationale="rendus")
+    economy_spend_gate(job(), 1)
+    with pytest.raises(CloudVideoError, match="enveloppe"):
+        economy_spend_gate(job(), 2)  # 0,30 + 0,30 > 0,50

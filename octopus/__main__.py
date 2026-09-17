@@ -9,6 +9,7 @@
   python -m octopus tasks [--status queued] | cancel ID | ask | answer REQUEST_ID "texte"
   python -m octopus schedule octopus octopus.cost_report --every 86400 [--disable]
   python -m octopus events [--since ID]
+  python -m octopus strategy add|list|show|move|link|mission|review|snapshot ...
 """
 from __future__ import annotations
 
@@ -250,11 +251,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--days", type=int, default=7)
     from .media import cli as media_cli
     media_cli.add_parser(sub)
+    from . import strategy_cli
+    strategy_cli.add_parser(sub)
     args = parser.parse_args(argv)
     commands = {"report": cmd_report, "bench": cmd_bench, "models": cmd_models, "doctor": cmd_doctor,
                 "worker": cmd_worker, "enqueue": cmd_enqueue, "tasks": cmd_tasks, "cancel": cmd_cancel,
                 "ask": cmd_ask, "answer": cmd_answer, "schedule": cmd_schedule, "events": cmd_events,
-                "video": media_cli.run, "businesses": cmd_businesses}
+                "video": media_cli.run, "businesses": cmd_businesses, "strategy": strategy_cli.run,
+                "economy": strategy_cli.run_economy}
     return commands[args.cmd](args)
 
 

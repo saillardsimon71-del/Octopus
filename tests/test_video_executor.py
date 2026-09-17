@@ -44,7 +44,8 @@ def test_executor_produces_manifest_and_is_idempotent(tmp_path):
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text("ok")
         out_dir = Path(log).parent.parent
-        if "make_audio_chatterbox_full.py" in cmd:
+        joined = " ".join(map(str, cmd))
+        if "make_audio_chatterbox_full.py" in joined:
             out = out_dir / "audio"
             out.mkdir(parents=True, exist_ok=True)
             (out / "mix.wav").write_bytes(b"wav")
@@ -62,7 +63,7 @@ def test_executor_produces_manifest_and_is_idempotent(tmp_path):
             return "I: -14.0 LUFS"
         elif cmd[0] == "ffmpeg":
             Path(cmd[-1]).write_bytes(b"final")
-        elif "qc_metrics.py" in cmd:
+        elif "qc_metrics.py" in joined:
             (out_dir / "frames").mkdir(parents=True, exist_ok=True)
             for i in range(2):
                 (out_dir / "frames" / f"frame-{i}.jpg").write_bytes(b"jpg")

@@ -104,7 +104,8 @@ def test_probe_reports_models_and_hardware(fake_wangp, isolated):
     assert data["ok"] and data["wangp_version"] == "fake-1.0"
     assert [m["model_type"] for m in data["models"]] == ["minimax_h3_fl2va", "minimax_h3_ref2va_pruned"]
     assert data["hardware"]["python"] and "cpu_count" in data["hardware"]
-    assert handlers.default_model() == "minimax_h3_fl2va"  # premier modèle H3 disponible
+    # H3 est cloud-only : jamais auto-selectionne comme modele local, meme detecte par WanGP.
+    assert handlers.default_model() == handlers.MODEL_PREFERENCE[0]
 
 
 # --- génération ---------------------------------------------------------------------------------
@@ -198,11 +199,12 @@ def test_cli_list_show_and_reuse(fake_wangp, isolated, capsys):
 def test_insufficient_hardware_fails_without_retry(fake_wangp, isolated):
     wangp.probe()
     cache = wangp.cached_probe()
-    cache["hardware"] = {"cuda_available": True, "gpu": {"vram_total_gb": 3.0, "capability": "6.1"}, "ram_total_gb": 15.9}
+    # Le garde-fou materiel ne concerne que les modeles locaux (H3 part sur RunPod).
+    cache["hardware"] = {"cuda_available": False, "gpu": {}, "ram_total_gb": 15.9}
     wangp.probe_cache_path().write_text(__import__("json").dumps(cache), encoding="utf-8")
-    result = run_task(model_type="minimax_h3_fl2va")
+    result = run_task(model_type="t2v_1.3B")
     assert result["status"] == "failed" and "Matériel : incompatible" in result["error"]  # pas de 2e tentative
-    forced = run_task(model_type="minimax_h3_fl2va", force=True)
+    forced = run_task(model_type="t2v_1.3B", force=True)
     assert forced["status"] == "done"
 
 

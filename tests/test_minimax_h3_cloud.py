@@ -46,8 +46,11 @@ def test_h3_preset_is_explicit_cloud():
 
 
 def test_h3_handler_bypasses_local_wangp(monkeypatch, isolated):
+    from octopus import economy
     monkeypatch.setenv("OCTOPUS_MINIMAX_H3_ENDPOINT_ID", "endpoint")
     monkeypatch.setenv("OCTOPUS_MINIMAX_H3_API_TOKEN", "secret")
+    monkeypatch.setenv("OCTOPUS_H3_JOB_COST_ESTIMATE", "0.50 USD")
+    economy.grant_allowance("podalux", 1, "USD", granted_by="human", rationale="test H3")
 
     class FakeClient:
         def __init__(self, config):
@@ -77,3 +80,43 @@ def test_h3_handler_bypasses_local_wangp(monkeypatch, isolated):
     output = handlers.video_generate(Ctx())
     assert output["backend"] == "runpod_minimax_h3"
     assert len(output["videos"]) == 1
+
+
+def test_h3_submission_is_refused_without_estimate_or_allowance(monkeypatch, isolated):
+    from octopus import economy
+    monkeypatch.setenv("OCTOPUS_MINIMAX_H3_ENDPOINT_ID", "endpoint")
+    monkeypatch.setenv("OCTOPUS_MINIMAX_H3_API_TOKEN", "secret")
+    submits = []
+
+    class FakeClient:
+        def __init__(self, config):
+            pass
+
+        def submit(self, workflow):
+            submits.append(workflow)
+            return "remote-1"
+
+    monkeypatch.setattr(handlers, "MiniMaxH3RunPodClient", FakeClient)
+
+    class Ctx:
+        id = 8
+        input = {"preset": "h3", "prompt": "test"}
+        business = "podalux"
+
+        def cancelled(self):
+            return False
+
+        def emit(self, *args, **kwargs):
+            pass
+
+    import pytest
+    for setup in (lambda: None, lambda: monkeypatch.setenv("OCTOPUS_H3_JOB_COST_ESTIMATE", "0.50 USD")):
+        setup()
+        with pytest.raises(Exception, match="aucune vidéo"):
+            handlers.video_generate(Ctx())
+    assert submits == []
+    economy.grant_allowance("podalux", 0.4, "USD", granted_by="human", rationale="trop petite")
+    Ctx.id = 9
+    with pytest.raises(Exception, match="aucune vidéo"):
+        handlers.video_generate(Ctx())
+    assert submits == []

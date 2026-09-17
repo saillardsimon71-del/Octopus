@@ -27,13 +27,15 @@ La page **Intelligence** transforme la vision long-terme en missions explicites 
 7. **Réinvestir** — règles de réallocation fondées sur les revenus/coûts réellement disponibles.
 8. **Revue stratégique** — revue périodique, décisions, risques et prochains tests.
 
-Les boutons de cette page utilisent le runtime de missions existant : ils ne constituent pas un second moteur d'agents.
+Les boutons de cette page utilisent le runtime de missions existant : ils ne constituent pas un second moteur d'agents. Le business sélectionné est transmis à la mission (`agents.run mission --business <id>`) : runs et coûts LLM lui sont rattachés.
+
+Sous les actions, la carte **État stratégique persisté** lit `octopus.strategy` (lecture seule) : objectifs actifs, hypothèses en test, expériences ouvertes, preuves récentes avec leur nature, décisions en attente d'un humain, revues planifiées et état des sources externes (`octopus.connectors`). En vue « Tous les business », elle affiche le portefeuille. La création et l'évolution de ces objets passent aujourd'hui par `python -m octopus strategy ...`.
 
 ## Ce qui est réellement connecté
 
 Le cockpit peut déjà piloter les missions ORBIT, les tâches durables, la production vidéo cloud, le navigateur gardé, les handoffs humains et le pont Orca optionnel.
 
-Le registre des businesses est une métadonnée locale d'interface. Il regroupe les offres connues et permet de changer de contexte sans dupliquer la base métier. Par défaut, les businesses existants peuvent être dérivés des IDs présents dans `jobs/`.
+Le registre des businesses est une métadonnée locale d'interface. Il regroupe les offres connues et permet de changer de contexte sans dupliquer la base métier. Au premier lancement, il reprend les activités déclarées dans `businesses/*/business.toml` et rattache les offres de `jobs/` au business `podalux` (même identifiant que les tâches et le journal). Un fichier `agents/data/workspaces.json` existant n'est pas réécrit.
 
 ## Ce qui reste à brancher pour une autonomie business complète
 

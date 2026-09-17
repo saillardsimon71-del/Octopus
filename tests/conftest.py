@@ -35,6 +35,16 @@ REAL_IS_PEAK = pricing.is_peak  # les tests de la passerelle figent les heures c
 assert config.PROJECT_ROOT == _SESSION_ROOT, "les tests ne doivent jamais viser le projet reel"
 
 
+class _NoRegistry:
+    """Remplace `winreg` : aucune variable utilisateur Windows n'est lisible pendant les tests."""
+
+    HKEY_CURRENT_USER = None
+
+    @staticmethod
+    def OpenKey(*_args, **_kwargs):
+        raise OSError("registre Windows neutralise pendant les tests")
+
+
 class FakeTransport:
     """Remplace l'appel HTTP : enregistre les requetes, repond via `handler`."""
 
@@ -72,6 +82,10 @@ def isolated(tmp_path, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OCTOPUS_PROFILE", "legacy")
     monkeypatch.setenv("OMNIROUTE_ENABLED", "0")
+    # Rendu local simule par defaut : un test ne doit jamais viser RunPod sans le demander.
+    monkeypatch.setenv("PODALUX_VIDEO_RENDERER", "local")
+    # Les secrets de l'utilisateur (registre Windows) ne doivent jamais fuir dans les tests.
+    monkeypatch.setitem(sys.modules, "winreg", _NoRegistry())
     monkeypatch.setattr(config, "PROJECT_ROOT", root)
     monkeypatch.setattr(config, "DATA_DIR", root / "agents" / "data")
     monkeypatch.setattr(config, "DB_PATH", root / "agents" / "data" / "podalux.db")

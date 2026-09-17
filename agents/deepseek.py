@@ -61,8 +61,9 @@ def _complete(agent: str, task: str, model: str, messages: list[dict], max_token
         content = (r.choices[0].message.content or "").strip()
         db.log_cost(agent, task, model, r.usage.prompt_tokens, r.usage.completion_tokens)
         return content
-    from octopus import llm
-    c = llm.complete(llm.legacy_task(agent, task), messages, agent=agent, business="podalux",
+    from octopus import journal, llm
+    run = journal.current_run()  # coûts rattachés au business du run (mission, tâche), pas toujours à Podalux
+    c = llm.complete(llm.legacy_task(agent, task), messages, agent=agent, business=run.business if run else "podalux",
                      max_tokens=max_tokens, json_mode=json_mode, reasoning=reasoning, needs=needs,
                      pin_model=_MODEL_IDS.get(model, model), profile=_default_profile())
     used = model if c.model == _MODEL_IDS.get(model) else c.model

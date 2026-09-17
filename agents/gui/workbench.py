@@ -57,6 +57,7 @@ class PodaluxWorkbench(ctk.CTk):
         self.minsize(1180, 760)
         self.configure(fg_color=COLORS["bg"])
 
+        db.init_db()  # premier lancement : la table state doit exister avant de lire le business actif
         self.registry = WorkspaceRegistry()
         selected = db.get_state("active_business") or DEFAULT_BUSINESS_ID
         self.selected_business_id = selected if selected == DEFAULT_BUSINESS_ID or self.registry.get(selected) else DEFAULT_BUSINESS_ID
@@ -70,7 +71,6 @@ class PodaluxWorkbench(ctk.CTk):
         self._orca_busy = False
         self._last_activity_signature: tuple | None = None
         self._build_shell()
-        db.init_db()
         self._sync_business_menu()
         self._show_page("Cockpit")
         self._bind_shortcuts()
@@ -169,7 +169,7 @@ class PodaluxWorkbench(ctk.CTk):
 
     @staticmethod
     def _slug(page: str) -> str:
-        return page.lower().replace("é", "e").replace(" ", "_")
+        return page.lower().replace("é", "e").replace("è", "e").replace(" ", "_")
 
     def _business_label(self) -> str:
         business = self.registry.get(self.selected_business_id)
@@ -266,7 +266,10 @@ class PodaluxWorkbench(ctk.CTk):
 
         quick = self._card(root, "Actions rapides")
         quick.grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=5)
-        for i in range(5): quick.grid_columnconfigure(i, weight=1)
+        # Le titre de _card est placé avec pack : les boutons en grille vont dans un cadre dédié.
+        quick_row = ctk.CTkFrame(quick, fg_color="transparent")
+        quick_row.pack(fill="x")
+        for i in range(5): quick_row.grid_columnconfigure(i, weight=1)
         buttons = [
             ("▶  Cycle", self._start_cycle, COLORS["accent"]),
             ("◇  Mission", lambda: self._show_page("Missions"), COLORS["surface3"]),
@@ -275,14 +278,12 @@ class PodaluxWorkbench(ctk.CTk):
             ("?  Humain", lambda: self._show_page("Humain"), COLORS["surface3"]),
         ]
         for i, (text, command, fg) in enumerate(buttons):
-            ctk.CTkButton(quick, text=text, height=37, command=command, fg_color=fg, hover_color=COLORS["accent_hover"] if fg == COLORS["accent"] else COLORS["surface3"]).grid(row=1, column=i, sticky="ew", padx=5, pady=(0, 12))
+            ctk.CTkButton(quick_row, text=text, height=37, command=command, fg_color=fg, hover_color=COLORS["accent_hover"] if fg == COLORS["accent"] else COLORS["surface3"]).grid(row=1, column=i, sticky="ew", padx=5, pady=(0, 12))
 
         activity = self._card(root, "Flux d'activité")
         activity.grid(row=2, column=0, sticky="nsew", padx=(0, 6), pady=5)
-        activity.grid_columnconfigure(0, weight=1)
-        activity.grid_rowconfigure(1, weight=1)
         self.activity_feed = ctk.CTkScrollableFrame(activity, fg_color="transparent")
-        self.activity_feed.grid(row=1, column=0, sticky="nsew", padx=7, pady=(0, 7))
+        self.activity_feed.pack(fill="both", expand=True, padx=7, pady=(0, 7))
         self._render_activity(self.activity_feed)
 
         side = ctk.CTkFrame(root, fg_color="transparent")
@@ -343,11 +344,13 @@ class PodaluxWorkbench(ctk.CTk):
         root.grid_rowconfigure(1, weight=1)
         compose = self._card(root, "Nouvelle mission")
         compose.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 9))
-        compose.grid_columnconfigure(0, weight=1)
-        self.mission_entry = ctk.CTkEntry(compose, height=41, placeholder_text=f"Ex. : analyser le marché et préparer un plan — contexte : {self._business_label()}")
+        compose_row = ctk.CTkFrame(compose, fg_color="transparent")
+        compose_row.pack(fill="x")
+        compose_row.grid_columnconfigure(0, weight=1)
+        self.mission_entry = ctk.CTkEntry(compose_row, height=41, placeholder_text=f"Ex. : analyser le marché et préparer un plan — contexte : {self._business_label()}")
         self.mission_entry.grid(row=1, column=0, sticky="ew", padx=(14, 7), pady=(3, 13))
         self.mission_entry.bind("<Return>", lambda _e: self._start_mission())
-        ctk.CTkButton(compose, text="Lancer", width=130, height=41, command=self._start_mission).grid(row=1, column=1, padx=(7, 14), pady=(3, 13))
+        ctk.CTkButton(compose_row, text="Lancer", width=130, height=41, command=self._start_mission).grid(row=1, column=1, padx=(7, 14), pady=(3, 13))
 
         task_card = self._card(root, "File de travail")
         task_card.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
@@ -426,12 +429,14 @@ class PodaluxWorkbench(ctk.CTk):
         root.grid_rowconfigure(1, weight=1)
         controls = self._card(root, "Navigation contrôlée")
         controls.grid(row=0, column=0, sticky="ew", pady=(0, 9))
-        controls.grid_columnconfigure(0, weight=1)
-        self.browser_entry = ctk.CTkEntry(controls, height=38, placeholder_text="https://…")
+        controls_row = ctk.CTkFrame(controls, fg_color="transparent")
+        controls_row.pack(fill="x")
+        controls_row.grid_columnconfigure(0, weight=1)
+        self.browser_entry = ctk.CTkEntry(controls_row, height=38, placeholder_text="https://…")
         self.browser_entry.grid(row=0, column=0, sticky="ew", padx=(14, 6), pady=10)
         self.browser_entry.bind("<Return>", lambda _e: self._browse_url())
-        ctk.CTkButton(controls, text="Ouvrir visible", width=120, command=self._open_browser).grid(row=0, column=1, padx=4, pady=10)
-        ctk.CTkButton(controls, text="Inspecter", width=100, fg_color=COLORS["surface3"], command=self._browse_url).grid(row=0, column=2, padx=(4, 14), pady=10)
+        ctk.CTkButton(controls_row, text="Ouvrir visible", width=120, command=self._open_browser).grid(row=0, column=1, padx=4, pady=10)
+        ctk.CTkButton(controls_row, text="Inspecter", width=100, fg_color=COLORS["surface3"], command=self._browse_url).grid(row=0, column=2, padx=(4, 14), pady=10)
         view = self._card(root, "Observation")
         view.grid(row=1, column=0, sticky="nsew")
         self.browser_state = ctk.CTkLabel(view, text="URL : (inactive)", text_color=COLORS["muted"], anchor="w")
@@ -609,7 +614,9 @@ class PodaluxWorkbench(ctk.CTk):
         goal = f"[Business: {context}] {text}" if context != "Tous les business" else text
         db.post("HUMAN", f"objectif : {goal}")
         entry.delete(0, "end")
-        self.proc, _ = procs.spawn(["mission", goal], "mission")
+        business = self.selected_business_id
+        args = ["mission", "--business", business, goal] if business != DEFAULT_BUSINESS_ID else ["mission", goal]
+        self.proc, _ = procs.spawn(args, "mission")
         self._set_status(f"Mission lancée · {context}", COLORS["info"])
 
     def _stop_cycle(self) -> None:
@@ -856,7 +863,9 @@ class PodaluxWorkbench(ctk.CTk):
         if self.worker_proc is not None and self.worker_proc.poll() is not None:
             self.worker_proc = None
         self.side_worker.configure(text="● Worker actif" if self.worker_proc else "● Worker arrêté", text_color=COLORS["good"] if self.worker_proc else COLORS["muted"])
-        if hasattr(self, "worker_state"):
+        # Le libellé n'existe que sur la page Missions : une fois la page quittée, le widget est détruit et
+        # l'erreur Tcl arrêtait définitivement ce rafraîchissement (le self.after final n'était plus atteint).
+        if self.current_page == "Missions" and hasattr(self, "worker_state") and self.worker_state.winfo_exists():
             self.worker_state.configure(text="Actif" if self.worker_proc else "Arrêté", text_color=COLORS["good"] if self.worker_proc else COLORS["muted"])
         try:
             if self.current_page == "Cockpit" and hasattr(self, "activity_feed"):

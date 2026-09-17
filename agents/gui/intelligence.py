@@ -11,7 +11,9 @@ import subprocess
 import customtkinter as ctk
 
 from .. import db, procs
-from .strategy import STRATEGIC_ACTIONS, build_objective, get_action
+from octopus import strategy as strategy_store
+
+from .strategy import STRATEGIC_ACTIONS, build_objective, get_action, overview_lines, portfolio_lines
 from .workbench import COLORS, DEFAULT_BUSINESS_ID, PAGE_META, PodaluxWorkbench
 
 INTELLIGENCE_META = {
@@ -64,6 +66,7 @@ class EntrepreneurialWorkbench(PodaluxWorkbench):
         root.grid_columnconfigure(0, weight=2)
         root.grid_columnconfigure(1, weight=1)
         root.grid_rowconfigure(1, weight=1)
+        root.grid_rowconfigure(2, weight=1)
 
         overview = self._card(root, "Boucle entrepreneuriale")
         overview.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 9))
@@ -115,6 +118,24 @@ class EntrepreneurialWorkbench(PodaluxWorkbench):
         ctk.CTkLabel(side, text="Garde-fou", text_color=COLORS["warn"], font=("Segoe UI", 9, "bold"), anchor="w").pack(fill="x", padx=14, pady=(7, 3))
         ctk.CTkLabel(side, text="ORBIT peut rechercher, analyser, proposer et préparer des actions. Les données absentes ne sont pas inventées et les opérations irréversibles restent contrôlées.", text_color=COLORS["muted"], anchor="w", justify="left", wraplength=350).pack(fill="x", padx=14, pady=(0, 12))
 
+        self._strategy_state_card(root)
+
+    def _strategy_state_card(self, root) -> None:
+        """Lecture seule de la boucle persistée (octopus.strategy) : business actif ou portefeuille."""
+        card = self._card(root, "État stratégique persisté")
+        card.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(9, 0))
+        try:
+            if self.selected_business_id == DEFAULT_BUSINESS_ID:
+                lines = ["Portefeuille"] + portfolio_lines(strategy_store.portfolio())
+            else:
+                lines = overview_lines(strategy_store.overview(self.selected_business_id))
+        except Exception as exc:  # base occupée ou migration en cours : afficher, ne pas casser la page
+            lines = [f"Lecture impossible : {type(exc).__name__}: {exc}"]
+        box = ctk.CTkTextbox(card, height=200, fg_color=COLORS["surface2"], text_color=COLORS["text"], wrap="word")
+        box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        box.insert("1.0", "\n".join(lines))
+        box.configure(state="disabled")
+
     def _mini_stat(self, parent, title: str, value: str, detail: str) -> None:
         card = ctk.CTkFrame(parent, fg_color=COLORS["surface2"], corner_radius=9)
         card.pack(fill="x", padx=10, pady=4)
@@ -130,7 +151,8 @@ class EntrepreneurialWorkbench(PodaluxWorkbench):
             self._set_status("Une mission/cycle tourne déjà", COLORS["warn"])
             return
         db.post("HUMAN", f"objectif stratégique · {action.title} · {self._business_label()}")
-        self.proc, log = procs.spawn(["mission", objective], "strategy-mission")
+        args = ["mission", "--business", business.id, objective] if business else ["mission", objective]
+        self.proc, log = procs.spawn(args, "strategy-mission")
         self._set_status(f"ORBIT · {action.title} lancé", COLORS["info"])
         self.page_subtitle.configure(text=f"Mission stratégique lancée · journal {log.name}")
         self._show_page("Missions")

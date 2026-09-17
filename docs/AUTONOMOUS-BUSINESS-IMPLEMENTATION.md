@@ -25,6 +25,21 @@ The Intelligence Workbench already exposes eight strategic actions:
 
 Each action builds a contextual ORBIT objective from the active business and known offers. The current implementation deliberately does not invent CRM, revenue, margin or social analytics data.
 
+## Implementation status (2026-09-17, working tree not yet committed)
+
+| Phase | Status | Where |
+|---|---|---|
+| 1 Persistent strategy model | Implemented, tested | `octopus/strategy.py`, migration v5 in `octopus/journal.py`, `tests/test_strategy.py` |
+| 2 Evidence / provenance | Implemented, tested | `strategy_evidence` (nature, source, capture time, confidence, immutable) |
+| 3 Mission linkage | Implemented, tested with simulated LLM | `orbit.mission` in `agents/task_handlers.py`; business propagated in `agents/runtime.py` |
+| 4 Recurring loop | Implemented, tested | `strategy.review` handler (no LLM), `strategy.schedule_review`, `octopus schedule <business> strategy.review --every N` |
+| 5 Connectors | Boundary only, no real source | `octopus/connectors.py` (every domain "non configuré") |
+| 6 Reinvestment decision support | Not started | requires a real finance source first |
+| 7 Strategic GUI | Read-only state card | `agents/gui/intelligence.py`; creation via `python -m octopus strategy` |
+| 8 Second business | Tested end to end (simulated LLM, no real network) | `tests/test_second_business_loop.py` |
+
+Not verified: a real ORBIT mission with a real model, real GUI clicks with real data, any CI run.
+
 ## Target operating loop
 
 ```text

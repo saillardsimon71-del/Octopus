@@ -10,10 +10,11 @@ from __future__ import annotations
 import contextvars
 import json
 import re
+import time
 import unicodedata
 from contextlib import contextmanager
 
-from octopus.journal import with_run
+from octopus import journal
 
 from . import cancel, db, deepseek, web_guard
 
@@ -85,6 +86,11 @@ def _browse(args):
 
 
 def _render_offer(args):
+    run = journal.current_run()
+    if run is not None and run.business != DEFAULT_BUSINESS:
+        # Les offres et le rendu (potentiellement payant, RunPod) appartiennent à Podalux.
+        return {"refuse": True, "note": f"render_offer produit une offre Podalux : indisponible pour le business "
+                                        f"{run.business}. Propose l'action à l'humain au lieu de l'exécuter."}
     from .cycle import run_cycle
     r = run_cycle(offer_id=args["offer_id"], max_iterations=1)
     return {"score": r["ledger"].get("score"), "decision": r["orbit"].get("decision"),
@@ -134,6 +140,129 @@ def _recall(args):
     return {"trouve": False, "agent": str(agent).upper(), "cles_connues": keys}
 
 
+# --- Boucle économique (génériques, tout business) ---
+def _run_business() -> str:
+    run = journal.current_run()
+    return run.business if run else DEFAULT_BUSINESS
+
+
+def _economy_status(args):
+    from octopus import economy
+    return economy.status(_run_business())
+
+
+def _seen_this_session(source: str) -> bool:
+    """La source a-t-elle réellement été ouverte (browse) ou renvoyée par une recherche dans cette exécution ?"""
+    if not source:
+        return False
+    if source in web_guard.current().visited:
+        return True
+    return any(source in str(entry.get("result", "")) for entry in (_SEARCHES.get() or {}).values())
+
+
+def _ids(args, keys) -> dict:
+    return {k: int(args[k]) for k in keys if args.get(k) not in (None, "")}
+
+
+def _record_observation(args):
+    """Observé seulement si la source a été consultée dans cette exécution ; sinon non vérifié (source gardée)."""
+    from octopus import strategy
+    source = str(args.get("source_ref") or "").strip()
+    observed = _seen_this_session(source)
+    fields = {k: args[k] for k in ("metric", "unit") if args.get(k) not in (None, "")}
+    fields.update(_ids(args, ("experiment_id", "channel_id")))
+    if args.get("value") not in (None, ""):
+        fields["value"] = float(args["value"])
+    evidence_id = strategy.create(
+        "evidence", _run_business(), str(args.get("summary") or args.get("observation", ""))[:200],
+        created_by=f"agent:{_ROLE.get()}", nature="observed" if observed else "unverified",
+        source_type=str(args.get("source_type") or "agent"), source_ref=source or None,
+        captured_at=time.time() if observed else None, observation=str(args.get("observation", "")), **fields)
+    return {"evidence_id": evidence_id, "nature": "observed" if observed else "unverified",
+            "note": None if observed else "source non consultée dans cette exécution : donnée non vérifiée"}
+
+
+def _propose_experiment(args):
+    """Crée (ou réutilise) objectif et hypothèse, puis une expérience mesurable en statut planned."""
+    from octopus import strategy
+    business, by = _run_business(), f"agent:{_ROLE.get()}"
+    objective_id = args.get("objective_id") or strategy.create(
+        "objective", business, str(args["objective"])[:200], created_by=by, statement=str(args["objective"]))
+    hypothesis_id = args.get("hypothesis_id") or strategy.create(
+        "hypothesis", business, str(args["hypothesis"])[:200], created_by=by, parent_id=int(objective_id),
+        statement=str(args["hypothesis"]), stop_criterion=args.get("stop_criterion"))
+    fields = {k: args[k] for k in ("metric", "budget_currency", "expected_result") if args.get(k)}
+    fields.update(_ids(args, ("channel_id",)))
+    for key in ("target_value", "stop_value", "budget_limit"):
+        if args.get(key) not in (None, ""):
+            fields[key] = float(args[key])
+    if args.get("deadline_days"):
+        fields["deadline_at"] = time.time() + float(args["deadline_days"]) * 86400
+    experiment_id = strategy.create("experiment", business, str(args.get("summary") or args["action"])[:200],
+                                    created_by=by, parent_id=int(hypothesis_id), action=str(args["action"]), **fields)
+    return {"objective_id": int(objective_id), "hypothesis_id": int(hypothesis_id), "experiment_id": experiment_id,
+            "status": "planned"}
+
+
+def _start_experiment(args):
+    from octopus import strategy
+    strategy.transition("experiment", int(args["experiment_id"]), _run_business(), "running",
+                        actor=f"agent:{_ROLE.get()}")
+    return {"experiment_id": int(args["experiment_id"]), "status": "running"}
+
+
+def _register_channel(args):
+    from octopus import economy
+    caps = args.get("capabilities") or []
+    if isinstance(caps, str):
+        caps = [c.strip() for c in caps.split(",")]
+    source = str(args.get("source_ref") or "").strip()
+    channel_id = economy.add_channel(_run_business(), str(args["kind"]), str(args["name"]),
+                                     created_by=f"agent:{_ROLE.get()}", locator=args.get("locator"), capabilities=caps,
+                                     nature="observed" if _seen_this_session(source) else "unverified",
+                                     source_ref=source or None,
+                                     notes=args.get("notes"))
+    return {"channel_id": channel_id, "access": "none", "note": "accès à qualifier avant toute action"}
+
+
+def _open_business(args):
+    """Ouvre une nouvelle activité : un business n'existe que par ses objets (objectif, grand livre...)."""
+    import re as _re
+    from octopus import strategy
+    ascii_id = unicodedata.normalize("NFKD", str(args["business_id"])).encode("ascii", "ignore").decode()
+    business_id = _re.sub(r"[^a-z0-9_]+", "_", ascii_id.strip().lower()).strip("_")[:64]
+    if not business_id:
+        raise ValueError("business_id vide")
+    if any(r["business"] == business_id for r in strategy.portfolio()):
+        return {"business_id": business_id, "status": "exists"}
+    objective_id = strategy.create("objective", business_id, str(args.get("name") or business_id)[:200],
+                                   created_by=f"agent:{_ROLE.get()}", statement=str(args["thesis"]),
+                                   success_criteria="cash net observé positif")
+    return {"business_id": business_id, "objective_id": objective_id, "status": "opened",
+            "note": "business ouvert en brouillon ; ses missions tournent sous ce business_id"}
+
+
+def _act_on_channel(args):
+    """Action réelle sur un canal : exécutée seulement si l'humain a ouvert l'accès et qu'un exécuteur existe."""
+    from octopus import actions
+    payload = args.get("payload") or {}
+    if isinstance(payload, str):
+        payload = json.loads(payload) if payload.strip().startswith("{") else {"text": payload}
+    return actions.propose(_run_business(), int(args["channel_id"]), str(args["action"]), payload,
+                           requested_by=f"agent:{_ROLE.get()}",
+                           experiment_id=int(args["experiment_id"]) if args.get("experiment_id") else None,
+                           spend_amount=float(args["spend_amount"]) if args.get("spend_amount") else None,
+                           spend_currency=args.get("spend_currency"))
+
+
+def _request_spend(args):
+    """Demande d'autorisation : ne paie rien. Refusée sans enveloppe accordée par l'humain ou une politique."""
+    from octopus import economy
+    return economy.authorize_spend(_run_business(), float(args["amount"]), str(args["currency"]), str(args["purpose"]),
+                                   requested_by=f"agent:{_ROLE.get()}",
+                                   experiment_id=int(args["experiment_id"]) if args.get("experiment_id") else None)
+
+
 TOOLS = {
     "search": {"desc": "recherche web (liens)", "params": {"query": "str"}, "fn": _search},
     "browse": {"desc": "ouvre une page dans TON Chrome réel (comptes Stripe/Reddit/X/Fiverr/YouTube connectés) et la décrit", "params": {"url": "str"}, "fn": _browse},
@@ -144,6 +273,14 @@ TOOLS = {
     "send_message": {"desc": "prospection : envoie un message (dry-run)", "params": {"platform": "str", "recipient": "str", "text": "str"}, "fn": _send_message},
     "remember": {"desc": "mémorise un apprentissage", "params": {"agent": "str", "key": "str", "value": "str"}, "fn": _remember},
     "recall": {"desc": "retrouve un apprentissage", "params": {"agent": "str", "key": "str"}, "fn": _recall},
+    "economy_status": {"desc": "état économique réel du business : cash observé par devise, coûts LLM calculés, enveloppes de dépense, canaux, expériences en cours et leur verdict", "params": {}, "fn": _economy_status},
+    "record_observation": {"desc": "enregistre un fait constaté (avec source_ref consultable = observé, sinon non vérifié), éventuellement une valeur mesurée pour une expérience", "params": {"summary": "str", "observation": "str", "source_ref": "str?", "metric": "str?", "value": "float?", "unit": "str?", "experiment_id": "int?", "channel_id": "int?"}, "fn": _record_observation},
+    "propose_experiment": {"desc": "propose une expérience mesurable (objectif/hypothèse créés si absents) ; metric peut être cash_net:DEVISE", "params": {"objective": "str|objective_id", "hypothesis": "str|hypothesis_id", "action": "str", "metric": "str", "target_value": "float", "stop_value": "float?", "deadline_days": "float?", "budget_limit": "float?", "budget_currency": "str?", "channel_id": "int?"}, "fn": _propose_experiment},
+    "start_experiment": {"desc": "passe une expérience planned en running", "params": {"experiment_id": "int"}, "fn": _start_experiment},
+    "register_channel": {"desc": "enregistre un canal économique découvert (site, marketplace, réseau, email, API, publicité...)", "params": {"kind": "str", "name": "str", "locator": "str?", "capabilities": "list", "source_ref": "str?", "notes": "str?"}, "fn": _register_channel},
+    "act_on_channel": {"desc": "agit réellement sur un canal (publier, vendre, écrire...) ; bloqué et tracé si l'accès, l'exécuteur ou la dépense manquent", "params": {"channel_id": "int", "action": "str", "payload": "dict", "experiment_id": "int?", "spend_amount": "float?", "spend_currency": "str?"}, "fn": _act_on_channel},
+    "open_business": {"desc": "ouvre une nouvelle activité économique distincte (objectif initial en brouillon)", "params": {"business_id": "str", "name": "str", "thesis": "str"}, "fn": _open_business},
+    "request_spend": {"desc": "demande l'autorisation de dépenser (ne paie rien) ; refusée hors enveloppe accordée", "params": {"amount": "float", "currency": "str", "purpose": "str", "experiment_id": "int?"}, "fn": _request_spend},
 }
 
 
@@ -164,6 +301,17 @@ ROLES = {
 }
 
 
+# Hors Podalux, les rôles ne présupposent ni vidéo ni produit : ils décrivent des fonctions économiques.
+GENERIC_ROLES = {
+    "SOUT": "Observation du monde réel : demandes, marchés, concurrents, canaux ; cite les sources consultées (record_observation).",
+    "CONVERT": "Monétisation : ce qui peut être vendu, à qui, à quel prix, par quel canal ; propose des expériences mesurables.",
+    "FORGE": "Production : fabrique ce que l'expérience exige (offre, contenu, produit, service, page, outil).",
+    "GROWTH": "Distribution : agit sur les canaux ouverts (act_on_channel) et mesure les retours.",
+    "LEDGER": "Mesure économique : cash observé, coûts, verdicts et apprentissages (economy_status).",
+    "ORBIT": "Arbitrage : choisit, arrête ou étend les expériences selon le cash net observé.",
+}
+
+
 def _budget_exhausted() -> bool:
     """Budget du run OCTOPUS en cours (et de ses parents). Coupe-circuit : contrôle historique."""
     import octopus
@@ -174,12 +322,23 @@ def _budget_exhausted() -> bool:
     return bool(run and journal.budget_exhausted(run))
 
 
+def _group() -> str:
+    """Identité donnée à l'agent : Podalux par défaut, sinon le business du run en cours."""
+    run = journal.current_run()
+    if run is None or run.business == DEFAULT_BUSINESS:
+        return "Podalux"
+    return f"OCTOPUS (business {run.business})"
+
+
 def build_prompts(role: str, goal: str, conversational: bool = False) -> tuple[str, str, str]:
     """(prompt système, premier message, libellé de fin) de la boucle ReAct."""
-    role_desc = ROLES.get(role, "")
+    run = journal.current_run()
+    roles = GENERIC_ROLES if run is not None and run.business != DEFAULT_BUSINESS else ROLES
+    role_desc = roles.get(role, "")
+    group = _group()
     if conversational:
         system = (
-            f"Tu es l'agent {role} du groupe Podalux. {role_desc} "
+            f"Tu es l'agent {role} du groupe {group}. {role_desc} "
             f"Un humain t'a écrit. Réponds-lui DIRECTEMENT, en français, de façon utile "
             f"et conversationnelle. Tu peux utiliser un outil (search, browse, recall) "
             f"si besoin, mais ta priorité est de répondre à sa demande.\n\n"
@@ -194,7 +353,7 @@ def build_prompts(role: str, goal: str, conversational: bool = False) -> tuple[s
         done_label = "réponse"
     else:
         system = (
-            f"Tu es l'agent {role} du groupe Podalux. {role_desc} "
+            f"Tu es l'agent {role} du groupe {group}. {role_desc} "
             f"Poursuis l'objectif en utilisant "
             f"les outils disponibles. À chaque étape, choisis UNE action. "
             f"Utilise `remember` pour stocker tes apprentissages et `recall` pour les relire.\n\n"
@@ -207,19 +366,31 @@ def build_prompts(role: str, goal: str, conversational: bool = False) -> tuple[s
     return system, first_user, done_label
 
 
-@with_run("podalux", "agent", budget_usd=deepseek.config.CYCLE_BUDGET_USD)
+DEFAULT_BUSINESS = "podalux"
+
+
+def _business(business: str | None) -> str:
+    """Business explicite, sinon celui du run englobant (tâche, mission), sinon l'activité historique."""
+    if business:
+        return business
+    current = journal.current_run()
+    return current.business if current else DEFAULT_BUSINESS
+
+
 def run_agent(role: str, goal: str, max_steps: int = 10,
-              conversational: bool = False) -> dict:
+              conversational: bool = False, *, business: str | None = None) -> dict:
     """Un agent (rôle) poursuit un objectif librement via la boucle ReAct.
 
     `conversational=True` → l'agent répond à un message humain (pas un objectif).
     """
-    token = _ROLE.set(role)
-    try:
-        with cancel.scope(), web_guard.session(), _search_cache():
-            return _run_agent(role, goal, max_steps, conversational)
-    finally:
-        _ROLE.reset(token)
+    with journal.run(_business(business), "agent", label=f"{role} : {goal}",
+                     budget_usd=deepseek.config.CYCLE_BUDGET_USD):
+        token = _ROLE.set(role)
+        try:
+            with cancel.scope(), web_guard.session(), _search_cache():
+                return _run_agent(role, goal, max_steps, conversational)
+        finally:
+            _ROLE.reset(token)
 
 
 def _run_agent(role: str, goal: str, max_steps: int, conversational: bool) -> dict:
@@ -278,11 +449,14 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool) -> di
     return {"role": role, "steps": steps, "final": "(max steps atteint)"}
 
 
-@with_run("podalux", "mission", budget_usd=deepseek.config.CYCLE_BUDGET_USD)
-def run_mission(goal: str, max_steps_per_agent: int = 8) -> dict:
+def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None = None) -> dict:
     """ORBIT planifie puis délègue aux rôles (multi-agents via le runtime)."""
-    with cancel.scope(), web_guard.session(), _search_cache():
-        return _run_mission(goal, max_steps_per_agent)
+    with journal.run(_business(business), "mission", label=goal, budget_usd=deepseek.config.CYCLE_BUDGET_USD):
+        with cancel.scope(), web_guard.session(), _search_cache():
+            return _run_mission(goal, max_steps_per_agent)
+
+
+MAX_PLAN_TASKS = 5
 
 
 def _run_mission(goal: str, max_steps_per_agent: int) -> dict:
@@ -298,7 +472,11 @@ def _run_mission(goal: str, max_steps_per_agent: int) -> dict:
                               [{"role": "system", "content": plan_sys},
                                {"role": "user", "content": goal}],
                               reasoning="high")
-    tasks = plan.get("tasks", [])
+    proposed = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
+    # Le prompt demande 2 à 5 sous-tâches : au-delà, chaque sous-tâche coûte une boucle ReAct complète.
+    tasks = [t for t in proposed if isinstance(t, dict)][:MAX_PLAN_TASKS]
+    if len(proposed) > len(tasks):
+        db.post("ORBIT", f"plan tronqué : {len(proposed)} sous-tâches proposées, {len(tasks)} gardées")
     db.post("ORBIT", f"mission : {goal[:70]} → {len(tasks)} sous-tâches")
 
     results = []

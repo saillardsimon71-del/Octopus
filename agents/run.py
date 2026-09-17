@@ -124,10 +124,10 @@ def cmd_goal(goal_text):
     print(json.dumps(r, ensure_ascii=False, indent=2))
 
 
-def cmd_mission(goal_text):
+def cmd_mission(goal_text, business=None):
     from .runtime import run_mission
     db.init_db()
-    r = run_mission(goal_text, max_steps_per_agent=8)
+    r = run_mission(goal_text, max_steps_per_agent=8, business=business)
     print(json.dumps(r, ensure_ascii=False, indent=2))
 
 
@@ -208,6 +208,7 @@ def main():
     p_goal = sub.add_parser("goal", help="donne un objectif en langage naturel au groupe")
     p_goal.add_argument("text", nargs="+", help="l'objectif")
     p_mission = sub.add_parser("mission", help="objectif multi-agents (ORBIT planifie + délègue)")
+    p_mission.add_argument("--business", default=None, help="business du run et des coûts (défaut : podalux)")
     p_mission.add_argument("text", nargs="+", help="l'objectif")
     p_msg = sub.add_parser("msg", help="message à un agent (@ROLE) → réponse directe")
     p_msg.add_argument("role", help="rôle cible (ORBIT, SOUT, …)")
@@ -257,7 +258,7 @@ def main():
     elif args.cmd == "goal":
         cmd_goal(" ".join(args.text))
     elif args.cmd == "mission":
-        cmd_mission(" ".join(args.text))
+        cmd_mission(" ".join(args.text), business=args.business)
     elif args.cmd == "msg":
         cmd_msg(args.role, " ".join(args.text))
     elif args.cmd == "browse-open":
