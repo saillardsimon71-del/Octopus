@@ -131,6 +131,27 @@ class _Events:
         self.fh.close()
 
 
+def _watch_downloads(root: Path, events: "_Events", stop, every_s: float = 5.0) -> None:
+    """WanGP télécharge les poids manquants au premier lancement, sans événement de progression :
+    on mesure les fichiers partiels de huggingface_hub pour afficher la taille et le débit."""
+    folder = root / "ckpts"
+    previous: dict[str, int] = {}
+    while not stop.wait(every_s):
+        partial: dict[str, tuple[int, str]] = {}
+        try:
+            for path in folder.rglob("*.incomplete"):
+                stat = path.stat()
+                if time.time() - stat.st_mtime < 120:  # ignorer les téléchargements abandonnés
+                    repo = path.parent.name if path.parent.name != "download" else ""
+                    partial[str(path)] = (stat.st_size, repo)
+        except OSError:
+            continue
+        for key, (size, repo) in partial.items():
+            rate = max(0, size - previous.get(key, size)) / every_s
+            events.write("download", file=repo or Path(key).name[:24], bytes=size, rate_bps=int(rate))
+        previous = {k: v[0] for k, v in partial.items()}
+
+
 def cmd_run(args) -> int:
     workdir = Path(args.workdir).resolve()
     workdir.mkdir(parents=True, exist_ok=True)
@@ -145,6 +166,10 @@ def cmd_run(args) -> int:
     code = 1
     try:
         events.write("bridge_started", pid=os.getpid(), tasks=len(manifest), hardware=_hardware())
+        import threading
+        watcher_stop = threading.Event()
+        threading.Thread(target=_watch_downloads, args=(Path(args.root).resolve(), events, watcher_stop),
+                         daemon=True).start()
         session = _session(Path(args.root).resolve(), workdir / "outputs", json.loads(args.cli_args))
         events.write("session_ready", seconds=round(time.time() - started, 1))
         job = session.submit_manifest(manifest) if len(manifest) > 1 else session.submit_task(manifest[0])
@@ -193,6 +218,8 @@ def cmd_run(args) -> int:
         result["traceback"] = traceback.format_exc(limit=10)
         code = 1
     finally:
+        if "watcher_stop" in locals():
+            watcher_stop.set()
         result["seconds"] = round(time.time() - started, 1)
         _write_json(workdir / "result.json", result)
         events.write("bridge_finished", code=code, seconds=result["seconds"])

@@ -204,3 +204,28 @@ def test_insufficient_hardware_fails_without_retry(fake_wangp, isolated):
     assert result["status"] == "failed" and "Matériel : incompatible" in result["error"]  # pas de 2e tentative
     forced = run_task(model_type="minimax_h3_fl2va", force=True)
     assert forced["status"] == "done"
+
+
+def test_download_watcher_reports_active_partial_files(tmp_path):
+    import threading
+    from octopus.media import wangp_bridge
+    folder = tmp_path / "ckpts" / ".cache" / "huggingface" / "download" / "umt5-xxl"
+    folder.mkdir(parents=True)
+    partial = folder / "abc.incomplete"
+    partial.write_bytes(b"x" * 1000)
+    stale = folder / "old.incomplete"
+    stale.write_bytes(b"x")
+    os.utime(stale, (time.time() - 3600,) * 2)
+    events = wangp_bridge._Events(tmp_path)
+    stop = threading.Event()
+    thread = threading.Thread(target=wangp_bridge._watch_downloads, args=(tmp_path, events, stop, 0.2))
+    thread.start()
+    time.sleep(0.3)
+    partial.write_bytes(b"x" * 3000)
+    time.sleep(0.4)
+    stop.set()
+    thread.join()
+    events.close()
+    lines = [json.loads(l) for l in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert lines and all(e["kind"] == "download" and e["file"] == "umt5-xxl" for e in lines)
+    assert max(e["bytes"] for e in lines) == 3000 and any(e["rate_bps"] > 0 for e in lines)

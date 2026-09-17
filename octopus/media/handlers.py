@@ -123,6 +123,17 @@ def video_generate(ctx):
                 library.update(gen_ids[index], phase=event.get("phase"), progress=pct,
                                status_text=(event.get("status") or "")[:200])
                 last_write.update(t=now, pct=pct, index=index)
+        elif kind == "download":
+            now = time.time()
+            if now - last_write["t"] >= 5:
+                gb, rate = event.get("bytes", 0) / 2**30, event.get("rate_bps", 0) / 2**20
+                for gen_id in gen_ids:
+                    library.update(gen_id, phase="downloading_model",
+                                   status_text=f"téléchargement {event.get('file') or 'des poids'} : {gb:.2f} Go ({rate:.0f} Mo/s)")
+                last_write["t"] = now
+        elif kind == "status":
+            for gen_id in gen_ids[last_write["index"]:]:
+                library.update(gen_id, status_text=str(event.get("text", ""))[:200])
         elif kind == "preview":
             library.update(gen_ids[last_write["index"]], preview_path=str(workdir / "preview.jpg"))
         elif kind in ("session_ready", "bridge_started"):
