@@ -15,11 +15,13 @@ Un handler est une fonction `fn(ctx) -> sortie JSON`, enregistrée pour un type 
 from __future__ import annotations
 
 import importlib
+import math
 import os
 import socket
 import threading
 import time
 import traceback
+import uuid
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -101,16 +103,18 @@ class TaskContext:
         return self._cancel.is_set() or tasks.cancel_requested(self.id)
 
     def check_cancel(self) -> None:
-        if self.cancelled():
+        if self._cancel.is_set() or tasks.heartbeat(self.id, self.owner, self.lease_s):
             raise TaskCancelled("annulation demandée")
 
     def memo(self, key: str, compute: Callable):
         """Résultat d'une étape conservé en base : une tâche rejouée (après une réponse humaine, une
         nouvelle tentative) ne refait pas les étapes déjà faites, ni leurs appels payants."""
-        value = tasks.step_value(self.id, key, None)
-        if value is None:
+        self.check_cancel()
+        missing = object()
+        value = tasks.step_value(self.id, key, missing)
+        if value is missing:
             value = compute()
-            tasks.save_step(self.id, key, value)
+            tasks.save_step(self.id, key, value, owner=self.owner)
         return value
 
     def ask_human(self, key: str, question: str, *, context: dict | None = None, expires_s: float | None = None) -> str:
@@ -133,7 +137,7 @@ def default_owner() -> str:
 
 
 def _heartbeat_loop(ctx: TaskContext, stop: threading.Event) -> None:
-    interval = max(1.0, ctx.lease_s / 3)
+    interval = ctx.lease_s / 3
     while not stop.wait(interval):
         try:
             if tasks.heartbeat(ctx.id, ctx.owner, ctx.lease_s):
@@ -148,7 +152,10 @@ def _heartbeat_loop(ctx: TaskContext, stop: threading.Event) -> None:
 def run_one(owner: str | None = None, *, lease_s: float = 60, kinds: list[str] | None = None,
             log: Callable[[str], None] = print) -> dict | None:
     """Maintenance, puis exécution d'une tâche prête. Renvoie la tâche traitée (état final) ou None."""
-    owner = owner or default_owner()
+    if not math.isfinite(lease_s) or lease_s <= 0:
+        raise ValueError("lease_s doit être une durée finie strictement positive")
+    # Un nom de worker peut être réutilisé : chaque exécution doit avoir son propre bail.
+    owner = f"{owner or default_owner()}:{uuid.uuid4().hex}"
     tasks.reap()
     tasks.materialize_due(resources={k: h.resource for k, h in HANDLERS.items() if h.resource})
     task = tasks.claim(owner, lease_s=lease_s, kinds=kinds or list(HANDLERS) or None)
@@ -168,9 +175,10 @@ def run_one(owner: str | None = None, *, lease_s: float = 60, kinds: list[str] |
         with journal.run(task["business"], f"task:{task['kind']}", label=f"tâche #{task['id']}",
                          budget_usd=task.get("budget_usd")) as run:
             if run is not None:
-                tasks.set_run(task["id"], run.id)
+                tasks.set_run(task["id"], run.id, owner=owner)
+            ctx.check_cancel()
             output = spec.fn(ctx)
-        tasks.complete(task["id"], owner, output)
+            tasks.complete(task["id"], owner, output)
     except WaitingHuman as waiting:
         log(f"[worker] #{task['id']} {waiting}")
     except TaskCancelled as exc:
