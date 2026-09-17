@@ -1,8 +1,6 @@
 """Tests du pont Orca sans nécessiter l'installation d'Orca."""
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from agents import orca
@@ -25,7 +23,6 @@ def test_command_uses_project_root_and_no_shell(monkeypatch, tmp_path):
     monkeypatch.setenv("OCTOPUS_ORCA_ENABLED", "1")
     monkeypatch.setenv("OCTOPUS_ORCA_CLI", "orca")
     monkeypatch.setattr(orca.shutil, "which", lambda _: str(tmp_path / "orca"))
-    monkeypatch.setattr(orca.Path, "is_file", lambda self: True)
     seen = {}
 
     def fake_run(argv, **kwargs):
@@ -36,15 +33,22 @@ def test_command_uses_project_root_and_no_shell(monkeypatch, tmp_path):
     monkeypatch.setattr(orca.subprocess, "run", fake_run)
     assert orca.run(["status", "--json"]) == {"ok": True}
     assert seen["argv"][1:] == ["status", "--json"]
-    assert seen["shell"] if "shell" in seen else False is False
+    assert seen.get("shell", False) is False
     assert seen["cwd"] == str(orca.config.PROJECT_ROOT)
+
+
+def test_unavailable_cli_is_explicit(monkeypatch):
+    monkeypatch.setenv("OCTOPUS_ORCA_ENABLED", "1")
+    monkeypatch.setenv("OCTOPUS_ORCA_CLI", "missing-orca")
+    monkeypatch.setattr(orca.shutil, "which", lambda _: None)
+    with pytest.raises(orca.OrcaUnavailable, match="CLI Orca introuvable"):
+        orca.status()
 
 
 def test_command_error_is_explicit(monkeypatch, tmp_path):
     monkeypatch.setenv("OCTOPUS_ORCA_ENABLED", "1")
     monkeypatch.setenv("OCTOPUS_ORCA_CLI", "orca")
     monkeypatch.setattr(orca.shutil, "which", lambda _: str(tmp_path / "orca"))
-    monkeypatch.setattr(orca.Path, "is_file", lambda self: True)
 
     def fake_run(*args, **kwargs):
         return type("Completed", (), {"returncode": 2, "stdout": "", "stderr": "bad spec"})()
