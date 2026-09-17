@@ -53,6 +53,7 @@ class VideoService:
         metrics["cloud_video_url"] = result.video_url
         metrics["cloud_job_id"] = result.job_id
         self._materialize_frames(offer_id, metrics, result)
+        self._write_control_manifest(offer_id, result)
         return metrics
 
     @staticmethod
@@ -82,3 +83,18 @@ class VideoService:
             target.write_bytes(data)
             materialized.append(str(target))
         metrics["frames"] = materialized
+
+    @staticmethod
+    def _write_control_manifest(offer_id: str, result: VideoResult) -> None:
+        root = Path(os.environ.get("PODALUX_ROOT", Path.cwd()))
+        target = root / "out" / offer_id / "cloud_result.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps({
+            "schema_version": "1",
+            "job_id": result.job_id,
+            "offer_id": offer_id,
+            "status": result.status.value,
+            "video_url": result.video_url,
+            "qc": dict(result.qc),
+            "artifacts": [artifact.to_dict() for artifact in result.artifacts],
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
