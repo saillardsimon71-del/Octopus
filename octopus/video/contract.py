@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import Any, Mapping
 
 SCHEMA_VERSION = "1"
+DEFAULT_TEMPLATE = "CashShort"
 _SECRET_FRAGMENTS = (
     "api_key", "apikey", "secret", "password", "passwd", "token", "access_key",
     "private_key", "client_secret", "authorization", "cookie", "credentials",
@@ -71,7 +72,7 @@ class VideoJob:
     schema_version: str = SCHEMA_VERSION
 
     @classmethod
-    def from_legacy_job(cls, job: Mapping[str, Any], *, job_id: str, template: str = "forge-v4") -> "VideoJob":
+    def from_legacy_job(cls, job: Mapping[str, Any], *, job_id: str, template: str = DEFAULT_TEMPLATE) -> "VideoJob":
         narration = job.get("narration")
         if not isinstance(narration, list) or not narration:
             raise VideoContractError("job legacy sans narration")
@@ -83,36 +84,20 @@ class VideoJob:
         except (TypeError, ValueError) as exc:
             raise VideoContractError("duree_cible_s invalide") from exc
         script = {
-            "titre": job.get("titre", ""),
-            "hook": job.get("hook", ""),
-            "douleur": job.get("douleur", ""),
-            "preuve": job.get("preuve", ""),
-            "soulagement": job.get("soulagement", ""),
-            "cta": job.get("cta", ""),
-            "prix": job.get("prix", ""),
-            "stripe_link": job.get("stripe_link", ""),
-            "sub_id": job.get("sub_id", ""),
-            "segments": narration,
+            "titre": job.get("titre", ""), "hook": job.get("hook", ""),
+            "douleur": job.get("douleur", ""), "preuve": job.get("preuve", ""),
+            "soulagement": job.get("soulagement", ""), "cta": job.get("cta", ""),
+            "prix": job.get("prix", ""), "stripe_link": job.get("stripe_link", ""),
+            "sub_id": job.get("sub_id", ""), "segments": narration,
         }
         voice = dict(job.get("voix") or {})
-        metadata = {
-            "keywords": list(job.get("keywords") or []),
-            "visuel": job.get("visuel"),
-            "palette": job.get("palette"),
-        }
-        return cls(
-            job_id=job_id,
-            offer_id=offer_id,
-            template=template,
-            language=str(job.get("langue") or "fr"),
-            duration_seconds=duration_f,
-            script=script,
-            voice=voice,
-            assets=list(job.get("assets") or []),
-            quality={"target_lufs": -14.0, "min_lra": 5.0, "min_score": 24,
-                     "resolution": "1080x1920", "fps": 30},
-            metadata=metadata,
-        )
+        metadata = {"keywords": list(job.get("keywords") or []), "visuel": job.get("visuel"),
+                    "palette": job.get("palette")}
+        return cls(job_id=job_id, offer_id=offer_id, template=template,
+                   language=str(job.get("langue") or "fr"), duration_seconds=duration_f,
+                   script=script, voice=voice, assets=list(job.get("assets") or []),
+                   quality={"target_lufs": -14.0, "min_lra": 5.0, "min_score": 24,
+                            "resolution": "1080x1920", "fps": 30}, metadata=metadata)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "VideoJob":
@@ -140,12 +125,13 @@ class VideoJob:
             raise VideoContractError("assets doit être une liste")
         quality = payload.get("quality") or {}
         metadata = payload.get("metadata") or {}
-        for name, value in (("job", payload), ("script", script), ("voice", voice), ("assets", assets), ("quality", quality), ("metadata", metadata)):
+        for name, value in (("job", payload), ("script", script), ("voice", voice),
+                            ("assets", assets), ("quality", quality), ("metadata", metadata)):
             assert_no_secrets(value, path=name)
         return cls(job_id=job_id, offer_id=offer_id,
-                   template=str(payload.get("template") or "forge-v4"),
-                   language=str(payload.get("language") or "fr"),
-                   duration_seconds=duration, script=script, voice=voice,
+                   template=str(payload.get("template") or DEFAULT_TEMPLATE),
+                   language=str(payload.get("language") or "fr"), duration_seconds=duration,
+                   script=script, voice=voice,
                    assets=[x for x in assets if isinstance(x, Mapping)], quality=quality,
                    metadata=metadata, schema_version=schema_version)
 
@@ -160,7 +146,6 @@ class VideoJob:
         return payload
 
     def to_legacy_job(self) -> dict[str, Any]:
-        """Reconstruit le job attendu par les scripts FORGE historiques dans un worker isolé."""
         script = dict(self.script)
         legacy = {"offer_id": self.offer_id, "langue": self.language,
                   "duree_cible_s": self.duration_seconds, "titre": script.get("titre", ""),
