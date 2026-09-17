@@ -4,7 +4,7 @@
 
 This branch is the active cloud-video migration branch. Do not restart the architecture from scratch and do not rewrite `agents/runtime.py` unless there is a concrete regression requiring it.
 
-The branch includes the cloud-first control-plane/video foundation, the integrated Chromium browser guard, OmniRoute routing, MiniMax H3 cloud routing, local diagnostics, and CI coverage. Recent fixes also make OmniRoute `zero_cost` the default when enabled and guard WebSocket connections. Do not claim CI is green until a fresh run passes.
+The branch includes the cloud-first control-plane/video foundation, the integrated Chromium browser guard, OmniRoute routing, MiniMax H3 cloud routing, local diagnostics, one-command Windows bootstrap, artifact checksum verification, and CI coverage. Recent fixes also make OmniRoute `zero_cost` the default when enabled and guard WebSocket connections. Do not claim CI is green until a fresh run passes.
 
 ## Architecture to preserve
 
@@ -36,6 +36,12 @@ Expected local stack:
 - OmniRoute container
 - OCTOPUS GUI/control plane
 
+Bootstrap:
+
+```powershell
+.\setup-local.ps1
+```
+
 Run `python -m agents.run doctor` before a real cycle.
 
 Default local LLM routing is OmniRoute with:
@@ -53,10 +59,10 @@ The browser is Playwright/Chromium.
 Public pages: ephemeral context.
 Account pages: persistent profile for human-authenticated sessions.
 Service workers: blocked in guarded contexts.
-Network guard: navigation + redirects + fetch/XHR/EventSource/beacon are guarded; WebSockets use Playwright `route_web_socket()` when available; outbound URLs after an account read must not leak to public destinations.
+Network guard: navigation + redirects + fetch/XHR/EventSource/beacon are guarded; WebSockets use Playwright `route_web_socket()`; outbound URLs after an account read must not leak to public destinations.
 Login/2FA/CAPTCHA/confirmation must use human handoff.
 
-There are browser integration tests in `tests/test_browser_integration.py`, including account-page load exfiltration and public WebSocket blocking. The local dependency is pinned to Playwright `>=1.55` so the WebSocket route API is available.
+There are browser integration tests in `tests/test_browser_integration.py`, including account-page load exfiltration and public WebSocket blocking. The local dependency is pinned to Playwright `>=1.55`.
 
 ## Video requirements
 
@@ -74,6 +80,8 @@ Idempotence is critical: stable job IDs + local render state prevent blind dupli
 
 MiniMax H3 is cloud-only. The H3 ComfyUI workflow should track the current official ComfyUI H3 node/workflow contract rather than copied opaque implementations.
 
+RunPod deployment notes are in `docs/RUNPOD_SETUP.md`, including endpoint timeout and object-storage configuration.
+
 ## Important files
 
 - `octopus/catalog.py` — dynamic OmniRoute overlay + safe default profile
@@ -83,7 +91,7 @@ MiniMax H3 is cloud-only. The H3 ComfyUI workflow should track the current offic
 - `agents/doctor.py` — preflight diagnostics
 - `octopus/media/handlers.py` — local WanGP vs cloud H3 routing
 - `octopus/media/presets.py` — H3 cloud preset
-- `octopus/video/service.py` — video facade
+- `octopus/video/service.py` — video facade + artifact integrity checks
 - `octopus/video/renderers.py` — cloud/local renderer abstraction
 - `octopus/video/runpod.py` — RunPod adapter
 - `video_worker/executor.py` — FORGE cloud executor
@@ -97,6 +105,8 @@ MiniMax H3 is cloud-only. The H3 ComfyUI workflow should track the current offic
 - `.github/workflows/video-foundation.yml`
 - `docs/LOCAL_SETUP.md`
 - `docs/OMNIROUTE_SETUP.md`
+- `docs/RUNPOD_SETUP.md`
+- `setup-local.ps1`
 
 ## Next work order
 
