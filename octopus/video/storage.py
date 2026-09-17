@@ -28,6 +28,9 @@ class ArtifactStore(Protocol):
     def put_json(self, payload: dict[str, Any], key: str) -> Artifact:
         ...
 
+    def url_for(self, key: str) -> str:
+        ...
+
 
 class ArtifactStoreError(RuntimeError):
     pass
@@ -45,7 +48,7 @@ class FilesystemArtifactStore:
         destination.resolve().relative_to(self.root.resolve())
         return destination
 
-    def _url(self, key: str) -> str:
+    def url_for(self, key: str) -> str:
         base = self.public_base_url.rstrip("/")
         clean_key = key.strip("/")
         if self.public_base_url.startswith("file://"):
@@ -79,8 +82,8 @@ class FilesystemArtifactStore:
             while chunk := src.read(1024 * 1024):
                 digest.update(chunk)
                 dst.write(chunk)
-        return Artifact(name=destination.name, url=self._url(clean_key), content_type=content_type,
-                        sha256=digest.hexdigest())
+        return Artifact(name=destination.name, url=self.url_for(clean_key), content_type=content_type,
+                        sha256=digest.hexdigest(), key=clean_key)
 
     def put_json(self, payload: dict[str, Any], key: str) -> Artifact:
         clean_key = key.strip("/")
@@ -91,8 +94,8 @@ class FilesystemArtifactStore:
         tmp.write_bytes(data)
         tmp.replace(destination)
         digest = hashlib.sha256(data).hexdigest()
-        return Artifact(name=destination.name, url=self._url(clean_key), content_type="application/json",
-                        sha256=digest)
+        return Artifact(name=destination.name, url=self.url_for(clean_key), content_type="application/json",
+                        sha256=digest, key=clean_key)
 
 
 @dataclass(frozen=True)
@@ -117,12 +120,19 @@ class S3ArtifactStore:
         prefix = self.prefix.strip("/")
         return f"{prefix}/{key}" if prefix else key
 
+    @staticmethod
+    def _not_found(exc: Exception) -> bool:
+        response = getattr(exc, "response", None)
+        error = response.get("Error", {}) if isinstance(response, dict) else {}
+        code = str(error.get("Code", ""))
+        return code in {"404", "NoSuchKey", "NotFound", "NoSuchBucket"}
+
     def exists(self, key: str) -> bool:
         try:
             self._client().head_object(Bucket=self.bucket, Key=self._key(key))
             return True
         except Exception as exc:
-            if exc.__class__.__name__ in {"ClientError", "NoSuchKey"}:
+            if self._not_found(exc):
                 return False
             raise ArtifactStoreError(f"S3 head_object échoué pour {key}: {exc}") from exc
 
@@ -130,7 +140,7 @@ class S3ArtifactStore:
         try:
             response = self._client().get_object(Bucket=self.bucket, Key=self._key(key))
         except Exception as exc:
-            if exc.__class__.__name__ in {"ClientError", "NoSuchKey"}:
+            if self._not_found(exc):
                 return None
             raise ArtifactStoreError(f"S3 get_object échoué pour {key}: {exc}") from exc
         try:
@@ -141,7 +151,7 @@ class S3ArtifactStore:
             raise ArtifactStoreError(f"manifest S3 non objet JSON pour {key}")
         return value
 
-    def _url(self, key: str) -> str:
+    def url_for(self, key: str) -> str:
         try:
             return self._client().generate_presigned_url(
                 "get_object", Params={"Bucket": self.bucket, "Key": self._key(key)},
@@ -154,7 +164,8 @@ class S3ArtifactStore:
         source = Path(path)
         if not source.is_file() or source.stat().st_size <= 0:
             raise ArtifactStoreError(f"artefact absent/vide: {source}")
-        s3key = self._key(key)
+        clean_key = key.strip("/")
+        s3key = self._key(clean_key)
         extra = {"ContentType": content_type} if content_type else None
         try:
             self._client().upload_file(str(source), self.bucket, s3key, ExtraArgs=extra or {})
@@ -164,17 +175,19 @@ class S3ArtifactStore:
         with source.open("rb") as src:
             while chunk := src.read(1024 * 1024):
                 digest.update(chunk)
-        return Artifact(name=source.name, url=self._url(key), content_type=content_type, sha256=digest.hexdigest())
+        return Artifact(name=source.name, url=self.url_for(clean_key), content_type=content_type,
+                        sha256=digest.hexdigest(), key=clean_key)
 
     def put_json(self, payload: dict[str, Any], key: str) -> Artifact:
+        clean_key = key.strip("/")
         data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         try:
-            self._client().put_object(Bucket=self.bucket, Key=self._key(key), Body=data,
+            self._client().put_object(Bucket=self.bucket, Key=self._key(clean_key), Body=data,
                                       ContentType="application/json", CacheControl="no-cache")
         except Exception as exc:
             raise ArtifactStoreError(f"upload S3 JSON échoué pour {key}: {exc}") from exc
-        return Artifact(name=Path(key).name, url=self._url(key), content_type="application/json",
-                        sha256=hashlib.sha256(data).hexdigest())
+        return Artifact(name=Path(clean_key).name, url=self.url_for(clean_key), content_type="application/json",
+                        sha256=hashlib.sha256(data).hexdigest(), key=clean_key)
 
 
 def store_from_env() -> ArtifactStore:
