@@ -41,35 +41,31 @@ def test_executor_produces_manifest_and_is_idempotent(tmp_path):
 
     def runner(cmd, cwd, timeout, env, log):
         calls.append(cmd)
+        offer_dir = Path(log).parent.parent
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text("ok")
-        cwd = Path(cwd)
         if "make_audio_chatterbox_full.py" in cmd:
-            out = cwd / "out" / "cash_devis_cgv01" / "audio"
-            out.mkdir(parents=True)
+            out = offer_dir / "audio"
+            out.mkdir(parents=True, exist_ok=True)
             (out / "mix.wav").write_bytes(b"wav")
-            data = cwd / "remotion" / "src" / "data"
+            data = Path(cwd) / "remotion" / "src" / "data"
             data.mkdir(parents=True, exist_ok=True)
             (data / "captions.ts").write_text("x")
             (data / "job.ts").write_text("x")
         elif cmd[0] == "npx":
-            output = cwd.parent / "out" / "cash_devis_cgv01" / "video.mp4"
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_bytes(b"video")
+            (offer_dir / "video.mp4").write_bytes(b"video")
         elif cmd[0] == "ffmpeg" and "ebur128" in cmd:
             return "I: -14.0 LUFS"
         elif cmd[0] == "ffmpeg":
-            output = Path(cmd[-1])
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_bytes(b"final")
+            (Path(cmd[-1])).write_bytes(b"final")
         elif "qc_metrics.py" in cmd:
-            out = cwd / "out" / "cash_devis_cgv01"
-            (out / "frames").mkdir(parents=True, exist_ok=True)
+            (offer_dir / "frames").mkdir(parents=True, exist_ok=True)
             for i in range(2):
-                (out / "frames" / f"frame-{i}.jpg").write_bytes(b"jpg")
-            (out / "qc_metrics.json").write_text(json.dumps({
+                (offer_dir / "frames" / f"frame-{i}.jpg").write_bytes(b"jpg")
+            (offer_dir / "qc_metrics.json").write_text(json.dumps({
                 "duration_s": 24, "resolution": "1080x1920", "lufs_integrated": -14,
                 "freezes_gt1_2s": 0,
+                "frames": [str(offer_dir / "frames" / "frame-0.jpg"), str(offer_dir / "frames" / "frame-1.jpg")],
             }))
             return "{}"
         return "ok"
@@ -79,6 +75,7 @@ def test_executor_produces_manifest_and_is_idempotent(tmp_path):
     assert first.status == VideoStatus.COMPLETED
     assert first.video_url == "https://storage.test/cash_devis_cgv01/video-test-1/final.mp4"
     assert store.exists("cash_devis_cgv01/video-test-1/manifest.json")
+    assert any(artifact.kind == "image" for artifact in first.artifacts)
 
     calls_before = len(calls)
     second = executor.render(make_job())
