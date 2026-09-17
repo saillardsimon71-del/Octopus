@@ -16,6 +16,7 @@ def test_catalog_injects_omniroute_free_model(monkeypatch):
     assert model["provider"] == "omniroute"
     assert cat.provider("omniroute")["base_url"] == "http://127.0.0.1:20128/api/v1"
     assert cat.task("podalux.write_job")["candidates"]["zero_cost"][0] == "omniroute/auto-free"
+    assert cat.task("web.inspect_page")["candidates"]["zero_cost"][0] == "omniroute/auto-free"
 
 
 def test_zero_cost_llm_uses_omniroute_without_paid_fallback(monkeypatch, providers_up):
@@ -51,7 +52,6 @@ def test_zero_cost_does_not_pick_paid_model_when_free_route_is_down(monkeypatch,
     monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
     providers_up.add("omniroute")
-    # Les autres providers cloud sont également indisponibles dans ce scénario.
     providers_up.update({"groq", "gemini"})
     monkeypatch.setattr(llm, "provider_status",
                         lambda name, provider: (False, "down") if name in providers_up else (True, "up"))
