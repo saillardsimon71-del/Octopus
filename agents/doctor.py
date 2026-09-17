@@ -134,14 +134,14 @@ def run_checks() -> list[Check]:
                         "un cycle tourne déjà ; l'arrêter avant un nouveau cycle", blocking=False))
 
     if omni_enabled:
-        base = os.environ.get("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/api/v1").rstrip("/")
+        base = os.environ.get("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1").rstrip("/")
         key = os.environ.get("OMNIROUTE_API_KEY", "").strip()
         checks.append(Check("Clé OmniRoute", bool(key), "présente" if key else "absente",
                             "définir OMNIROUTE_API_KEY dans l'environnement utilisateur Windows"))
         if key:
             ok, detail = _http_ok(f"{base}/models", key)
             checks.append(Check("OmniRoute", ok, f"{base} · {detail}",
-                                "démarrer Docker/OmniRoute et vérifier son endpoint /models"))
+                                "démarrer Docker/OmniRoute et vérifier son endpoint /v1/models"))
         else:
             checks.append(Check("OmniRoute", False, f"{base} · clé absente",
                                 "définir OMNIROUTE_API_KEY puis relancer le terminal"))
