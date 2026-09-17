@@ -1,16 +1,15 @@
-"""Application desktop Podalux (customtkinter).
+"""Cockpit desktop OCTOPUS : centre de travail unique du control-plane.
 
-Cockpit de suivi + interaction :
-- salon des agents (live),
-- tableau de bord (coût, rubric, demandes humaines),
-- contrôles (démarrer/arrêter un cycle, publier, répondre).
-
-Le cycle tourne en SOUS-PROCESSUS (venv MPT) et communique via SQLite.
+La GUI orchestre les fonctions existantes ; elle ne contient pas de logique métier nouvelle.
+Les opérations longues passent par des sous-processus ou des threads, jamais par le thread Tk principal.
 """
 from __future__ import annotations
 
 import os
+import platform
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import customtkinter as ctk
@@ -19,391 +18,470 @@ from PIL import Image
 from .. import config, db, procs
 
 COLORS = {
-    "ORBIT": "#ffb74d", "GROWTH": "#81c784", "LEDGER": "#64b5f6",
-    "FORGE": "#ff8a65", "CONVERT": "#ba68c8", "SOUT": "#4db6ac",
-    "BROWSER": "#b0bec5", "HUMAN": "#4fc3f7", "TEST": "#90a4ae",
+    "bg": "#0b1220", "surface": "#111827", "surface2": "#172033", "surface3": "#1f2a40",
+    "border": "#26344d", "text": "#e6edf7", "muted": "#8ea0ba", "accent": "#5b8def",
+    "accent_hover": "#4c78d6", "good": "#3ecf8e", "warn": "#f0b35b", "bad": "#ef6b73", "info": "#58b8ff",
 }
-DEFAULT_COLOR = "#eceff1"
+AGENT_COLORS = {
+    "ORBIT": "#f4b860", "GROWTH": "#63d39b", "LEDGER": "#64b5f6",
+    "FORGE": "#ff8b6a", "CONVERT": "#b987f5", "SOUT": "#55c3bd",
+}
+AGENT_DESCRIPTIONS = {
+    "ORBIT": "coordination, arbitrage, synthèse", "GROWTH": "QC visuel, distribution",
+    "LEDGER": "coûts, métriques, go/no-go", "FORGE": "production vidéo",
+    "CONVERT": "offres, scripts, CTA", "SOUT": "veille, sources, opportunités",
+}
+PAGE_META = {
+    "Cockpit": ("Centre de contrôle", "Vue opérationnelle de l'usine Podalux"),
+    "Missions": ("Missions", "Donner un objectif à ORBIT et suivre son exécution"),
+    "Agents": ("Agents", "Activité et santé du collectif"),
+    "Production": ("Production vidéo", "Offres, rendu, studio et QC"),
+    "Humain": ("Interventions humaines", "Questions, validations et handoffs"),
+    "Navigateur": ("Navigateur", "Session Chromium agentique et observations"),
+    "Système": ("Système", "Prévol local, cloud-first et développement Orca"),
+}
 
 
 class PodaluxApp(ctk.CTk):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
-        self.title("Podalux — usine à Shorts")
-        self.geometry("1200x740")
-        self.minsize(980, 640)
-
+        self.title("OCTOPUS — Centre de travail")
+        self.geometry("1440x900")
+        self.minsize(1120, 720)
+        self.configure(fg_color=COLORS["bg"])
         self.proc: subprocess.Popen | None = None
-        self.msg_procs: list = []
-        self._last_msg_id = 0
-        self._handoff_widgets = []
-        self._handoff_ids = ()
-        self._last_shot = None
         self.worker_proc: subprocess.Popen | None = None
-
-        self._build_ui()
+        self.msg_procs: list[subprocess.Popen] = []
+        self.current_page = "Cockpit"
+        self._last_browser_shot: str | None = None
+        self._browser_image = None
+        self._refreshing_system = False
+        self._orca_state_busy = False
+        self._build_shell()
         db.init_db()
-        self.after(1000, self._refresh)
+        self._show_page("Cockpit")
+        self.after(800, self._refresh)
 
-    def _build_ui(self):
-        self.grid_columnconfigure(0, weight=2)
+    # shell -------------------------------------------------------------------------
+    def _build_shell(self) -> None:
+        self.grid_columnconfigure(0, weight=0, minsize=228)
         self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        self.sidebar = ctk.CTkFrame(self, width=228, corner_radius=0, fg_color=COLORS["surface"])
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
+        brand = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        brand.pack(fill="x", padx=18, pady=(20, 18))
+        ctk.CTkLabel(brand, text="OCTOPUS", text_color=COLORS["text"], font=("Segoe UI", 24, "bold")).pack(anchor="w")
+        ctk.CTkLabel(brand, text="PODALUX CONTROL PLANE", text_color=COLORS["muted"], font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(2, 0))
+        self.nav_buttons: dict[str, ctk.CTkButton] = {}
+        for page in PAGE_META:
+            button = ctk.CTkButton(self.sidebar, text=self._nav_label(page), anchor="w", height=40, corner_radius=10,
+                                   fg_color="transparent", hover_color=COLORS["surface3"], text_color=COLORS["muted"],
+                                   command=lambda p=page: self._show_page(p))
+            button.pack(fill="x", padx=12, pady=3)
+            self.nav_buttons[page] = button
+        foot = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        foot.pack(fill="x", padx=12, pady=14)
+        ctk.CTkLabel(foot, text="CLOUD-FIRST", text_color=COLORS["good"], font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=8)
+        ctk.CTkLabel(foot, text="control-plane léger · vidéo distante", text_color=COLORS["muted"], font=("Segoe UI", 9)).pack(anchor="w", padx=8, pady=(3, 0))
+        main = ctk.CTkFrame(self, fg_color=COLORS["bg"], corner_radius=0)
+        main.grid(row=0, column=1, sticky="nsew")
+        main.grid_columnconfigure(0, weight=1)
+        main.grid_rowconfigure(1, weight=1)
+        header = ctk.CTkFrame(main, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=24, pady=(18, 10))
+        header.grid_columnconfigure(1, weight=1)
+        self.page_title = ctk.CTkLabel(header, text="", anchor="w", text_color=COLORS["text"], font=("Segoe UI", 22, "bold"))
+        self.page_title.grid(row=0, column=0, sticky="w")
+        self.page_subtitle = ctk.CTkLabel(header, text="", anchor="w", text_color=COLORS["muted"], font=("Segoe UI", 11))
+        self.page_subtitle.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self.header_status = ctk.CTkLabel(header, text="● Idle", text_color=COLORS["muted"], font=("Segoe UI", 11, "bold"))
+        self.header_status.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.page_host = ctk.CTkFrame(main, fg_color="transparent")
+        self.page_host.grid(row=1, column=0, sticky="nsew", padx=24, pady=(0, 20))
+        self.page_host.grid_columnconfigure(0, weight=1)
+        self.page_host.grid_rowconfigure(0, weight=1)
 
-        top = ctk.CTkFrame(self)
-        top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 4))
-        top.grid_columnconfigure(5, weight=1)
+    @staticmethod
+    def _nav_label(page: str) -> str:
+        return {"Cockpit": "⌂  Cockpit", "Missions": "◇  Missions", "Agents": "◉  Agents",
+                "Production": "▣  Production", "Humain": "?  Humain", "Navigateur": "◌  Navigateur",
+                "Système": "⚙  Système"}.get(page, page)
 
-        self.status_label = ctk.CTkLabel(top, text="● Idle", text_color="#90a4ae",
-                                         font=("Segoe UI", 15, "bold"))
-        self.status_label.grid(row=0, column=0, padx=(10, 6))
-        self.step_label = ctk.CTkLabel(top, text="", text_color="#b0bec5", font=("Segoe UI", 12))
-        self.step_label.grid(row=0, column=1, padx=6, sticky="w")
+    def _show_page(self, page: str) -> None:
+        self.current_page = page
+        for name, button in self.nav_buttons.items():
+            button.configure(fg_color=COLORS["surface3"] if name == page else "transparent",
+                             text_color=COLORS["text"] if name == page else COLORS["muted"])
+        title, subtitle = PAGE_META[page]
+        self.page_title.configure(text=title)
+        self.page_subtitle.configure(text=subtitle)
+        for child in self.page_host.winfo_children():
+            child.destroy()
+        getattr(self, f"_page_{self._slug(page)}")()
 
-        self.offer_menu = ctk.CTkOptionMenu(top, values=self._offer_values(), width=200)
-        self.offer_menu.grid(row=0, column=2, padx=6)
+    @staticmethod
+    def _slug(page: str) -> str:
+        return page.lower().replace("é", "e").replace(" ", "_")
 
-        ctk.CTkButton(top, text="▶ Démarrer cycle", width=130,
-                      command=self._start_cycle).grid(row=0, column=3, padx=4)
-        ctk.CTkButton(top, text="■ Arrêter", width=90, fg_color="#c62828",
-                      hover_color="#b71c1c", command=self._stop_cycle).grid(row=0, column=4, padx=4)
-        ctk.CTkButton(top, text="Publier", width=90, fg_color="#2e7d32",
-                      hover_color="#1b5e20", command=self._publish).grid(row=0, column=5, padx=4, sticky="e")
-        ctk.CTkButton(top, text="▶ Vidéo", width=80, fg_color="#455a64", hover_color="#37474f",
-                      command=self._open_video).grid(row=0, column=6, padx=4)
-        ctk.CTkButton(top, text="🎬 Studio vidéo", width=120, fg_color="#6a1b9a", hover_color="#4a148c",
-                      command=self._open_studio).grid(row=0, column=7, padx=4)
-        self.worker_btn = ctk.CTkButton(top, text="⚙ Worker", width=90, fg_color="#37474f", hover_color="#455a64",
-                                        command=self._toggle_worker)
-        self.worker_btn.grid(row=0, column=8, padx=(4, 10))
+    def _card(self, parent, title: str | None = None):
+        card = ctk.CTkFrame(parent, fg_color=COLORS["surface"], border_width=1, border_color=COLORS["border"], corner_radius=14)
+        if title:
+            ctk.CTkLabel(card, text=title.upper(), text_color=COLORS["muted"], anchor="w", font=("Segoe UI", 9, "bold")).pack(fill="x", padx=14, pady=(12, 6))
+        return card
 
-        self.salon = ctk.CTkScrollableFrame(self, label_text="Salon des agents")
-        self.salon.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=4)
+    def _metric(self, parent, column: int, title: str, value: str, detail: str, color: str = COLORS["text"]) -> None:
+        card = self._card(parent)
+        card.grid(row=0, column=column, sticky="nsew", padx=5)
+        ctk.CTkLabel(card, text=title.upper(), text_color=COLORS["muted"], font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=14, pady=(12, 2))
+        ctk.CTkLabel(card, text=value, text_color=color, font=("Segoe UI", 21, "bold")).pack(anchor="w", padx=14)
+        ctk.CTkLabel(card, text=detail, text_color=COLORS["muted"], font=("Segoe UI", 10), anchor="w", wraplength=230).pack(anchor="w", padx=14, pady=(0, 12))
 
-        # barre d'envoi vers le groupe
-        input_bar = ctk.CTkFrame(self)
-        input_bar.grid(row=2, column=0, sticky="ew", padx=(10, 5), pady=(0, 10))
-        input_bar.grid_columnconfigure(0, weight=1)
-        self.msg_entry = ctk.CTkEntry(input_bar, placeholder_text="Écrire au groupe (ex. « @SOUT fais une veille sur X »)")
-        self.msg_entry.grid(row=0, column=0, sticky="ew", padx=(10, 4), pady=8)
-        self.msg_entry.bind("<Return>", lambda e: self._send_message())
-        ctk.CTkButton(input_bar, text="Envoyer", width=90,
-                      command=self._send_message).grid(row=0, column=1, padx=(4, 10), pady=8)
+    def _pill(self, parent, text: str, color: str):
+        return ctk.CTkLabel(parent, text=f"  {text}  ", text_color=color, fg_color=COLORS["surface3"], corner_radius=8,
+                            font=("Segoe UI", 9, "bold"))
 
-        # barre « objectif » → mission multi-agents (ORBIT planifie + délègue)
-        objective_bar = ctk.CTkFrame(self)
-        objective_bar.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
-        objective_bar.grid_columnconfigure(0, weight=1)
-        self.objective_entry = ctk.CTkEntry(objective_bar,
-            placeholder_text="Objectif libre → mission multi-agents (ex. « fais une veille sur X et propose un plan »)")
-        self.objective_entry.grid(row=0, column=0, sticky="ew", padx=(10, 4), pady=8)
-        self.objective_entry.bind("<Return>", lambda e: self._start_mission())
-        ctk.CTkButton(objective_bar, text="▶ Objectif", width=110, fg_color="#5c6bc0",
-                      hover_color="#3f51b5", command=self._start_mission).grid(
-            row=0, column=1, padx=(4, 10), pady=8)
+    # pages --------------------------------------------------------------------------
+    def _page_cockpit(self) -> None:
+        root = self.page_host
+        root.grid_columnconfigure(0, weight=2)
+        root.grid_columnconfigure(1, weight=1)
+        root.grid_rowconfigure(2, weight=1)
+        metrics = ctk.CTkFrame(root, fg_color="transparent")
+        metrics.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        for i in range(4): metrics.grid_columnconfigure(i, weight=1)
+        run, tasks, pending = db.current_run() or {}, self._task_rows(), self._pending_requests()
+        self._metric(metrics, 0, "Run", self._run_status(run), run.get("step") or "aucun run actif", self._run_color(run))
+        self._metric(metrics, 1, "Coût aujourd'hui", f"${db.cost_today():.4f}", f"budget/cycle ${config.CYCLE_BUDGET_USD:.2f}")
+        active = sum(1 for task in tasks if task.get("status") in {"queued", "running", "waiting_human"})
+        self._metric(metrics, 2, "Tâches", str(active), f"{len(tasks)} dernières dans la file")
+        self._metric(metrics, 3, "À traiter", str(len(pending)), "demandes humaines", COLORS["warn"] if pending else COLORS["good"])
+        actions = self._card(root, "Actions rapides")
+        actions.grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=6)
+        for i in range(4): actions.grid_columnconfigure(i, weight=1)
+        buttons = [("▶  Démarrer cycle", self._start_cycle, COLORS["accent"]), ("◇  Nouvelle mission", lambda: self._show_page("Missions"), COLORS["surface3"]),
+                   ("▣  Studio vidéo", self._open_studio, COLORS["surface3"]), ("◌  Navigateur", self._open_browser, COLORS["surface3"])]
+        for i, (text, command, fg) in enumerate(buttons):
+            ctk.CTkButton(actions, text=text, height=38, command=command, fg_color=fg,
+                          hover_color=COLORS["accent_hover"] if fg == COLORS["accent"] else COLORS["surface3"]).grid(row=1, column=i, sticky="ew", padx=6, pady=(0, 12))
+        run_card = self._card(root, "Run actuel")
+        run_card.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=6)
+        ctk.CTkLabel(run_card, text=run.get("offer_id") or "Aucun run sélectionné", text_color=COLORS["text"], font=("Segoe UI", 14, "bold"), anchor="w").pack(fill="x", padx=14, pady=(0, 2))
+        ctk.CTkLabel(run_card, text=run.get("step") or "Prêt à travailler", text_color=COLORS["muted"], anchor="w", wraplength=360).pack(fill="x", padx=14)
+        ctk.CTkButton(run_card, text="Arrêter", width=100, fg_color="#7d2b35", hover_color="#953540", command=self._stop_cycle).pack(side="left", padx=(14, 5), pady=10)
+        ctk.CTkButton(run_card, text="Ouvrir vidéo", width=110, fg_color=COLORS["surface3"], hover_color=COLORS["surface3"], command=self._open_video).pack(side="left", padx=5, pady=10)
+        activity = self._card(root, "Flux d'activité")
+        activity.grid(row=2, column=0, sticky="nsew", padx=(0, 6), pady=6)
+        activity.grid_columnconfigure(0, weight=1); activity.grid_rowconfigure(1, weight=1)
+        feed = ctk.CTkScrollableFrame(activity, fg_color="transparent")
+        feed.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self._render_activity(feed)
+        agents = self._card(root, "État des agents")
+        agents.grid(row=2, column=1, sticky="nsew", padx=(6, 0), pady=6)
+        self.agent_overview = ctk.CTkScrollableFrame(agents, fg_color="transparent")
+        self.agent_overview.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self._render_agents(self.agent_overview, compact=True)
 
-        right = ctk.CTkFrame(self)
-        right.grid(row=1, column=1, sticky="nsew", padx=(5, 10), pady=4)
-        right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(4, weight=1)
+    def _page_missions(self) -> None:
+        root = self.page_host
+        root.grid_columnconfigure(0, weight=2); root.grid_columnconfigure(1, weight=1); root.grid_rowconfigure(1, weight=1)
+        compose = self._card(root, "Nouvelle mission")
+        compose.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10)); compose.grid_columnconfigure(0, weight=1)
+        self.mission_entry = ctk.CTkEntry(compose, height=40, placeholder_text="Ex. : analyse les offres B2B et prépare une proposition exploitable")
+        self.mission_entry.grid(row=1, column=0, sticky="ew", padx=(14, 6), pady=(4, 14)); self.mission_entry.bind("<Return>", lambda _e: self._start_mission())
+        ctk.CTkButton(compose, text="Lancer la mission", width=150, height=40, command=self._start_mission).grid(row=1, column=1, padx=(6, 14), pady=(4, 14))
+        task_card = self._card(root, "File OCTOPUS")
+        task_card.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+        self.mission_tasks = ctk.CTkScrollableFrame(task_card, fg_color="transparent"); self.mission_tasks.pack(fill="both", expand=True, padx=6, pady=(0, 8)); self._render_task_list(self.mission_tasks)
+        worker = self._card(root, "Worker")
+        worker.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+        self.worker_state = ctk.CTkLabel(worker, text="Worker actif" if self.worker_proc else "Worker arrêté", text_color=COLORS["muted"], anchor="w")
+        self.worker_state.pack(fill="x", padx=14, pady=7)
+        ctk.CTkButton(worker, text="Démarrer / arrêter", command=self._toggle_worker).pack(fill="x", padx=14, pady=6)
+        ctk.CTkLabel(worker, text="La file durable `octopus.tasks` garde leases, retries, idempotence et handoffs.", text_color=COLORS["muted"], justify="left", wraplength=300, anchor="w").pack(fill="x", padx=14, pady=8)
 
-        self.cost_label = ctk.CTkLabel(right, text="Coût : —", anchor="w",
-                                       font=("Segoe UI", 14, "bold"))
-        self.cost_label.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 2))
+    def _page_agents(self) -> None:
+        root = self.page_host; root.grid_rowconfigure(0, weight=1); root.grid_columnconfigure(0, weight=1)
+        frame = ctk.CTkScrollableFrame(root, fg_color="transparent"); frame.grid(row=0, column=0, sticky="nsew"); frame.grid_columnconfigure((0, 1), weight=1)
+        self._render_agents(frame)
 
-        self.metrics_label = ctk.CTkLabel(right, text="Métriques : —", anchor="w", justify="left",
-                                          font=("Segoe UI", 12))
-        self.metrics_label.grid(row=1, column=0, sticky="ew", padx=10, pady=2)
+    def _page_production(self) -> None:
+        root = self.page_host; root.grid_columnconfigure(0, weight=1); root.grid_columnconfigure(1, weight=2); root.grid_rowconfigure(1, weight=1)
+        controls = self._card(root, "Production"); controls.grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=(0, 8)); controls.grid_columnconfigure(0, weight=1)
+        self.production_offer = ctk.CTkOptionMenu(controls, values=self._offer_values()); self.production_offer.pack(fill="x", padx=14, pady=(2, 8))
+        row = ctk.CTkFrame(controls, fg_color="transparent"); row.pack(fill="x", padx=10, pady=(0, 8))
+        for text, command in (("▶ Cycle", self._start_cycle), ("🎬 Studio", self._open_studio), ("▶ Ouvrir", self._open_video)):
+            ctk.CTkButton(row, text=text, command=command, fg_color=COLORS["surface3"], hover_color=COLORS["surface3"]).pack(side="left", fill="x", expand=True, padx=3)
+        ctk.CTkButton(controls, text="Publication dry-run", fg_color="#28623f", hover_color="#32774d", command=self._publish).pack(fill="x", padx=14, pady=(0, 14))
+        summary = self._card(root, "Résultat courant"); summary.grid(row=0, column=1, sticky="ew", padx=(6, 0), pady=(0, 8)); self.production_summary = summary; self._render_production_summary()
+        qc = self._card(root, "Métriques QC"); qc.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=8)
+        self.production_metrics = ctk.CTkScrollableFrame(qc, fg_color="transparent"); self.production_metrics.pack(fill="both", expand=True, padx=8, pady=(0, 8)); self._render_metrics(self.production_metrics)
 
-        self.tasks_label = ctk.CTkLabel(right, text="Tâches : —", anchor="w", justify="left",
-                                        font=("Segoe UI", 12))
-        self.tasks_label.grid(row=2, column=0, sticky="ew", padx=10, pady=2)
+    def _page_humain(self) -> None:
+        root = self.page_host; root.grid_rowconfigure(0, weight=1); root.grid_columnconfigure(0, weight=1)
+        frame = ctk.CTkScrollableFrame(root, fg_color="transparent"); frame.grid(row=0, column=0, sticky="nsew"); self._render_handoffs(frame)
 
-        self.browser_frame = ctk.CTkFrame(right, fg_color="#1e272e")
-        self.browser_frame.grid(row=3, column=0, sticky="ew", padx=10, pady=(6, 2))
-        self.browser_url_label = ctk.CTkLabel(self.browser_frame, text="Navigateur : (inactif)",
-                                              anchor="w", font=("Segoe UI", 11))
-        self.browser_url_label.pack(anchor="w", padx=8, pady=(6, 2))
-        self.browser_open_btn = ctk.CTkButton(self.browser_frame, text="🌐 Ouvrir le navigateur",
-                                              height=28, fg_color="#37474f", hover_color="#455a64",
-                                              command=self._open_browser)
-        self.browser_open_btn.pack(anchor="e", padx=8, pady=(2, 4))
-        self.browser_img_label = ctk.CTkLabel(self.browser_frame, text="")
-        self.browser_img_label.pack(padx=8, pady=(2, 6))
+    def _page_navigateur(self) -> None:
+        root = self.page_host; root.grid_rowconfigure(1, weight=1); root.grid_columnconfigure(0, weight=1)
+        controls = self._card(root, "Session navigateur"); controls.grid(row=0, column=0, sticky="ew", pady=(0, 8)); controls.grid_columnconfigure(0, weight=1)
+        self.browser_entry = ctk.CTkEntry(controls, placeholder_text="https://…"); self.browser_entry.grid(row=1, column=0, sticky="ew", padx=(14, 6), pady=(0, 12)); self.browser_entry.insert(0, db.get_state("browser_url") or "https://www.google.com"); self.browser_entry.bind("<Return>", lambda _e: self._browse_url())
+        ctk.CTkButton(controls, text="Ouvrir", width=100, command=self._browse_url).grid(row=1, column=1, padx=(6, 4), pady=(0, 12))
+        ctk.CTkButton(controls, text="Fenêtre Chromium", width=150, fg_color=COLORS["surface3"], hover_color=COLORS["surface3"], command=self._open_browser).grid(row=1, column=2, padx=(4, 14), pady=(0, 12))
+        view = self._card(root, "Observation"); view.grid(row=1, column=0, sticky="nsew"); view.grid_rowconfigure(2, weight=1); view.grid_columnconfigure(0, weight=1)
+        self.browser_state = ctk.CTkLabel(view, text="", text_color=COLORS["muted"], anchor="w"); self.browser_state.grid(row=1, column=0, sticky="ew", padx=14)
+        self.browser_preview = ctk.CTkLabel(view, text="Aucune capture récente", text_color=COLORS["muted"]); self.browser_preview.grid(row=2, column=0, sticky="nsew", padx=14, pady=14)
 
-        self.handoffs_frame = ctk.CTkScrollableFrame(right, label_text="Demandes humaines")
-        self.handoffs_frame.grid(row=4, column=0, sticky="nsew", padx=10, pady=(6, 10))
+    def _page_systeme(self) -> None:
+        root = self.page_host; root.grid_columnconfigure((0, 1), weight=1); root.grid_rowconfigure(0, weight=1)
+        health = self._card(root, "Prévol local"); health.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self.system_checks = ctk.CTkScrollableFrame(health, fg_color="transparent"); self.system_checks.pack(fill="both", expand=True, padx=8, pady=(0, 8)); self._render_system_checks()
+        ctk.CTkButton(health, text="Rafraîchir diagnostic", command=self._run_doctor).pack(fill="x", padx=14, pady=(0, 14))
+        dev = self._card(root, "Développement assisté Orca"); dev.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        self.orca_state = ctk.CTkLabel(dev, text="", text_color=COLORS["muted"], anchor="w", justify="left", wraplength=420); self.orca_state.pack(fill="x", padx=14, pady=(0, 8))
+        ctk.CTkLabel(dev, text="Objectif", text_color=COLORS["muted"], anchor="w").pack(fill="x", padx=14)
+        self.orca_objective = ctk.CTkEntry(dev, placeholder_text="Ex. : auditer le control-plane"); self.orca_objective.pack(fill="x", padx=14, pady=(3, 8))
+        ctk.CTkLabel(dev, text="Spécification", text_color=COLORS["muted"], anchor="w").pack(fill="x", padx=14)
+        self.orca_spec = ctk.CTkTextbox(dev, height=130, wrap="word"); self.orca_spec.pack(fill="x", padx=14, pady=(3, 8))
+        self.orca_agent = ctk.CTkOptionMenu(dev, values=["codex", "claude", "opencode"]); self.orca_agent.pack(fill="x", padx=14, pady=(0, 8))
+        ctk.CTkButton(dev, text="Lancer dans Orca", command=self._orca_start).pack(fill="x", padx=14, pady=6)
+        self.orca_result = ctk.CTkLabel(dev, text="", text_color=COLORS["muted"], anchor="w", justify="left", wraplength=420); self.orca_result.pack(fill="x", padx=14, pady=8)
+        self._refresh_orca_state_async()
 
-    def _offer_values(self):
+    # render helpers -----------------------------------------------------------------
+    def _render_agents(self, parent, compact: bool = False) -> None:
+        for widget in list(parent.winfo_children()): widget.destroy()
+        for index, row in enumerate(self._agent_rows()):
+            role, color = row["role"], AGENT_COLORS.get(row["role"], COLORS["text"])
+            if compact:
+                card = ctk.CTkFrame(parent, fg_color=COLORS["surface2"], corner_radius=10); card.grid_columnconfigure(1, weight=1)
+                ctk.CTkLabel(card, text="●", text_color=color, font=("Segoe UI", 14)).grid(row=0, column=0, padx=(8, 5), pady=7)
+                ctk.CTkLabel(card, text=role, text_color=COLORS["text"], font=("Segoe UI", 10, "bold")).grid(row=0, column=1, sticky="w")
+                ctk.CTkLabel(card, text=row["activity"], text_color=COLORS["muted"], font=("Segoe UI", 9)).grid(row=0, column=2, padx=8)
+                card.pack(fill="x", pady=3)
+            else:
+                card = self._card(parent); card.grid(row=index // 2, column=index % 2, sticky="nsew", padx=5, pady=5)
+                head = ctk.CTkFrame(card, fg_color="transparent"); head.pack(fill="x", padx=14, pady=(12, 2))
+                ctk.CTkLabel(head, text=role, text_color=color, font=("Segoe UI", 16, "bold")).pack(side="left")
+                self._pill(head, row["status"], row["status_color"]).pack(side="right")
+                ctk.CTkLabel(card, text=AGENT_DESCRIPTIONS.get(role, ""), text_color=COLORS["muted"], anchor="w").pack(fill="x", padx=14)
+                ctk.CTkLabel(card, text=row["latest"], text_color=COLORS["text"], anchor="w", justify="left", wraplength=560).pack(fill="x", padx=14, pady=(9, 4))
+                ctk.CTkLabel(card, text=f"{row['tasks']} tâches · {row['messages']} messages", text_color=COLORS["muted"], anchor="w").pack(fill="x", padx=14, pady=(0, 12))
+
+    def _render_activity(self, parent) -> None:
+        for m in db.recent_messages(80)[-30:][::-1]:
+            role = m["from_agent"]; color = AGENT_COLORS.get(role, COLORS["info"] if role == "HUMAN" else COLORS["muted"])
+            row = ctk.CTkFrame(parent, fg_color=COLORS["surface2"], corner_radius=9); row.pack(fill="x", pady=2)
+            top = ctk.CTkFrame(row, fg_color="transparent"); top.pack(fill="x", padx=10, pady=(6, 1))
+            ctk.CTkLabel(top, text=role, text_color=color, font=("Segoe UI", 9, "bold")).pack(side="left")
+            ctk.CTkLabel(top, text=self._format_age(m["ts"]), text_color=COLORS["muted"], font=("Segoe UI", 8)).pack(side="right")
+            ctk.CTkLabel(row, text=m["content"], text_color=COLORS["text"], anchor="w", justify="left", wraplength=780).pack(fill="x", padx=10, pady=(0, 7))
+
+    def _render_task_list(self, parent) -> None:
+        for widget in list(parent.winfo_children()): widget.destroy()
+        icons = {"queued": "…", "running": "▶", "waiting_human": "?", "done": "✓", "failed": "✗", "cancelled": "■"}
+        for task in self._task_rows():
+            card = ctk.CTkFrame(parent, fg_color=COLORS["surface2"], corner_radius=10); card.pack(fill="x", pady=3)
+            line = ctk.CTkFrame(card, fg_color="transparent"); line.pack(fill="x", padx=10, pady=(7, 2))
+            ctk.CTkLabel(line, text=f"{icons.get(task['status'], '·')}  #{task['id']} · {task['kind']}", text_color=COLORS["text"], font=("Segoe UI", 10, "bold")).pack(side="left")
+            color = {"running": COLORS["info"], "waiting_human": COLORS["warn"], "done": COLORS["good"], "failed": COLORS["bad"]}.get(task["status"], COLORS["muted"])
+            self._pill(line, task["status"], color).pack(side="right")
+            detail = task.get("error") if task["status"] == "failed" else task.get("business")
+            ctk.CTkLabel(card, text=str(detail or ""), text_color=COLORS["muted"], anchor="w", wraplength=820).pack(fill="x", padx=10, pady=(0, 7))
+
+    def _render_handoffs(self, parent) -> None:
+        for widget in list(parent.winfo_children()): widget.destroy()
+        pending = self._pending_requests()
+        if not pending:
+            ctk.CTkLabel(parent, text="Aucune intervention humaine en attente.", text_color=COLORS["muted"]).pack(anchor="w", padx=10, pady=20); return
+        for item in pending:
+            card = self._card(parent); card.pack(fill="x", pady=5, padx=2)
+            ctk.CTkLabel(card, text=item["who"], text_color=COLORS["warn"], font=("Segoe UI", 10, "bold"), anchor="w").pack(fill="x", padx=14, pady=(10, 2))
+            ctk.CTkLabel(card, text=item["question"], text_color=COLORS["text"], anchor="w", justify="left", wraplength=900).pack(fill="x", padx=14)
+            entry = ctk.CTkEntry(card, placeholder_text="Votre réponse…"); entry.pack(fill="x", padx=14, pady=7)
+            ctk.CTkButton(card, text="Envoyer", width=100, command=lambda i=item, e=entry: self._answer(i, e)).pack(anchor="e", padx=14, pady=(0, 10))
+
+    def _render_metrics(self, parent) -> None:
+        for widget in list(parent.winfo_children()): widget.destroy()
+        metrics = db.metrics_list()
+        if not metrics:
+            ctk.CTkLabel(parent, text="Aucune métrique QC enregistrée.", text_color=COLORS["muted"]).pack(anchor="w", padx=10, pady=16); return
+        for metric in metrics[-20:][::-1]:
+            row = ctk.CTkFrame(parent, fg_color=COLORS["surface2"], corner_radius=9); row.pack(fill="x", pady=2)
+            score = metric.get("score") or 0; color = COLORS["good"] if score >= config.QC_SHIP_SCORE else COLORS["warn"]
+            ctk.CTkLabel(row, text=metric["offer_id"], text_color=COLORS["text"], font=("Segoe UI", 10, "bold"), anchor="w").pack(side="left", padx=10, pady=7)
+            ctk.CTkLabel(row, text=f"{score}/35", text_color=color, font=("Segoe UI", 10, "bold")).pack(side="right", padx=10)
+            ctk.CTkLabel(row, text=f"humanité {metric.get('humanite')}/5 · {metric.get('verdict')}", text_color=COLORS["muted"]).pack(side="right")
+
+    def _render_production_summary(self) -> None:
+        for widget in list(self.production_summary.winfo_children()): widget.destroy()
+        run = db.current_run() or {}
+        ctk.CTkLabel(self.production_summary, text=run.get("offer_id") or "Aucun rendu courant", text_color=COLORS["text"], font=("Segoe UI", 16, "bold"), anchor="w").pack(fill="x", padx=14, pady=(4, 2))
+        ctk.CTkLabel(self.production_summary, text=run.get("step") or "Prêt", text_color=COLORS["muted"], anchor="w", wraplength=650).pack(fill="x", padx=14, pady=(0, 10))
+        offer = run.get("offer_id"); final = config.PROJECT_ROOT / "out" / offer / "final.mp4" if offer else None
+        ctk.CTkLabel(self.production_summary, text=f"Final : {final if final and final.exists() else 'Pas encore disponible'}", text_color=COLORS["muted"], anchor="w", wraplength=650).pack(fill="x", padx=14, pady=(0, 12))
+
+    def _render_system_checks(self) -> None:
+        for widget in list(self.system_checks.winfo_children()): widget.destroy()
+        try:
+            from ..doctor import run_checks
+            checks = [c.__dict__ for c in run_checks()]
+        except Exception as exc:
+            checks = [{"name": "Doctor", "ok": False, "blocking": True, "detail": f"{type(exc).__name__}: {exc}"}]
+        self._paint_system_checks(checks)
+
+    def _paint_system_checks(self, checks: list[dict]) -> None:
+        if not hasattr(self, "system_checks"): return
+        for widget in list(self.system_checks.winfo_children()): widget.destroy()
+        for check in checks:
+            color = COLORS["good"] if check["ok"] else (COLORS["bad"] if check["blocking"] else COLORS["warn"])
+            row = ctk.CTkFrame(self.system_checks, fg_color=COLORS["surface2"], corner_radius=8); row.pack(fill="x", pady=2)
+            ctk.CTkLabel(row, text="●", text_color=color, width=20).pack(side="left", padx=(8, 0))
+            ctk.CTkLabel(row, text=check["name"], text_color=COLORS["text"], font=("Segoe UI", 10, "bold"), anchor="w").pack(side="left", padx=6, pady=7)
+            ctk.CTkLabel(row, text=check["detail"], text_color=COLORS["muted"], anchor="e", justify="right", wraplength=230).pack(side="right", padx=8)
+
+    # background/process actions ----------------------------------------------------
+    def _run_doctor(self) -> None:
+        if self._refreshing_system: return
+        self._refreshing_system = True; self._set_status("● Diagnostic…", COLORS["info"])
+        def worker() -> None:
+            try:
+                from ..doctor import run_checks
+                snapshot = [c.__dict__ for c in run_checks()]
+            except Exception as exc:
+                snapshot = [{"name": "Doctor", "ok": False, "blocking": True, "detail": f"{type(exc).__name__}: {exc}"}]
+            self.after(0, lambda: self._finish_doctor(snapshot))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_doctor(self, snapshot: list[dict]) -> None:
+        self._refreshing_system = False
+        if hasattr(self, "system_checks"): self._paint_system_checks(snapshot)
+        blocking = sum(1 for check in snapshot if not check["ok"] and check["blocking"])
+        self._set_status("✓ Diagnostic OK" if not blocking else f"● {blocking} blocage(s)", COLORS["good"] if not blocking else COLORS["bad"])
+
+    def _orca_start(self) -> None:
+        objective = self.orca_objective.get().strip(); spec = self.orca_spec.get("1.0", "end").strip(); agent = self.orca_agent.get()
+        if not objective or not spec:
+            self.orca_result.configure(text="Renseigne l'objectif et la spécification.", text_color=COLORS["warn"]); return
+        from .. import orca
+        if not orca.enabled():
+            self.orca_result.configure(text="Active OCTOPUS_ORCA_ENABLED=1 pour utiliser Orca.", text_color=COLORS["warn"]); return
+        self.orca_result.configure(text="Création Run → Task → Worker…", text_color=COLORS["info"])
+        def worker() -> None:
+            try:
+                result = orca.start_development_task(objective=objective, spec=spec, agent=agent)
+                text = f"Worker lancé · Run {result['run_id']}"
+                self.after(0, lambda: self.orca_result.configure(text=text, text_color=COLORS["good"]))
+            except Exception as exc:
+                text = f"Échec Orca : {exc}"
+                self.after(0, lambda: self.orca_result.configure(text=text, text_color=COLORS["bad"]))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _refresh_orca_state_async(self) -> None:
+        if not hasattr(self, "orca_state") or self._orca_state_busy: return
+        self._orca_state_busy = True
+        def worker() -> None:
+            try:
+                from .. import orca
+                if not orca.enabled(): text, color = "Pont Orca désactivé (optionnel).", COLORS["muted"]
+                else: text, color = f"Orca actif · {orca.status()}", COLORS["good"]
+            except Exception as exc:
+                text, color = f"Orca indisponible : {exc}", COLORS["warn"]
+            self.after(0, lambda: self._apply_orca_state(text, color)); self._orca_state_busy = False
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_orca_state(self, text: str, color: str) -> None:
+        if hasattr(self, "orca_state"): self.orca_state.configure(text=text, text_color=color)
+
+    def _refresh(self) -> None:
+        self.msg_procs = [p for p in self.msg_procs if p.poll() is None]
+        if self.proc is not None and self.proc.poll() is not None:
+            run = db.current_run() or {}; status = run.get("status") or "done"
+            label, color = {"done": ("✓ Terminé", COLORS["good"]), "error": ("✗ Erreur", COLORS["bad"]), "stopped": ("■ Arrêté", COLORS["warn"])}.get(status, ("● Idle", COLORS["muted"]))
+            self._set_status(label, color); self.proc = None
+        if self.worker_proc is not None and self.worker_proc.poll() is not None: self.worker_proc = None
+        try:
+            if self.current_page == "Cockpit" and hasattr(self, "activity_feed"):
+                self._render_activity(self.activity_feed); self._render_agents(self.agent_overview, compact=True)
+            elif self.current_page == "Missions" and hasattr(self, "mission_tasks"):
+                self._render_task_list(self.mission_tasks); self.worker_state.configure(text="Worker actif" if self.worker_proc else "Worker arrêté")
+            elif self.current_page == "Production" and hasattr(self, "production_metrics"):
+                self._render_production_summary(); self._render_metrics(self.production_metrics)
+            elif self.current_page == "Humain":
+                for child in self.page_host.winfo_children():
+                    if isinstance(child, ctk.CTkScrollableFrame): self._render_handoffs(child); break
+            elif self.current_page == "Navigateur": self._refresh_browser_view()
+            elif self.current_page == "Système": self._refresh_orca_state_async()
+        except Exception as exc:
+            self._set_status(f"● Interface : {type(exc).__name__}", COLORS["bad"])
+        self.after(1500, self._refresh)
+
+    def _refresh_browser_view(self) -> None:
+        if not hasattr(self, "browser_preview"): return
+        url = db.get_state("browser_url") or ""; shot = db.get_state("browser_shot")
+        self.browser_state.configure(text=f"URL : {url or '(inactive)'}")
+        if not shot or shot == self._last_browser_shot or not Path(shot).exists(): return
+        self._last_browser_shot = shot
+        try:
+            image = Image.open(shot); ratio = min(1.0, 950 / image.width); size = (max(1, int(image.width * ratio)), max(1, int(image.height * ratio)))
+            self._browser_image = ctk.CTkImage(light_image=image, dark_image=image, size=size); self.browser_preview.configure(image=self._browser_image, text="")
+        except Exception: pass
+
+    # small utilities ----------------------------------------------------------------
+    def _set_status(self, text: str, color: str) -> None: self.header_status.configure(text=text, text_color=color)
+    def _run_status(self, run: dict) -> str: return "RUNNING" if self.proc is not None and self.proc.poll() is None else str(run.get("status") or "IDLE").upper()
+    @staticmethod
+    def _run_color(run: dict) -> str: return {"done": COLORS["good"], "error": COLORS["bad"], "stopped": COLORS["warn"], "running": COLORS["info"]}.get(run.get("status"), COLORS["muted"])
+    @staticmethod
+    def _format_age(ts: float) -> str:
+        age = max(0, time.time() - float(ts))
+        if age < 60: return "à l'instant"
+        if age < 3600: return f"il y a {int(age // 60)} min"
+        if age < 86400: return f"il y a {int(age // 3600)} h"
+        return time.strftime("%d/%m %H:%M", time.localtime(ts))
+
+    # compatibility/data helpers -----------------------------------------------------
+    def _offer_values(self) -> list[str]:
         vals = ["auto"]
-        if config.JOBS_DIR.exists():
-            vals += [p.stem for p in sorted(config.JOBS_DIR.glob("*.json")) if p.stem not in vals]
-        for k in config.CATALOG_OFFERS:
-            if k not in vals:
-                vals.append(k)
+        if config.JOBS_DIR.exists(): vals += [p.stem for p in sorted(config.JOBS_DIR.glob("*.json")) if p.stem not in vals]
+        for key in config.CATALOG_OFFERS:
+            if key not in vals: vals.append(key)
         return vals
 
-    # --- rafraîchissement (polling 1 s) ---
-    def _refresh(self):
-        self.msg_procs = [p for p in self.msg_procs if p.poll() is None]
-        try:
-            self._refresh_run()
-            self._refresh_salon()
-            self._refresh_dashboard()
-            self._refresh_browser()
-            self._refresh_tasks()
-            self._refresh_handoffs()
-        except Exception as e:
-            self.status_label.configure(text=f"● erreur : {e}", text_color="#ef5350")
-        self.after(1000, self._refresh)
+    def _agent_rows(self) -> list[dict]:
+        messages, tasks, rows = db.recent_messages(300), self._task_rows(), []
+        for role in config.AGENTS:
+            role_msgs = [m for m in messages if m["from_agent"] == role]
+            role_tasks = [t for t in tasks if role in str(t.get("business", "")).upper() or role in str(t.get("kind", "")).upper()]
+            running = any(t.get("status") == "running" for t in role_tasks); waiting = any(t.get("status") == "waiting_human" for t in role_tasks)
+            status = "en cours" if running else ("attente humain" if waiting else "au repos")
+            rows.append({"role": role, "latest": role_msgs[-1]["content"][:140] if role_msgs else "Aucune activité récente", "activity": status,
+                         "status": status, "status_color": COLORS["info"] if running else (COLORS["warn"] if waiting else COLORS["muted"]),
+                         "tasks": len(role_tasks), "messages": len(role_msgs)})
+        return rows
 
-    def _refresh_run(self):
-        run = db.current_run()
-        if self.proc is not None and self.proc.poll() is not None:
-            # le sous-processus vient de finir
-            status = run.get("status") if run else "done"
-            txt = {"done": "✓ Terminé", "error": "✗ Erreur", "stopped": "■ Arrêté"}.get(status, "● Idle")
-            col = {"done": "#81c784", "error": "#ef5350", "stopped": "#ffb74d"}.get(status, "#90a4ae")
-            self.status_label.configure(text=txt, text_color=col)
-            self.step_label.configure(text=(run or {}).get("step", ""))
-            self.proc = None
-        elif self.proc is not None:
-            self.status_label.configure(text="● Running", text_color="#ffb74d")
-            self.step_label.configure(text=(run or {}).get("step", ""))
-        else:
-            self.status_label.configure(text="● Idle", text_color="#90a4ae")
-            self.step_label.configure(text=(run or {}).get("step", ""))
-
-    def _refresh_salon(self):
-        # suivi par identifiant (et non par compteur) : ne rate aucun message,
-        # même quand la base dépasse la fenêtre des 120 derniers.
-        for m in db.recent_messages(120):
-            if m["id"] > self._last_msg_id:
-                color = COLORS.get(m["from_agent"], DEFAULT_COLOR)
-                ctk.CTkLabel(self.salon, text=f"[{m['from_agent']}] {m['content']}",
-                             anchor="w", justify="left", text_color=color,
-                             font=("Segoe UI", 12), wraplength=640).pack(anchor="w", pady=1)
-                self._last_msg_id = m["id"]
-
-    def _refresh_dashboard(self):
-        self.cost_label.configure(
-            text=f"Coût aujourd'hui : ${db.cost_today():.4f} · budget par cycle ${config.CYCLE_BUDGET_USD:.2f}")
-        mets = db.metrics_list()
-        if mets:
-            lines = [f"  {m['offer_id']}: {m['score']}/35 · humanité {m['humanite']}/5 · {m['verdict']}"
-                     for m in mets[-6:]]
-            self.metrics_label.configure(text="Métriques (rubric) :\n" + "\n".join(lines))
-        else:
-            self.metrics_label.configure(text="Métriques : (aucune encore)")
-
-    def _refresh_tasks(self):
-        """File OCTOPUS : 5 dernières tâches et état du worker lancé par la GUI."""
-        if self.worker_proc is not None and self.worker_proc.poll() is not None:
-            self.worker_proc = None
-        self.worker_btn.configure(text="■ Worker" if self.worker_proc else "⚙ Worker",
-                                  fg_color="#2e7d32" if self.worker_proc else "#37474f")
+    def _task_rows(self) -> list[dict]:
         try:
             from octopus import tasks
-            recent = tasks.list_tasks(limit=5)
-        except Exception as e:
-            self.tasks_label.configure(text=f"Tâches : indisponibles ({type(e).__name__})")
-            return
-        if not recent:
-            self.tasks_label.configure(text="Tâches : (file vide)")
-            return
-        icons = {"queued": "…", "running": "▶", "waiting_human": "?", "done": "✓", "failed": "✗", "cancelled": "■"}
-        lines = [f"  {icons.get(t['status'], '·')} #{t['id']} {t['kind']} · {t['status']}" for t in recent]
-        self.tasks_label.configure(text="Tâches :\n" + "\n".join(lines))
+            return tasks.list_tasks(limit=40)
+        except Exception: return []
 
     def _pending_requests(self) -> list[dict]:
-        """Demandes du cycle (podalux.db) et des tâches OCTOPUS, dans un seul panneau."""
-        items = [{"key": ("p", h["id"]), "who": h["agent"], "question": h["question"]} for h in db.pending_handoffs()]
+        items = [{"source": "podalux", "id": h["id"], "who": h["agent"], "question": h["question"]} for h in db.pending_handoffs()]
         try:
             from octopus import tasks
-            items += [{"key": ("t", r["id"]), "who": f"tâche #{r['task_id']}", "question": r["question"]}
-                      for r in tasks.pending_human_requests()]
-        except Exception:
-            pass
+            items += [{"source": "task", "id": r["id"], "task_id": r["task_id"], "who": f"tâche #{r['task_id']}", "question": r["question"]} for r in tasks.pending_human_requests()]
+        except Exception: pass
         return items
 
-    def _refresh_handoffs(self):
-        pending = self._pending_requests()
-        ids = tuple(h["key"] for h in pending)
-        if ids == self._handoff_ids:
-            return  # rien de nouveau → ne pas reconstruire (évite clignotement / perte de focus)
-        self._handoff_ids = ids
-        for w in self._handoff_widgets:
-            w.destroy()
-        self._handoff_widgets = []
-        for h in pending:
-            frm = ctk.CTkFrame(self.handoffs_frame, fg_color="#263238")
-            frm.pack(fill="x", pady=4)
-            ctk.CTkLabel(frm, text=f"[{h['who']}] {h['question']}", anchor="w",
-                         justify="left", wraplength=320, font=("Segoe UI", 12)).pack(anchor="w", padx=8, pady=(6, 2))
-            entry = ctk.CTkEntry(frm, placeholder_text="Votre réponse…")
-            entry.pack(fill="x", padx=8, pady=2)
-            ctk.CTkButton(frm, text="Envoyer", height=28, width=80,
-                          command=lambda key=h["key"], e=entry: self._answer(key, e)).pack(anchor="e", padx=8, pady=(2, 6))
-            self._handoff_widgets.append(frm)
 
-    # --- actions ---
-    def _start_cycle(self):
-        if self.proc is not None and self.proc.poll() is None:
-            return
-        holder = db.run_lock_holder()
-        if holder:  # cycle lancé par la CLI, un agent ou une GUI précédente
-            self.step_label.configure(text=f"un cycle tourne déjà ({holder})")
-            return
-        offer = self.offer_menu.get()
-        args = ["cycle"]
-        if offer != "auto":
-            args += ["--offer", offer]
-        self.proc, log = procs.spawn(args, "cycle")
-        self.step_label.configure(text=f"journal : {log.name}")
-        self.status_label.configure(text="● Running", text_color="#ffb74d")
-
-    def _start_mission(self):
-        text = self.objective_entry.get().strip()
-        if not text:
-            return
-        if self.proc is not None and self.proc.poll() is None:
-            self.step_label.configure(text="un cycle/mission tourne déjà")
-            return
-        db.post("HUMAN", f"objectif : {text}")
-        self.objective_entry.delete(0, "end")
-        self.proc, _ = procs.spawn(["mission", text], "mission")
-        self.status_label.configure(text="● Mission", text_color="#5c6bc0")
-
-    def _stop_cycle(self):
-        db.request_stop()
-        self.step_label.configure(text="arrêt demandé (au prochain point d'étape)…")
-
-    def _open_browser(self):
-        """Ouvre le navigateur Chromium (visible, persistant) via un sous-processus."""
-        p, _ = procs.spawn(["browse-open"], "browse-open")
-        self.msg_procs.append(p)
-
-    def _publish(self):
-        offer = self.offer_menu.get()
-        if offer == "auto":
-            run = db.current_run()
-            offer = (run or {}).get("offer_id") or ""
-        if not offer:
-            return
-        from ..publish import publish
-        try:
-            r = publish(offer, dry_run=True)
-        except Exception as e:  # avant : exception invisible, le bouton semblait ne rien faire
-            ctk.CTkLabel(self.handoffs_frame, text=f"[PUBLICATION] échec : {e}", anchor="w", wraplength=320,
-                         text_color="#e57373").pack(fill="x", pady=4)
-            return
-        ctk.CTkLabel(self.handoffs_frame, text=f"[PUBLICATION dry-run] {r['plan'].get('title', offer)}",
-                     anchor="w", wraplength=320, text_color="#81c784").pack(fill="x", pady=4)
-
-    def _answer(self, key, entry):
-        val = entry.get().strip()
-        if not val:
-            return
-        source, hid = key
-        if source == "t":
-            from octopus import tasks
-            task_id = tasks.answer(hid, val)
-            db.post("HUMAN", f"réponse envoyée (tâche #{task_id}, reprise par le worker)")
-        else:
-            db.answer(hid, val)
-            db.post("HUMAN", f"réponse envoyée (demande #{hid})")
-
-    def _send_message(self):
-        import re
-        text = self.msg_entry.get().strip()
-        if not text:
-            return
-        # router vers un agent via @mention (défaut : ORBIT, le CEO)
-        m = re.match(r"@(\w+)\s*(.*)", text, re.S)
-        if m and m.group(2).strip():
-            role = m.group(1).upper()
-            content = m.group(2).strip()
-        else:
-            role = "ORBIT"
-            content = text
-        if role not in config.AGENTS:
-            role = "ORBIT"
-        db.post("HUMAN", text)
-        self.msg_entry.delete(0, "end")
-        ctk.CTkLabel(self.salon, text=f"[HUMAN] {text}", anchor="w", justify="left",
-                     text_color="#4fc3f7", font=("Segoe UI", 12), wraplength=640).pack(anchor="w", pady=1)
-        # dispatcher à l'agent en sous-processus (non-bloquant, la réponse arrive au salon)
-        p, _ = procs.spawn(["msg", role, content], f"msg-{role}")
-        self.msg_procs.append(p)
-
-    def _open_studio(self):
-        """Fenêtre de génération vidéo locale (WanGP)."""
-        from .studio import StudioWindow
-        if getattr(self, "_studio", None) is not None and self._studio.winfo_exists():
-            self._studio.focus()
-            return
-        self._studio = StudioWindow(self, start_worker=self._toggle_worker)
-
-    def _toggle_worker(self):
-        """Lance ou arrête le worker OCTOPUS (exécute les tâches en file et planifiées)."""
-        if self.worker_proc is not None and self.worker_proc.poll() is None:
-            proc, self.worker_proc = self.worker_proc, None
-            try:  # arrêt propre : la tâche en cours s'arrête (verrou libéré, processus enfants fermés)
-                from octopus import tasks
-                for task in tasks.list_tasks(status="running", limit=20):
-                    tasks.cancel(task["id"], "worker arrêté depuis la GUI")
-            except Exception:
-                pass
-            self.step_label.configure(text="arrêt du worker…")
-            self.after(15000, lambda: self._kill_worker(proc))
-            return
-        self.worker_proc, log = procs.spawn(["worker"], "worker", module="octopus")
-        self.step_label.configure(text=f"worker lancé (journal : {log.name})")
-
-    def _kill_worker(self, proc):
-        from ..tools import kill_tree
-        if proc.poll() is None:
-            kill_tree(proc)  # arbre complet : node, ffmpeg, navigateur
-        self.step_label.configure(text="worker arrêté")
-
-    def _refresh_browser(self):
-        url = db.get_state("browser_url")
-        shot = db.get_state("browser_shot")
-        if url:
-            self.browser_url_label.configure(text=f"Navigateur : {url[:64]}")
-        if shot == self._last_shot:
-            return  # capture inchangée : ne pas relire l'image chaque seconde (audit M5)
-        self._last_shot = shot
-        if shot and Path(shot).exists():
-            try:
-                img = Image.open(shot)
-                w, h = img.size
-                nw = 300
-                nh = max(1, int(h * nw / w))
-                ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(nw, min(nh, 170)))
-                self.browser_img_label.configure(image=ctk_img, text="")
-            except Exception:
-                pass
-
-    def _open_video(self):
-        run = db.current_run()
-        offer = (run or {}).get("offer_id") or self.offer_menu.get()
-        if offer == "auto":
-            return
-        mp4 = config.PROJECT_ROOT / "out" / offer / "final.mp4"
-        if mp4.exists():
-            os.startfile(str(mp4))
-        else:
-            self.step_label.configure(text=f"pas de final.mp4 pour {offer}")
-
-
-def main():
-    app = PodaluxApp()
-    app.mainloop()
+def _open_path(path: str | Path) -> None:
+    target = str(path)
+    if platform.system() == "Windows": os.startfile(target)
+    elif platform.system() == "Darwin": subprocess.Popen(["open", target])
+    else: subprocess.Popen(["xdg-open", target])
 
 
 if __name__ == "__main__":
-    main()
-
+    PodaluxApp().mainloop()
