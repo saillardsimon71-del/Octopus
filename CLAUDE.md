@@ -142,6 +142,7 @@ Do not move business agents or cloud rendering into Orca merely because Orca can
 - `agents/gui/app.py` — compatibility entrypoint to Workbench
 - `agents/gui/studio.py` — existing video studio window used by the Workbench
 - `docs/GUI.md` — cockpit/workbench and Intelligence workflow
+- `docs/HANDOFF-AUTONOMOUS-BUSINESS.md` — concrete implementation roadmap and acceptance criteria for the long-term autonomous-business layer
 - `octopus/catalog.py` — dynamic OmniRoute overlay + safe default profile
 - `octopus/llm.py` — LLM gateway
 - `agents/browser.py` — Chromium/Playwright tool
@@ -169,18 +170,18 @@ Do not move business agents or cloud rendering into Orca merely because Orca can
 - `docs/OMNIROUTE_SETUP.md`
 - `docs/ORCA_INTEGRATION.md`
 - `docs/RUNPOD_SETUP.md`
-- `setup-local.ps1`
 
 ## Next work order
 
 1. Let the fresh CI run for the current HEAD finish and fix actual failures.
 2. Run the GUI on Windows and verify Business switching, business creation, Intelligence actions, mission launch, handoff replies and browser observation.
 3. Run the real local smoke test with OmniRoute + Chromium + `doctor` on Windows.
-4. Add real CRM/revenue/social data connectors before claiming full client-management, funnel execution or reinvestment automation.
-5. Deploy the real RunPod worker + object storage and execute one paid-safe/idempotent end-to-end video test.
-6. Only after that, run a real Podalux cycle and compare technical QC + visual QC.
-7. Use the Orca bridge only for explicit repository-development tasks; keep business automation and video execution in Octopus.
-8. Keep publication in dry-run until the whole pipeline is verified.
+4. Follow `docs/HANDOFF-AUTONOMOUS-BUSINESS.md`: first persist strategic objectives/hypotheses/experiments/decisions/reviews in the existing OCTOPUS persistence layer, then add evidence provenance and scheduler-backed reviews, then introduce CRM/finance/social/funnel connectors behind stable provider-neutral interfaces.
+5. Add real CRM/revenue/social data connectors before claiming full client-management, funnel execution or reinvestment automation.
+6. Deploy the real RunPod worker + object storage and execute one paid-safe/idempotent end-to-end video test.
+7. Only after that, run a real Podalux cycle and compare technical QC + visual QC.
+8. Use the Orca bridge only for explicit repository-development tasks; keep business automation and video execution in Octopus.
+9. Keep publication in dry-run until the whole pipeline is verified.
 
 ## Do not regress
 
