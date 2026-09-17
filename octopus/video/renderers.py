@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Mapping
 
 from .client import CloudVideoClient
-from .contract import VideoJob, VideoResult, VideoStatus
+from .contract import VideoJob, VideoResult
+from .runpod import RunPodConfig, RunPodServerlessClient
 
 
 class VideoRenderer(ABC):
@@ -25,25 +25,26 @@ class CloudVideoRenderer(VideoRenderer):
 
 
 class LocalVideoRenderer(VideoRenderer):
-    """Adaptateur de transition.
-
-    Il ne réimplémente pas FORGE : le pipeline local existant reste la source de vérité
-    jusqu'à ce que le worker cloud soit validé. Cette classe sert seulement de point
-    d'extension pour une future migration sans changer les agents.
-    """
+    """Point d'extension uniquement ; FORGE conserve son pipeline local historique."""
 
     def render(self, job: VideoJob) -> VideoResult:
         raise RuntimeError(
-            "LocalVideoRenderer n'est pas encore branché intentionnellement. "
-            "Utiliser le FORGE historique ou CloudVideoRenderer."
+            "LocalVideoRenderer n'est pas appelé directement pendant la migration. "
+            "Le service vidéo délègue au pipeline FORGE historique."
         )
 
 
-def get_renderer(*, mode: str | None = None) -> VideoRenderer:
+def get_renderer(*, mode: str | None = None, provider: str | None = None) -> VideoRenderer:
     selected = (mode or os.environ.get("PODALUX_VIDEO_RENDERER", "local")).strip().lower()
-    if selected == "cloud":
-        from .client import CloudVideoConfig
-        return CloudVideoRenderer(CloudVideoClient(CloudVideoConfig.from_env()))
     if selected == "local":
         return LocalVideoRenderer()
-    raise ValueError(f"PODALUX_VIDEO_RENDERER inconnu: {selected!r}; valeurs: local, cloud")
+    if selected != "cloud":
+        raise ValueError(f"PODALUX_VIDEO_RENDERER inconnu: {selected!r}; valeurs: local, cloud")
+
+    selected_provider = (provider or os.environ.get("PODALUX_VIDEO_PROVIDER", "runpod")).strip().lower()
+    if selected_provider == "runpod":
+        return CloudVideoRenderer(RunPodServerlessClient(RunPodConfig.from_env()))
+    if selected_provider == "http":
+        from .client import CloudVideoConfig
+        return CloudVideoRenderer(CloudVideoClient(CloudVideoConfig.from_env()))
+    raise ValueError(f"PODALUX_VIDEO_PROVIDER inconnu: {selected_provider!r}; valeurs: runpod, http")
