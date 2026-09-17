@@ -96,6 +96,13 @@ BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "").strip()
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "").strip()
 
 # --- Navigateur ---
+# Domaines ouverts avec le profil connecté (lecture seule). Tout le reste : contexte éphémère sans
+# cookies. Après lecture d'un de ces comptes, l'agent ne peut plus ouvrir de page publique (agents/web_guard.py).
+ACCOUNT_DOMAINS = (
+    "stripe.com", "youtube.com", "mail.google.com", "accounts.google.com", "myaccount.google.com",
+    "fiverr.com", "reddit.com", "x.com", "twitter.com", "linkedin.com", "gumroad.com",
+)
+
 # Chromium (Playwright) avec profil persistant `agents/data/browser_profile` :
 # les connexions aux comptes (Stripe, Reddit, X, Fiverr, YouTube…) sont conservées
 # entre les sessions. L'humain se connecte une fois dans la fenêtre, l'agent retrouve

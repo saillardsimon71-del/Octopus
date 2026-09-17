@@ -13,16 +13,25 @@ from __future__ import annotations
 import atexit
 import time
 from pathlib import Path
+from urllib.parse import urljoin
 
 from . import config, db, deepseek
 
 
 class BrowserTool:
-    def __init__(self, headless: bool = False, profile_dir: Path | None = None):
+    def __init__(self, headless: bool = False, profile_dir: Path | None = None, persistent: bool = True,
+                 guard=None):
         self.headless = headless
+        # guard(url) -> bool : chaque navigation (y compris redirection, lien, script) est vérifiée
+        # AVANT la requête ; refusée, elle est annulée (agents/web_guard.py).
+        self.guard = guard
+        self.blocked: list[str] = []
+        self.persistent = persistent  # False : contexte éphémère, sans cookies ni session (web public)
         self.profile_dir = profile_dir or (config.DATA_DIR / "browser_profile")
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        if persistent:
+            self.profile_dir.mkdir(parents=True, exist_ok=True)
         self._pw = None
+        self._browser = None
         self._context = None
         self._page = None
         self._started = False
@@ -32,22 +41,68 @@ class BrowserTool:
     def start(self) -> "BrowserTool":
         from playwright.sync_api import sync_playwright
         self._pw = sync_playwright().start()
-        self._context = self._pw.chromium.launch_persistent_context(
-            str(self.profile_dir),
-            headless=self.headless,
-            viewport={"width": 1280, "height": 800},
-            args=["--no-sandbox"],
-        )
+        # Sandbox Chromium conservée (l'ancien --no-sandbox la désactivait : audit C8).
+        if self.persistent:
+            self._context = self._pw.chromium.launch_persistent_context(
+                str(self.profile_dir), headless=self.headless, viewport={"width": 1280, "height": 800})
+        else:
+            self._browser = self._pw.chromium.launch(headless=self.headless)
+            self._context = self._browser.new_context(viewport={"width": 1280, "height": 800})
+        if self.guard is not None:
+            self._context.route("**/*", self._route)
         self._page = self._context.new_page()
         self._started = True
         return self
 
+    MAX_REDIRECTS = 10
+
+    def _route(self, route) -> None:
+        request = route.request
+        if not request.is_navigation_request():
+            self._continue(route)
+            return
+        if not self.guard(request.url):
+            self._block(route, request.url)
+            return
+        # Playwright n'appelle ce handler que pour la PREMIÈRE URL d'une redirection HTTP : sans ce
+        # suivi manuel, une redirection 302 vers un site tiers échapperait au garde.
+        url, response = request.url, self._fetch(route, request.url, first=True)
+        for _ in range(self.MAX_REDIRECTS):
+            location = response.headers.get("location")
+            if not (300 <= response.status < 400 and location):
+                break
+            target = urljoin(url, location)
+            if not self.guard(target):
+                self._block(route, target)
+                return
+            url, response = target, self._fetch(route, target, first=False)
+        else:
+            self._block(route, url)
+            return
+        self._fulfill(route, response)
+
+    def _block(self, route, url: str) -> None:
+        self.blocked.append(url)
+        route.abort("blockedbyclient")
+
+    def _fetch(self, route, url: str, first: bool):
+        if first:
+            return route.fetch(max_redirects=0)
+        return self._context.request.get(url, max_redirects=0)
+
+    def _fulfill(self, route, response) -> None:
+        route.fulfill(response=response)
+
+    def _continue(self, route) -> None:
+        route.continue_()
+
     def stop(self) -> None:
-        try:
-            if self._context:
-                self._context.close()
-        except Exception:
-            pass
+        for closable in (self._context, self._browser):
+            try:
+                if closable:
+                    closable.close()
+            except Exception:
+                pass
         if self._pw:
             try:
                 self._pw.stop()
@@ -143,8 +198,9 @@ class BrowserTool:
         return ans.strip().lower() in ("ok", "o", "oui", "y", "yes", "continue", "valider", "c")
 
 
-def new_browser(headless: bool = False) -> BrowserTool:
-    return BrowserTool(headless=headless).start()
+def new_browser(headless: bool = False, account: bool = False, guard=None) -> BrowserTool:
+    """`account=True` : profil connecté (comptes). Sinon contexte éphémère sans cookies."""
+    return BrowserTool(headless=headless, persistent=account, guard=guard).start()
 
 
 _shared: BrowserTool | None = None

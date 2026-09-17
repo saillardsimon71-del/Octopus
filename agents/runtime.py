@@ -12,7 +12,7 @@ import json
 
 from octopus.journal import with_run
 
-from . import cancel, db, deepseek
+from . import cancel, db, deepseek, web_guard
 
 _ROLE: contextvars.ContextVar[str] = contextvars.ContextVar("podalux_role", default="RUNTIME")
 
@@ -26,12 +26,26 @@ def _search(args):
 
 
 def _browse(args):
-    from .browser import new_browser
-    b = new_browser(headless=False)  # Chromium visible, profil persistant (connexions conservées)
+    """Web public : contexte éphémère sans cookies. Comptes : profil connecté, visible, lecture seule."""
+    from . import browser
+    state = web_guard.current()
+    url = str(args.get("url", ""))
+    kind = web_guard.check(url, state)
+    account = kind == web_guard.ACCOUNT
+    b = browser.new_browser(headless=not account, account=account, guard=lambda u: web_guard.allowed(u, state))
     try:
-        b.goto(args["url"])
-        return {"url": b.url(), "texte": b.snapshot()[:1500],
-                "vision": b.see()["description"]}
+        try:
+            b.goto(url)
+        except Exception as e:
+            if b.blocked:
+                raise web_guard.BrowseRefused(f"redirection refusée vers {b.blocked[-1][:120]}") from e
+            raise
+        final = b.url()
+        final_kind = web_guard.classify(final)
+        web_guard.record(final, final_kind, state)
+        source = "compte connecté (lecture seule)" if final_kind == web_guard.ACCOUNT else web_guard.UNTRUSTED_NOTE
+        return {"url": final, "source": source, "texte": b.snapshot()[:1500],
+                "vision": b.see(agent=_ROLE.get())["description"]}
     finally:
         b.stop()
 
@@ -168,7 +182,7 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
     """
     token = _ROLE.set(role)
     try:
-        with cancel.scope():
+        with cancel.scope(), web_guard.session():
             return _run_agent(role, goal, max_steps, conversational)
     finally:
         _ROLE.reset(token)
@@ -230,7 +244,7 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool) -> di
 @with_run("podalux", "mission", budget_usd=deepseek.config.CYCLE_BUDGET_USD)
 def run_mission(goal: str, max_steps_per_agent: int = 8) -> dict:
     """ORBIT planifie puis délègue aux rôles (multi-agents via le runtime)."""
-    with cancel.scope():
+    with cancel.scope(), web_guard.session():
         return _run_mission(goal, max_steps_per_agent)
 
 
