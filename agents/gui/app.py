@@ -40,6 +40,8 @@ class PodaluxApp(ctk.CTk):
         self._last_msg_id = 0
         self._handoff_widgets = []
         self._handoff_ids = ()
+        self._last_shot = None
+        self.worker_proc: subprocess.Popen | None = None
 
         self._build_ui()
         db.init_db()
@@ -71,6 +73,9 @@ class PodaluxApp(ctk.CTk):
                       hover_color="#1b5e20", command=self._publish).grid(row=0, column=5, padx=4, sticky="e")
         ctk.CTkButton(top, text="▶ Vidéo", width=80, fg_color="#455a64", hover_color="#37474f",
                       command=self._open_video).grid(row=0, column=6, padx=4)
+        self.worker_btn = ctk.CTkButton(top, text="⚙ Worker", width=90, fg_color="#37474f", hover_color="#455a64",
+                                        command=self._toggle_worker)
+        self.worker_btn.grid(row=0, column=7, padx=(4, 10))
 
         self.salon = ctk.CTkScrollableFrame(self, label_text="Salon des agents")
         self.salon.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=4)
@@ -100,7 +105,7 @@ class PodaluxApp(ctk.CTk):
         right = ctk.CTkFrame(self)
         right.grid(row=1, column=1, sticky="nsew", padx=(5, 10), pady=4)
         right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(3, weight=1)
+        right.grid_rowconfigure(4, weight=1)
 
         self.cost_label = ctk.CTkLabel(right, text="Coût : —", anchor="w",
                                        font=("Segoe UI", 14, "bold"))
@@ -110,8 +115,12 @@ class PodaluxApp(ctk.CTk):
                                           font=("Segoe UI", 12))
         self.metrics_label.grid(row=1, column=0, sticky="ew", padx=10, pady=2)
 
+        self.tasks_label = ctk.CTkLabel(right, text="Tâches : —", anchor="w", justify="left",
+                                        font=("Segoe UI", 12))
+        self.tasks_label.grid(row=2, column=0, sticky="ew", padx=10, pady=2)
+
         self.browser_frame = ctk.CTkFrame(right, fg_color="#1e272e")
-        self.browser_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(6, 2))
+        self.browser_frame.grid(row=3, column=0, sticky="ew", padx=10, pady=(6, 2))
         self.browser_url_label = ctk.CTkLabel(self.browser_frame, text="Navigateur : (inactif)",
                                               anchor="w", font=("Segoe UI", 11))
         self.browser_url_label.pack(anchor="w", padx=8, pady=(6, 2))
@@ -123,7 +132,7 @@ class PodaluxApp(ctk.CTk):
         self.browser_img_label.pack(padx=8, pady=(2, 6))
 
         self.handoffs_frame = ctk.CTkScrollableFrame(right, label_text="Demandes humaines")
-        self.handoffs_frame.grid(row=3, column=0, sticky="nsew", padx=10, pady=(6, 10))
+        self.handoffs_frame.grid(row=4, column=0, sticky="nsew", padx=10, pady=(6, 10))
 
     def _offer_values(self):
         vals = ["auto"]
@@ -142,6 +151,7 @@ class PodaluxApp(ctk.CTk):
             self._refresh_salon()
             self._refresh_dashboard()
             self._refresh_browser()
+            self._refresh_tasks()
             self._refresh_handoffs()
         except Exception as e:
             self.status_label.configure(text=f"● erreur : {e}", text_color="#ef5350")
@@ -186,9 +196,39 @@ class PodaluxApp(ctk.CTk):
         else:
             self.metrics_label.configure(text="Métriques : (aucune encore)")
 
+    def _refresh_tasks(self):
+        """File OCTOPUS : 5 dernières tâches et état du worker lancé par la GUI."""
+        if self.worker_proc is not None and self.worker_proc.poll() is not None:
+            self.worker_proc = None
+        self.worker_btn.configure(text="■ Worker" if self.worker_proc else "⚙ Worker",
+                                  fg_color="#2e7d32" if self.worker_proc else "#37474f")
+        try:
+            from octopus import tasks
+            recent = tasks.list_tasks(limit=5)
+        except Exception as e:
+            self.tasks_label.configure(text=f"Tâches : indisponibles ({type(e).__name__})")
+            return
+        if not recent:
+            self.tasks_label.configure(text="Tâches : (file vide)")
+            return
+        icons = {"queued": "…", "running": "▶", "waiting_human": "?", "done": "✓", "failed": "✗", "cancelled": "■"}
+        lines = [f"  {icons.get(t['status'], '·')} #{t['id']} {t['kind']} · {t['status']}" for t in recent]
+        self.tasks_label.configure(text="Tâches :\n" + "\n".join(lines))
+
+    def _pending_requests(self) -> list[dict]:
+        """Demandes du cycle (podalux.db) et des tâches OCTOPUS, dans un seul panneau."""
+        items = [{"key": ("p", h["id"]), "who": h["agent"], "question": h["question"]} for h in db.pending_handoffs()]
+        try:
+            from octopus import tasks
+            items += [{"key": ("t", r["id"]), "who": f"tâche #{r['task_id']}", "question": r["question"]}
+                      for r in tasks.pending_human_requests()]
+        except Exception:
+            pass
+        return items
+
     def _refresh_handoffs(self):
-        pending = db.pending_handoffs()
-        ids = tuple(h["id"] for h in pending)
+        pending = self._pending_requests()
+        ids = tuple(h["key"] for h in pending)
         if ids == self._handoff_ids:
             return  # rien de nouveau → ne pas reconstruire (évite clignotement / perte de focus)
         self._handoff_ids = ids
@@ -198,12 +238,12 @@ class PodaluxApp(ctk.CTk):
         for h in pending:
             frm = ctk.CTkFrame(self.handoffs_frame, fg_color="#263238")
             frm.pack(fill="x", pady=4)
-            ctk.CTkLabel(frm, text=f"[{h['agent']}] {h['question']}", anchor="w",
+            ctk.CTkLabel(frm, text=f"[{h['who']}] {h['question']}", anchor="w",
                          justify="left", wraplength=320, font=("Segoe UI", 12)).pack(anchor="w", padx=8, pady=(6, 2))
             entry = ctk.CTkEntry(frm, placeholder_text="Votre réponse…")
             entry.pack(fill="x", padx=8, pady=2)
             ctk.CTkButton(frm, text="Envoyer", height=28, width=80,
-                          command=lambda hid=h["id"], e=entry: self._answer(hid, e)).pack(anchor="e", padx=8, pady=(2, 6))
+                          command=lambda key=h["key"], e=entry: self._answer(key, e)).pack(anchor="e", padx=8, pady=(2, 6))
             self._handoff_widgets.append(frm)
 
     # --- actions ---
@@ -260,9 +300,16 @@ class PodaluxApp(ctk.CTk):
         ctk.CTkLabel(self.handoffs_frame, text=f"[PUBLICATION dry-run] {r['plan'].get('title', offer)}",
                      anchor="w", wraplength=320, text_color="#81c784").pack(fill="x", pady=4)
 
-    def _answer(self, hid, entry):
+    def _answer(self, key, entry):
         val = entry.get().strip()
-        if val:
+        if not val:
+            return
+        source, hid = key
+        if source == "t":
+            from octopus import tasks
+            task_id = tasks.answer(hid, val)
+            db.post("HUMAN", f"réponse envoyée (tâche #{task_id}, reprise par le worker)")
+        else:
             db.answer(hid, val)
             db.post("HUMAN", f"réponse envoyée (demande #{hid})")
 
@@ -289,11 +336,36 @@ class PodaluxApp(ctk.CTk):
         p, _ = procs.spawn(["msg", role, content], f"msg-{role}")
         self.msg_procs.append(p)
 
+    def _toggle_worker(self):
+        """Lance ou arrête le worker OCTOPUS (exécute les tâches en file et planifiées)."""
+        if self.worker_proc is not None and self.worker_proc.poll() is None:
+            proc, self.worker_proc = self.worker_proc, None
+            try:  # arrêt propre : la tâche en cours s'arrête (verrou libéré, processus enfants fermés)
+                from octopus import tasks
+                for task in tasks.list_tasks(status="running", limit=20):
+                    tasks.cancel(task["id"], "worker arrêté depuis la GUI")
+            except Exception:
+                pass
+            self.step_label.configure(text="arrêt du worker…")
+            self.after(15000, lambda: self._kill_worker(proc))
+            return
+        self.worker_proc, log = procs.spawn(["worker"], "worker", module="octopus")
+        self.step_label.configure(text=f"worker lancé (journal : {log.name})")
+
+    def _kill_worker(self, proc):
+        from ..tools import kill_tree
+        if proc.poll() is None:
+            kill_tree(proc)  # arbre complet : node, ffmpeg, navigateur
+        self.step_label.configure(text="worker arrêté")
+
     def _refresh_browser(self):
         url = db.get_state("browser_url")
         shot = db.get_state("browser_shot")
         if url:
             self.browser_url_label.configure(text=f"Navigateur : {url[:64]}")
+        if shot == self._last_shot:
+            return  # capture inchangée : ne pas relire l'image chaque seconde (audit M5)
+        self._last_shot = shot
         if shot and Path(shot).exists():
             try:
                 img = Image.open(shot)

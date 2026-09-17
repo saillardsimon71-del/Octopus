@@ -39,13 +39,13 @@ def _prune(directory: Path, keep: int = KEEP_LOGS) -> None:
             pass  # journal encore ouvert par un processus : on reessaiera au prochain lancement
 
 
-def spawn(args: list[str], kind: str) -> tuple[subprocess.Popen, Path]:
-    """Lance `python -m agents.run <args>` ; sortie complète dans agents/data/logs/<date>-<kind>.log."""
+def spawn(args: list[str], kind: str, module: str = "agents.run") -> tuple[subprocess.Popen, Path]:
+    """Lance `python -m <module> <args>` ; sortie complète dans agents/data/logs/<date>-<kind>.log."""
     directory = logs_dir()
     _prune(directory)
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_", kind)[:40]
     log = directory / f"{time.strftime('%Y%m%d-%H%M%S')}-{safe}-{time.time_ns() % 1_000_000:06d}.log"
     with log.open("ab") as fh:
-        proc = subprocess.Popen([config.PYTHON, "-m", "agents.run", *args], cwd=str(config.PROJECT_ROOT),
+        proc = subprocess.Popen([config.PYTHON, "-m", module, *args], cwd=str(config.PROJECT_ROOT),
                                 env=agent_env(), stdout=fh, stderr=subprocess.STDOUT)
     return proc, log
