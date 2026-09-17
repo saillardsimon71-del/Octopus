@@ -21,7 +21,7 @@ def job() -> VideoJob:
 
 def test_submitting_without_remote_id_is_ambiguous(tmp_path):
     store = RenderStateStore(tmp_path)
-    store.save(RenderState("video-state-1", "runpod", "SUBMITTING", None, time.time()))
+    store.save(RenderState("video-state-1", "runpod", "SUBMITTING", None, 1, time.time()))
     with pytest.raises(AmbiguousSubmissionError):
         store.require_resume_safe(store.load("video-state-1"))
 
@@ -41,7 +41,7 @@ def test_renderer_resumes_known_remote_job_without_submit(tmp_path):
             return VideoResult("video-state-1", VideoStatus.COMPLETED, "file:///final.mp4", qc={"duration_s": 24})
 
     client = FakeClient()
-    state.save(RenderState("video-state-1", "runpod", "RUNNING", "remote-1", time.time()))
+    state.save(RenderState("video-state-1", "runpod", "RUNNING", "remote-1", 1, time.time()))
     result = CloudVideoRenderer(client, state_store=state).render(job())
     assert result.status == VideoStatus.COMPLETED
     assert client.submits == 0
@@ -62,3 +62,41 @@ def test_renderer_does_not_hide_submit_failure(tmp_path):
     saved = state.load("video-state-1")
     assert saved.state == "SUBMITTING"
     assert saved.remote_id is None
+    assert saved.attempt == 1
+
+
+def test_renderer_retries_terminal_failure_once(tmp_path):
+    state = RenderStateStore(tmp_path)
+
+    class RetryClient:
+        def __init__(self):
+            self.submits = 0
+            self.waits = []
+        def submit(self, video_job):
+            self.submits += 1
+            return RemoteJob(f"remote-{self.submits}", VideoStatus.QUEUED)
+        def wait(self, remote_id):
+            self.waits.append(remote_id)
+            return VideoResult("video-state-1", VideoStatus.COMPLETED, "file:///final.mp4", qc={"ok": True})
+
+    client = RetryClient()
+    state.save(RenderState("video-state-1", "runpod", "FAILED", "remote-old", 1, time.time()))
+    result = CloudVideoRenderer(client, state_store=state, max_attempts=2).render(job())
+    assert result.status == VideoStatus.COMPLETED
+    assert client.submits == 1
+    assert client.waits == ["remote-1"]
+    assert state.load("video-state-1").attempt == 2
+
+
+def test_renderer_stops_after_attempt_limit(tmp_path):
+    state = RenderStateStore(tmp_path)
+
+    class NoSubmitClient:
+        def submit(self, video_job):
+            raise AssertionError("aucune nouvelle soumission ne doit être faite")
+        def wait(self, remote_id):
+            raise AssertionError("aucun polling ne doit être fait")
+
+    state.save(RenderState("video-state-1", "runpod", "FAILED", "remote-old", 2, time.time()))
+    with pytest.raises(CloudVideoError, match="limite de 2"):
+        CloudVideoRenderer(NoSubmitClient(), state_store=state, max_attempts=2).render(job())
