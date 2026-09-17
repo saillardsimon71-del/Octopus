@@ -87,7 +87,8 @@ def cmd_probe(args) -> int:
     out: dict = {"ok": False, "root": str(root), "hardware": _hardware()}
     try:
         session = _session(root, None, json.loads(args.cli_args))
-        module = getattr(getattr(session, "_runtime", None), "module", None)
+        runtime = session._ensure_runtime() if hasattr(session, "_ensure_runtime") else getattr(session, "_runtime", None)
+        module = getattr(runtime, "module", None)
         out["wangp_version"] = getattr(module, "WanGP_version", None)
         prefixes = tuple(p.strip() for p in args.families.split(",") if p.strip())
         models = []

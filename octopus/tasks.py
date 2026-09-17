@@ -172,12 +172,16 @@ def complete(task_id: int, owner: str, output=None) -> None:
         _emit(conn, row["business"], task_id, "task.done", {"kind": row["kind"]})
 
 
-def fail(task_id: int, owner: str, error: str, *, retry_delay_s: float = 30) -> str:
-    """Échec d'une tentative : nouvelle tentative différée s'il en reste, sinon échec définitif."""
+def fail(task_id: int, owner: str, error: str, *, retry_delay_s: float = 30, final: bool = False) -> str:
+    """Échec d'une tentative : nouvelle tentative différée s'il en reste, sinon échec définitif.
+
+    `final=True` : échec qu'une nouvelle tentative ne corrigerait pas (entrée invalide, matériel insuffisant).
+    """
     now = time.time()
     with _tx() as conn:
         row = _owned(conn, task_id, owner)
-        status = "queued" if row["attempts"] < row["max_attempts"] and not row["cancel_requested"] else "failed"
+        retry = row["attempts"] < row["max_attempts"] and not row["cancel_requested"] and not final
+        status = "queued" if retry else "failed"
         conn.execute("UPDATE tasks SET status=?, error=?, lease_owner=NULL, lease_until=NULL, not_before=?, "
                      "updated_at=?, finished_at=? WHERE id=?",
                      (status, error[:2000], now + retry_delay_s if status == "queued" else row["not_before"], now,

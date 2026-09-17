@@ -26,6 +26,7 @@ def add_parser(sub) -> None:
     g.add_argument("--business", default="studio")
     g.add_argument("--setting", action="append", default=[], help="réglage WanGP clé=valeur JSON, ex. guidance_scale=5")
     g.add_argument("--allow-with-webui", action="store_true")
+    g.add_argument("--force", action="store_true", help="essayer malgré un matériel jugé insuffisant")
     g.add_argument("--wait", action="store_true", help="exécuter tout de suite dans ce terminal")
     l = vsub.add_parser("list", help="historique")
     l.add_argument("--limit", type=int, default=20)
@@ -108,7 +109,7 @@ def run(args) -> int:
             settings["num_inference_steps"] = args.steps
         inp = {"prompt": args.prompt, "model_type": args.model, "settings": settings, "duration_s": args.seconds,
                "resolution": args.resolution, "seed": args.seed, "variants": args.variants, "business": args.business,
-               "allow_with_webui": args.allow_with_webui}
+               "allow_with_webui": args.allow_with_webui, "force": args.force}
         task_id = _enqueue({k: v for k, v in inp.items() if v not in (None, {}, False)})
         print(f"génération en file : tâche #{task_id}")
         return _wait(task_id) if args.wait else 0

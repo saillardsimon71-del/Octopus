@@ -92,7 +92,8 @@ def test_build_settings_merges_defaults_and_request(fake_wangp, isolated):
     wangp.probe()  # vrai pont, faux WanGP : met les réglages par défaut en cache
     settings = handlers.build_settings("minimax_h3_fl2va", "prompt", settings={"num_inference_steps": 8},
                                        duration_s=5, resolution="480x832", seed=7)
-    assert settings == {"model_type": "minimax_h3_fl2va", "prompt": "prompt", "resolution": "480x832",
+    assert settings.pop("prompt").startswith("integrated_multimodal_description: [Shot 1] prompt\noverall_soundscape: ")
+    assert settings == {"model_type": "minimax_h3_fl2va", "resolution": "480x832",
                         "num_inference_steps": 8, "video_length": "5s", "seed": 7}
     with pytest.raises(ValueError, match="résolution invalide"):
         handlers.build_settings("m", "p", resolution="grand")
@@ -192,3 +193,14 @@ def test_cli_list_show_and_reuse(fake_wangp, isolated, capsys):
     children = [g for g in library.recent() if g["parent_id"] == gen_id]
     assert len(children) == 2 and all(c["status"] == "done" for c in children)
     assert all("seed" not in c["settings"] or c["settings"]["seed"] != 5 for c in children)
+
+
+def test_insufficient_hardware_fails_without_retry(fake_wangp, isolated):
+    wangp.probe()
+    cache = wangp.cached_probe()
+    cache["hardware"] = {"cuda_available": True, "gpu": {"vram_total_gb": 3.0, "capability": "6.1"}, "ram_total_gb": 15.9}
+    wangp.probe_cache_path().write_text(__import__("json").dumps(cache), encoding="utf-8")
+    result = run_task(model_type="minimax_h3_fl2va")
+    assert result["status"] == "failed" and "Matériel : incompatible" in result["error"]  # pas de 2e tentative
+    forced = run_task(model_type="minimax_h3_fl2va", force=True)
+    assert forced["status"] == "done"

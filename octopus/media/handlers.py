@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from ..worker import TaskCancelled, handler
-from . import library, wangp
+from . import library, prompts, requirements, wangp
 
 MODEL_PREFERENCE = ("minimax_h3_fl2va_pruned", "minimax_h3_fl2va", "minimax_h3_vdn_pruned", "minimax_h3_vdn")
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov"}
@@ -42,7 +42,7 @@ def build_settings(model_type: str, prompt: str, *, settings: dict | None = None
     probe = wangp.cached_probe() or {}
     base = dict(probe.get("defaults", {}).get(model_type) or {})
     base.pop("_error", None)
-    merged = {**base, **(settings or {}), "model_type": model_type, "prompt": prompt}
+    merged = {**base, **(settings or {}), "model_type": model_type, "prompt": prompts.prepare(model_type, prompt)}
     if duration_s:
         merged["video_length"] = f"{float(duration_s):g}s"  # l'API WanGP convertit en nombre d'images valide
     if resolution:
@@ -81,6 +81,11 @@ def video_generate(ctx):
                               "automatique, sinon deux copies du modèle se disputent la mémoire "
                               "(ou relancer avec allow_with_webui=true)")
     model_type = inp.get("model_type") or default_model()
+    check = requirements.preflight(model_type, (wangp.cached_probe() or {}).get("hardware"), seconds=inp.get("duration_s"))
+    if check["level"] == "blocked" and not inp.get("force"):
+        raise wangp.HardwareInsufficient(requirements.describe(check) + " (relancer avec force=true pour essayer quand même)")
+    if check["level"] in ("warning", "blocked"):
+        ctx.emit("media.hardware_warning", check)
     business = inp.get("business") or ctx.business
     base_seed = inp.get("seed")
     if base_seed is None and variants > 1:

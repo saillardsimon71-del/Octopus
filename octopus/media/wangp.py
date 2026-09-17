@@ -28,6 +28,11 @@ class WanGPError(RuntimeError):
     pass
 
 
+class HardwareInsufficient(WanGPError):
+    """Le modèle demandé dépasse nettement la VRAM ou la RAM de la machine."""
+    retryable = False
+
+
 class WanGPBusy(WanGPError):
     """Une autre instance de WanGP (interface Pinokio) occupe déjà la mémoire du GPU."""
 

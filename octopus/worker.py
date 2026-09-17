@@ -187,7 +187,8 @@ def run_one(owner: str | None = None, *, lease_s: float = 60, kinds: list[str] |
         log(f"[worker] #{task['id']} abandonnée : {exc}")
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=6)}"
-        status = _safe(lambda: tasks.fail(task["id"], owner, detail, retry_delay_s=spec.retry_delay_s))
+        final = getattr(exc, "retryable", True) is False or isinstance(exc, (ValueError, TypeError, KeyError))
+        status = _safe(lambda: tasks.fail(task["id"], owner, detail, retry_delay_s=spec.retry_delay_s, final=final))
         log(f"[worker] #{task['id']} échec ({status}) : {type(exc).__name__}: {str(exc)[:200]}")
     finally:
         stop.set()
