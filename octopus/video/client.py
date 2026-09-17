@@ -13,7 +13,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
-from .contract import TERMINAL_STATUSES, RemoteJob, VideoJob, VideoResult, VideoStatus, Artifact
+from .contract import TERMINAL_STATUSES, Artifact, RemoteJob, VideoJob, VideoResult, VideoStatus
 
 
 class CloudVideoError(RuntimeError):
@@ -53,12 +53,7 @@ class CloudVideoConfig:
 
 
 class CloudVideoClient:
-    """Client fournisseur-agnostique.
-
-    Le fournisseur doit accepter un POST JSON au submit_url et exposer un endpoint
-    de statut paramétré par `{job_id}`. Le schéma métier retourné au-dessus de cette
-    couche est celui de `VideoResult`.
-    """
+    """Client fournisseur-agnostique."""
 
     def __init__(self, config: CloudVideoConfig, *, opener: Callable | None = None):
         self.config = config
@@ -171,6 +166,7 @@ class CloudVideoClient:
                 kind=str(item.get("kind") or "file"),
                 content_type=str(item["content_type"]) if item.get("content_type") else None,
                 sha256=str(item["sha256"]) if item.get("sha256") else None,
+                key=str(item["key"]) if item.get("key") else None,
             ))
         qc = output.get("qc") or data.get("qc") or {}
         if not isinstance(qc, Mapping):
@@ -178,6 +174,9 @@ class CloudVideoClient:
         if remote.status != VideoStatus.COMPLETED:
             error = output.get("error") or data.get("error") or f"job distant terminé avec {remote.status.value}"
             raise CloudVideoError(str(error))
+        if not video_url:
+            video_artifact = next((a for a in artifacts if a.name == "final.mp4" and a.url), None)
+            video_url = video_artifact.url if video_artifact else None
         if not video_url:
             raise CloudVideoError("job COMPLETED sans video_url")
         return VideoResult(remote.remote_id, remote.status, str(video_url), tuple(artifacts), qc, data)
