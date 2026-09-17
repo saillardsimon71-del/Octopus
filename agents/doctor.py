@@ -91,15 +91,36 @@ def _add_local_renderer_checks(checks: list[Check], blocking: bool) -> None:
                             "supprimer l'ancien chemin fixe ou définir PODALUX_REMOTION_BROWSER", blocking=blocking))
     else:
         checks.append(Check("Navigateur Remotion local", True, "auto-détection Remotion", blocking=blocking))
-    tts_url = os.environ.get("CHATTERBOX_URL", config.CHATTERBOX_URL).strip() or config.CHATTERBOX_URL
-    if tts_url.startswith("hf-space:"):  # voix dans le cloud : aucun serveur local, aucun GPU
-        has_client = importlib.util.find_spec("gradio_client") is not None
-        checks.append(Check("Voix (Space Hugging Face)", has_client, tts_url,
-                            "python -m pip install gradio_client", blocking=blocking))
-    else:
-        checks.append(Check("Serveur Chatterbox local", _port_open(tts_url), tts_url,
-                            "démarrer Chatterbox, ou CHATTERBOX_URL=hf-space:ResembleAI/Chatterbox-Multilingual-TTS "
-                            "pour la voix dans le cloud", blocking=blocking))
+    checks.append(_voice_check(blocking))
+
+
+def _voice_check(blocking: bool) -> "Check":
+    """Chaine de voix : le premier fournisseur utilisable sert la narration (aucun quota ne bloque le cycle)."""
+    sys.path.insert(0, str(config.PROJECT_ROOT))
+    try:
+        from tools import tts_providers
+        chain = tts_providers.chain()
+    except Exception as exc:  # noqa: BLE001 - diagnostic
+        return Check("Voix (chaine TTS)", False, f"{type(exc).__name__}: {exc}",
+                     "verifier TTS_CHAIN et tools/tts_providers.py", blocking=blocking)
+    ready = []
+    if os.environ.get("AZURE_SPEECH_KEY", "").strip() and os.environ.get("AZURE_SPEECH_REGION", "").strip():
+        ready.append("azure")
+    if os.environ.get("CF_ACCOUNT_ID", "").strip() and os.environ.get("CF_API_TOKEN", "").strip():
+        ready.append("cloudflare")
+    url = os.environ.get("CHATTERBOX_URL", "").strip()
+    if url.startswith("hf-space:"):
+        if importlib.util.find_spec("gradio_client") is not None:
+            ready.append("chatterbox (Space HF)")
+    elif _port_open(url or config.CHATTERBOX_URL):
+        ready.append("chatterbox (local)")
+    if importlib.util.find_spec("piper") is not None:
+        ready.append("piper (CPU)")
+    usable = [name for name in ready if name.split()[0] in chain]
+    detail = f"chaine {','.join(chain)} ; disponibles : {', '.join(usable) if usable else 'aucun'}"
+    return Check("Voix (chaine TTS)", bool(usable), detail,
+                 "python -m pip install piper-tts (voix locale sans compte), ou definir AZURE_SPEECH_KEY/"
+                 "AZURE_SPEECH_REGION (500 000 caracteres/mois gratuits)", blocking=blocking)
 
 
 def run_checks() -> list[Check]:

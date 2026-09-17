@@ -1,71 +1,36 @@
-"""Pipeline audio complet avec VO Chatterbox + word-timestamps + bed/SFX/ducking.
+"""Pipeline audio complet : VO (chaine de fournisseurs) + word-timestamps + bed/SFX/ducking.
 
 Usage : python tools/make_audio_chatterbox_full.py <job.json> <offer_id> [voice] [exaggeration] [cfg_weight]
 
-`CHATTERBOX_URL` permet de déplacer le backend TTS hors du poste local sans changer
-le reste du pipeline. Par défaut, la compatibilité locale 4123 est conservée.
-
-`CHATTERBOX_URL=hf-space:<owner/space>` utilise un Space Hugging Face public via son API Gradio
-documentée (ex. hf-space:ResembleAI/Chatterbox-Multilingual-TTS, modèle MIT) : aucun GPU local,
-aucun compte ; quota anonyme partagé, d'où les nouvelles tentatives espacées.
-`CHATTERBOX_REF_AUDIO` : voix de référence (fichier ou URL) ; `CHATTERBOX_LANG` : langue (fr par défaut).
+La voix vient de `tools/tts_providers.py` : `TTS_CHAIN` (defaut azure,cloudflare,chatterbox,piper)
+essaie les fournisseurs dans l'ordre et retient le premier qui repond. Aucun quota ne peut donc
+arreter le pipeline : `piper` synthetise en local sur CPU, sans compte. Le fournisseur reellement
+utilise par segment est ecrit dans out/<offer>/audio/tts_report.json.
 """
 import json
-import os
-import re
 import subprocess
 import sys
-import urllib.request
 import wave
 from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from tools import tts_providers  # noqa: E402
 
 SR = 44100
 GAP = 0.12
 TAIL = 1.5
 BED_LEVEL = 0.28
 SFX_LEVEL = 0.45
-BASE = os.environ.get("CHATTERBOX_URL", "http://127.0.0.1:4123/v1/audio/speech").strip()
-
-
-HF_PREFIX = "hf-space:"
-DEFAULT_REF = "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav"
-
-
-def tts_hf_space(text, exaggeration, cfg_weight, attempts=4):
-    import time
-    from gradio_client import Client, handle_file
-    space = BASE[len(HF_PREFIX):]
-    ref = os.environ.get("CHATTERBOX_REF_AUDIO", "").strip() or DEFAULT_REF
-    lang = os.environ.get("CHATTERBOX_LANG", "fr").strip() or "fr"
-    token = os.environ.get("HF_TOKEN", "").strip() or None  # quota ZeroGPU bien plus large une fois authentifie
-    last = None
-    for attempt in range(attempts):
-        try:
-            out = Client(space, verbose=False, hf_token=token).predict(
-                text[:300], lang, handle_file(ref), exaggeration, 0.8, 0, cfg_weight, api_name="/generate_tts_audio")
-            return Path(out).read_bytes()
-        except Exception as exc:  # quota ZeroGPU ou Space en réveil : attendre puis réessayer
-            last = exc
-            print(f"tts hf-space tentative {attempt + 1}/{attempts} : {type(exc).__name__}: {str(exc)[:160]}")
-            time.sleep(20 * (attempt + 1))
-    hint = "" if token else (" — définir HF_TOKEN (https://huggingface.co/settings/tokens) pour un quota ZeroGPU "
-                             "bien plus large, ou repasser à un serveur Chatterbox local via CHATTERBOX_URL")
-    raise RuntimeError(f"TTS hf-space indisponible après {attempts} tentatives : {last}{hint}")
 
 
 def tts(text, voice, exaggeration, cfg_weight):
-    if BASE.startswith(HF_PREFIX):
-        return tts_hf_space(text, exaggeration, cfg_weight)
-    payload = json.dumps({
-        "model": "chatterbox", "input": text, "voice": voice,
-        "response_format": "wav", "exaggeration": exaggeration,
-        "cfg_weight": cfg_weight, "temperature": 0.7,
-    }).encode("utf-8")
-    req = urllib.request.Request(BASE, data=payload, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=600) as r:
-        return r.read()
+    audio, used, failures = tts_providers.synthesize(
+        text, voice=voice, exaggeration=exaggeration, cfg_weight=cfg_weight)
+    for failure in failures:
+        print(f"tts: {failure}")
+    return audio, used
 
 
 def read_wav(path):
@@ -149,9 +114,10 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     segments = job["narration"]
-    seg_wavs, seg_durs = [], []
+    seg_wavs, seg_durs, used_providers = [], [], []
     for i, seg in enumerate(segments):
-        raw = tts(seg["texte"], voice, exagg, cfg)
+        raw, used = tts(seg["texte"], voice, exagg, cfg)
+        used_providers.append(used)
         raw_wav = out_dir / f"cb_seg_raw_{i}.wav"
         raw_wav.write_bytes(raw)
         seg_wav = out_dir / f"cb_seg_{i}.wav"
@@ -159,7 +125,10 @@ def main():
                         "-ar", str(SR), "-ac", "1", "-c:a", "pcm_s16le", str(seg_wav)], check=True)
         seg_wavs.append(seg_wav)
         seg_durs.append(wav_dur(seg_wav))
-        print(f"seg {i} ok duree={round(seg_durs[-1], 2)}s")
+        print(f"seg {i} ok duree={round(seg_durs[-1], 2)}s voix={used}")
+
+    (out_dir / "tts_report.json").write_text(json.dumps(
+        {"chain": tts_providers.chain(), "segments": used_providers}, ensure_ascii=False, indent=1), encoding="utf-8")
 
     seg_starts, acc = [], 0.0
     for d in seg_durs:

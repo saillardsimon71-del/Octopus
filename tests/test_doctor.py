@@ -55,32 +55,35 @@ def test_doctor_local_mode_checks_local_media_dependencies(isolated, monkeypatch
     (remotion / "node_modules" / "remotion").mkdir(parents=True)
     (remotion / "remotion.config.ts").write_text("// auto detection", encoding="utf-8")
     checks = {c.name: c for c in doctor.run_checks()}
-    assert not checks["Serveur Chatterbox local"].ok
-    assert not checks["Serveur Chatterbox local"].blocking or checks["Serveur Chatterbox local"].fix
+    assert not checks["Voix (chaine TTS)"].ok  # aucun fournisseur : ni cle, ni serveur, ni piper
+    assert checks["Voix (chaine TTS)"].fix
     assert checks["npx renderer local"].ok
     assert checks["Remotion local"].ok
 
 
-def test_doctor_local_mode_accepts_cloud_voice(isolated, monkeypatch):
-    """Voix via un Space Hugging Face : aucun serveur Chatterbox local n'est attendu."""
+def test_doctor_voice_chain_reports_available_providers(isolated, monkeypatch):
+    """La chaine de voix est verte des qu'un fournisseur est utilisable ; piper suffit, sans compte."""
     monkeypatch.setenv("PODALUX_VIDEO_RENDERER", "local")
-    monkeypatch.setenv("CHATTERBOX_URL", "hf-space:ResembleAI/Chatterbox-Multilingual-TTS")
     monkeypatch.setenv("OMNIROUTE_ENABLED", "0")
+    monkeypatch.delenv("TTS_CHAIN", raising=False)
+    monkeypatch.delenv("CHATTERBOX_URL", raising=False)
     monkeypatch.setattr(config, "PYTHON", sys.executable)
     monkeypatch.setattr(config, "api_key", lambda: "")
+    monkeypatch.setattr(doctor, "_port_open", lambda url: False)
     monkeypatch.setattr(doctor.shutil, "which", lambda name: sys.executable if name in {"ffmpeg", "ffprobe", "npx"} else None)
     monkeypatch.setattr(doctor.importlib.util, "find_spec",
-                        lambda name: object() if name in {"playwright", "gradio_client"} else None)
+                        lambda name: object() if name in {"playwright", "piper"} else None)
     monkeypatch.setattr(doctor, "_chromium_executable", lambda: sys.executable)
     remotion = isolated / "remotion"
     (remotion / "node_modules" / "remotion").mkdir(parents=True)
     (remotion / "remotion.config.ts").write_text("// auto detection", encoding="utf-8")
 
     checks = {c.name: c for c in doctor.run_checks()}
+    voice = checks["Voix (chaine TTS)"]
+    assert voice.ok and "piper" in voice.detail
     assert "Serveur Chatterbox local" not in checks
-    assert checks["Voix (Space Hugging Face)"].ok
 
     monkeypatch.setattr(doctor.importlib.util, "find_spec",
-                        lambda name: object() if name == "playwright" else None)  # gradio_client absent
-    absent = {c.name: c for c in doctor.run_checks()}
-    assert not absent["Voix (Space Hugging Face)"].ok and "gradio_client" in absent["Voix (Space Hugging Face)"].fix
+                        lambda name: object() if name == "playwright" else None)  # plus aucun fournisseur
+    none_ready = {c.name: c for c in doctor.run_checks()}["Voix (chaine TTS)"]
+    assert not none_ready.ok and "aucun" in none_ready.detail

@@ -149,3 +149,20 @@ Le rendu local reste disponible pour diagnostic uniquement :
 ```
 
 Dans ce cas le `doctor` exigera les dépendances locales correspondantes, notamment FFmpeg, Remotion, Chromium et Chatterbox. MiniMax H3 n'est jamais rendu localement par cette configuration.
+
+
+## Voix (TTS_CHAIN)
+
+La narration passe par `tools/tts_providers.py`. `TTS_CHAIN` (defaut `azure,cloudflare,chatterbox,piper`)
+essaie les fournisseurs dans l'ordre et garde le premier qui repond ; le fournisseur reellement utilise
+par segment est ecrit dans `out/<offer>/audio/tts_report.json`.
+
+| Fournisseur | Variables | Gratuit |
+|---|---|---|
+| azure | `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`, `AZURE_TTS_VOICE` (defaut `fr-FR-VivienneMultilingualNeural`) | palier F0 : 500 000 caracteres/mois, voix neuronales |
+| cloudflare | `CF_ACCOUNT_ID`, `CF_API_TOKEN`, `CF_TTS_MODEL` (defaut `@cf/myshell-ai/melotts`) | 10 000 neurones/jour |
+| chatterbox | `CHATTERBOX_URL` (serveur local, ou `hf-space:<owner/space>` + `HF_TOKEN`) | local, ou quota ZeroGPU du Space |
+| piper | `PIPER_VOICE` (defaut `fr_FR-siwis-medium`), `PIPER_DATA_DIR`, `PIPER_LENGTH_SCALE` | illimite, CPU, sans compte |
+
+`piper` est le plancher : tant qu'il est installe (`pip install piper-tts`), aucun quota ne peut
+arreter un cycle. Mesure du 17/09/2026 (2 vCPU) : 7,4 s de voix synthetises en 1,8 s.
