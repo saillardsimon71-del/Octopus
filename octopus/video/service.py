@@ -100,7 +100,7 @@ class VideoService:
             if artifact is None:
                 raise VideoServiceError("artefact cloud requis absent: final.mp4")
             destination, max_size = destinations[name]
-            VideoService._download_artifact(artifact.url, destination, max_size)
+            VideoService._download_artifact(artifact.url, destination, max_size, artifact.sha256)
 
         # Ces fichiers restent optionnels : certains providers peuvent seulement publier le
         # final et les frames/QC, tandis que le worker FORGE complet les fournit.
@@ -109,7 +109,7 @@ class VideoService:
             if artifact is None:
                 continue
             destination, max_size = destinations[name]
-            VideoService._download_artifact(artifact.url, destination, max_size)
+            VideoService._download_artifact(artifact.url, destination, max_size, artifact.sha256)
 
         frames = metrics.get("frames")
         if isinstance(frames, list) and frames:
@@ -127,17 +127,24 @@ class VideoService:
                 if artifact is None:
                     raise VideoServiceError(f"frame QC introuvable dans le manifest: {item}")
                 destination = frames_dir / name
-                VideoService._download_artifact(artifact.url, destination, 8 * 1024 * 1024)
+                VideoService._download_artifact(artifact.url, destination, 8 * 1024 * 1024, artifact.sha256)
                 materialized.append(str(destination))
             metrics["frames"] = materialized
 
     @staticmethod
-    def _download_artifact(url: str, destination: Path, max_size: int) -> None:
+    def _download_artifact(url: str, destination: Path, max_size: int, expected_sha256: str | None = None) -> None:
         if not url.startswith(("https://", "http://", "file://")):
             raise VideoServiceError(f"schéma d'URL artefact refusé: {url}")
+        if expected_sha256 is not None:
+            expected = expected_sha256.strip().lower()
+            if len(expected) != 64 or any(ch not in "0123456789abcdef" for ch in expected):
+                raise VideoServiceError(f"sha256 artefact invalide pour {destination.name}")
+        else:
+            expected = None
         destination.parent.mkdir(parents=True, exist_ok=True)
         tmp = destination.with_suffix(destination.suffix + ".part")
         total = 0
+        digest = hashlib.sha256()
         try:
             with urllib.request.urlopen(url, timeout=120) as response, tmp.open("wb") as out:
                 while True:
@@ -149,9 +156,14 @@ class VideoService:
                         raise VideoServiceError(
                             f"artefact trop volumineux: {destination.name} ({total} > {max_size})"
                         )
+                    digest.update(chunk)
                     out.write(chunk)
             if total <= 0:
                 raise VideoServiceError(f"artefact vide: {destination.name}")
+            if expected is not None and digest.hexdigest() != expected:
+                raise VideoServiceError(
+                    f"checksum sha256 invalide pour {destination.name}: {digest.hexdigest()} != {expected}"
+                )
             tmp.replace(destination)
         except VideoServiceError:
             tmp.unlink(missing_ok=True)
