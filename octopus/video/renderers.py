@@ -87,27 +87,19 @@ class CloudVideoRenderer(VideoRenderer):
         return result
 
     def _persist_remote_terminal_failure(self, state) -> None:
-        """Distingue un job réellement terminal d'un simple timeout réseau.
-
-        Un appel de statut supplémentaire est volontaire : un timeout du client ne doit
-        jamais être interprété comme un échec et ne doit donc pas créer un second rendu.
-        """
+        """Distinguish an actually terminal job from a client-side status timeout."""
         if not state.remote_id:
             return
         try:
             remote = self.client.status(state.remote_id)
         except CloudVideoError:
             return
-        if remote.status in {
-            VideoStatus.FAILED,
-            VideoStatus.CANCELLED,
-            VideoStatus.EXPIRED,
-        }:
+        if remote.status in {VideoStatus.FAILED, VideoStatus.CANCELLED, VideoStatus.EXPIRED}:
             self.state_store.mark_status(state, remote.status.value)
 
 
 class LocalVideoRenderer(VideoRenderer):
-    """Point d'extension uniquement ; FORGE conserve son pipeline local historique."""
+    """Point d'extension : le pipeline FORGE historique gère le local."""
 
     def render(self, job: VideoJob) -> VideoResult:
         raise RuntimeError(
@@ -117,7 +109,8 @@ class LocalVideoRenderer(VideoRenderer):
 
 
 def get_renderer(*, mode: str | None = None, provider: str | None = None) -> VideoRenderer:
-    selected = (mode or os.environ.get("PODALUX_VIDEO_RENDERER", "local")).strip().lower()
+    # Cloud-first : le contrôle-plane doit nécessiter une sélection explicite du local.
+    selected = (mode or os.environ.get("PODALUX_VIDEO_RENDERER", "cloud")).strip().lower()
     if selected == "local":
         return LocalVideoRenderer()
     if selected != "cloud":
