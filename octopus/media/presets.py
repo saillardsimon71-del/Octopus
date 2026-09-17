@@ -1,10 +1,7 @@
 """Préréglages de génération : choisir un compromis vitesse / qualité sans connaître les réglages WanGP.
 
-Les réglages viennent des fiches de modèles WanGP (C:/pinokio/api/wan.git/app/defaults, 17/09/2026) :
-- t2v_nexus_1.3B : finetune de Wan2.1 1.3B « Built on CausVid », fiche WanGP : 6 étapes, guidance_scale 1,
-  flow_shift 5 (pas de CFG : une seule évaluation du modèle par étape) ;
-- t2v_1.3B : modèle de base, guidage CFG 5.0 (deux évaluations par étape).
-Les durées ne sont jamais écrites ici : elles sont estimées d'après les mesures de la machine (perf.py).
+Les réglages viennent des fiches de modèles WanGP. MiniMax H3 est désormais explicitement
+un backend cloud : il ne doit pas être auto-sélectionné comme modèle local.
 """
 from __future__ import annotations
 
@@ -17,7 +14,7 @@ from . import perf, wangp
 class Preset:
     key: str
     label: str
-    model_type: str | None  # None : modèle par défaut (MiniMax H3 disponible)
+    model_type: str | None
     resolution: str | None
     duration_s: float | None
     settings: dict = field(default_factory=dict)
@@ -34,13 +31,13 @@ PRESETS: dict[str, Preset] = {p.key: p for p in (
     Preset("qualite", "Qualité Wan 1.3B (lent)", "t2v_1.3B", "480x832", 3,
            {"num_inference_steps": 20, "guidance_scale": 5.0},
            "modèle de base avec CFG : deux évaluations par étape"),
-    Preset("h3", "MiniMax H3 (GPU 8 Go+)", None, None, 5, {},
-           "vidéo + son ; demande un GPU récent (RTX 30+) et beaucoup de RAM"),
+    Preset("h3", "MiniMax H3 cloud", "minimax_h3_fl2va_pruned_cloud", "768x1344", 5, {},
+           "RunPod GPU : H3 est entièrement externalisé et ne consomme pas la VRAM du PC local"),
 )}
 
 
 def apply(inp: dict) -> dict:
-    """Complète une entrée de tâche avec son préréglage ; les choix explicites de la demande restent prioritaires."""
+    """Complète une entrée de tâche avec son préréglage ; les choix explicites restent prioritaires."""
     key = inp.get("preset")
     if not key:
         return dict(inp)
@@ -59,8 +56,10 @@ def apply(inp: dict) -> dict:
 
 
 def estimate_for_input(inp: dict, model_type: str | None = None) -> dict | None:
-    """Durée prévue d'une entrée de tâche (après préréglage), d'après les générations mesurées sur ce GPU."""
+    """Durée prévue d'une entrée de tâche pour un moteur local WanGP."""
     inp = apply(inp)
+    if str(inp.get("model_type") or model_type or "").startswith("minimax_h3"):
+        return None
     probe = wangp.cached_probe() or {}
     model_type = model_type or inp.get("model_type")
     if not model_type:
