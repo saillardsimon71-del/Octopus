@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from . import enabled, paths
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -192,7 +192,39 @@ CREATE TABLE IF NOT EXISTS media_generations (
 CREATE INDEX IF NOT EXISTS idx_media_status ON media_generations(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_media_task ON media_generations(task_id);
 """
-_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3))
+_SCHEMA_V4 = """
+CREATE TABLE IF NOT EXISTS media_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at REAL NOT NULL,
+    task_id INTEGER,
+    workdir TEXT NOT NULL UNIQUE,
+    provider TEXT,
+    model_type TEXT,
+    architecture TEXT,
+    width INTEGER,
+    height INTEGER,
+    frames INTEGER,
+    steps INTEGER,
+    passes INTEGER,
+    variants INTEGER,
+    gpu TEXT,
+    vram_gb REAL,
+    exit_code INTEGER,
+    session_s REAL,
+    download_s REAL,
+    download_gb REAL,
+    prepare_s REAL,
+    sec_per_step REAL,
+    steps_timed INTEGER,
+    inference_s REAL,
+    total_s REAL,
+    finished INTEGER NOT NULL DEFAULT 0,
+    data TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_media_runs_arch ON media_runs(architecture, gpu);
+"""
+
+_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4))
 
 _LLM_COLUMNS = (
     "ts", "run_id", "root_run_id", "business", "agent", "task", "profile", "model", "provider",

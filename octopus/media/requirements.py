@@ -28,6 +28,7 @@ FAMILIES: tuple[tuple[str, Needs], ...] = (
     ("minimax_h3_vdn_pruned", Needs("MiniMax H3 VDN élagué 20B", 5.5, 21.0, "estimation, VDN demande un peu plus de VRAM")),
     ("minimax_h3", Needs("MiniMax H3 33B", 5.0, 34.0, "README WanGP (5-6 Go VRAM) + fichier int8 de 34,0 Go")),
     ("ltx2", Needs("LTX-2 19-22B", 6.0, 20.0, "estimation : 19-22 milliards de paramètres en int8")),
+    ("t2v_nexus_1.3B", Needs("Wan2.1 Nexus 1.3B (distillé)", 6.0, 3.0, "même architecture que Wan2.1 T2V 1.3B")),
     ("t2v_1.3B", Needs("Wan2.1 T2V 1.3B", 6.0, 3.0, "README WanGP : 6 Go pour les petits modèles")),
     ("vace_1.3B", Needs("Wan VACE 1.3B", 6.0, 3.0, "README WanGP : 6 Go pour les petits modèles")),
 )

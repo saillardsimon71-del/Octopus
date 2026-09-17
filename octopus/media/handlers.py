@@ -1,6 +1,6 @@
 """Tâche `media.video_generate` : génération vidéo locale (WanGP) dans la file OCTOPUS.
 
-Entrée : {"prompt": "...", "model_type"?, "settings"?: {...réglages WanGP...}, "duration_s"?, "resolution"?,
+Entrée : {"prompt": "...", "preset"?: brouillon|standard|qualite|h3, "model_type"?, "settings"?: {...réglages WanGP...}, "duration_s"?, "resolution"?,
           "seed"?, "variants"?: 1-8, "business"?, "parent_id"?, "tags"?, "allow_with_webui"?, "timeout_s"?}
 Sortie : identifiants de la bibliothèque et fichiers produits.
 
@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from ..worker import TaskCancelled, handler
-from . import library, prompts, requirements, wangp
+from . import library, perf, presets, prompts, requirements, wangp
 
 MODEL_PREFERENCE = ("minimax_h3_fl2va_pruned", "minimax_h3_fl2va", "minimax_h3_vdn_pruned", "minimax_h3_vdn")
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov"}
@@ -64,9 +64,20 @@ def _assign_outputs(result: dict, count: int) -> dict[int, str | None]:
     return assignment
 
 
+def _record_perf(ctx, workdir: Path) -> None:
+    """Mesure réelle du lancement (même annulé) : sert aux estimations de durée ; ne fait jamais échouer la tâche."""
+    try:
+        measured = perf.record(workdir)
+        if measured and measured.get("sec_per_step"):
+            ctx.emit("media.performance", {k: measured.get(k) for k in (
+                "model_type", "width", "height", "frames", "steps", "passes", "sec_per_step", "prepare_s", "total_s")})
+    except Exception as exc:  # noqa: BLE001 - la mesure est accessoire
+        ctx.emit("media.performance_error", {"error": f"{type(exc).__name__}: {exc}"})
+
+
 @handler("media.video_generate", resource="gpu", max_attempts=2, retry_delay_s=300)
 def video_generate(ctx):
-    inp = ctx.input
+    inp = presets.apply(ctx.input)
     prompt = str(inp.get("prompt", "")).strip()
     if not prompt:
         raise ValueError("prompt vide")
@@ -151,6 +162,8 @@ def video_generate(ctx):
         for gen_id in gen_ids:
             library.update(gen_id, status="cancelled", phase="cancelled")
         raise TaskCancelled(str(exc)) from exc
+    finally:
+        _record_perf(ctx, workdir)
     outputs = _assign_outputs(result, variants)
     errors = "; ".join(e.get("message", "") for e in result.get("errors", []))[:1000]
     produced = []

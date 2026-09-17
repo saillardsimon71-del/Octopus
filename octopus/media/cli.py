@@ -6,7 +6,7 @@ import json
 import time
 
 from .. import tasks, worker
-from . import handlers, library, wangp
+from . import handlers, library, perf, presets, wangp
 
 
 def add_parser(sub) -> None:
@@ -17,6 +17,7 @@ def add_parser(sub) -> None:
     q.add_argument("--families", default="minimax_h3,ltx2")
     g = vsub.add_parser("generate", help="met une génération en file")
     g.add_argument("prompt")
+    g.add_argument("--preset", default=None, help="brouillon | standard | qualite | h3 (voir « video presets »)")
     g.add_argument("--model", default=None)
     g.add_argument("--seconds", type=float, default=None)
     g.add_argument("--resolution", default=None, help="LARGEURxHAUTEUR, ex. 480x832")
@@ -28,6 +29,9 @@ def add_parser(sub) -> None:
     g.add_argument("--allow-with-webui", action="store_true")
     g.add_argument("--force", action="store_true", help="essayer malgré un matériel jugé insuffisant")
     g.add_argument("--wait", action="store_true", help="exécuter tout de suite dans ce terminal")
+    vsub.add_parser("presets", help="préréglages vitesse / qualité et durée estimée sur cette machine")
+    m = vsub.add_parser("perf", help="performances mesurées des générations (s/étape, chargement, total)")
+    m.add_argument("--limit", type=int, default=20)
     l = vsub.add_parser("list", help="historique")
     l.add_argument("--limit", type=int, default=20)
     l.add_argument("--search", default=None)
@@ -107,12 +111,40 @@ def run(args) -> int:
                 settings[key] = value
         if args.steps:
             settings["num_inference_steps"] = args.steps
-        inp = {"prompt": args.prompt, "model_type": args.model, "settings": settings, "duration_s": args.seconds,
-               "resolution": args.resolution, "seed": args.seed, "variants": args.variants, "business": args.business,
-               "allow_with_webui": args.allow_with_webui, "force": args.force}
-        task_id = _enqueue({k: v for k, v in inp.items() if v not in (None, {}, False)})
-        print(f"génération en file : tâche #{task_id}")
+        inp = {"prompt": args.prompt, "preset": args.preset, "model_type": args.model, "settings": settings,
+               "duration_s": args.seconds, "resolution": args.resolution, "seed": args.seed, "variants": args.variants,
+               "business": args.business, "allow_with_webui": args.allow_with_webui, "force": args.force}
+        inp = {k: v for k, v in inp.items() if v not in (None, {}, False)}
+        try:
+            perf.backfill()
+            estimate = presets.estimate_for_input(inp, inp.get("model_type") or (None if args.preset else handlers.default_model()))
+        except ValueError as exc:
+            print(f"erreur : {exc}")
+            return 2
+        task_id = _enqueue(inp)
+        print(f"génération en file : tâche #{task_id} — durée prévue {perf.describe(estimate)}")
         return _wait(task_id) if args.wait else 0
+    if cmd == "presets":
+        perf.backfill()
+        for preset in presets.PRESETS.values():
+            model = preset.model_type or handlers.default_model()
+            estimate = presets.estimate_for_input({"preset": preset.key}, model)
+            print(f"{preset.key:10} {preset.label:26} {model:22} {preset.resolution or 'défaut':9} "
+                  f"{preset.duration_s or '?'}s  {perf.describe(estimate)}")
+            print(f"{'':10} {preset.note}")
+        return 0
+    if cmd == "perf":
+        added = perf.backfill()
+        if added:
+            print(f"{added} lancement(s) passé(s) mesuré(s)")
+        for r in perf.runs(args.limit):
+            state = {0: "ok", 2: "échec", 3: "annulé"}.get(r["exit_code"], f"code {r['exit_code']}")
+            print(f"tâche #{r['task_id'] or '?':<4} {state:7} {r['model_type']:22} {r['width']}x{r['height']} "
+                  f"{r['frames'] or '?'} img  {r['steps'] or '?'} ét. {'CFG' if (r['passes'] or 2) == 2 else 'sans CFG'}  "
+                  f"{r['sec_per_step'] if r['sec_per_step'] is not None else '?'} s/étape  "
+                  f"chargement {r['prepare_s'] if r['prepare_s'] is not None else '?'} s  "
+                  f"téléchargé {r['download_gb'] or 0:g} Go  total {r['total_s']:.0f} s  [{r['gpu'] or '?'}]")
+        return 0
     if cmd == "list":
         for g in library.recent(args.limit, search=args.search):
             print(f"#{g['id']:<5} {g['status']:9} {g['progress']:>3}% {g['model_type']:28} "
