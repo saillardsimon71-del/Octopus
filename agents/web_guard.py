@@ -8,8 +8,8 @@ l'empêche de façon sûre : la protection est ici, en code.
 Règles :
 1. http(s) uniquement ; pas d'hôte local ni de réseau privé (Chatterbox, Ollama, box...).
 2. Web public : contexte éphémère sans cookies. Comptes : profil connecté, lecture seule.
-3. Après la lecture d'un compte connecté, plus aucune page hors comptes dans la même exécution
-   (mission comprise), et plus d'URL de compte portant une redirection ou une longue requête.
+3. Dès qu'une requête de compte autorisé est observée, la session est marquée `account_read`
+   AVANT de laisser la réponse arriver ; toute sortie vers le web public est alors refusée.
 """
 from __future__ import annotations
 
@@ -95,11 +95,19 @@ def check(url: str, state: BrowseState) -> str:
 
 
 def allowed(url: str, state: BrowseState) -> bool:
+    """Garde booléen utilisé par Playwright.
+
+    Important : un appel autorisé vers un domaine de compte marque immédiatement la session comme
+    ayant observé un compte. Cela ferme la fenêtre dans laquelle une page de compte pourrait
+    charger un script puis déclencher un `fetch` public avant que `goto()` ne rende la main.
+    """
     try:
-        check(url, state)
-        return True
+        kind = check(url, state)
     except BrowseRefused:
         return False
+    if kind == ACCOUNT:
+        state.account_read = True
+    return True
 
 
 def record(url: str, kind: str, state: BrowseState) -> None:
