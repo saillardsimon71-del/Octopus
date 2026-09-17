@@ -143,6 +143,22 @@ def log_cost(agent: str, task: str, model: str,
     return cost
 
 
+def cost_today() -> float:
+    """Coût LLM depuis minuit UTC (journal OCTOPUS si actif, sinon table historique)."""
+    try:
+        import octopus
+        if octopus.enabled():
+            from octopus import journal
+            return journal.spent_today()
+    except Exception:
+        pass
+    start = time.time() - (time.time() % 86400)
+    conn = _conn()
+    row = conn.execute("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM costs WHERE ts >= ?", (start,)).fetchone()
+    conn.close()
+    return float(row["c"])
+
+
 def total_cost() -> float:
     conn = _conn()
     row = conn.execute("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM costs").fetchone()
@@ -160,6 +176,13 @@ def record_metric(offer_id: str, score: int | None, humanite: int | None,
     )
     conn.commit()
     conn.close()
+
+
+def last_metric(offer_id: str) -> dict | None:
+    conn = _conn()
+    row = conn.execute("SELECT * FROM metrics WHERE offer_id=? ORDER BY id DESC LIMIT 1", (offer_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def decide(agent: str, decision: str, payload: dict | None = None) -> None:
@@ -403,7 +426,10 @@ def human_messages(limit: int = 10) -> list[dict]:
 def metrics_list() -> list[dict]:
     """Toutes les métriques rubric (dernière par offre)."""
     conn = _conn()
-    rows = conn.execute("SELECT offer_id, score, humanite, verdict FROM metrics ORDER BY id").fetchall()
+    # Seulement les offres du catalogue : 22 des 26 lignes du 16/09 venaient de _verify.py (audit C9).
+    marks = ",".join("?" for _ in config.CATALOG_OFFERS)
+    rows = conn.execute(f"SELECT offer_id, score, humanite, verdict FROM metrics WHERE offer_id IN ({marks}) "
+                        "ORDER BY id", tuple(config.CATALOG_OFFERS)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

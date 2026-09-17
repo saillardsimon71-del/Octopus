@@ -177,7 +177,7 @@ class PodaluxApp(ctk.CTk):
 
     def _refresh_dashboard(self):
         self.cost_label.configure(
-            text=f"Coût : ${db.total_cost():.4f} / ${config.CYCLE_BUDGET_USD:.2f}")
+            text=f"Coût aujourd'hui : ${db.cost_today():.4f} · budget par cycle ${config.CYCLE_BUDGET_USD:.2f}")
         mets = db.metrics_list()
         if mets:
             lines = [f"  {m['offer_id']}: {m['score']}/35 · humanité {m['humanite']}/5 · {m['verdict']}"
@@ -251,7 +251,12 @@ class PodaluxApp(ctk.CTk):
         if not offer:
             return
         from ..publish import publish
-        r = publish(offer, dry_run=True)
+        try:
+            r = publish(offer, dry_run=True)
+        except Exception as e:  # avant : exception invisible, le bouton semblait ne rien faire
+            ctk.CTkLabel(self.handoffs_frame, text=f"[PUBLICATION] échec : {e}", anchor="w", wraplength=320,
+                         text_color="#e57373").pack(fill="x", pady=4)
+            return
         ctk.CTkLabel(self.handoffs_frame, text=f"[PUBLICATION dry-run] {r['plan'].get('title', offer)}",
                      anchor="w", wraplength=320, text_color="#81c784").pack(fill="x", pady=4)
 
