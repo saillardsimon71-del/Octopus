@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from tools import tts_providers  # noqa: E402
+from tools import tts_providers, word_sync  # noqa: E402
 
 SR = 44100
 GAP = 0.12
@@ -161,19 +161,27 @@ def main():
     vo = np.concatenate(parts)
     vo_total = len(vo) / SR
 
-    words = []
+    synced = word_sync.enabled()
+    words, shifts = [], []
     for i, seg in enumerate(segments):
         seg_start, seg_end = seg_starts[i], seg_starts[i] + seg_durs[i]
         toks = seg["texte"].split()
-        weights = [max(1, len(tok.rstrip('.,;:!?'))) for tok in toks]
-        total_w = sum(weights)
-        t = seg_start
-        for j, tok in enumerate(toks):
-            dur = (weights[j] / total_w) * (seg_end - seg_start)
-            words.append({"text": tok, "start": round(t, 3), "end": round(t + dur, 3),
+        spread = word_sync._proportional(toks, seg_start, seg_end)
+        spans = spread
+        if synced:
+            try:
+                heard = word_sync.transcribe(str(seg_wavs[i]))
+                spans = word_sync.align(toks, heard, seg_start, seg_end)
+                shifts += [abs(a[0] - b[0]) for a, b in zip(spans, spread)]
+            except Exception as exc:  # modele absent, audio illisible : la repartition reste valable
+                print(f"calage mots: segment {i} non cale ({type(exc).__name__}: {str(exc)[:80]})")
+                spans = spread
+        for tok, (start, end) in zip(toks, spans):
+            words.append({"text": tok, "start": round(start, 3), "end": round(end, 3),
                           "seg": i, "role": seg["role"]})
-            t += dur
-    print(f"mots (source distribues): {len(words)}")
+    source = "cales sur la voix" if synced else "repartis au prorata"
+    print(f"mots ({source}): {len(words)}" +
+          (f" ; decalage moyen {sum(shifts) / len(shifts):.3f}s, max {max(shifts):.3f}s" if shifts else ""))
 
     full = vo_total + TAIL
     n = int(full * SR)

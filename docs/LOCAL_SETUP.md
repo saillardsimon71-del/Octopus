@@ -181,3 +181,15 @@ Remotion garde les photos du depot pour les roles sans image trouvee.
 
 Les credits sont ecrits dans `out/<offer>/credits.txt` (a coller dans la description de la video quand
 la licence demande une attribution). `PODALUX_BROLL=0` desactive l'etape.
+
+
+## Sous-titres cales sur la voix
+
+`tools/word_sync.py` transcrit chaque segment audio (faster-whisper, modele `tiny`, CPU) et aligne
+les mots du script sur les temps mesures ; les mots mal transcrits sont interpoles entre deux mots
+reconnus. Sans `faster-whisper` installe, ou avec `PODALUX_WORD_SYNC=0`, la repartition au prorata
+des caracteres est conservee.
+
+Mesure du 18/09/2026 (cash_impayes_relance01, 53 mots, 2 vCPU) : decalage moyen de 0,146 s et
+maximum de 0,526 s par rapport a la repartition au prorata ; transcription de 22 s d'audio en 4,8 s.
+`PODALUX_WHISPER_MODEL` permet un modele plus precis (`base`, `small`) au prix du temps de calcul.
