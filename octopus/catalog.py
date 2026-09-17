@@ -23,7 +23,14 @@ class Catalog:
 
     @property
     def default_profile(self) -> str:
-        return self.raw.get("default_profile", "legacy")
+        selected = self.raw.get("default_profile", "legacy")
+        # Le catalogue historique reste legacy quand OmniRoute est désactive ou quand
+        # OCTOPUS_PROFILE est explicitement choisi. Sans override, OmniRoute doit toutefois
+        # proteger le poste d'un appel payant implicite.
+        if (selected == "legacy" and _omniroute_enabled()
+                and not os.environ.get("OCTOPUS_PROFILE", "").strip()):
+            return "zero_cost"
+        return selected
 
     def provider(self, name: str) -> dict:
         return self.raw["providers"][name]
