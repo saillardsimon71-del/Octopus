@@ -33,3 +33,7 @@ jobs/*.bak
 # Quarantaine et copies locales
 _quarantine/
 Claude outputs/
+
+# Configuration locale des outils IA (hors depot)
+.claude/
+.mcp.json
