@@ -19,9 +19,6 @@ from . import config, db, deepseek, web_guard
 
 
 class BrowserTool:
-    # Les appels actifs sont les vecteurs d'exfiltration les plus fréquents après lecture d'un compte.
-    # Les ressources statiques externes restent tolérées pour ne pas casser les applications modernes
-    # (CDN, images, fonts), tandis que navigation/XHR/fetch/websocket restent soumis au garde.
     ACTIVE_RESOURCE_TYPES = {"fetch", "xhr", "websocket", "eventsource", "beacon"}
 
     def __init__(self, headless: bool = False, profile_dir: Path | None = None, persistent: bool = True,
@@ -39,12 +36,9 @@ class BrowserTool:
         self._page = None
         self._started = False
 
-    # --- cycle de vie ---
     def start(self) -> "BrowserTool":
         from playwright.sync_api import sync_playwright
         self._pw = sync_playwright().start()
-        # Service workers peuvent contourner browserContext.route(); on les bloque pour que le garde
-        # réseau reste observable et déterministe (Playwright recommande ce mode pour l'interception).
         if self.persistent:
             self._context = self._pw.chromium.launch_persistent_context(
                 str(self.profile_dir), headless=self.headless,
@@ -67,7 +61,6 @@ class BrowserTool:
         try:
             return request.resource_type() in self.ACTIVE_RESOURCE_TYPES
         except Exception:
-            # Défense prudente pour les faux objets/test doubles sans resource_type().
             return True
 
     def _route(self, route) -> None:
@@ -86,8 +79,9 @@ class BrowserTool:
             self._continue(route)
             return
 
-        # Playwright n'appelle ce handler que pour la PREMIÈRE URL d'une redirection HTTP :
-        # suivi manuel pour empêcher une redirection vers un tiers de contourner le garde.
+        # Suivi manuel des redirections : le premier saut est contrôlé puis chaque Location
+        # est vérifiée avant d'être demandée. `route.fetch(url=...)` conserve le contexte réseau
+        # Playwright, contrairement à un nouvel APIRequestContext indépendant.
         url, response = request.url, self._fetch(route, request.url, first=True)
         for _ in range(self.MAX_REDIRECTS):
             location = response.headers.get("location")
@@ -112,9 +106,9 @@ class BrowserTool:
         route.abort("blockedbyclient")
 
     def _fetch(self, route, url: str, first: bool):
-        if first:
-            return route.fetch(max_redirects=0)
-        return self._context.request.get(url, max_redirects=0)
+        # `url=` is supported by Playwright Route.fetch and keeps the redirect inside the
+        # intercepted browser request rather than issuing a separate context request.
+        return route.fetch(url=url, max_redirects=0)
 
     def _fulfill(self, route, response) -> None:
         route.fulfill(response=response)
@@ -142,7 +136,6 @@ class BrowserTool:
     def __exit__(self, *a):
         self.stop()
 
-    # --- navigation / lecture ---
     def goto(self, url: str) -> str:
         self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
         db.set_state("browser_url", self._page.url)
@@ -170,7 +163,6 @@ class BrowserTool:
             return []
         return [h for h in hrefs if h][:max_items]
 
-    # --- interaction ---
     def click(self, selector: str) -> None:
         self._page.click(selector, timeout=15000)
 
@@ -186,12 +178,10 @@ class BrowserTool:
     def url(self) -> str:
         return self._page.url
 
-    # --- recherche web (veille) ---
     def search(self, query: str, max_results: int = 6) -> str:
         from .search import web_search
         return web_search(query, max_results)
 
-    # --- vision ---
     def screenshot(self, path: Path | None = None) -> Path:
         path = path or (config.DATA_DIR / "screenshots" / f"shot_{int(time.time())}.png")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -200,7 +190,6 @@ class BrowserTool:
         return path
 
     def see(self, prompt: str = "Décris cette page et ce qu'on peut y faire.", agent: str = "SOUT") -> dict:
-        """Capture + vision : compte connecté = modèle local, page publique = OmniRoute/free."""
         shot = self.screenshot()
         kind = web_guard.classify(self.url())
         task = "web.describe_page" if kind == web_guard.ACCOUNT else "web.inspect_page"
@@ -209,13 +198,11 @@ class BrowserTool:
         except Exception as exc:
             from octopus import llm
             if isinstance(exc, llm.NoEligibleModel):
-                # Le texte DOM reste exploitable même sans provider vision configuré.
                 txt = self.snapshot(2000) or "Vision indisponible : aucun modèle vision éligible."
             else:
                 raise
         return {"screenshot": str(shot), "description": txt, "vision_task": task, "page_kind": kind}
 
-    # --- passation humaine (login, 2FA, captcha, confirmation) ---
     def handoff(self, message: str, timeout_s: int = 300) -> bool:
         ans = db.ask_human("BROWSER", "browser_handoff", message, timeout_s=timeout_s)
         if ans is None:
