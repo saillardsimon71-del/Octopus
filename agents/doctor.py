@@ -91,8 +91,15 @@ def _add_local_renderer_checks(checks: list[Check], blocking: bool) -> None:
                             "supprimer l'ancien chemin fixe ou définir PODALUX_REMOTION_BROWSER", blocking=blocking))
     else:
         checks.append(Check("Navigateur Remotion local", True, "auto-détection Remotion", blocking=blocking))
-    checks.append(Check("Serveur Chatterbox local", _port_open(config.CHATTERBOX_URL), config.CHATTERBOX_URL,
-                        "démarrer Chatterbox uniquement pour PODALUX_VIDEO_RENDERER=local", blocking=blocking))
+    tts_url = os.environ.get("CHATTERBOX_URL", config.CHATTERBOX_URL).strip() or config.CHATTERBOX_URL
+    if tts_url.startswith("hf-space:"):  # voix dans le cloud : aucun serveur local, aucun GPU
+        has_client = importlib.util.find_spec("gradio_client") is not None
+        checks.append(Check("Voix (Space Hugging Face)", has_client, tts_url,
+                            "python -m pip install gradio_client", blocking=blocking))
+    else:
+        checks.append(Check("Serveur Chatterbox local", _port_open(tts_url), tts_url,
+                            "démarrer Chatterbox, ou CHATTERBOX_URL=hf-space:ResembleAI/Chatterbox-Multilingual-TTS "
+                            "pour la voix dans le cloud", blocking=blocking))
 
 
 def run_checks() -> list[Check]:
