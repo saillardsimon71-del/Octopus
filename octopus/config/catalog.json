@@ -1,0 +1,235 @@
+{
+  "version": 1,
+  "_doc": "Catalogue OCTOPUS. Prix en USD par million de tokens, heures creuses ; multiplicateur applique dans les fenetres de pointe du fournisseur. Informations de quotas et de donnees verifiees le 2026-09-16 (sources par fournisseur) : a reverifier avant tout usage commercial.",
+  "default_profile": "legacy",
+  "budgets": {"daily_usd": 2.0},
+  "evidence": {"min_samples": 5, "min_pass_rate": 0.9, "max_age_days": 60},
+  "providers": {
+    "deepseek": {
+      "kind": "cloud",
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "timeout_s": 600,
+      "max_retries": 2,
+      "peak_utc_weekdays": ["01:00-04:00", "06:00-10:00"],
+      "data_policy": "Donnees traitees et stockees en Chine ; utilisees par defaut pour entrainer les modeles (opposition par e-mail).",
+      "sources": ["https://api-docs.deepseek.com/quick_start/pricing", "https://cdn.deepseek.com/policies/en-US/deepseek-privacy-policy.html"]
+    },
+    "ollama": {
+      "kind": "local",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "api_key_env": null,
+      "timeout_s": 300,
+      "max_retries": 0,
+      "health_path": "/models",
+      "data_policy": "Execution locale : aucune donnee ne quitte la machine.",
+      "sources": ["https://docs.ollama.com/api/openai-compatibility", "https://docs.ollama.com/gpu"]
+    },
+    "lmstudio": {
+      "kind": "local",
+      "base_url": "http://127.0.0.1:1234/v1",
+      "api_key_env": null,
+      "timeout_s": 300,
+      "max_retries": 0,
+      "health_path": "/models",
+      "data_policy": "Execution locale. Application gratuite, y compris au travail.",
+      "sources": ["https://lmstudio.ai/blog/free-for-work"]
+    },
+    "groq": {
+      "kind": "cloud",
+      "base_url": "https://api.groq.com/openai/v1",
+      "api_key_env": "GROQ_API_KEY",
+      "timeout_s": 60,
+      "max_retries": 1,
+      "quota_note": "Plan gratuit : 30 requetes/min, 1 000 requetes/jour, 8 000 tokens/min, 200 000 tokens/jour (gpt-oss-120b, qwen3.8-27b).",
+      "data_policy": "Entrees et sorties non utilisees pour l'entrainement ; retention jusqu'a 30 jours ; Zero Data Retention activable.",
+      "sources": ["https://console.groq.com/docs/rate-limits", "https://console.groq.com/docs/your-data"]
+    },
+    "gemini": {
+      "kind": "cloud",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+      "api_key_env": "GEMINI_API_KEY",
+      "timeout_s": 90,
+      "max_retries": 1,
+      "quota_note": "Palier gratuit : limites par projet, affichees dans Google AI Studio (non publiees).",
+      "data_policy": "Palier gratuit : contenus utilises pour ameliorer les produits, sauf pour les utilisateurs de l'EEE, de Suisse et du Royaume-Uni (conditions du palier payant). Usage professionnel, 18 ans et plus.",
+      "sources": ["https://ai.google.dev/gemini-api/docs/pricing", "https://ai.google.dev/gemini-api/terms", "https://ai.google.dev/gemini-api/docs/openai"]
+    },
+    "openrouter": {
+      "kind": "cloud",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "timeout_s": 90,
+      "max_retries": 1,
+      "quota_note": "Modeles :free : 20 requetes/min ; 50 requetes/jour, 1 000 apres 10 credits achetes au total.",
+      "data_policy": "Depend du fournisseur final de chaque modele gratuit : a verifier modele par modele.",
+      "sources": ["https://openrouter.ai/docs/api-reference/limits"]
+    },
+    "cerebras": {
+      "kind": "cloud",
+      "base_url": "https://api.cerebras.ai/v1",
+      "api_key_env": "CEREBRAS_API_KEY",
+      "timeout_s": 60,
+      "max_retries": 1,
+      "quota_note": "Essai gratuit : 5 requetes/min, 1 million de tokens/jour (gpt-oss-120b, qwen-3.8-27b).",
+      "data_policy": "Non verifie.",
+      "sources": ["https://inference-docs.cerebras.ai/support/rate-limits"]
+    }
+  },
+  "models": {
+    "deepseek/flash": {
+      "provider": "deepseek", "api_model": "deepseek-flash", "cost_class": "paid",
+      "capabilities": ["json", "vision", "tools"],
+      "params": {"extra_body": {"thinking": {"type": "disabled"}}},
+      "price": {"input_cache_hit": 0.003, "input_cache_miss": 0.15, "output": 0.60, "peak_multiplier": 2.0},
+      "notes": "DeepSeek-V4.1-Flash. Mode reflexion desactive (sinon il consomme max_tokens)."
+    },
+    "deepseek/v4-pro": {
+      "provider": "deepseek", "api_model": "deepseek-v4-pro", "cost_class": "paid",
+      "capabilities": ["json", "tools", "reasoning_effort"],
+      "params": {"extra_body": {"thinking": {"type": "enabled"}}},
+      "price": {"input_cache_hit": 0.022, "input_cache_miss": 0.66, "output": 1.98, "peak_multiplier": 2.0},
+      "notes": "DeepSeek-V4-Pro. Pas de vision."
+    },
+    "ollama/qwen3.5-2b": {
+      "provider": "ollama", "api_model": "qwen3.5:2b", "cost_class": "local",
+      "capabilities": ["json", "vision"],
+      "params": {"reasoning_effort": "none"},
+      "notes": "Apache 2.0. 2,7 Go dans Ollama : tient presque entierement dans la VRAM d'une GTX 1060 3 Go."
+    },
+    "ollama/qwen3.5-4b": {
+      "provider": "ollama", "api_model": "qwen3.5:4b", "cost_class": "local",
+      "capabilities": ["json", "vision"],
+      "params": {"reasoning_effort": "none"},
+      "notes": "Apache 2.0. 3,4 Go dans Ollama : dechargement partiel sur le CPU avec 3 Go de VRAM."
+    },
+    "groq/gpt-oss-120b": {
+      "provider": "groq", "api_model": "openai/gpt-oss-120b", "cost_class": "free_quota",
+      "capabilities": ["json", "tools", "reasoning_effort"],
+      "notes": "Apache 2.0. Quota gratuit Groq."
+    },
+    "groq/qwen3.8-27b": {
+      "provider": "groq", "api_model": "qwen/qwen3.8-27b", "cost_class": "free_quota",
+      "capabilities": ["json", "vision"],
+      "notes": "Apache 2.0. Quota gratuit Groq."
+    },
+    "gemini/3.5-flash": {
+      "provider": "gemini", "api_model": "gemini-3.5-flash", "cost_class": "free_quota",
+      "capabilities": ["json", "vision", "reasoning_effort"],
+      "notes": "Palier gratuit Gemini. La reflexion ne peut pas etre desactivee sur les modeles Gemini 3."
+    },
+    "gemini/3.5-flash-lite": {
+      "provider": "gemini", "api_model": "gemini-3.5-flash-lite", "cost_class": "free_quota",
+      "capabilities": ["json", "vision", "reasoning_effort"],
+      "notes": "Palier gratuit Gemini."
+    }
+  },
+  "profiles": {
+    "legacy": {
+      "description": "Comportement historique : le modele impose par le code est utilise tel quel.",
+      "honor_pins": true, "allowed_cost_classes": ["paid", "free_quota", "local"], "require_evidence": false, "fallback": false
+    },
+    "zero_cost": {
+      "description": "Local et quotas gratuits uniquement. Aucun appel payant automatique.",
+      "honor_pins": false, "allowed_cost_classes": ["local", "free_quota"], "require_evidence": true, "fallback": true
+    },
+    "low_cost": {
+      "description": "Local et gratuit d'abord ; payant seulement si aucune alternative validee, dans le budget.",
+      "honor_pins": false, "allowed_cost_classes": ["local", "free_quota", "paid"], "require_evidence": true, "fallback": true
+    },
+    "quality_first": {
+      "description": "Meilleur modele valide d'abord ; couts suivis et plafonnes.",
+      "honor_pins": false, "allowed_cost_classes": ["paid", "free_quota", "local"], "require_evidence": true, "fallback": true
+    },
+    "bench": {
+      "description": "Banc d'evaluation : modele impose, aucune exigence de preuve.",
+      "honor_pins": true, "allowed_cost_classes": ["paid", "free_quota", "local"], "require_evidence": false, "fallback": false
+    }
+  },
+  "tasks": {
+    "podalux.select_offer": {
+      "needs": ["json"], "privacy": "public", "baseline": "deepseek/flash",
+      "candidates": {
+        "zero_cost": ["ollama/qwen3.5-2b", "groq/gpt-oss-120b", "gemini/3.5-flash-lite"],
+        "low_cost": ["ollama/qwen3.5-2b", "groq/gpt-oss-120b", "gemini/3.5-flash-lite", "deepseek/flash"],
+        "quality_first": ["deepseek/flash"]
+      }
+    },
+    "podalux.write_job": {
+      "needs": ["json"], "privacy": "public", "baseline": "deepseek/flash",
+      "candidates": {
+        "zero_cost": ["ollama/qwen3.5-4b", "gemini/3.5-flash", "groq/qwen3.8-27b"],
+        "low_cost": ["ollama/qwen3.5-4b", "gemini/3.5-flash", "groq/qwen3.8-27b", "deepseek/flash"],
+        "quality_first": ["deepseek/flash", "gemini/3.5-flash"]
+      }
+    },
+    "podalux.qc_vision": {
+      "needs": ["vision"], "privacy": "public", "baseline": "deepseek/flash",
+      "candidates": {
+        "zero_cost": ["ollama/qwen3.5-4b", "gemini/3.5-flash", "groq/qwen3.8-27b"],
+        "low_cost": ["ollama/qwen3.5-4b", "gemini/3.5-flash", "groq/qwen3.8-27b", "deepseek/flash"],
+        "quality_first": ["deepseek/flash", "gemini/3.5-flash"]
+      }
+    },
+    "podalux.arbitrate": {
+      "needs": ["json"], "privacy": "public", "baseline": "deepseek/v4-pro",
+      "candidates": {
+        "zero_cost": ["ollama/qwen3.5-2b", "groq/gpt-oss-120b"],
+        "low_cost": ["ollama/qwen3.5-2b", "groq/gpt-oss-120b", "deepseek/flash", "deepseek/v4-pro"],
+        "quality_first": ["deepseek/v4-pro"]
+      }
+    },
+    "agent.react_step": {
+      "needs": ["json"], "privacy": "internal", "baseline": "deepseek/flash",
+      "candidates": {
+        "zero_cost": ["groq/gpt-oss-120b", "ollama/qwen3.5-4b"],
+        "low_cost": ["groq/gpt-oss-120b", "ollama/qwen3.5-4b", "deepseek/flash"],
+        "quality_first": ["deepseek/flash"]
+      }
+    },
+    "agent.plan": {
+      "needs": ["json"], "privacy": "internal", "baseline": "deepseek/v4-pro",
+      "candidates": {
+        "zero_cost": ["groq/gpt-oss-120b"],
+        "low_cost": ["groq/gpt-oss-120b", "deepseek/flash", "deepseek/v4-pro"],
+        "quality_first": ["deepseek/v4-pro"]
+      }
+    },
+    "agent.synthesize": {
+      "needs": ["json"], "privacy": "internal", "baseline": "deepseek/v4-pro",
+      "candidates": {
+        "zero_cost": ["groq/gpt-oss-120b"],
+        "low_cost": ["groq/gpt-oss-120b", "deepseek/flash", "deepseek/v4-pro"],
+        "quality_first": ["deepseek/v4-pro"]
+      }
+    },
+    "web.summarize": {
+      "needs": [], "privacy": "public", "baseline": "deepseek/flash",
+      "candidates": {
+        "zero_cost": ["ollama/qwen3.5-2b", "groq/gpt-oss-120b"],
+        "low_cost": ["ollama/qwen3.5-2b", "groq/gpt-oss-120b", "deepseek/flash"],
+        "quality_first": ["deepseek/flash"]
+      }
+    },
+    "web.describe_page": {
+      "needs": ["vision"], "privacy": "sensitive", "baseline": "deepseek/flash",
+      "candidates": {
+        "zero_cost": ["ollama/qwen3.5-4b"],
+        "low_cost": ["ollama/qwen3.5-4b"],
+        "quality_first": ["ollama/qwen3.5-4b"]
+      }
+    }
+  },
+  "legacy_tasks": {
+    "SOUT/selection_offre": "podalux.select_offer",
+    "CONVERT/redaction_job": "podalux.write_job",
+    "GROWTH/qc_vision": "podalux.qc_vision",
+    "ORBIT/arbitrage": "podalux.arbitrate",
+    "ORBIT/planification": "agent.plan",
+    "ORBIT/synthese": "agent.synthesize",
+    "SOUT/veille_synthese": "web.summarize",
+    "SOUT/voir_page": "web.describe_page",
+    "*/voir_page": "web.describe_page",
+    "*/action": "agent.react_step"
+  }
+}

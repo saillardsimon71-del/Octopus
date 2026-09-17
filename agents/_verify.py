@@ -3,6 +3,8 @@
 Usage : python -m agents._verify
 """
 import json
+import os
+import sys
 import traceback
 
 from . import config, db, deepseek, tools
@@ -25,6 +27,12 @@ def check(name, fn):
 
 
 def main():
+    if "--live" not in sys.argv and os.environ.get("PODALUX_VERIFY_LIVE") != "1":
+        print("Ce script fait des appels payants, écrit dans la base de production et écrase "
+              "jobs/cash_impayes_relance01.json.")
+        print("Vérifications hors-ligne : python -m pytest tests")
+        print("Pour le lancer quand même : python -m agents._verify --live")
+        raise SystemExit(2)
     print("=== 1. DB (SQLite) ===")
     def t_db():
         db.init_db()

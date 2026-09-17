@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+from octopus.journal import with_run
+
 from . import config, db
 from .agents import SOUT, CONVERT, FORGE, GROWTH, LEDGER, ORBIT
 
@@ -15,6 +17,7 @@ def already_produced() -> list[str]:
     return sorted(p.name for p in out_dir.iterdir() if (p / "final.mp4").exists())
 
 
+@with_run("podalux", "video_cycle", budget_usd=config.CYCLE_BUDGET_USD)
 def run_cycle(offer_id: str | None = None, max_iterations: int = 3) -> dict:
     db.init_db()
     db.clear_stop()

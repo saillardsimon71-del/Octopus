@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+from octopus.journal import with_run
+
 from . import db, deepseek
 
 MODEL = deepseek.config.MODEL_FLASH
@@ -104,12 +106,18 @@ ROLES = {
 }
 
 
-def run_agent(role: str, goal: str, max_steps: int = 10,
-              conversational: bool = False) -> dict:
-    """Un agent (rôle) poursuit un objectif librement via la boucle ReAct.
+def _budget_exhausted() -> bool:
+    """Budget du run OCTOPUS en cours (et de ses parents). Coupe-circuit : contrôle historique."""
+    import octopus
+    if not octopus.enabled():
+        return db.total_cost() > deepseek.config.CYCLE_BUDGET_USD
+    from octopus import journal
+    run = journal.current_run()
+    return bool(run and journal.budget_exhausted(run))
 
-    `conversational=True` → l'agent répond à un message humain (pas un objectif).
-    """
+
+def build_prompts(role: str, goal: str, conversational: bool = False) -> tuple[str, str, str]:
+    """(prompt système, premier message, libellé de fin) de la boucle ReAct."""
     role_desc = ROLES.get(role, "")
     if conversational:
         system = (
@@ -138,14 +146,25 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
         )
         first_user = f"Objectif : {goal}"
         done_label = "objectif atteint"
+    return system, first_user, done_label
+
+
+@with_run("podalux", "agent", budget_usd=deepseek.config.CYCLE_BUDGET_USD)
+def run_agent(role: str, goal: str, max_steps: int = 10,
+              conversational: bool = False) -> dict:
+    """Un agent (rôle) poursuit un objectif librement via la boucle ReAct.
+
+    `conversational=True` → l'agent répond à un message humain (pas un objectif).
+    """
+    system, first_user, done_label = build_prompts(role, goal, conversational)
     context = [{"role": "system", "content": system},
                {"role": "user", "content": first_user}]
     steps = []
     last_sig = None
     repeat = 0
     for i in range(max_steps):
-        # Garde-budget : on arrête l'agent si le coût cumulé dépasse le plafond du cycle.
-        if db.total_cost() > deepseek.config.CYCLE_BUDGET_USD:
+        # Garde-budget : on arrête l'agent si le budget du run est atteint.
+        if _budget_exhausted():
             db.post(role, "budget dépassé — arrêt du run")
             return {"role": role, "steps": steps, "final": "(budget dépassé)"}
         try:
@@ -183,6 +202,7 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
     return {"role": role, "steps": steps, "final": "(max steps atteint)"}
 
 
+@with_run("podalux", "mission", budget_usd=deepseek.config.CYCLE_BUDGET_USD)
 def run_mission(goal: str, max_steps_per_agent: int = 8) -> dict:
     """ORBIT planifie puis délègue aux rôles (multi-agents via le runtime)."""
     pro = deepseek.config.MODEL_PRO

@@ -118,9 +118,13 @@ def post(agent: str, content: str, to: str | None = None,
 
 
 def log_cost(agent: str, task: str, model: str,
-             prompt_tokens: int, completion_tokens: int) -> float:
-    prices = config.PRICES.get(model, {"in": 0.0, "out": 0.0})
-    cost = (prompt_tokens * prices["in"] + completion_tokens * prices["out"]) / 1_000_000
+             prompt_tokens: int, completion_tokens: int, cost_usd: float | None = None) -> float:
+    """Table historique (affichee par la GUI). `cost_usd` : cout officiel calcule par OCTOPUS."""
+    if cost_usd is None:
+        prices = config.PRICES.get(model, {"in": 0.0, "out": 0.0})
+        cost = (prompt_tokens * prices["in"] + completion_tokens * prices["out"]) / 1_000_000
+    else:
+        cost = cost_usd
     conn = _conn()
     conn.execute(
         "INSERT INTO costs (ts, agent, task, model, prompt_tokens, completion_tokens, cost_usd) "

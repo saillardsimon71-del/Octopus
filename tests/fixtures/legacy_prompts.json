@@ -1,0 +1,226 @@
+{
+ "_source": "capture automatique depuis le commit pre-octopus (4f36417)",
+ "requests": {
+  "flash_json": {
+   "model": "deepseek-flash",
+   "messages": [
+    {
+     "role": "user",
+     "content": "x"
+    }
+   ],
+   "max_tokens": 2000,
+   "extra_body": {
+    "thinking": {
+     "type": "disabled"
+    }
+   },
+   "response_format": {
+    "type": "json_object"
+   }
+  },
+  "pro_reasoning_json": {
+   "model": "deepseek-v4-pro",
+   "messages": [
+    {
+     "role": "user",
+     "content": "x"
+    }
+   ],
+   "max_tokens": 2000,
+   "reasoning_effort": "high",
+   "extra_body": {
+    "thinking": {
+     "type": "enabled"
+    }
+   },
+   "response_format": {
+    "type": "json_object"
+   }
+  },
+  "flash_text": {
+   "model": "deepseek-flash",
+   "messages": [
+    {
+     "role": "user",
+     "content": "x"
+    }
+   ],
+   "max_tokens": 300,
+   "extra_body": {
+    "thinking": {
+     "type": "disabled"
+    }
+   }
+  },
+  "vision_json": {
+   "model": "deepseek-flash",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "PROMPT VISION"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/jpeg;base64,/9j/4GpwZWdmYWtl",
+        "detail": "low"
+       }
+      }
+     ]
+    }
+   ],
+   "max_tokens": 3000,
+   "extra_body": {
+    "thinking": {
+     "type": "disabled"
+    }
+   }
+  },
+  "vision_text": {
+   "model": "deepseek-flash",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Décris"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "data:image/jpeg;base64,/9j/4GpwZWdmYWtl",
+        "detail": "low"
+       }
+      }
+     ]
+    }
+   ],
+   "max_tokens": 1500,
+   "extra_body": {
+    "thinking": {
+     "type": "disabled"
+    }
+   }
+  }
+ },
+ "prompts": {
+  "sout_select": {
+   "model": "deepseek-flash",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Tu es SOUT, l'agent de recherche du groupe Podalux. Tu choisis la prochaine offre à produire pour maximiser le cash immédiat, sans refaire ce qui est déjà produit. Réponds en JSON uniquement."
+    },
+    {
+     "role": "user",
+     "content": "Catalogue disponible :\n{\"cash_devis_cgv01\": {\"nom\": \"Devis / CGV — devis pro + CGV (pack)\", \"prix\": \"37 €\", \"angle\": \"passer pour un pro\"}, \"cash_avenant_scope01\": {\"nom\": \"Avenant — faire signer un avenant de scope\", \"prix\": \"27 €\", \"angle\": \"le client qui élargit sans payer\"}, \"cash_linkedin_rdv01\": {\"nom\": \"LinkedIn RDV — obtenir un rendez-vous\", \"prix\": \"19 €\", \"angle\": \"le prospect qui ne répond jamais\"}}\n\nDéjà produites : [\"cash_impayes_relance01\"]\n\nChoisis UNE offre. JSON : {\"offer_id\":\"...\",\"angle\":\"...\",\"rationale\":\"1 phrase\"}"
+    }
+   ],
+   "max_tokens": 2000,
+   "reasoning": null
+  },
+  "convert_cash_devis_cgv01_nofix": {
+   "model": "deepseek-flash",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Tu es CONVERT, l'agent de monétisation du groupe Podalux. Tu écris le script d'un Short vertical (1080x1920, ~24s) qui convertit. Règles : hook ≤1s, preuve ≤3s, CTA net avec prix, ton envie/soulagement. Narration française, 7 segments, rôles imposés. Réponds en JSON uniquement."
+    },
+    {
+     "role": "user",
+     "content": "Offre : Devis / CGV — devis pro + CGV (pack) · prix 37 € · angle « passer pour un pro ».\n\nGénère un job.json complet. Schéma exact :\n{\"titre\":\"...\",\"hook\":\"...\",\"douleur\":\"...\",\"preuve\":\"...\",\"soulagement\":\"...\",\"cta\":\"...\",\"prix\":\"37 €\",\"keywords\":[\"mot1\",...],\"narration\":[{\"id\":\"hook\",\"role\":\"hook\",\"rate\":\"-8%\",\"texte\":\"...\"},{\"id\":\"hook2\",\"role\":\"hook\",\"rate\":\"-4%\",\"texte\":\"...\"},{\"id\":\"douleur\",\"role\":\"douleur\",\"rate\":\"+4%\",\"texte\":\"...\"},{\"id\":\"douleur2\",\"role\":\"douleur\",\"rate\":\"+7%\",\"texte\":\"...\"},{\"id\":\"preuve\",\"role\":\"preuve\",\"rate\":\"+12%\",\"texte\":\"...\"},{\"id\":\"soulagement\",\"role\":\"soulagement\",\"rate\":\"+2%\",\"texte\":\"...\"},{\"id\":\"cta\",\"role\":\"cta\",\"rate\":\"-1%\",\"texte\":\"...\"}]}\n\nContraintes : phrases courtes, CTA = prix + « lien en description », keywords = 5-8 mots clés réellement présents dans la narration."
+    }
+   ],
+   "max_tokens": 2000,
+   "reasoning": null
+  },
+  "convert_cash_impayes_relance01_fixes": {
+   "model": "deepseek-flash",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Tu es CONVERT, l'agent de monétisation du groupe Podalux. Tu écris le script d'un Short vertical (1080x1920, ~24s) qui convertit. Règles : hook ≤1s, preuve ≤3s, CTA net avec prix, ton envie/soulagement. Narration française, 7 segments, rôles imposés. Réponds en JSON uniquement."
+    },
+    {
+     "role": "user",
+     "content": "Offre : Impayés — relance de facture impayée · prix 9 € · angle « le cash qui ne rentre pas ».\n\nGénère un job.json complet. Schéma exact :\n{\"titre\":\"...\",\"hook\":\"...\",\"douleur\":\"...\",\"preuve\":\"...\",\"soulagement\":\"...\",\"cta\":\"...\",\"prix\":\"9 €\",\"keywords\":[\"mot1\",...],\"narration\":[{\"id\":\"hook\",\"role\":\"hook\",\"rate\":\"-8%\",\"texte\":\"...\"},{\"id\":\"hook2\",\"role\":\"hook\",\"rate\":\"-4%\",\"texte\":\"...\"},{\"id\":\"douleur\",\"role\":\"douleur\",\"rate\":\"+4%\",\"texte\":\"...\"},{\"id\":\"douleur2\",\"role\":\"douleur\",\"rate\":\"+7%\",\"texte\":\"...\"},{\"id\":\"preuve\",\"role\":\"preuve\",\"rate\":\"+12%\",\"texte\":\"...\"},{\"id\":\"soulagement\",\"role\":\"soulagement\",\"rate\":\"+2%\",\"texte\":\"...\"},{\"id\":\"cta\",\"role\":\"cta\",\"rate\":\"-1%\",\"texte\":\"...\"}]}\n\nContraintes : phrases courtes, CTA = prix + « lien en description », keywords = 5-8 mots clés réellement présents dans la narration.\n\nAméliorations EXIGÉES par le QC (intègre-les toutes) :\n[\"Ajouter un léger fondu au noir entre les scènes.\", \"Intégrer le prix dès la première mention.\"]"
+    }
+   ],
+   "max_tokens": 2000,
+   "reasoning": null
+  },
+  "growth_prompt": "Voici 2 frames d'un Short vertical 1080x1920.\nNarration exacte :\n« Facture impayée ? 9 €, lien en description. »\n\nÉvalue-le comme un spectateur qui scrolle.\n\nNote ce Short sur 35. Bareme STRICT : hook/5, douleur/4, preuve/4, cta/4, lisibilite/4, humanite/5 (0 si voix synthetique ; ECHEC si <3), motion/4, son/3, pacing/2. Reponds UNIQUEMENT par un objet JSON : {\"hook\":0,\"douleur\":0,\"preuve\":0,\"cta\":0,\"lisibilite\":0,\"humanite\":0,\"motion\":0,\"son\":0,\"pacing\":0,\"impression\":\"...\",\"defauts\":[\"...\"],\"fixes\":[\"...\"]}",
+  "orbit_with_human": {
+   "model": "deepseek-v4-pro",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Tu es ORBIT, le CEO du groupe Podalux. Tu arbitres : tu tiens la barre qualité. Publication à ≥24/35 (SHIP, WARM_PASS obligatoire), cible ≥30/35. Décide « done » si ≥24 WARM_PASS, « iterate » si <24 (avec les fixes), « stop » si plus d'amélioration possible. Réponds en JSON uniquement."
+    },
+    {
+     "role": "user",
+     "content": "Résultat du cycle pour cash_impayes_relance01 :\n{\"score\": 27, \"humanite\": 4, \"warm_pass\": true, \"cost_usd\": 0.01, \"go\": true}\n\nMessages récents de l'humain (à prendre en compte) :\n- vise 30/35\n\nDécide : JSON {'{\"decision\":\"done|iterate|stop\",\"message\":\"1 phrase\"}'}"
+    }
+   ],
+   "max_tokens": 2000,
+   "reasoning": "high"
+  },
+  "sout_research": {
+   "model": "deepseek-flash",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Résume en 2 phrases l'opportunité business de ces résultats."
+    },
+    {
+     "role": "user",
+     "content": "- resultat 1\n- resultat 2"
+    }
+   ],
+   "max_tokens": 300
+  },
+  "runtime_goal": {
+   "agent": "SOUT",
+   "task": "action",
+   "model": "deepseek-flash",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Tu es l'agent SOUT du groupe Podalux. Recherche et veille : utilise search/browse pour trouver des infos utiles. Poursuis l'objectif en utilisant les outils disponibles. À chaque étape, choisis UNE action. Utilise `remember` pour stocker tes apprentissages et `recall` pour les relire.\n\nOutils disponibles :\n- search(query) : recherche web (liens)\n- browse(url) : ouvre une page dans TON Chrome réel (comptes Stripe/Reddit/X/Fiverr/YouTube connectés) et la décrit\n- render_offer(offer_id) : produit la vidéo complète d'une offre\n- qc(offer_id) : métriques ffmpeg d'une offre\n- ask_human(question) : demande confirmation/info à l'humain\n- publish(offer_id) : plan de publication (dry-run)\n- send_message(platform, recipient, text) : prospection : envoie un message (dry-run)\n- remember(agent, key, value) : mémorise un apprentissage\n- recall(agent, key) : retrouve un apprentissage\n\nRéponds TOUJOURS en JSON : soit {\"tool\": \"<nom>\", \"args\": {...}} pour agir, soit {\"final\": \"<réponse>\"} quand l'objectif est atteint."
+    },
+    {
+     "role": "user",
+     "content": "Objectif : fais une veille"
+    },
+    {
+     "role": "user",
+     "content": "Choisis ta prochaine action (JSON)."
+    }
+   ]
+  },
+  "runtime_conversational": {
+   "agent": "ORBIT",
+   "task": "action",
+   "model": "deepseek-flash",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Tu es l'agent ORBIT du groupe Podalux. CEO : planifie, arbitre, décide. Un humain t'a écrit. Réponds-lui DIRECTEMENT, en français, de façon utile et conversationnelle. Tu peux utiliser un outil (search, browse, recall) si besoin, mais ta priorité est de répondre à sa demande.\n\nIMPORTANT : tu es connecté à tes comptes (Stripe, Reddit, X, Fiverr, YouTube…) via l'outil `browse`, qui ouvre les pages dans TON Chrome réel. Pour vérifier un accès, utilise `browse` sur la page concernée.\n\nOutils disponibles :\n- search(query) : recherche web (liens)\n- browse(url) : ouvre une page dans TON Chrome réel (comptes Stripe/Reddit/X/Fiverr/YouTube connectés) et la décrit\n- render_offer(offer_id) : produit la vidéo complète d'une offre\n- qc(offer_id) : métriques ffmpeg d'une offre\n- ask_human(question) : demande confirmation/info à l'humain\n- publish(offer_id) : plan de publication (dry-run)\n- send_message(platform, recipient, text) : prospection : envoie un message (dry-run)\n- remember(agent, key, value) : mémorise un apprentissage\n- recall(agent, key) : retrouve un apprentissage\n\nRéponds TOUJOURS en JSON : soit {\"tool\": \"<nom>\", \"args\": {...}} pour agir, soit {\"final\": \"<ta réponse à l'humain>\"}."
+    },
+    {
+     "role": "user",
+     "content": "Message de l'humain : bonjour"
+    },
+    {
+     "role": "user",
+     "content": "Choisis ta prochaine action (JSON)."
+    }
+   ]
+  }
+ }
+}
