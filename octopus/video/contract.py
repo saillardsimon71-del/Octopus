@@ -13,6 +13,7 @@ _SECRET_FRAGMENTS = (
     "private_key", "client_secret", "authorization", "cookie", "credentials",
 )
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_TEMPLATE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 
 
 class VideoContractError(ValueError):
@@ -40,6 +41,7 @@ class Artifact:
     kind: str = "file"
     content_type: str | None = None
     sha256: str | None = None
+    key: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"name": self.name, "url": self.url, "kind": self.kind}
@@ -47,6 +49,8 @@ class Artifact:
             out["content_type"] = self.content_type
         if self.sha256:
             out["sha256"] = self.sha256
+        if self.key:
+            out["key"] = self.key
         return out
 
 
@@ -78,6 +82,7 @@ class VideoJob:
             raise VideoContractError("job legacy sans narration")
         job_id = _validate_id(job_id, "job_id")
         offer_id = _validate_id(str(job.get("offer_id") or ""), "offer_id")
+        template = _validate_template(template)
         duration = job.get("duree_cible_s", 24)
         try:
             duration_f = float(duration)
@@ -125,11 +130,11 @@ class VideoJob:
             raise VideoContractError("assets doit être une liste")
         quality = payload.get("quality") or {}
         metadata = payload.get("metadata") or {}
+        template = _validate_template(str(payload.get("template") or DEFAULT_TEMPLATE))
         for name, value in (("job", payload), ("script", script), ("voice", voice),
                             ("assets", assets), ("quality", quality), ("metadata", metadata)):
             assert_no_secrets(value, path=name)
-        return cls(job_id=job_id, offer_id=offer_id,
-                   template=str(payload.get("template") or DEFAULT_TEMPLATE),
+        return cls(job_id=job_id, offer_id=offer_id, template=template,
                    language=str(payload.get("language") or "fr"), duration_seconds=duration,
                    script=script, voice=voice,
                    assets=[x for x in assets if isinstance(x, Mapping)], quality=quality,
@@ -178,6 +183,12 @@ class VideoResult:
 def _validate_id(value: str, field_name: str) -> str:
     if not value or not _ID_RE.fullmatch(value) or ".." in value:
         raise VideoContractError(f"{field_name} invalide")
+    return value
+
+
+def _validate_template(value: str) -> str:
+    if not value or not _TEMPLATE_RE.fullmatch(value):
+        raise VideoContractError(f"template invalide: {value!r}")
     return value
 
 
