@@ -49,6 +49,9 @@ const V = {
   cta: {...DEFAULT_VISUEL.cta, ...JOB_VISUEL.cta},
 };
 const CARD_ROWS = V.preuve.card_rows ?? [];
+// Carte image des segments non plein ecran : elle descend derriere les sous-titres, qui ont
+// leurs propres fonds. Sinon le bas de l'ecran reste vide sur la moitie de la video.
+const CARD_H = 1040;
 
 const meta = (role: keyof Visuel, img: string, full: boolean, bg: string, accentText?: string): Meta => ({
   label: V[role].label ?? '',
@@ -186,7 +189,7 @@ export const CashShort: React.FC = () => {
           </div>
         </AbsoluteFill>
       ) : (
-        <AbsoluteFill style={{top: 100, left: 70, width: 940, height: 430, opacity: segIn, transform: `scale(${zoom * (0.95 + 0.05 * segIn)})`, transformOrigin: '50% 50%'}}>
+        <AbsoluteFill style={{top: 100, left: 70, width: 940, height: CARD_H, opacity: segIn, transform: `scale(${zoom * (0.95 + 0.05 * segIn)})`, transformOrigin: '50% 50%'}}>
           <Img src={staticFile(`img/${meta.img}`)} style={{width: '100%', height: '100%', objectFit: 'cover', borderRadius: 44, boxShadow: '0 24px 60px rgba(60,20,0,0.35)'}} />
           <div style={{position: 'absolute', inset: 0, borderRadius: 44, background: 'linear-gradient(180deg, rgba(43,18,6,0.02) 0%, rgba(43,18,6,0.4) 100%)'}} />
           <div style={{position: 'absolute', top: 26, right: 26, display: 'flex', alignItems: 'center', gap: 12, padding: '14px 26px', borderRadius: 24, backgroundColor: accent.bg, color: '#fff', fontFamily: FONT.xbold, fontSize: 40, boxShadow: '0 10px 26px rgba(0,0,0,0.3)', transform: `rotate(${Math.sin(frame / 12) * 2}deg) scale(${0.9 + 0.1 * segIn})`}}>
