@@ -95,6 +95,7 @@ def _overlay_omniroute(raw: dict) -> dict:
         "agent.plan": model_id,
         "agent.synthesize": model_id,
         "web.summarize": model_id,
+        "web.inspect_page": model_id,
         "veille.brief": model_id,
     }
     for task_name, selected_model in free_defaults.items():
@@ -106,8 +107,6 @@ def _overlay_omniroute(raw: dict) -> dict:
         current_low = list(candidates.get("low_cost", []))
         if selected_model not in current_low:
             candidates["low_cost"] = [selected_model, *current_low]
-        # Le baseline est le candidat de référence et ne requiert pas une preuve du banc.
-        # On utilise OmniRoute seulement lorsque le profil est explicitement zero_cost/low_cost.
         if raw.get("profiles", {}).get("zero_cost", {}).get("fallback"):
             task.setdefault("omniroute_bootstrap_baseline", {})["zero_cost"] = selected_model
     return raw
