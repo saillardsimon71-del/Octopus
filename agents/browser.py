@@ -13,7 +13,7 @@ from __future__ import annotations
 import atexit
 import time
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from . import config, db, deepseek, web_guard
 
@@ -49,6 +49,12 @@ class BrowserTool:
                 viewport={"width": 1280, "height": 800}, service_workers="block")
         if self.guard is not None:
             self._context.route("**/*", self._route)
+            # Playwright demande un route_web_socket dédié pour intercepter réellement les
+            # WebSockets ; la dépendance locale est >=1.55. On garde un fallback pour
+            # d'anciens environnements importés manuellement.
+            route_ws = getattr(self._context, "route_web_socket", None)
+            if route_ws is not None:
+                route_ws("**/*", self._route_websocket)
         self._page = self._context.new_page()
         self._started = True
         return self
@@ -101,12 +107,34 @@ class BrowserTool:
             return
         self._fulfill(route, response)
 
+    @staticmethod
+    def _websocket_guard_url(url: str) -> str:
+        """Convertit ws(s):// en http(s):// pour réutiliser le même garde d'URL."""
+        parts = urlsplit(str(url).strip())
+        scheme = {"ws": "http", "wss": "https"}.get(parts.scheme.lower())
+        if scheme is None:
+            raise ValueError(f"schéma WebSocket inattendu : {parts.scheme or '(aucun)'}")
+        return urlunsplit((scheme, parts.netloc, parts.path, parts.query, parts.fragment))
+
+    def _route_websocket(self, websocket) -> None:
+        original_url = websocket.url
+        try:
+            guard_url = self._websocket_guard_url(original_url)
+            allowed = self.guard(guard_url)
+        except Exception:
+            allowed = False
+        if not allowed:
+            self.blocked.append(original_url)
+            websocket.close(code=1008, reason="WebSocket bloqué par le garde-fou OCTOPUS")
+            return
+        websocket.connect_to_server()
+
     def _block(self, route, url: str) -> None:
         self.blocked.append(url)
         route.abort("blockedbyclient")
 
     def _fetch(self, route, url: str, first: bool):
-        # `url=` is supported by Playwright Route.fetch and keeps the redirect inside the
+        # `url=` est supported by Playwright Route.fetch and keeps the redirect inside the
         # intercepted browser request rather than issuing a separate context request.
         return route.fetch(url=url, max_redirects=0)
 
