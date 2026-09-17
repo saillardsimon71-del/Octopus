@@ -1,21 +1,19 @@
-"""Worker vidéo cloud : contrat d'exécution, pas de provider hard-codé.
+"""Worker vidéo cloud : point d'entrée fournisseur-agnostique.
 
-Ce worker est volontairement séparé du runtime agents. Il reçoit un VideoJob,
-exécute la chaîne lourde dans son propre environnement et doit publier les artefacts
-vers un object storage avant de répondre COMPLETED.
-
-Le pipeline réel FORGE/Remotion n'est pas copié ici tant que son exécution Linux,
-les dépendances Chromium et le backend TTS n'ont pas été validés dans un conteneur.
+Le worker reçoit un VideoJob, exécute le FORGE existant dans un workspace isolé et
+publie le résultat vers le backend de stockage configuré. Une exception remonte au
+provider afin qu'un échec soit réellement marqué comme échec, jamais comme succès.
 """
 from __future__ import annotations
 
 import json
-import os
 import sys
-from dataclasses import asdict
 from typing import Any, Mapping
 
-from octopus.video.contract import VideoJob, VideoStatus
+from octopus.video.contract import VideoJob
+from octopus.video.storage import ArtifactStoreError, store_from_env
+
+from .executor import ExecutorError, ForgeExecutor
 
 
 class WorkerError(RuntimeError):
@@ -28,21 +26,23 @@ def load_job(payload: Mapping[str, Any]) -> VideoJob:
 
 def process(payload: Mapping[str, Any]) -> dict[str, Any]:
     job = load_job(payload)
-    # Fail closed : tant que le pipeline réel n'est pas installé dans l'image worker,
-    # ne jamais annoncer COMPLETED. Cela évite une intégration factice.
-    raise WorkerError(
-        f"worker reçu job {job.job_id}, mais pipeline FORGE cloud non installé. "
-        "Construire/valider l'image Remotion+Chromium+FFmpeg+TTS avant activation."
-    )
+    try:
+        store = store_from_env()
+        result = ForgeExecutor(store).render(job)
+    except (ArtifactStoreError, ExecutorError, OSError, ValueError) as exc:
+        raise WorkerError(str(exc)) from exc
+    return result.to_dict()
 
 
 def main() -> int:
     raw = sys.stdin.read()
     try:
         payload = json.loads(raw)
+        if not isinstance(payload, Mapping):
+            raise WorkerError("payload racine doit être un objet JSON")
         result = process(payload)
     except (json.JSONDecodeError, WorkerError, ValueError) as exc:
-        print(json.dumps({"status": VideoStatus.FAILED.value, "error": str(exc)}, ensure_ascii=False))
+        print(json.dumps({"status": "FAILED", "error": str(exc)}, ensure_ascii=False))
         return 1
     print(json.dumps(result, ensure_ascii=False))
     return 0
