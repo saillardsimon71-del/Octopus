@@ -1,5 +1,7 @@
-"""Interface graphique OCTOPUS : Workbench principal."""
+"""Interface graphique OCTOPUS : Workbench entrepreneurial principal."""
 
-from .workbench import PodaluxWorkbench, main
+from .intelligence import EntrepreneurialWorkbench, main
 
-__all__ = ["PodaluxWorkbench", "main"]
+PodaluxWorkbench = EntrepreneurialWorkbench
+
+__all__ = ["EntrepreneurialWorkbench", "PodaluxWorkbench", "main"]
