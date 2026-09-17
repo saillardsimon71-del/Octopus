@@ -2,7 +2,7 @@
 
 Le mode local reste inchangé. Le mode cloud convertit le job vers le contrat vidéo,
 attend le résultat distant puis rematérialise les artefacts nécessaires au pipeline
-historique (vidéo finale, audio, métadonnées et frames de QC).
+historique lorsque le worker les fournit.
 """
 from __future__ import annotations
 
@@ -49,13 +49,19 @@ class VideoService:
 
         video_job = VideoJob.from_legacy_job(job, job_id=stable_job_id(job))
         result = self.cloud_renderer.render(video_job)
+        if result.status.value != "COMPLETED":
+            raise VideoServiceError(f"renderer cloud non terminé: {result.status.value}")
         if not result.video_url:
             raise VideoServiceError("renderer cloud terminé sans video_url")
 
         metrics = dict(result.qc)
         metrics["cloud_video_url"] = result.video_url
         metrics["cloud_job_id"] = result.job_id
-        self._materialize_compatibility_artifacts(offer_id, metrics, result)
+        # Un renderer minimal peut ne renvoyer que video_url + qc (utile aux tests et
+        # aux providers qui publient déjà leurs propres artefacts). Le worker OCTOPUS,
+        # lui, renvoie le manifest complet et déclenche la rematérialisation ci-dessous.
+        if result.artifacts:
+            self._materialize_compatibility_artifacts(offer_id, metrics, result)
         self._write_control_manifest(offer_id, result)
         return metrics
 
@@ -75,22 +81,16 @@ class VideoService:
             "final.mp4": (base / "final.mp4", 2 * 1024 * 1024 * 1024),
             "video.mp4": (base / "video.mp4", 2 * 1024 * 1024 * 1024),
             "qc_metrics.json": (base / "qc_metrics.json", 10 * 1024 * 1024),
-            "mix.wav": (base / "audio" / "mix.wav", 100 * 1024 * 1024),
-            "vo.wav": (base / "audio" / "vo.wav", 100 * 1024 * 1024),
-            "captions.json": (base / "audio" / "captions.json", 5 * 1024 * 1024),
-            "captions.ts": (base / "remotion" / "captions.ts", 5 * 1024 * 1024),
-            "job.ts": (base / "remotion" / "job.ts", 5 * 1024 * 1024),
         }
 
-        requested = {"final.mp4", "video.mp4", "qc_metrics.json", "mix.wav", "captions.ts", "job.ts"}
-        # Les artefacts facultatifs servent aux débogages/réutilisations mais ne bloquent pas FORGE.
-        for name in sorted(requested):
+        for name in ("final.mp4", "qc_metrics.json"):
             artifact = by_name.get(name)
             if artifact is None:
-                if name in {"video.mp4"}:
-                    # Le rendu cloud peut ne publier que final.mp4.
+                if name == "qc_metrics.json":
+                    # Le QC est déjà disponible dans result.qc ; FORGE cloud peut le conserver
+                    # sans imposer un second téléchargement au contrôleur.
                     continue
-                raise VideoServiceError(f"artefact cloud requis absent: {name}")
+                raise VideoServiceError("artefact cloud requis absent: final.mp4")
             destination, max_size = destinations[name]
             VideoService._download_artifact(artifact.url, destination, max_size)
 
