@@ -14,8 +14,14 @@ import requests
 
 from . import config
 
+import os
+
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                      "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"}
+# API Wikimedia : User-Agent identifiable exigé par sa politique (audit M9). Ajouter un contact via
+# PODALUX_WIKI_USER_AGENT, ex. "Podalux/0.2 (contact: vous@exemple.fr)".
+WIKI_UA = {"User-Agent": os.environ.get("PODALUX_WIKI_USER_AGENT", "").strip()
+           or "Podalux/0.2 (agent de veille personnel; python-requests)"}
 
 
 def _strip_html(s: str) -> str:
@@ -73,7 +79,7 @@ def _wikipedia(query: str, max_results: int) -> str:
                      params={"action": "query", "list": "search", "srsearch": query,
                              "srlimit": max_results, "srprop": "snippet",
                              "format": "json", "utf8": 1},
-                     headers=UA, timeout=15)
+                     headers=WIKI_UA, timeout=15)
     r.raise_for_status()
     hits = r.json().get("query", {}).get("search", [])
     if not hits:
@@ -87,32 +93,31 @@ def _wikipedia(query: str, max_results: int) -> str:
 
 
 def web_search(query: str, max_results: int = 6) -> str:
-    """Recherche web : Brave/Tavily si clé, sinon Google News + Wikipedia."""
+    """Recherche web : Brave/Tavily si clé, sinon Google News + Wikipedia. Les pannes sont signalées."""
+    errors: list[str] = []
+
+    def attempt(name, fn):
+        try:
+            return fn(query, max_results)
+        except Exception as exc:  # une source en panne ne doit pas bloquer les autres, mais se voit
+            errors.append(f"{name} : {type(exc).__name__} {str(exc)[:80]}")
+            return ""
+
     if config.BRAVE_API_KEY:
-        try:
-            out = _brave(query, max_results)
-            if out.strip():
-                return out
-        except Exception:
-            pass
+        out = attempt("Brave", _brave)
+        if out.strip():
+            return out
     if config.TAVILY_API_KEY:
-        try:
-            out = _tavily(query, max_results)
-            if out.strip():
-                return out
-        except Exception:
-            pass
+        out = attempt("Tavily", _tavily)
+        if out.strip():
+            return out
     parts: list[str] = []
-    try:
-        gn = _gnews(query, max_results)
-        if gn.strip():
-            parts.append("Actualités (Google News) :\n" + gn)
-    except Exception:
-        pass
-    try:
-        wk = _wikipedia(query, max_results)
-        if wk.strip():
-            parts.append("Encyclopédie (Wikipedia) :\n" + wk)
-    except Exception:
-        pass
+    gn = attempt("Google News", _gnews)
+    if gn.strip():
+        parts.append("Actualités (Google News) :\n" + gn)
+    wk = attempt("Wikipedia", _wikipedia)
+    if wk.strip():
+        parts.append("Encyclopédie (Wikipedia) :\n" + wk)
+    if errors:
+        parts.append("Sources en erreur : " + " ; ".join(errors))
     return "\n\n".join(parts) if parts else "(aucun résultat de recherche)"

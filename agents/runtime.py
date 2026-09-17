@@ -9,12 +9,35 @@ from __future__ import annotations
 
 import contextvars
 import json
+import re
+import unicodedata
+from contextlib import contextmanager
 
 from octopus.journal import with_run
 
 from . import cancel, db, deepseek, web_guard
 
 _ROLE: contextvars.ContextVar[str] = contextvars.ContextVar("podalux_role", default="RUNTIME")
+_SEARCHES: contextvars.ContextVar[dict | None] = contextvars.ContextVar("podalux_searches", default=None)
+
+
+@contextmanager
+def _search_cache():
+    """Recherches déjà faites dans l'exécution (un agent, ou toute une mission)."""
+    if _SEARCHES.get() is not None:
+        yield _SEARCHES.get()
+        return
+    token = _SEARCHES.set({})
+    try:
+        yield _SEARCHES.get()
+    finally:
+        _SEARCHES.reset(token)
+
+
+def query_key(query: str) -> str:
+    """Requêtes équivalentes : casse, accents, ordre des mots, pluriels et mots courts ignorés."""
+    text = unicodedata.normalize("NFKD", str(query)).encode("ascii", "ignore").decode().lower()
+    return " ".join(sorted({w.rstrip("sx") for w in re.findall(r"[a-z0-9]+", text) if len(w) > 2}))
 
 MODEL = deepseek.config.MODEL_FLASH
 
@@ -22,7 +45,18 @@ MODEL = deepseek.config.MODEL_FLASH
 # --- Outils partagés ---
 def _search(args):
     from .search import web_search
-    return web_search(args["query"], 6)
+    query = str(args.get("query", ""))
+    cache, key = _SEARCHES.get(), query_key(query)
+    if cache is not None and key in cache:  # 21 recherches quasi identiques dans un run du 16/09 (audit M2)
+        previous = cache[key]
+        return {"deja_cherche": True, "requete_precedente": previous["query"],
+                "note": "Recherche équivalente déjà faite : même résultat. Change d'angle, ouvre un lien "
+                        "avec browse, ou conclus avec « final ».",
+                "resultat": previous["result"][:600]}
+    result = web_search(query, 6)
+    if cache is not None:
+        cache[key] = {"query": query, "result": result}
+    return result
 
 
 def _browse(args):
@@ -182,7 +216,7 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
     """
     token = _ROLE.set(role)
     try:
-        with cancel.scope(), web_guard.session():
+        with cancel.scope(), web_guard.session(), _search_cache():
             return _run_agent(role, goal, max_steps, conversational)
     finally:
         _ROLE.reset(token)
@@ -214,6 +248,9 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool) -> di
             return {"role": role, "steps": steps, "final": r["final"]}
         tool = r.get("tool")
         args = r.get("args") or {}
+        # L'action choisie entre dans l'historique : sans elle, le modèle ne voyait que les résultats
+        # et relançait les mêmes requêtes (audit M2).
+        context.append({"role": "assistant", "content": json.dumps(r, ensure_ascii=False)[:600]})
         if tool not in TOOLS:
             context.append({"role": "user", "content": f"outil inconnu : {tool}. Disponibles : {list(TOOLS)}"})
             steps.append({"step": i + 1, "tool": tool, "result": "inconnu"})
@@ -244,7 +281,7 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool) -> di
 @with_run("podalux", "mission", budget_usd=deepseek.config.CYCLE_BUDGET_USD)
 def run_mission(goal: str, max_steps_per_agent: int = 8) -> dict:
     """ORBIT planifie puis délègue aux rôles (multi-agents via le runtime)."""
-    with cancel.scope(), web_guard.session():
+    with cancel.scope(), web_guard.session(), _search_cache():
         return _run_mission(goal, max_steps_per_agent)
 
 
