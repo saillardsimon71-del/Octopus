@@ -1,16 +1,5 @@
-"""Interface graphique Podalux (cockpit)."""
+"""Interface graphique OCTOPUS : Workbench principal."""
 
-from . import app as _app
+from .workbench import PodaluxWorkbench, main
 
-PodaluxApp = _app.PodaluxApp
-
-
-def main() -> None:
-    """Stable entrypoint used by the CLI and standalone launcher."""
-    PodaluxApp().mainloop()
-
-
-# Compatibility: existing callers import `main` from `agents.gui.app`.
-_app.main = main
-
-__all__ = ["PodaluxApp", "main"]
+__all__ = ["PodaluxWorkbench", "main"]
