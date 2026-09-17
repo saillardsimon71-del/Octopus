@@ -24,15 +24,17 @@ Prérequis : Docker Desktop démarré. L'image OmniRoute est la seule grosse dé
 
 ```powershell
 docker pull diegosouzapw/omniroute:latest
-docker run -d --name omniroute --restart unless-stopped -p 20128:20128 -v omniroute-data:/app/data diegosouzapw/omniroute:latest
+docker run -d --name omniroute --restart unless-stopped --stop-timeout 40 -p 127.0.0.1:20128:20128 -v omniroute-data:/app/data diegosouzapw/omniroute:latest
 docker ps
 ```
+
+OmniRoute sert aujourd'hui l'API OpenAI-compatible sous `/v1` sur le port `20128`; OCTOPUS utilise donc `http://127.0.0.1:20128/v1`. Le bind sur `127.0.0.1` évite d'exposer le proxy sur le réseau local par défaut.
 
 L'instance doit ensuite afficher/répondre sur l'endpoint local fourni par l'installation. Pour cette configuration OCTOPUS :
 
 ```text
 OMNIROUTE_ENABLED=1
-OMNIROUTE_BASE_URL=http://127.0.0.1:20128/api/v1
+OMNIROUTE_BASE_URL=http://127.0.0.1:20128/v1
 OMNIROUTE_MODEL=auto/free
 ```
 
@@ -41,7 +43,7 @@ La clé ne va jamais dans Git. La définir uniquement dans l'environnement utili
 ```powershell
 [Environment]::SetEnvironmentVariable("OMNIROUTE_API_KEY", "<CLE_OMNIROUTE>", "User")
 [Environment]::SetEnvironmentVariable("OMNIROUTE_ENABLED", "1", "User")
-[Environment]::SetEnvironmentVariable("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/api/v1", "User")
+[Environment]::SetEnvironmentVariable("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1", "User")
 ```
 
 Fermer/réouvrir PowerShell après changement d'environnement.
@@ -50,7 +52,7 @@ Fermer/réouvrir PowerShell après changement d'environnement.
 
 ```powershell
 $headers = @{ Authorization = "Bearer $env:OMNIROUTE_API_KEY" }
-Invoke-RestMethod -Uri "http://127.0.0.1:20128/api/v1/models" -Headers $headers
+Invoke-RestMethod -Uri "http://127.0.0.1:20128/v1/models" -Headers $headers
 ```
 
 Puis dans OCTOPUS :
