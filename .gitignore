@@ -28,3 +28,7 @@ jobs/*.bak
 # Secrets
 .env
 .env.*
+
+# Quarantaine et copies locales
+_quarantine/
+Claude outputs/
