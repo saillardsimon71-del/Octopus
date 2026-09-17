@@ -24,9 +24,6 @@ class Catalog:
     @property
     def default_profile(self) -> str:
         selected = self.raw.get("default_profile", "legacy")
-        # Le catalogue historique reste legacy quand OmniRoute est désactive ou quand
-        # OCTOPUS_PROFILE est explicitement choisi. Sans override, OmniRoute doit toutefois
-        # proteger le poste d'un appel payant implicite.
         if (selected == "legacy" and _omniroute_enabled()
                 and not os.environ.get("OCTOPUS_PROFILE", "").strip()):
             return "zero_cost"
@@ -78,7 +75,7 @@ def _overlay_omniroute(raw: dict) -> dict:
     model_name = os.environ.get("OMNIROUTE_MODEL", "auto/free").strip() or "auto/free"
     raw.setdefault("providers", {})[provider_id] = {
         "kind": "cloud",
-        "base_url": os.environ.get("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/api/v1").rstrip("/"),
+        "base_url": os.environ.get("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1").rstrip("/"),
         "api_key_env": "OMNIROUTE_API_KEY",
         "timeout_s": float(os.environ.get("OMNIROUTE_TIMEOUT_S", "120")),
         "max_retries": 0,
