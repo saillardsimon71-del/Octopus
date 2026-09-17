@@ -45,6 +45,13 @@ class FilesystemArtifactStore:
         destination.resolve().relative_to(self.root.resolve())
         return destination
 
+    def _url(self, key: str) -> str:
+        base = self.public_base_url.rstrip("/")
+        clean_key = key.strip("/")
+        if self.public_base_url.startswith("file://"):
+            return Path(self._dest(clean_key)).resolve().as_uri()
+        return f"{base}/{clean_key}"
+
     def exists(self, key: str) -> bool:
         return self._dest(key).is_file()
 
@@ -64,26 +71,28 @@ class FilesystemArtifactStore:
         source = Path(path)
         if not source.is_file() or source.stat().st_size <= 0:
             raise ArtifactStoreError(f"artefact absent/vide: {source}")
-        destination = self._dest(key)
+        clean_key = key.strip("/")
+        destination = self._dest(clean_key)
         destination.parent.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256()
         with source.open("rb") as src, destination.open("wb") as dst:
             while chunk := src.read(1024 * 1024):
                 digest.update(chunk)
                 dst.write(chunk)
-        url = f"{self.public_base_url}{destination.as_posix()}"
-        return Artifact(name=destination.name, url=url, content_type=content_type, sha256=digest.hexdigest())
+        return Artifact(name=destination.name, url=self._url(clean_key), content_type=content_type,
+                        sha256=digest.hexdigest())
 
     def put_json(self, payload: dict[str, Any], key: str) -> Artifact:
+        clean_key = key.strip("/")
         data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-        destination = self._dest(key)
+        destination = self._dest(clean_key)
         destination.parent.mkdir(parents=True, exist_ok=True)
         tmp = destination.with_suffix(destination.suffix + ".tmp")
         tmp.write_bytes(data)
         tmp.replace(destination)
         digest = hashlib.sha256(data).hexdigest()
-        return Artifact(name=destination.name, url=f"{self.public_base_url}{destination.as_posix()}",
-                        content_type="application/json", sha256=digest)
+        return Artifact(name=destination.name, url=self._url(clean_key), content_type="application/json",
+                        sha256=digest)
 
 
 @dataclass(frozen=True)
