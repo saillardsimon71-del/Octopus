@@ -98,6 +98,7 @@ def _add_local_renderer_checks(checks: list[Check], blocking: bool) -> None:
 def run_checks() -> list[Check]:
     checks: list[Check] = []
     video_mode = os.environ.get("PODALUX_VIDEO_RENDERER", "cloud").strip().lower() or "cloud"
+    video_provider = os.environ.get("PODALUX_VIDEO_PROVIDER", "runpod").strip().lower() or "runpod"
     omni_enabled = os.environ.get("OMNIROUTE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 
     controller = Path(sys.executable)
@@ -150,9 +151,16 @@ def run_checks() -> list[Check]:
     if video_mode == "cloud":
         endpoint = os.environ.get("PODALUX_RUNPOD_ENDPOINT_ID", "").strip()
         token = os.environ.get("PODALUX_RUNPOD_API_TOKEN", "").strip()
-        checks.append(Check("RunPod vidéo", bool(endpoint and token),
-                            f"endpoint={'présent' if endpoint else 'absent'}, token={'présent' if token else 'absent'}",
+        configured = bool(endpoint and token)
+        checks.append(Check("RunPod vidéo", configured,
+                            f"provider={video_provider}, endpoint={'présent' if endpoint else 'absent'}, token={'présent' if token else 'absent'}",
                             "définir PODALUX_RUNPOD_ENDPOINT_ID et PODALUX_RUNPOD_API_TOKEN", blocking=True))
+        h3_endpoint = os.environ.get("OCTOPUS_MINIMAX_H3_ENDPOINT_ID", "").strip()
+        h3_token = os.environ.get("OCTOPUS_MINIMAX_H3_API_TOKEN", "").strip()
+        checks.append(Check("MiniMax H3 cloud", bool(h3_endpoint and h3_token),
+                            f"endpoint={'présent' if h3_endpoint else 'absent'}, token={'présent' if h3_token else 'absent'}",
+                            "définir OCTOPUS_MINIMAX_H3_ENDPOINT_ID et OCTOPUS_MINIMAX_H3_API_TOKEN lorsque H3 est utilisé",
+                            blocking=False))
         checks.append(Check("Rendu vidéo", True, "cloud-first (RunPod) · aucun GPU local requis", blocking=False))
         checks.append(Check("Chatterbox local", True, "non requis en cloud", blocking=False))
         checks.append(Check("Remotion/FFmpeg local", True, "non requis pour le cycle cloud", blocking=False))
