@@ -66,7 +66,9 @@ class ForgeExecutor:
             self._require_nonempty(out_dir / "audio" / "mix.wav", workspace / "remotion" / "src" / "data" / "captions.ts",
                                    workspace / "remotion" / "src" / "data" / "job.ts")
 
-            self._run(["npx", "remotion", "render", job.template, f"../out/{offer}/video.mp4"],
+            browser = os.environ.get("REMOTION_BROWSER_EXECUTABLE", "/usr/bin/chromium")
+            self._run(["npx", "remotion", "render", job.template, f"../out/{offer}/video.mp4",
+                       "--browser-executable", browser],
                       workspace / "remotion", env=env, log=out_dir / "logs" / "render.log")
             video = out_dir / "video.mp4"
             self._require_nonempty(video)
@@ -87,7 +89,7 @@ class ForgeExecutor:
             frame_urls = {artifact.name: artifact.url for artifact in artifacts if artifact.kind == "image"}
             if isinstance(qc.get("frames"), list):
                 qc["frames"] = [frame_urls.get(Path(str(item)).name, str(item)) for item in qc["frames"]]
-            video_artifact = next((a for a in artifacts if a.kind == "video"), None)
+            video_artifact = next((a for a in artifacts if a.kind == "video" and a.name == "final.mp4"), None)
             if video_artifact is None:
                 raise ExecutorError("final.mp4 non publié")
 
@@ -174,18 +176,36 @@ class ForgeExecutor:
                    "-af", f"volume={gain}dB", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
                    "-shortest", str(final)], workspace, env=os.environ.copy(), log=out_dir / "logs" / "mux.log")
 
-    def _upload_artifacts(self, job: VideoJob, out_dir: Path, final: Path, qc_path: Path):
+    def _upload_artifacts(self, job: VideoJob, out_dir: Path, final: Path, qc_path: Path) -> list[Artifact]:
         prefix = f"{job.offer_id}/{job.job_id}"
-        artifacts = [self.store.put_file(final, f"{prefix}/final.mp4", content_type="video/mp4")]
-        artifacts[0] = Artifact(artifacts[0].name, artifacts[0].url, "video",
-                                artifacts[0].content_type, artifacts[0].sha256)
-        artifacts.append(self.store.put_file(qc_path, f"{prefix}/qc_metrics.json", content_type="application/json"))
+        artifacts: list[Artifact] = []
+
+        video = self.store.put_file(final, f"{prefix}/final.mp4", content_type="video/mp4")
+        artifacts.append(Artifact(video.name, video.url, "video", video.content_type, video.sha256))
+
+        # Compatibilité FORGE : ces artefacts évitent de réintroduire un second pipeline
+        # côté contrôleur tout en laissant le worker posséder l'exécution lourde.
+        compat_files = [
+            (out_dir / "audio" / "mix.wav", f"{prefix}/audio/mix.wav", "audio/wav"),
+            (out_dir / "audio" / "vo.wav", f"{prefix}/audio/vo.wav", "audio/wav"),
+            (out_dir / "audio" / "captions.json", f"{prefix}/audio/captions.json", "application/json"),
+            (out_dir.parent.parent / "remotion" / "src" / "data" / "captions.ts", f"{prefix}/remotion/captions.ts", "text/plain"),
+            (out_dir.parent.parent / "remotion" / "src" / "data" / "job.ts", f"{prefix}/remotion/job.ts", "text/plain"),
+        ]
+        for source, key, content_type in compat_files:
+            if source.is_file() and source.stat().st_size > 0:
+                stored = self.store.put_file(source, key, content_type=content_type)
+                artifacts.append(stored)
+
+        qc = self.store.put_file(qc_path, f"{prefix}/qc_metrics.json", content_type="application/json")
+        artifacts.append(qc)
+
         frames_dir = out_dir / "frames"
         if frames_dir.is_dir():
             for frame in sorted(frames_dir.glob("*.jpg")):
-                artifacts.append(Artifact(frame.name,
-                                           self.store.put_file(frame, f"{prefix}/frames/{frame.name}", content_type="image/jpeg").url,
-                                           "image", "image/jpeg"))
+                stored = self.store.put_file(frame, f"{prefix}/frames/{frame.name}", content_type="image/jpeg")
+                artifacts.append(Artifact(frame.name, stored.url, "image", "image/jpeg", stored.sha256))
+
         logs_dir = out_dir / "logs"
         if logs_dir.is_dir():
             for log in sorted(logs_dir.glob("*.log")):
@@ -197,7 +217,7 @@ class ForgeExecutor:
         return f"{job.offer_id}/{job.job_id}/{name}"
 
     @staticmethod
-    def _artifacts(manifest: dict[str, Any]):
+    def _artifacts(manifest: dict[str, Any]) -> tuple[Artifact, ...]:
         return tuple(Artifact(str(x.get("name", "artifact")), str(x["url"]), str(x.get("kind", "file")),
                              x.get("content_type"), x.get("sha256"))
                      for x in manifest.get("artifacts", []) if isinstance(x, dict) and x.get("url"))
