@@ -4,6 +4,8 @@ Garde-fous :
 - Shell limité à la liste blanche `SHELL_WHITELIST` (aucun drapeau destructif).
 - Les briques haut niveau (render, qc) encapsulent les commandes exactes.
 - Rien de sortant (upload/email/achat) : tout est `--dry-run` par défaut.
+- En mode cloud, FORGE garde sa séquence historique mais une seule étape déclenche le
+  rendu distant ; les étapes suivantes vérifient/rematérialisent les artefacts reçus.
 """
 from __future__ import annotations
 
@@ -17,7 +19,6 @@ from pathlib import Path
 
 from . import cancel, config
 
-# Plus longue étape mesurée le 16/09 : 281 s (TTS). Marge x3.
 STEP_TIMEOUT_S = 900
 
 
@@ -26,7 +27,6 @@ class StepError(RuntimeError):
 
 
 def _run_checked(cmd: list[str], cwd: str, timeout: int = STEP_TIMEOUT_S, log: Path | None = None) -> str:
-    """Lance une commande, lève StepError si elle échoue. Sortie complète écrite dans `log`."""
     started = time.time()
     name = Path(cmd[0]).name
     group = {"start_new_session": True} if os.name != "nt" else {}
@@ -57,7 +57,6 @@ def _run_checked(cmd: list[str], cwd: str, timeout: int = STEP_TIMEOUT_S, log: P
 
 
 def kill_tree(proc: subprocess.Popen) -> None:
-    """Tue le processus et ses enfants (npx -> node -> navigateur, python -> ffmpeg)."""
     if proc.poll() is not None:
         return
     if os.name == "nt":
@@ -90,7 +89,6 @@ def _write_log(log: Path | None, cmd: list[str], code: int | None, seconds: floa
 
 
 def require_fresh(paths: list[Path], since: float) -> None:
-    """Refuse un artefact absent, vide ou antérieur au début de l'étape (données d'un autre run)."""
     for p in paths:
         if not p.exists() or p.stat().st_size == 0 or p.stat().st_mtime < since - 1:
             raise StepError(f"artefact absent ou périmé : {p}")
@@ -102,7 +100,6 @@ def step_log(offer_id: str, step: str) -> Path:
 
 def run_shell(cmd: list[str], cwd: str | None = None, timeout: int = STEP_TIMEOUT_S,
               log: Path | None = None) -> str:
-    """Exécute une commande de la liste blanche. Refuse tout le reste. Lève StepError en cas d'échec."""
     if not cmd:
         raise ValueError("commande vide")
     exe = Path(cmd[0]).name.lower()
@@ -117,8 +114,27 @@ def run_shell(cmd: list[str], cwd: str | None = None, timeout: int = STEP_TIMEOU
     return _run_checked(cmd, cwd or str(config.PROJECT_ROOT), timeout, log)
 
 
+def _cloud_mode() -> bool:
+    return os.environ.get("PODALUX_VIDEO_RENDERER", "local").strip().lower() == "cloud"
+
+
+def _cloud_service():
+    from octopus.video.renderers import get_renderer
+    from octopus.video.service import VideoService
+    return VideoService(cloud_renderer=get_renderer(mode="cloud"), mode="cloud")
+
+
 def make_audio(job_json: str, offer_id: str) -> str:
-    """Génère VO Chatterbox + captions + mix (Phase 3)."""
+    """En local, génère l'audio. En cloud, déclenche la production distante une seule fois.
+
+    FORGE appelle cette fonction avant Remotion ; le shim cloud rematérialise ensuite
+    les artefacts produits par le worker afin que les contrôles historiques restent valides.
+    """
+    if _cloud_mode():
+        job = json.loads(Path(job_json).read_text(encoding="utf-8"))
+        metrics = _cloud_service().render(offer_id, job)
+        return json.dumps({"mode": "cloud", "job_id": metrics.get("cloud_job_id"),
+                           "video_url": metrics.get("cloud_video_url")}, ensure_ascii=False)
     return run_shell([
         config.PYTHON, "tools/make_audio_chatterbox_full.py",
         job_json, offer_id, config.CHATTERBOX_VOICE, "0.6", "0.4",
@@ -126,20 +142,29 @@ def make_audio(job_json: str, offer_id: str) -> str:
 
 
 def remotion_render(offer_id: str) -> str:
-    """Rend le composant CashShort (lit captions.ts/job.ts générés)."""
+    """Rend CashShort localement ou valide le rendu déjà rematérialisé du cloud."""
+    if _cloud_mode():
+        video = config.PROJECT_ROOT / "out" / offer_id / "final.mp4"
+        if not video.is_file() or video.stat().st_size <= 0:
+            raise StepError(f"rendu cloud absent : {video}")
+        return f"rendu cloud déjà disponible : {video}"
     npx = "npx.cmd" if os.name == "nt" else "npx"
     return _run_checked([npx, "remotion", "render", "CashShort", f"../out/{offer_id}/video.mp4"],
                         str(config.PROJECT_ROOT / "remotion"), log=step_log(offer_id, "render"))
 
 
 def mux(offer_id: str) -> str:
-    """Mux vidéo + mix audio avec gain linéaire (préserve le LRA)."""
+    """Mux local historique ; en cloud, final.mp4 est déjà muxé et QC-mesuré."""
+    if _cloud_mode():
+        final = config.PROJECT_ROOT / "out" / offer_id / "final.mp4"
+        if not final.is_file() or final.stat().st_size <= 0:
+            raise StepError(f"final cloud absent : {final}")
+        return f"mux cloud déjà disponible : {final}"
     out_dir = config.PROJECT_ROOT / "out" / offer_id
     mix = out_dir / "audio" / "mix.wav"
     video = out_dir / "video.mp4"
     final = out_dir / "final.mp4"
     cwd = str(config.PROJECT_ROOT)
-    # mesure LUFS puis gain linéaire
     probe = _run_checked(["ffmpeg", "-hide_banner", "-i", str(mix), "-af", "ebur128", "-f", "null", "-"],
                          cwd, log=step_log(offer_id, "mux_lufs"))
     mm = re.findall(r"I:\s*(-?\d+(?:\.\d+)?)\s*LUFS", probe)
@@ -154,9 +179,14 @@ def mux(offer_id: str) -> str:
 
 
 def qc_metrics(offer_id: str) -> dict:
-    """Métriques ffmpeg + 6 frames (écrit qc_metrics.json)."""
+    """Métriques ffmpeg + 6 frames. Le cloud renvoie déjà le résultat QC du worker."""
     out_dir = config.PROJECT_ROOT / "out" / offer_id
     final = out_dir / "final.mp4"
+    if _cloud_mode():
+        path = out_dir / "qc_metrics.json"
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise StepError(f"QC cloud absent : {path}")
+        return json.loads(path.read_text(encoding="utf-8"))
     run_shell([config.PYTHON, "tools/qc_metrics.py", str(final),
                str(out_dir), "--label", offer_id], log=step_log(offer_id, "qc_metrics"))
     return json.loads((out_dir / "qc_metrics.json").read_text(encoding="utf-8"))
