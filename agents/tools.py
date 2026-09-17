@@ -10,11 +10,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import time
 from pathlib import Path
 
-from . import config
+from . import cancel, config
 
 # Plus longue étape mesurée le 16/09 : 281 s (TTS). Marge x3.
 STEP_TIMEOUT_S = 900
@@ -27,25 +28,57 @@ class StepError(RuntimeError):
 def _run_checked(cmd: list[str], cwd: str, timeout: int = STEP_TIMEOUT_S, log: Path | None = None) -> str:
     """Lance une commande, lève StepError si elle échoue. Sortie complète écrite dans `log`."""
     started = time.time()
+    name = Path(cmd[0]).name
+    group = {"start_new_session": True} if os.name != "nt" else {}
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", cwd=cwd, timeout=timeout)
-    except subprocess.TimeoutExpired as e:
-        _write_log(log, cmd, None, time.time() - started, _text(e.stdout) + _text(e.stderr))
-        raise StepError(f"timeout {timeout} s : {Path(cmd[0]).name}") from e
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                encoding="utf-8", errors="replace", cwd=cwd, **group)
     except OSError as e:
-        raise StepError(f"lancement impossible de {Path(cmd[0]).name} : {e}") from e
-    out = (r.stdout or "") + (r.stderr or "")
-    _write_log(log, cmd, r.returncode, time.time() - started, out)
-    if r.returncode != 0:
-        raise StepError(f"{Path(cmd[0]).name} code {r.returncode} : {out[-800:].strip()}")
+        raise StepError(f"lancement impossible de {name} : {e}") from e
+    while True:
+        try:
+            stdout, stderr = proc.communicate(timeout=1.0)
+            break
+        except subprocess.TimeoutExpired:
+            stopped = cancel.requested()
+            if not stopped and time.time() - started < timeout:
+                continue
+            kill_tree(proc)
+            stdout, stderr = _drain(proc)
+            _write_log(log, cmd, None, time.time() - started, stdout + stderr)
+            if stopped:
+                raise cancel.Cancelled(f"arrêt demandé par l'humain pendant {name}") from None
+            raise StepError(f"timeout {timeout} s : {name}") from None
+    out = (stdout or "") + (stderr or "")
+    _write_log(log, cmd, proc.returncode, time.time() - started, out)
+    if proc.returncode != 0:
+        raise StepError(f"{name} code {proc.returncode} : {out[-800:].strip()}")
     return out
 
 
-def _text(value) -> str:
-    if value is None:
-        return ""
-    return value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+def kill_tree(proc: subprocess.Popen) -> None:
+    """Tue le processus et ses enfants (npx -> node -> navigateur, python -> ffmpeg)."""
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def _drain(proc: subprocess.Popen) -> tuple[str, str]:
+    try:
+        stdout, stderr = proc.communicate(timeout=10)
+        return stdout or "", stderr or ""
+    except (subprocess.TimeoutExpired, ValueError):
+        return "", ""
 
 
 def _write_log(log: Path | None, cmd: list[str], code: int | None, seconds: float, output: str) -> None:

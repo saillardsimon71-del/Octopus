@@ -6,6 +6,7 @@ namespace par agent via la table `messages`).
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -15,13 +16,19 @@ from . import config
 
 def _conn() -> sqlite3.Connection:
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(config.DB_PATH))
+    # GUI, cycle et agents écrivent depuis des processus distincts : attendre plutôt qu'échouer (audit M6)
+    conn = sqlite3.connect(str(config.DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=10000")
     return conn
 
 
 def init_db() -> None:
     conn = _conn()
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")  # lectures de la GUI sans bloquer les écritures ; persistant
+    except sqlite3.OperationalError:
+        pass  # base occupée : on garde le mode courant, nouvel essai au prochain démarrage
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS messages (
@@ -227,17 +234,22 @@ def pending_handoffs() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def ask_human(agent: str, kind: str, question: str, timeout_s: int = 300) -> str | None:
-    """Demande à l'humain puis poll la réponse (bloquant pour l'agent)."""
+def ask_human(agent: str, kind: str, question: str, timeout_s: int = 300,
+              cancel=None) -> str | None:
+    """Demande à l'humain puis poll la réponse (bloquant pour l'agent). `cancel()` vrai : abandon."""
     hid = ask(agent, kind, question)
     deadline = time.time() + timeout_s
+    status = "timeout"
     while time.time() < deadline:
         h = get_handoff(hid)
         if h.get("status") == "answered":
             return h.get("answer")
+        if cancel is not None and cancel():
+            status = "cancelled"
+            break
         time.sleep(1.0)
     conn = _conn()
-    conn.execute("UPDATE handoffs SET status='timeout' WHERE id=?", (hid,))
+    conn.execute("UPDATE handoffs SET status=? WHERE id=? AND status='pending'", (status, hid))
     conn.commit()
     conn.close()
     return None
@@ -298,7 +310,7 @@ def get_state(key: str) -> str | None:
 
 
 def request_stop() -> None:
-    set_state("stop", "1")
+    set_state("stop", repr(time.time()))
 
 
 def clear_stop() -> None:
@@ -352,8 +364,16 @@ def release_run_lock(owner: str) -> None:
     conn.close()
 
 
-def stop_requested() -> bool:
-    return get_state("stop") == "1"
+def stop_requested(since: float | None = None) -> bool:
+    """Arrêt demandé. Avec `since` : seulement s'il a été demandé après ce moment."""
+    value = get_state("stop")
+    try:
+        requested_at = float(value) if value else 0.0
+    except ValueError:
+        requested_at = 0.0
+    if since is None:
+        return requested_at > 0
+    return requested_at >= since
 
 
 def recent_messages(limit: int = 100) -> list[dict]:
@@ -383,21 +403,36 @@ def metrics_list() -> list[dict]:
 
 
 # --- Mémoire (apprentissage) ---
+def norm_key(key: str) -> str:
+    """Clé de mémoire normalisée : minuscules, sans accents, mots séparés par « _ » (audit M3)."""
+    import unicodedata
+    text = unicodedata.normalize("NFKD", str(key)).encode("ascii", "ignore").decode().lower()
+    return "_".join(re.findall(r"[a-z0-9]+", text))
+
+
 def remember(agent: str, key: str, value: str) -> None:
     conn = _conn()
     conn.execute("INSERT INTO memory (ts, agent, key, value) VALUES (?, ?, ?, ?)",
-                 (time.time(), agent, key, value))
+                 (time.time(), str(agent).upper(), norm_key(key), value))
     conn.commit()
     conn.close()
 
 
 def recall(agent: str, key: str) -> str | None:
+    """Dernière valeur pour la clé, casse, accents et séparateurs ignorés. None si inconnue."""
+    wanted = norm_key(key)
+    exact = [r for r in memory_keys(agent, limit=1000) if norm_key(r["key"]) == wanted]
+    return exact[0]["value"] if exact else None
+
+
+def memory_keys(agent: str, limit: int = 200) -> list[dict]:
+    """Clés connues d'un agent, plus récentes d'abord (une ligne par clé)."""
     conn = _conn()
-    row = conn.execute(
-        "SELECT value FROM memory WHERE agent=? AND key=? ORDER BY id DESC LIMIT 1",
-        (agent, key)).fetchone()
+    rows = conn.execute(
+        "SELECT key, value, MAX(id) AS id FROM memory WHERE UPPER(agent)=? GROUP BY key ORDER BY id DESC LIMIT ?",
+        (str(agent).upper(), limit)).fetchall()
     conn.close()
-    return row["value"] if row else None
+    return [dict(r) for r in rows]
 
 
 def recall_all(agent: str, limit: int = 50) -> list[dict]:

@@ -218,7 +218,6 @@ class PodaluxApp(ctk.CTk):
         args = ["cycle"]
         if offer != "auto":
             args += ["--offer", offer]
-        db.clear_stop()
         self.proc, log = procs.spawn(args, "cycle")
         self.step_label.configure(text=f"journal : {log.name}")
         self.status_label.configure(text="● Running", text_color="#ffb74d")

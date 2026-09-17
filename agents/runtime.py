@@ -7,11 +7,14 @@ pas un nouvel agent ni un chantier.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 
 from octopus.journal import with_run
 
-from . import db, deepseek
+from . import cancel, db, deepseek
+
+_ROLE: contextvars.ContextVar[str] = contextvars.ContextVar("podalux_role", default="RUNTIME")
 
 MODEL = deepseek.config.MODEL_FLASH
 
@@ -68,12 +71,19 @@ def _send_message(args):
 
 
 def _remember(args):
-    db.remember(args["agent"], args["key"], args["value"])
-    return "mémorisé"
+    # L'agent qui écrit est celui qui tourne, pas celui qu'il nomme (audit, risque 18).
+    role = _ROLE.get()
+    db.remember(role, args["key"], args["value"])
+    return f"mémorisé pour {role} sous la clé {db.norm_key(args['key'])}"
 
 
 def _recall(args):
-    return db.recall(args["agent"], args["key"])
+    agent = args.get("agent") or _ROLE.get()
+    value = db.recall(agent, args["key"])
+    if value is not None:
+        return value
+    keys = [r["key"] for r in db.memory_keys(agent, limit=30)]
+    return {"trouve": False, "agent": str(agent).upper(), "cles_connues": keys}
 
 
 TOOLS = {
@@ -156,6 +166,15 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
 
     `conversational=True` → l'agent répond à un message humain (pas un objectif).
     """
+    token = _ROLE.set(role)
+    try:
+        with cancel.scope():
+            return _run_agent(role, goal, max_steps, conversational)
+    finally:
+        _ROLE.reset(token)
+
+
+def _run_agent(role: str, goal: str, max_steps: int, conversational: bool) -> dict:
     system, first_user, done_label = build_prompts(role, goal, conversational)
     context = [{"role": "system", "content": system},
                {"role": "user", "content": first_user}]
@@ -163,6 +182,9 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
     last_sig = None
     repeat = 0
     for i in range(max_steps):
+        if cancel.requested():
+            db.post(role, "arrêt demandé par l'humain — fin de l'agent")
+            return {"role": role, "steps": steps, "final": "(arrêt demandé)"}
         # Garde-budget : on arrête l'agent si le budget du run est atteint.
         if _budget_exhausted():
             db.post(role, "budget dépassé — arrêt du run")
@@ -185,6 +207,9 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
         try:
             result = TOOLS[tool]["fn"](args)
             result_str = json.dumps(result, ensure_ascii=False)[:1500]
+        except cancel.Cancelled:
+            db.post(role, "arrêt demandé par l'humain — fin de l'agent")
+            return {"role": role, "steps": steps, "final": "(arrêt demandé)"}
         except Exception as e:
             result_str = f"erreur : {e}"
         # garde anti-boucle : si même action + même résultat répétés, demander de changer
@@ -205,7 +230,14 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
 @with_run("podalux", "mission", budget_usd=deepseek.config.CYCLE_BUDGET_USD)
 def run_mission(goal: str, max_steps_per_agent: int = 8) -> dict:
     """ORBIT planifie puis délègue aux rôles (multi-agents via le runtime)."""
+    with cancel.scope():
+        return _run_mission(goal, max_steps_per_agent)
+
+
+def _run_mission(goal: str, max_steps_per_agent: int) -> dict:
     pro = deepseek.config.MODEL_PRO
+    if cancel.requested():
+        return {"plan": [], "results": [], "rapport": "(arrêt demandé)"}
     plan_sys = (
         "Tu es ORBIT, le CEO. Décompose l'objectif en 2 à 5 sous-tâches, chacune assignée "
         f"à UN rôle parmi {list(ROLES)}. Réponds en JSON : "
@@ -220,6 +252,9 @@ def run_mission(goal: str, max_steps_per_agent: int = 8) -> dict:
 
     results = []
     for t in tasks:
+        if cancel.requested():
+            db.post("ORBIT", "mission arrêtée par l'humain")
+            return {"plan": tasks, "results": results, "rapport": "(arrêt demandé)"}
         role = t.get("role", "ORBIT")
         if role not in ROLES:
             role = "ORBIT"
@@ -235,6 +270,9 @@ def run_mission(goal: str, max_steps_per_agent: int = 8) -> dict:
         results.append({"role": role, "task": original,
                         "final": r.get("final"), "steps": r.get("steps")})
 
+    if cancel.requested():
+        db.post("ORBIT", "mission arrêtée par l'humain avant la synthèse")
+        return {"plan": tasks, "results": results, "rapport": "(arrêt demandé)"}
     syn_sys = ("Tu es ORBIT. Synthétise les résultats des sous-tâches en un rapport final "
                "concis. Réponds en JSON : {\"rapport\":\"...\"}")
     syn = deepseek.call_json("ORBIT", "synthese", pro,

@@ -7,7 +7,7 @@ import time
 
 from octopus.journal import with_run
 
-from . import config, db
+from . import cancel, config, db
 from .agents import CATALOG, SOUT, CONVERT, FORGE, GROWTH, LEDGER, ORBIT
 
 YES = {"oui", "o", "yes", "y", "ok"}
@@ -46,10 +46,16 @@ class CycleBusy(RuntimeError):
 
 
 def _run_cycle_locked(owner: str, offer_id: str | None, max_iterations: int) -> dict:
-    db.clear_stop()  # après le verrou : un cycle refusé n'efface pas l'arrêt demandé sur le cycle en cours
+    # Pas de clear_stop : l'arrêt est horodaté (agents/cancel.py), un arrêt ancien ne concerne pas ce cycle.
+    with cancel.scope():
+        return _run_iterations(owner, offer_id, max_iterations)
+
+
+def _run_iterations(owner: str, offer_id: str | None, max_iterations: int) -> dict:
     rid = db.start_run(offer_id)
     db.post("ORBIT", "Démarrage du cycle SOUT → CONVERT → FORGE → GROWTH → LEDGER",
             kind="cycle")
+    oid, sout, ledger, orbit, iterations = offer_id, {}, {}, {}, []
 
     try:
         # 1. SOUT — sélection d'offre
@@ -71,23 +77,17 @@ def _run_cycle_locked(owner: str, offer_id: str | None, max_iterations: int) -> 
 
         # Boucle CONVERT → FORGE → GROWTH → LEDGER → ORBIT (itère tant que ORBIT dit "iterate")
         fixes = None
-        ledger = {}
-        orbit = {}
-        iterations = []
-        stopped = False
         for it in range(max_iterations):
             db.acquire_run_lock(owner)  # renouvelle le bail
-            if db.stop_requested():
-                db.update_run(rid, status="stopped", step="arrêt demandé")
-                db.post("ORBIT", "arrêt demandé par l'humain", kind="cycle")
-                stopped = True
-                break
+            cancel.checkpoint(f"début de l'itération {it + 1}")
             db.update_run(rid, step=f"itération {it + 1}/{max_iterations} · CONVERT")
             db.post("ORBIT", f"itération {it + 1}/{max_iterations} sur {oid}", kind="iteration")
             job = CONVERT.run(oid, angle, fixes=fixes)          # 2. monétisation (+ fixes du QC)
+            cancel.checkpoint("avant FORGE")
             db.update_run(rid, step=f"itération {it + 1} · FORGE (rendu)")
             metrics = FORGE.run(oid, job)                        # 3. rendu
             db.update_run(rid, step=f"itération {it + 1} · GROWTH (QC vision)")
+            cancel.checkpoint("avant le QC vision")
             growth = GROWTH.run(oid, job, metrics)               # 4. QC vision
             db.update_run(rid, step=f"itération {it + 1} · LEDGER")
             ledger = LEDGER.run(oid, metrics, growth)            # 5. rubric + coût + go/no-go
@@ -102,21 +102,23 @@ def _run_cycle_locked(owner: str, offer_id: str | None, max_iterations: int) -> 
             if orbit.get("decision") in ("done", "stop"):
                 break
 
-        if not stopped:
-            db.update_run(rid, status="done", step="terminé",
-                          result=json.dumps({"score": ledger.get("score"),
-                                             "decision": orbit.get("decision")}, ensure_ascii=False))
+        db.update_run(rid, status="done", step="terminé",
+                      result=json.dumps({"score": ledger.get("score"),
+                                         "decision": orbit.get("decision")}, ensure_ascii=False))
 
         # checkpoint humain : confirmation de publication (si ORBIT a dit "done")
         if orbit.get("decision") == "done":
             db.update_run(rid, step="attente de confirmation de publication")
             ans = db.ask_human("GROWTH", "publish_confirmation",
                                f"Publier la vidéo {oid} ({ledger.get('score')}/35) ? oui/non",
-                               timeout_s=600)
+                               timeout_s=600, cancel=cancel.requested)
             db.post("GROWTH", f"confirmation de publication : {ans}")
             if is_yes(ans):
                 db.decide("GROWTH", "publish_approved", {"offer_id": oid})
                 db.update_run(rid, step="publication approuvée (dry-run)")
+    except cancel.Cancelled as e:
+        db.update_run(rid, status="stopped", step=str(e))
+        db.post("ORBIT", f"cycle arrêté : {e}", kind="cycle")
     except Exception as e:
         db.update_run(rid, status="error", step=f"erreur : {e}")
         raise

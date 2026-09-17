@@ -156,7 +156,7 @@ def pipeline(monkeypatch):
         total = next(seen["scores"])
         return {"total_calcule": total, "humanite": 4, "warm_pass": total >= 24, "fixes": [f"fix-{total}"]}
 
-    def ask_human(agent, kind, question, timeout_s=300):
+    def ask_human(agent, kind, question, timeout_s=300, cancel=None):
         seen["asked"].append(question)
         return seen.get("answer", "oui")
 

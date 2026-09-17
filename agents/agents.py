@@ -10,7 +10,7 @@ import re
 import time
 from pathlib import Path
 
-from . import config, db, deepseek, tools
+from . import cancel, config, db, deepseek, tools
 
 CATALOG = {
     "cash_impayes_relance01": {
@@ -307,9 +307,11 @@ class FORGE:
         tools.make_audio(str(job_path), offer_id)
         tools.require_fresh([out / "audio" / "mix.wav", rem / "captions.ts", rem / "job.ts"], t0)
         db.post("FORGE", "audio + captions générés (Chatterbox)")
+        cancel.checkpoint("avant le rendu")
         tools.remotion_render(offer_id)
         tools.require_fresh([out / "video.mp4"], t0)
         db.post("FORGE", "rendu Remotion terminé")
+        cancel.checkpoint("avant le mux")
         tools.mux(offer_id)
         tools.require_fresh([out / "final.mp4"], t0)
         db.post("FORGE", "mux final.mp4 ok")
