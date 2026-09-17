@@ -72,7 +72,7 @@ def _overlay_omniroute(raw: dict) -> dict:
     raw = json.loads(json.dumps(raw))
     provider_id = "omniroute"
     model_id = "omniroute/auto-free"
-    model_name = os.environ.get("OMNIROUTE_MODEL", "auto/free").strip() or "auto/free"
+    model_name = os.environ.get("OMNIROUTE_MODEL", "auto/best-free").strip() or "auto/best-free"
     raw.setdefault("providers", {})[provider_id] = {
         "kind": "cloud",
         "base_url": os.environ.get("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1").rstrip("/"),
@@ -89,7 +89,7 @@ def _overlay_omniroute(raw: dict) -> dict:
         "api_model": model_name,
         "cost_class": "free_quota",
         "capabilities": ["json", "vision", "tools", "reasoning_effort"],
-        "notes": "Modèle virtuel OmniRoute : auto/free. La disponibilité et le provider réel dépendent des connexions OmniRoute.",
+        "notes": "Modèle virtuel OmniRoute : auto/best-free. La disponibilité et le provider réel dépendent des connexions OmniRoute.",
     }
 
     free_defaults = {

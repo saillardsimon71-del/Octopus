@@ -11,12 +11,12 @@ agents/runtime.py / agents/deepseek.py
         ↓
 OmniRoute local (Docker)
         ↓
-   auto/free
+   auto/best-free
         ↓
 provider gratuit réellement connecté/disponible
 ```
 
-Le catalogue OCTOPUS injecte à l'exécution le modèle virtuel `omniroute/auto-free`. Il est envoyé au gateway sous le nom `auto/free`, afin qu'OmniRoute fasse son propre routage sans que le code OCTOPUS fige un fournisseur gratuit précis.
+Le catalogue OCTOPUS injecte à l'exécution le modèle virtuel `omniroute/auto-free`. Il est envoyé au gateway sous le nom `auto/best-free` (vérifié le 17/09/2026 : `auto/free` n'existe pas dans OmniRoute, le gateway répond « Unknown built-in auto combo »), afin qu'OmniRoute fasse son propre routage sans que le code OCTOPUS fige un fournisseur gratuit précis.
 
 ## Installation locale Windows
 
@@ -35,7 +35,7 @@ L'instance doit ensuite afficher/répondre sur l'endpoint local fourni par l'ins
 ```text
 OMNIROUTE_ENABLED=1
 OMNIROUTE_BASE_URL=http://127.0.0.1:20128/v1
-OMNIROUTE_MODEL=auto/free
+OMNIROUTE_MODEL=auto/best-free
 ```
 
 La clé ne va jamais dans Git. La définir uniquement dans l'environnement utilisateur Windows :
