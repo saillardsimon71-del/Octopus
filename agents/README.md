@@ -48,6 +48,24 @@ OMNIROUTE_API_KEY=<secret runtime uniquement>
 
 La clé ne doit jamais entrer dans Git.
 
+## Centre de travail GUI
+
+`run_gui.py` ouvre désormais le cockpit principal :
+
+```text
+┌─ Cockpit
+├─ Missions
+├─ Agents
+├─ Production vidéo
+├─ Interventions humaines
+├─ Navigateur
+└─ Système / Orca
+```
+
+Le cockpit regroupe les commandes et observations déjà présentes dans le projet : cycle, mission ORBIT, worker, messages, publication dry-run, Studio vidéo, handoffs, navigateur, diagnostic et pont Orca. Il ne déplace pas la logique métier dans Tkinter.
+
+Les opérations longues sont lancées par `agents.procs` ou dans des threads de fond afin de conserver une interface réactive. La documentation d'utilisation est dans `docs/GUI.md`.
+
 ## Développement avec Orca (optionnel)
 
 [Orca](https://github.com/stablyai/orca) est intégré comme **pont de développement**, pas comme moteur du cycle business. Il peut recevoir une tâche d'audit/correction/revue et gérer son propre `Run → Task → Worker` avec Claude, Codex ou un autre agent pris en charge.
@@ -137,25 +155,14 @@ Tests : `tests/test_browser_integration.py` vérifie redirection tierce, navigat
 ## Commandes utiles
 
 ```powershell
-# Diagnostic de l'environnement local cloud-first
 python -m agents.run doctor
-
-# GUI
 python run_gui.py
-
-# Cycle
 python -m agents.run cycle
 python -m agents.run cycle --offer cash_devis_cgv01
-
-# Navigateur
 python -m agents.run browser https://example.com
 python -m agents.run browse-open
-
-# Missions
 python -m agents.run mission "…"
 python -m agents.run goal "…"
-
-# Développement Orca (optionnel)
 python -m agents.run orca status
 ```
 
