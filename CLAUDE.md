@@ -4,7 +4,7 @@
 
 This branch is the active cloud-video migration branch. Do not restart the architecture from scratch and do not rewrite `agents/runtime.py` unless there is a concrete regression requiring it.
 
-The branch includes the cloud-first control-plane/video foundation, the integrated Chromium browser guard, OmniRoute routing, MiniMax H3 cloud routing, local diagnostics, one-command Windows bootstrap, artifact checksum verification, CI coverage, an optional Orca development bridge, and a unified desktop Workbench GUI. Do not claim CI is green until a fresh run passes.
+The branch includes the cloud-first control-plane/video foundation, the integrated Chromium browser guard, OmniRoute routing, MiniMax H3 cloud routing, local diagnostics, one-command Windows bootstrap, artifact checksum verification, CI coverage, an optional Orca development bridge, and a unified entrepreneurial desktop Workbench. Do not claim CI is green until a fresh run passes.
 
 Orca is deliberately scoped to repository-development work: it is invoked only through its public CLI and remains disabled unless `OCTOPUS_ORCA_ENABLED=1` is set. It must not replace the Podalux business runtime, `octopus.tasks`, or RunPod video execution.
 
@@ -13,8 +13,9 @@ Orca is deliberately scoped to repository-development work: it is invoked only t
 ```text
 OCTOPUS control plane
   ├─ GUI Workbench (`agents/gui/workbench.py`)
-  │    └─ compatibility entrypoint (`agents/gui/app.py`)
-  ├─ local Business Workspace registry (`agents/gui/workspaces.py`)
+  │    └─ Intelligence extension (`agents/gui/intelligence.py`)
+  ├─ Business Workspace registry (`agents/gui/workspaces.py`)
+  ├─ strategic mission templates (`agents/gui/strategy.py`)
   ├─ agents/runtime.py (stable ReAct runtime)
   ├─ agents/cycle.py
   ├─ octopus.tasks (durable local queue / leases / human handoff)
@@ -42,14 +43,19 @@ The Workbench is a **Business Workspace first** rather than a collection of unre
 Navigation:
 - Cockpit: run status, business KPI, active task count, human requests, activity feed, agent overview and quick actions.
 - Business: portfolio of business workspaces, offer grouping, business creation and direct navigation to Missions/Production.
+- Intelligence: long-horizon entrepreneurial loop. ORBIT can be explicitly tasked to discover opportunities, validate hypotheses, build offers, design content engines, design funnels, improve client operations, propose reinvestment rules and perform strategic reviews.
 - Missions: ORBIT objectives, task filters, worker control and active business context.
 - Agents: activity and workload cards for all six roles.
 - Production: active-business offer selection, cycle, Studio, final output and QC metrics.
-- Humain: pending handoffs with direct response fields.
+- Humain: pending handoffs with direct responses.
 - Navigateur: guarded Chromium observation, URL and latest screenshot.
 - Système: local preflight, logs and optional Orca status.
 
+The Intelligence page is not a second autonomous runtime. Its actions compose explicit objectives through `agents/gui/strategy.py` and launch the existing ORBIT mission path. It must not invent revenue, margin, customer or social-platform data.
+
 Business metadata is stored only in ignored `agents/data/workspaces.json`. When missing, `agents/gui/workspaces.py` derives initial business groups from `jobs/*.json` offer-id prefixes. `active_business` is stored through the existing SQLite state table. `Tous les business` remains the global view.
+
+The current repository does **not** yet provide a structured CRM, consolidated revenue/margin ledger, or native social-platform analytics. Full customer management, automated funnel execution and capital allocation therefore require future connectors/data sources; the GUI should expose the orchestration surface without pretending those integrations already exist.
 
 Long operations must stay outside the Tk event loop. Cycles, workers, messages and browser commands use the existing subprocess launcher; doctor and Orca status/tasks use background threads. Do not move business logic into Tkinter.
 
@@ -130,10 +136,12 @@ Do not move business agents or cloud rendering into Orca merely because Orca can
 ## Important files
 
 - `agents/gui/workbench.py` — primary desktop Workbench
-- `agents/gui/app.py` — compatibility entrypoint to Workbench
+- `agents/gui/intelligence.py` — entrepreneurial Intelligence extension and entrypoint
+- `agents/gui/strategy.py` — strategic mission templates
 - `agents/gui/workspaces.py` — local Business Workspace registry
+- `agents/gui/app.py` — compatibility entrypoint to Workbench
 - `agents/gui/studio.py` — existing video studio window used by the Workbench
-- `docs/GUI.md` — cockpit/workbench workflow
+- `docs/GUI.md` — cockpit/workbench and Intelligence workflow
 - `octopus/catalog.py` — dynamic OmniRoute overlay + safe default profile
 - `octopus/llm.py` — LLM gateway
 - `agents/browser.py` — Chromium/Playwright tool
@@ -149,6 +157,7 @@ Do not move business agents or cloud rendering into Orca merely because Orca can
 - `video_worker/runpod_handler.py` — RunPod entry point
 - `video_worker/Dockerfile` — worker image
 - `tests/test_gui.py`
+- `tests/test_gui_intelligence.py`
 - `tests/test_browser_integration.py`
 - `tests/test_doctor.py`
 - `tests/test_omniroute.py`
@@ -165,12 +174,13 @@ Do not move business agents or cloud rendering into Orca merely because Orca can
 ## Next work order
 
 1. Let the fresh CI run for the current HEAD finish and fix actual failures.
-2. Run the GUI on Windows and verify Business switching, business creation, cycle/mission launch, handoff replies and browser observation.
+2. Run the GUI on Windows and verify Business switching, business creation, Intelligence actions, mission launch, handoff replies and browser observation.
 3. Run the real local smoke test with OmniRoute + Chromium + `doctor` on Windows.
-4. Deploy the real RunPod worker + object storage and execute one paid-safe/idempotent end-to-end video test.
-5. Only after that, run a real Podalux cycle and compare technical QC + visual QC.
-6. Use the Orca bridge only for explicit repository-development tasks; keep business automation and video execution in Octopus.
-7. Keep publication in dry-run until the whole pipeline is verified.
+4. Add real CRM/revenue/social data connectors before claiming full client-management, funnel execution or reinvestment automation.
+5. Deploy the real RunPod worker + object storage and execute one paid-safe/idempotent end-to-end video test.
+6. Only after that, run a real Podalux cycle and compare technical QC + visual QC.
+7. Use the Orca bridge only for explicit repository-development tasks; keep business automation and video execution in Octopus.
+8. Keep publication in dry-run until the whole pipeline is verified.
 
 ## Do not regress
 
@@ -183,4 +193,5 @@ Do not move business agents or cloud rendering into Orca merely because Orca can
 - Do not move Podalux business agents or RunPod workloads into Orca.
 - Do not move business logic into the Tkinter cockpit.
 - Do not block the Tk main loop on network or long-running work.
+- Do not invent client, revenue, margin or social-platform data that has not been connected.
 - Do not claim a successful GUI smoke, real render, deployment, or green CI run unless it was actually observed.
