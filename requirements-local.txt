@@ -1,0 +1,12 @@
+# Runtime local léger (mode cloud-first)
+openai>=1.99,<2
+requests>=2.32,<3
+customtkinter>=5.2,<6
+Pillow>=10,<13
+playwright>=1.55,<2
+
+# Optionnel mais utile pour les outils audio / certains modules média locaux.
+numpy>=1.26,<3
+
+# Développement / tests
+pytest>=8,<9
