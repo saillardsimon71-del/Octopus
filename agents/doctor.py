@@ -141,7 +141,7 @@ def run_checks() -> list[Check]:
         if key:
             ok, detail = _http_ok(f"{base}/models", key)
             checks.append(Check("OmniRoute", ok, f"{base} · {detail}",
-                                "démarrer Docker/OmniRoute et vérifier son endpoint /v1/models"))
+                                "démarrer Docker/OmniRoute et vérifier son endpoint /models"))
         else:
             checks.append(Check("OmniRoute", False, f"{base} · clé absente",
                                 "définir OMNIROUTE_API_KEY puis relancer le terminal"))
