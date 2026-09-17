@@ -62,13 +62,18 @@ class VideoService:
         if not isinstance(frames, list) or not frames:
             return
         by_name = {artifact.name: artifact.url for artifact in result.artifacts if artifact.kind == "image"}
+        allowed_urls = {artifact.url for artifact in result.artifacts if artifact.kind == "image"}
         root = Path(os.environ.get("PODALUX_ROOT", Path.cwd()))
         target_dir = root / "out" / offer_id / "frames"
         target_dir.mkdir(parents=True, exist_ok=True)
         materialized: list[str] = []
         for item in frames:
             raw = str(item)
-            url = raw if raw.startswith(("https://", "http://")) else by_name.get(Path(raw).name)
+            url = by_name.get(Path(raw).name)
+            if raw.startswith(("https://", "http://")):
+                if raw not in allowed_urls:
+                    raise VideoServiceError(f"URL frame QC non autorisée par le manifest: {raw}")
+                url = raw
             if not url:
                 raise VideoServiceError(f"frame QC introuvable dans les artefacts cloud: {raw}")
             name = Path(raw).name or "frame.jpg"
@@ -89,12 +94,11 @@ class VideoService:
         root = Path(os.environ.get("PODALUX_ROOT", Path.cwd()))
         target = root / "out" / offer_id / "cloud_result.json"
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps({
-            "schema_version": "1",
-            "job_id": result.job_id,
-            "offer_id": offer_id,
-            "status": result.status.value,
-            "video_url": result.video_url,
-            "qc": dict(result.qc),
-            "artifacts": [artifact.to_dict() for artifact in result.artifacts],
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload = {
+            "schema_version": "1", "job_id": result.job_id, "offer_id": offer_id,
+            "status": result.status.value, "video_url": result.video_url,
+            "qc": dict(result.qc), "artifacts": [artifact.to_dict() for artifact in result.artifacts],
+        }
+        tmp = target.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(target)
