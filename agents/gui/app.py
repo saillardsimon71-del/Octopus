@@ -16,7 +16,7 @@ from pathlib import Path
 import customtkinter as ctk
 from PIL import Image
 
-from .. import config, db
+from .. import config, db, procs
 
 COLORS = {
     "ORBIT": "#ffb74d", "GROWTH": "#81c784", "LEDGER": "#64b5f6",
@@ -210,17 +210,17 @@ class PodaluxApp(ctk.CTk):
     def _start_cycle(self):
         if self.proc is not None and self.proc.poll() is None:
             return
+        holder = db.run_lock_holder()
+        if holder:  # cycle lancé par la CLI, un agent ou une GUI précédente
+            self.step_label.configure(text=f"un cycle tourne déjà ({holder})")
+            return
         offer = self.offer_menu.get()
-        cmd = [config.PYTHON, "-m", "agents.run", "cycle"]
+        args = ["cycle"]
         if offer != "auto":
-            cmd += ["--offer", offer]
-        env = dict(os.environ)
-        env["DEEPSEEK_API_KEY"] = config.api_key()
-        env["PYTHONUTF8"] = "1"
-        env["PYTHONIOENCODING"] = "utf-8"
+            args += ["--offer", offer]
         db.clear_stop()
-        self.proc = subprocess.Popen(cmd, cwd=str(config.PROJECT_ROOT), env=env,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.proc, log = procs.spawn(args, "cycle")
+        self.step_label.configure(text=f"journal : {log.name}")
         self.status_label.configure(text="● Running", text_color="#ffb74d")
 
     def _start_mission(self):
@@ -230,15 +230,9 @@ class PodaluxApp(ctk.CTk):
         if self.proc is not None and self.proc.poll() is None:
             self.step_label.configure(text="un cycle/mission tourne déjà")
             return
-        cmd = [config.PYTHON, "-m", "agents.run", "mission", text]
-        env = dict(os.environ)
-        env["DEEPSEEK_API_KEY"] = config.api_key()
-        env["PYTHONUTF8"] = "1"
-        env["PYTHONIOENCODING"] = "utf-8"
         db.post("HUMAN", f"objectif : {text}")
         self.objective_entry.delete(0, "end")
-        self.proc = subprocess.Popen(cmd, cwd=str(config.PROJECT_ROOT), env=env,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.proc, _ = procs.spawn(["mission", text], "mission")
         self.status_label.configure(text="● Mission", text_color="#5c6bc0")
 
     def _stop_cycle(self):
@@ -247,13 +241,7 @@ class PodaluxApp(ctk.CTk):
 
     def _open_browser(self):
         """Ouvre le navigateur Chromium (visible, persistant) via un sous-processus."""
-        cmd = [config.PYTHON, "-m", "agents.run", "browse-open"]
-        env = dict(os.environ)
-        env["DEEPSEEK_API_KEY"] = config.api_key()
-        env["PYTHONUTF8"] = "1"
-        env["PYTHONIOENCODING"] = "utf-8"
-        p = subprocess.Popen(cmd, cwd=str(config.PROJECT_ROOT), env=env,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        p, _ = procs.spawn(["browse-open"], "browse-open")
         self.msg_procs.append(p)
 
     def _publish(self):
@@ -294,13 +282,7 @@ class PodaluxApp(ctk.CTk):
         ctk.CTkLabel(self.salon, text=f"[HUMAN] {text}", anchor="w", justify="left",
                      text_color="#4fc3f7", font=("Segoe UI", 12), wraplength=640).pack(anchor="w", pady=1)
         # dispatcher à l'agent en sous-processus (non-bloquant, la réponse arrive au salon)
-        cmd = [config.PYTHON, "-m", "agents.run", "msg", role, content]
-        env = dict(os.environ)
-        env["DEEPSEEK_API_KEY"] = config.api_key()
-        env["PYTHONUTF8"] = "1"
-        env["PYTHONIOENCODING"] = "utf-8"
-        p = subprocess.Popen(cmd, cwd=str(config.PROJECT_ROOT), env=env,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        p, _ = procs.spawn(["msg", role, content], f"msg-{role}")
         self.msg_procs.append(p)
 
     def _refresh_browser(self):

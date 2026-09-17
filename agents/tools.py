@@ -8,14 +8,68 @@ Garde-fous :
 from __future__ import annotations
 
 import json
+import os
+import re
 import subprocess
+import time
 from pathlib import Path
 
 from . import config
 
+# Plus longue étape mesurée le 16/09 : 281 s (TTS). Marge x3.
+STEP_TIMEOUT_S = 900
 
-def run_shell(cmd: list[str], cwd: str | None = None) -> str:
-    """Exécute une commande de la liste blanche. Refuse tout le reste."""
+
+class StepError(RuntimeError):
+    """Étape de production en échec : code retour, timeout ou artefact manquant/périmé."""
+
+
+def _run_checked(cmd: list[str], cwd: str, timeout: int = STEP_TIMEOUT_S, log: Path | None = None) -> str:
+    """Lance une commande, lève StepError si elle échoue. Sortie complète écrite dans `log`."""
+    started = time.time()
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", cwd=cwd, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        _write_log(log, cmd, None, time.time() - started, _text(e.stdout) + _text(e.stderr))
+        raise StepError(f"timeout {timeout} s : {Path(cmd[0]).name}") from e
+    except OSError as e:
+        raise StepError(f"lancement impossible de {Path(cmd[0]).name} : {e}") from e
+    out = (r.stdout or "") + (r.stderr or "")
+    _write_log(log, cmd, r.returncode, time.time() - started, out)
+    if r.returncode != 0:
+        raise StepError(f"{Path(cmd[0]).name} code {r.returncode} : {out[-800:].strip()}")
+    return out
+
+
+def _text(value) -> str:
+    if value is None:
+        return ""
+    return value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+
+
+def _write_log(log: Path | None, cmd: list[str], code: int | None, seconds: float, output: str) -> None:
+    if log is None:
+        return
+    log.parent.mkdir(parents=True, exist_ok=True)
+    status = "timeout" if code is None else f"code {code}"
+    log.write_text(f"$ {' '.join(map(str, cmd))}\n# {status}, {seconds:.1f} s\n\n{output}", encoding="utf-8")
+
+
+def require_fresh(paths: list[Path], since: float) -> None:
+    """Refuse un artefact absent, vide ou antérieur au début de l'étape (données d'un autre run)."""
+    for p in paths:
+        if not p.exists() or p.stat().st_size == 0 or p.stat().st_mtime < since - 1:
+            raise StepError(f"artefact absent ou périmé : {p}")
+
+
+def step_log(offer_id: str, step: str) -> Path:
+    return config.PROJECT_ROOT / "out" / offer_id / "logs" / f"{step}.log"
+
+
+def run_shell(cmd: list[str], cwd: str | None = None, timeout: int = STEP_TIMEOUT_S,
+              log: Path | None = None) -> str:
+    """Exécute une commande de la liste blanche. Refuse tout le reste. Lève StepError en cas d'échec."""
     if not cmd:
         raise ValueError("commande vide")
     exe = Path(cmd[0]).name.lower()
@@ -27,31 +81,22 @@ def run_shell(cmd: list[str], cwd: str | None = None) -> str:
     for bad in config.FORBIDDEN_ARGS:
         if bad in joined:
             raise ValueError(f"commande refusée (argument interdit '{bad}'): {joined}")
-    r = subprocess.run(cmd, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", cwd=cwd or str(config.PROJECT_ROOT))
-    return (r.stdout or "") + (r.stderr or "")
+    return _run_checked(cmd, cwd or str(config.PROJECT_ROOT), timeout, log)
 
 
 def make_audio(job_json: str, offer_id: str) -> str:
     """Génère VO Chatterbox + captions + mix (Phase 3)."""
-    out = run_shell([
+    return run_shell([
         config.PYTHON, "tools/make_audio_chatterbox_full.py",
         job_json, offer_id, config.CHATTERBOX_VOICE, "0.6", "0.4",
-    ])
-    return out
+    ], log=step_log(offer_id, "audio"))
 
 
 def remotion_render(offer_id: str) -> str:
     """Rend le composant CashShort (lit captions.ts/job.ts générés)."""
-    remotion_dir = config.PROJECT_ROOT / "remotion"
-    npx = "npx.cmd"
-    out = subprocess.run(
-        [npx, "remotion", "render", "CashShort",
-         f"../out/{offer_id}/video.mp4"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        cwd=str(remotion_dir),
-    )
-    return (out.stdout or "") + (out.stderr or "")
+    npx = "npx.cmd" if os.name == "nt" else "npx"
+    return _run_checked([npx, "remotion", "render", "CashShort", f"../out/{offer_id}/video.mp4"],
+                        str(config.PROJECT_ROOT / "remotion"), log=step_log(offer_id, "render"))
 
 
 def mux(offer_id: str) -> str:
@@ -60,21 +105,18 @@ def mux(offer_id: str) -> str:
     mix = out_dir / "audio" / "mix.wav"
     video = out_dir / "video.mp4"
     final = out_dir / "final.mp4"
+    cwd = str(config.PROJECT_ROOT)
     # mesure LUFS puis gain linéaire
-    probe = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-i", str(mix), "-af", "ebur128", "-f", "null", "-"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace").stderr
-    import re
+    probe = _run_checked(["ffmpeg", "-hide_banner", "-i", str(mix), "-af", "ebur128", "-f", "null", "-"],
+                         cwd, log=step_log(offer_id, "mux_lufs"))
     mm = re.findall(r"I:\s*(-?\d+(?:\.\d+)?)\s*LUFS", probe)
     if not mm:
-        raise ValueError("LUFS introuvable")
+        raise StepError(f"LUFS introuvable dans la mesure de {mix}")
     lufs = float(mm[-1])
     gain = round(-14 - lufs, 2)
-    subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(video), "-i", str(mix),
-         "-af", f"volume={gain}dB", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-         "-shortest", str(final)],
-        check=True)
+    _run_checked(["ffmpeg", "-y", "-loglevel", "error", "-i", str(video), "-i", str(mix),
+                  "-af", f"volume={gain}dB", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                  "-shortest", str(final)], cwd, log=step_log(offer_id, "mux"))
     return f"mux ok gain={gain}dB -> {final}"
 
 
@@ -83,7 +125,7 @@ def qc_metrics(offer_id: str) -> dict:
     out_dir = config.PROJECT_ROOT / "out" / offer_id
     final = out_dir / "final.mp4"
     run_shell([config.PYTHON, "tools/qc_metrics.py", str(final),
-               str(out_dir), "--label", offer_id])
+               str(out_dir), "--label", offer_id], log=step_log(offer_id, "qc_metrics"))
     return json.loads((out_dir / "qc_metrics.json").read_text(encoding="utf-8"))
 
 

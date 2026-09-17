@@ -102,9 +102,13 @@ L'automatisation de logins est fragile et peut violer les CGU → `handoff()` po
 ## Garde-fous
 
 - **Secrets** : `DEEPSEEK_API_KEY` reste en variable d'environnement.
-- **Shell** : liste blanche stricte (`SHELL_WHITELIST`), aucun argument destructif.
-- **Coût** : plafond par cycle (`CYCLE_BUDGET_USD`), tout appel est loggé.
+- **Shell** : liste blanche (`SHELL_WHITELIST`). Attention : `python`, `npx`, `curl` et `git` y figurent, la liste n'empêche donc pas l'exécution de code arbitraire. Ne jamais exposer `run_shell` à un LLM.
+- **Coût** : budget par run (`CYCLE_BUDGET_USD`, sous-runs inclus) et plafond journalier, vérifiés avant chaque appel par la passerelle OCTOPUS (`octopus/README.md`). Chaque appel est journalisé dans `data/octopus.db` et dans la table `costs`.
+- **Échecs bruyants** : toute étape de FORGE (TTS, rendu, mux, métriques) lève `StepError` sur code retour non nul, timeout (900 s) ou artefact absent/antérieur au début de l'étape. Sortie complète dans `out/<offre>/logs/<étape>.log`.
+- **Un seul cycle à la fois** : verrou `run_lock` (table `state`, bail de 30 min renouvelé à chaque itération). Un second cycle (GUI, CLI, outil `render_offer`) est refusé sans rien modifier. `python -m agents.run status` affiche le détenteur.
+- **Journaux GUI** : chaque sous-processus lancé par la GUI écrit dans `agents/data/logs/` (200 derniers conservés).
 - **Sortant** : rien ne sort de la machine (pas d'upload/email/achat) — à ajouter en `--dry-run`.
+- **Tests** : `python -m pytest` (hors-ligne). `python -m agents._verify --live` fait des appels payants et écrit en base de production.
 
 ## Prérequis
 

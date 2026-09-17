@@ -113,7 +113,7 @@ def main():
         raw_wav.write_bytes(raw)
         seg_wav = out_dir / f"cb_seg_{i}.wav"
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw_wav),
-                        "-ar", str(SR), "-ac", "1", "-c:a", "pcm_s16le", str(seg_wav)])
+                        "-ar", str(SR), "-ac", "1", "-c:a", "pcm_s16le", str(seg_wav)], check=True)
         seg_wavs.append(seg_wav)
         seg_durs.append(wav_dur(seg_wav))
         print(f"seg {i} ok duree={round(seg_durs[-1], 2)}s")

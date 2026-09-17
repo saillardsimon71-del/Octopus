@@ -6,6 +6,7 @@ FORGE (production) · CONVERT (monétisation) · SOUT (recherche).
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from . import config, db, deepseek, tools
@@ -179,16 +180,23 @@ class FORGE:
 
     @staticmethod
     def run(offer_id, job):
-        """Production déterministe : audio Chatterbox + rendu Remotion + mux + métriques."""
+        """Production déterministe : chaque étape doit produire un artefact neuf, sinon StepError."""
         job_path = config.JOBS_DIR / f"{offer_id}.json"
+        out = config.PROJECT_ROOT / "out" / offer_id
+        rem = config.PROJECT_ROOT / "remotion" / "src" / "data"
         db.post("FORGE", f"démarrage du rendu de {offer_id} (@FORGE)")
+        t0 = time.time()
         tools.make_audio(str(job_path), offer_id)
+        tools.require_fresh([out / "audio" / "mix.wav", rem / "captions.ts", rem / "job.ts"], t0)
         db.post("FORGE", "audio + captions générés (Chatterbox)")
         tools.remotion_render(offer_id)
+        tools.require_fresh([out / "video.mp4"], t0)
         db.post("FORGE", "rendu Remotion terminé")
         tools.mux(offer_id)
+        tools.require_fresh([out / "final.mp4"], t0)
         db.post("FORGE", "mux final.mp4 ok")
         metrics = tools.qc_metrics(offer_id)
+        tools.require_fresh([out / "qc_metrics.json"], t0)
         db.post("FORGE", f"métriques : LUFS {metrics.get('lufs_integrated')} · "
                          f"LRA {metrics.get('lra_lu')} · SATAVG {metrics.get('satavg_mean')}")
         return metrics

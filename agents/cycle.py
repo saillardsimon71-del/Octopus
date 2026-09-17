@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 
 from octopus.journal import with_run
 
@@ -20,7 +22,22 @@ def already_produced() -> list[str]:
 @with_run("podalux", "video_cycle", budget_usd=config.CYCLE_BUDGET_USD)
 def run_cycle(offer_id: str | None = None, max_iterations: int = 3) -> dict:
     db.init_db()
-    db.clear_stop()
+    owner = f"pid{os.getpid()}-{time.time_ns()}"
+    if not db.acquire_run_lock(owner):
+        db.post("ORBIT", f"cycle refusé : un autre cycle tourne déjà ({db.run_lock_holder()})", kind="cycle")
+        raise CycleBusy("un autre cycle tourne déjà")
+    try:
+        return _run_cycle_locked(owner, offer_id, max_iterations)
+    finally:
+        db.release_run_lock(owner)
+
+
+class CycleBusy(RuntimeError):
+    """Un autre cycle détient le verrou de production."""
+
+
+def _run_cycle_locked(owner: str, offer_id: str | None, max_iterations: int) -> dict:
+    db.clear_stop()  # après le verrou : un cycle refusé n'efface pas l'arrêt demandé sur le cycle en cours
     rid = db.start_run(offer_id)
     db.post("ORBIT", "Démarrage du cycle SOUT → CONVERT → FORGE → GROWTH → LEDGER",
             kind="cycle")
@@ -40,6 +57,7 @@ def run_cycle(offer_id: str | None = None, max_iterations: int = 3) -> dict:
         orbit = {}
         iterations = []
         for it in range(max_iterations):
+            db.acquire_run_lock(owner)  # renouvelle le bail
             if db.stop_requested():
                 db.update_run(rid, status="stopped", step="arrêt demandé")
                 db.post("ORBIT", "arrêt demandé par l'humain", kind="cycle")

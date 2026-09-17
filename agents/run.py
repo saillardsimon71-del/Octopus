@@ -15,12 +15,16 @@ import json
 import sqlite3
 
 from . import config, db
-from .cycle import run_cycle
+from .cycle import CycleBusy, run_cycle
 
 
 def cmd_cycle(offer_id=None):
     db.init_db()
-    res = run_cycle(offer_id)
+    try:
+        res = run_cycle(offer_id)
+    except CycleBusy:
+        print(f"refusé : un autre cycle tourne déjà ({db.run_lock_holder()})")
+        raise SystemExit(3)
     print(json.dumps(res, ensure_ascii=False, indent=2))
 
 
@@ -50,6 +54,7 @@ def cmd_publish(offer_id, real=False):
 def cmd_status():
     db.init_db()
     print(f"coût total : ${db.total_cost():.4f}  (budget cycle : ${config.CYCLE_BUDGET_USD})")
+    print(f"verrou de production : {db.run_lock_holder() or 'libre'}")
     conn = sqlite3.connect(str(config.DB_PATH))
     conn.row_factory = sqlite3.Row
     for row in conn.execute("SELECT * FROM decisions ORDER BY id DESC LIMIT 10"):

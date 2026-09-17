@@ -305,6 +305,53 @@ def clear_stop() -> None:
     set_state("stop", "0")
 
 
+# --- Verrou de production (un seul cycle à la fois : fichiers partagés, TTS non concurrent) ---
+RUN_LOCK_TTL_S = 1800  # bail renouvelé à chaque itération ; un processus tué libère le verrou en 30 min
+
+
+def acquire_run_lock(owner: str, ttl_s: float = RUN_LOCK_TTL_S) -> bool:
+    """Prend ou renouvelle le verrou de production. False si un autre propriétaire le détient."""
+    conn = _conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT value FROM state WHERE key='run_lock'").fetchone()
+        now = time.time()
+        if row and row["value"]:
+            holder, _, until = row["value"].rpartition("|")
+            try:
+                expired = float(until) <= now
+            except ValueError:
+                expired = True
+            if holder != owner and not expired:
+                conn.rollback()
+                return False
+        conn.execute("INSERT OR REPLACE INTO state (key, value) VALUES ('run_lock', ?)",
+                     (f"{owner}|{now + ttl_s}",))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def run_lock_holder() -> str | None:
+    """Propriétaire du verrou s'il est encore valide."""
+    value = get_state("run_lock")
+    if not value:
+        return None
+    holder, _, until = value.rpartition("|")
+    try:
+        return holder if float(until) > time.time() else None
+    except ValueError:
+        return None
+
+
+def release_run_lock(owner: str) -> None:
+    conn = _conn()
+    conn.execute("DELETE FROM state WHERE key='run_lock' AND value LIKE ?", (f"{owner}|%",))
+    conn.commit()
+    conn.close()
+
+
 def stop_requested() -> bool:
     return get_state("stop") == "1"
 
