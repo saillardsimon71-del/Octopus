@@ -15,18 +15,21 @@ import time
 from pathlib import Path
 from urllib.parse import urljoin
 
-from . import config, db, deepseek
+from . import config, db, deepseek, web_guard
 
 
 class BrowserTool:
+    # Les appels actifs sont les vecteurs d'exfiltration les plus fréquents après lecture d'un compte.
+    # Les ressources statiques externes restent tolérées pour ne pas casser les applications modernes
+    # (CDN, images, fonts), tandis que navigation/XHR/fetch/websocket restent soumis au garde.
+    ACTIVE_RESOURCE_TYPES = {"fetch", "xhr", "websocket", "eventsource", "beacon"}
+
     def __init__(self, headless: bool = False, profile_dir: Path | None = None, persistent: bool = True,
                  guard=None):
         self.headless = headless
-        # guard(url) -> bool : chaque navigation (y compris redirection, lien, script) est vérifiée
-        # AVANT la requête ; refusée, elle est annulée (agents/web_guard.py).
         self.guard = guard
         self.blocked: list[str] = []
-        self.persistent = persistent  # False : contexte éphémère, sans cookies ni session (web public)
+        self.persistent = persistent
         self.profile_dir = profile_dir or (config.DATA_DIR / "browser_profile")
         if persistent:
             self.profile_dir.mkdir(parents=True, exist_ok=True)
@@ -37,17 +40,19 @@ class BrowserTool:
         self._started = False
 
     # --- cycle de vie ---
-
     def start(self) -> "BrowserTool":
         from playwright.sync_api import sync_playwright
         self._pw = sync_playwright().start()
-        # Sandbox Chromium conservée (l'ancien --no-sandbox la désactivait : audit C8).
+        # Service workers peuvent contourner browserContext.route(); on les bloque pour que le garde
+        # réseau reste observable et déterministe (Playwright recommande ce mode pour l'interception).
         if self.persistent:
             self._context = self._pw.chromium.launch_persistent_context(
-                str(self.profile_dir), headless=self.headless, viewport={"width": 1280, "height": 800})
+                str(self.profile_dir), headless=self.headless,
+                viewport={"width": 1280, "height": 800}, service_workers="block")
         else:
             self._browser = self._pw.chromium.launch(headless=self.headless)
-            self._context = self._browser.new_context(viewport={"width": 1280, "height": 800})
+            self._context = self._browser.new_context(
+                viewport={"width": 1280, "height": 800}, service_workers="block")
         if self.guard is not None:
             self._context.route("**/*", self._route)
         self._page = self._context.new_page()
@@ -56,23 +61,44 @@ class BrowserTool:
 
     MAX_REDIRECTS = 10
 
+    def _must_guard_request(self, request) -> bool:
+        if request.is_navigation_request():
+            return True
+        try:
+            return request.resource_type() in self.ACTIVE_RESOURCE_TYPES
+        except Exception:
+            # Défense prudente pour les faux objets/test doubles sans resource_type().
+            return True
+
     def _route(self, route) -> None:
         request = route.request
+        if not self._must_guard_request(request):
+            self._continue(route)
+            return
+        try:
+            allowed = self.guard(request.url)
+        except Exception:
+            allowed = False
+        if not allowed:
+            self._block(route, request.url)
+            return
         if not request.is_navigation_request():
             self._continue(route)
             return
-        if not self.guard(request.url):
-            self._block(route, request.url)
-            return
-        # Playwright n'appelle ce handler que pour la PREMIÈRE URL d'une redirection HTTP : sans ce
-        # suivi manuel, une redirection 302 vers un site tiers échapperait au garde.
+
+        # Playwright n'appelle ce handler que pour la PREMIÈRE URL d'une redirection HTTP :
+        # suivi manuel pour empêcher une redirection vers un tiers de contourner le garde.
         url, response = request.url, self._fetch(route, request.url, first=True)
         for _ in range(self.MAX_REDIRECTS):
             location = response.headers.get("location")
             if not (300 <= response.status < 400 and location):
                 break
             target = urljoin(url, location)
-            if not self.guard(target):
+            try:
+                allowed = self.guard(target)
+            except Exception:
+                allowed = False
+            if not allowed:
                 self._block(route, target)
                 return
             url, response = target, self._fetch(route, target, first=False)
@@ -123,7 +149,6 @@ class BrowserTool:
         return self._page.url
 
     def snapshot(self, max_chars: int = 4000) -> str:
-        """Texte visible de la page (pour que l'agent « lise »)."""
         try:
             txt = self._page.inner_text("body", timeout=5000)
         except Exception:
@@ -131,7 +156,6 @@ class BrowserTool:
         return txt[:max_chars]
 
     def selector_text(self, selector: str, max_chars: int = 4000) -> str:
-        """Texte d'un conteneur précis (ex. résultats de recherche)."""
         try:
             txt = self._page.inner_text(selector, timeout=5000)
         except Exception:
@@ -139,7 +163,6 @@ class BrowserTool:
         return txt[:max_chars]
 
     def links(self, max_items: int = 40) -> list[str]:
-        """Liens de la page (pour la navigation décisionnelle)."""
         try:
             hrefs = self._page.eval_on_selector_all(
                 "a[href]", "els => els.map(e => e.href + ' | ' + (e.innerText||'').trim())")
@@ -165,11 +188,6 @@ class BrowserTool:
 
     # --- recherche web (veille) ---
     def search(self, query: str, max_results: int = 6) -> str:
-        """Recherche web multi-sources → texte lisible des résultats.
-
-        Délègue à `agents.search.web_search` (Brave/Tavily/Google News/Wikipedia).
-        Gardé pour compatibilité avec le code existant.
-        """
         from .search import web_search
         return web_search(query, max_results)
 
@@ -182,14 +200,23 @@ class BrowserTool:
         return path
 
     def see(self, prompt: str = "Décris cette page et ce qu'on peut y faire.", agent: str = "SOUT") -> dict:
-        """Capture + vision : l'agent « voit » la page."""
+        """Capture + vision : compte connecté = modèle local, page publique = OmniRoute/free."""
         shot = self.screenshot()
-        txt = deepseek.vision_text(agent, "voir_page", [str(shot)], prompt)
-        return {"screenshot": str(shot), "description": txt}
+        kind = web_guard.classify(self.url())
+        task = "web.describe_page" if kind == web_guard.ACCOUNT else "web.inspect_page"
+        try:
+            txt = deepseek.vision_text(agent, task, [str(shot)], prompt)
+        except Exception as exc:
+            from octopus import llm
+            if isinstance(exc, llm.NoEligibleModel):
+                # Le texte DOM reste exploitable même sans provider vision configuré.
+                txt = self.snapshot(2000) or "Vision indisponible : aucun modèle vision éligible."
+            else:
+                raise
+        return {"screenshot": str(shot), "description": txt, "vision_task": task, "page_kind": kind}
 
     # --- passation humaine (login, 2FA, captcha, confirmation) ---
     def handoff(self, message: str, timeout_s: int = 300) -> bool:
-        """Demande à l'humain (GUI ou terminal) via le mécanisme ask/answer."""
         ans = db.ask_human("BROWSER", "browser_handoff", message, timeout_s=timeout_s)
         if ans is None:
             db.post("BROWSER", f"handoff expiré (timeout) : {message}", kind="handoff")
@@ -199,7 +226,6 @@ class BrowserTool:
 
 
 def new_browser(headless: bool = False, account: bool = False, guard=None) -> BrowserTool:
-    """`account=True` : profil connecté (comptes). Sinon contexte éphémère sans cookies."""
     return BrowserTool(headless=headless, persistent=account, guard=guard).start()
 
 
@@ -207,11 +233,6 @@ _shared: BrowserTool | None = None
 
 
 def get_shared_browser() -> BrowserTool:
-    """Navigateur partagé/persistant : un seul Chromium (visible) réutilisé.
-
-    Les connexions aux comptes sont conservées dans le profil persistant, donc
-    l'humain ne se connecte qu'une fois. Fermé proprement à la sortie (atexit).
-    """
     global _shared
     if _shared is None or not _shared._started:
         _shared = BrowserTool(headless=False).start()
