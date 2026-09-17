@@ -1,5 +1,5 @@
 """Tests sans réseau pour le contrat vidéo cloud."""
-from octopus.video.contract import VideoContractError, VideoJob, VideoStatus
+from octopus.video.contract import Artifact, VideoContractError, VideoJob, VideoStatus
 
 
 def sample():
@@ -43,6 +43,23 @@ def test_reject_secret():
         pass
     else:
         raise AssertionError("secret must fail")
+
+
+def test_reject_shell_unsafe_template():
+    payload = sample()
+    payload["template"] = "CashShort/../../rm"
+    try:
+        VideoJob.from_dict(payload)
+    except VideoContractError:
+        pass
+    else:
+        raise AssertionError("unsafe template must fail")
+
+
+def test_artifact_key_roundtrip():
+    artifact = Artifact("final.mp4", "https://signed.invalid", "video", "video/mp4", "abc", "offer/job/final.mp4")
+    value = artifact.to_dict()
+    assert value["key"] == "offer/job/final.mp4"
 
 
 def test_status_values_are_stable():
