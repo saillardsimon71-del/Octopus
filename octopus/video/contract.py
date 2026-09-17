@@ -1,0 +1,204 @@
+"""Contrat réseau stable pour les jobs vidéo.
+
+Le contrat ne contient jamais de secrets. Les URLs d'artefacts peuvent être signées et
+éphémères ; elles sont des références de sortie, pas des identifiants d'authentification.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any, Mapping
+
+SCHEMA_VERSION = "1"
+_SECRET_FRAGMENTS = (
+    "api_key", "apikey", "secret", "password", "passwd", "token", "access_key",
+    "private_key", "client_secret", "authorization", "cookie", "credentials",
+)
+
+
+class VideoContractError(ValueError):
+    """Payload vidéo invalide ou contenant un secret."""
+
+
+class VideoStatus(StrEnum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    RENDERING = "RENDERING"
+    QC = "QC"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    EXPIRED = "EXPIRED"
+
+
+TERMINAL_STATUSES = frozenset({VideoStatus.COMPLETED, VideoStatus.FAILED, VideoStatus.CANCELLED, VideoStatus.EXPIRED})
+
+
+@dataclass(frozen=True)
+class Artifact:
+    name: str
+    url: str
+    kind: str = "file"
+    content_type: str | None = None
+    sha256: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"name": self.name, "url": self.url, "kind": self.kind}
+        if self.content_type:
+            out["content_type"] = self.content_type
+        if self.sha256:
+            out["sha256"] = self.sha256
+        return out
+
+
+@dataclass(frozen=True)
+class RemoteJob:
+    remote_id: str
+    status: VideoStatus
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class VideoJob:
+    job_id: str
+    offer_id: str
+    template: str
+    language: str
+    duration_seconds: float
+    script: Mapping[str, Any]
+    voice: Mapping[str, Any]
+    assets: list[Mapping[str, Any]] = field(default_factory=list)
+    quality: Mapping[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    schema_version: str = SCHEMA_VERSION
+
+    @classmethod
+    def from_legacy_job(cls, job: Mapping[str, Any], *, job_id: str, template: str = "forge-v4") -> "VideoJob":
+        narration = job.get("narration")
+        if not isinstance(narration, list) or not narration:
+            raise VideoContractError("job legacy sans narration")
+        duration = job.get("duree_cible_s", 24)
+        try:
+            duration_f = float(duration)
+        except (TypeError, ValueError) as exc:
+            raise VideoContractError("duree_cible_s invalide") from exc
+        script = {
+            "titre": job.get("titre", ""),
+            "hook": job.get("hook", ""),
+            "douleur": job.get("douleur", ""),
+            "preuve": job.get("preuve", ""),
+            "soulagement": job.get("soulagement", ""),
+            "cta": job.get("cta", ""),
+            "prix": job.get("prix", ""),
+            "segments": narration,
+        }
+        return cls(
+            job_id=job_id,
+            offer_id=str(job.get("offer_id") or ""),
+            template=template,
+            language=str(job.get("langue") or "fr"),
+            duration_seconds=duration_f,
+            script=script,
+            voice=dict(job.get("voix") or {}),
+            assets=list(job.get("assets") or []),
+            quality={
+                "target_lufs": -14.0,
+                "min_lra": 5.0,
+                "min_score": 24,
+            },
+            metadata={"keywords": list(job.get("keywords") or []), "visuel": job.get("visuel")},
+        )
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "VideoJob":
+        if not isinstance(payload, Mapping):
+            raise VideoContractError("job doit être un objet JSON")
+        job_id = str(payload.get("job_id") or "").strip()
+        offer_id = str(payload.get("offer_id") or "").strip()
+        if not job_id or not offer_id:
+            raise VideoContractError("job_id et offer_id sont obligatoires")
+        schema_version = str(payload.get("schema_version") or SCHEMA_VERSION)
+        if schema_version != SCHEMA_VERSION:
+            raise VideoContractError(f"schema_version non supportée: {schema_version}")
+        try:
+            duration = float(payload.get("duration_seconds"))
+        except (TypeError, ValueError) as exc:
+            raise VideoContractError("duration_seconds invalide") from exc
+        if not 1 <= duration <= 300:
+            raise VideoContractError("duration_seconds hors limites [1, 300]")
+        script = payload.get("script")
+        voice = payload.get("voice")
+        if not isinstance(script, Mapping) or not isinstance(script.get("segments"), list):
+            raise VideoContractError("script.segments est obligatoire")
+        if not isinstance(voice, Mapping):
+            raise VideoContractError("voice doit être un objet")
+        assets = payload.get("assets") or []
+        if not isinstance(assets, list):
+            raise VideoContractError("assets doit être une liste")
+        quality = payload.get("quality") or {}
+        metadata = payload.get("metadata") or {}
+        for name, value in (("job", payload), ("script", script), ("voice", voice), ("assets", assets), ("quality", quality), ("metadata", metadata)):
+            assert_no_secrets(value, path=name)
+        return cls(
+            job_id=job_id,
+            offer_id=offer_id,
+            template=str(payload.get("template") or "forge-v4"),
+            language=str(payload.get("language") or "fr"),
+            duration_seconds=duration,
+            script=script,
+            voice=voice,
+            assets=[x for x in assets if isinstance(x, Mapping)],
+            quality=quality,
+            metadata=metadata,
+            schema_version=schema_version,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "schema_version": self.schema_version,
+            "job_id": self.job_id,
+            "offer_id": self.offer_id,
+            "template": self.template,
+            "language": self.language,
+            "duration_seconds": self.duration_seconds,
+            "script": dict(self.script),
+            "voice": dict(self.voice),
+            "assets": [dict(x) for x in self.assets],
+            "quality": dict(self.quality),
+            "metadata": dict(self.metadata),
+        }
+        assert_no_secrets(payload)
+        return payload
+
+
+@dataclass(frozen=True)
+class VideoResult:
+    job_id: str
+    status: VideoStatus
+    video_url: str | None = None
+    artifacts: tuple[Artifact, ...] = ()
+    qc: Mapping[str, Any] = field(default_factory=dict)
+    raw: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "job_id": self.job_id,
+            "status": self.status.value,
+            "video_url": self.video_url,
+            "artifacts": [a.to_dict() for a in self.artifacts],
+            "qc": dict(self.qc),
+        }
+
+
+def assert_no_secrets(value: Any, *, path: str = "root") -> None:
+    """Refuse les clés qui ressemblent à des secrets avant tout envoi cloud."""
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            normalized = str(key).strip().lower().replace("-", "_")
+            if any(fragment in normalized for fragment in _SECRET_FRAGMENTS):
+                raise VideoContractError(f"secret interdit dans le job: {path}.{key}")
+            assert_no_secrets(child, path=f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            assert_no_secrets(child, path=f"{path}[{index}]")
