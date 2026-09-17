@@ -1,9 +1,10 @@
 """Tests de migration sans appel réseau ni rendu vidéo réel."""
 from __future__ import annotations
 
+import pytest
+
 from octopus.video.contract import VideoResult, VideoStatus
-from octopus.video.renderers import CloudVideoRenderer
-from octopus.video.service import VideoService, stable_job_id
+from octopus.video.service import VideoService, VideoServiceError, stable_job_id
 
 
 JOB = {
@@ -70,3 +71,12 @@ def test_cloud_service_forwards_contract_identity():
     assert seen[0].offer_id == JOB["offer_id"]
     assert seen[0].voice["nom"] == "vivienne-fr"
     assert seen[0].script["stripe_link"] == JOB["stripe_link"]
+
+
+def test_cloud_service_rejects_mismatched_offer_before_renderer():
+    class ExplodingRenderer:
+        def render(self, video_job):
+            raise AssertionError("renderer ne doit jamais être appelé")
+
+    with pytest.raises(VideoServiceError, match="incohérence offer_id"):
+        VideoService(mode="cloud", cloud_renderer=ExplodingRenderer()).render("other-offer", JOB)
