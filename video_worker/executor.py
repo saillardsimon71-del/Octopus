@@ -42,10 +42,13 @@ class ForgeExecutor:
     def render(self, job: VideoJob) -> VideoResult:
         manifest_key = self._key(job, "manifest.json")
         existing = self.store.read_json(manifest_key)
-        if existing and existing.get("status") == VideoStatus.COMPLETED.value and existing.get("video_url"):
-            return VideoResult(job.job_id, VideoStatus.COMPLETED,
-                                str(existing["video_url"]), self._artifacts(existing),
-                                existing.get("qc") or {}, existing)
+        if existing and existing.get("status") == VideoStatus.COMPLETED.value:
+            artifacts = self._artifacts(existing)
+            final_artifact = next((a for a in artifacts if a.name == "final.mp4" and a.url), None)
+            video_url = final_artifact.url if final_artifact else existing.get("video_url")
+            if video_url:
+                return VideoResult(job.job_id, VideoStatus.COMPLETED, str(video_url),
+                                   artifacts, existing.get("qc") or {}, existing)
 
         workspace = self.config.work_root / job.job_id
         self._prepare_workspace(workspace)
@@ -188,7 +191,7 @@ class ForgeExecutor:
         artifacts: list[Artifact] = []
 
         video = self.store.put_file(final, f"{prefix}/final.mp4", content_type="video/mp4")
-        artifacts.append(Artifact(video.name, video.url, "video", video.content_type, video.sha256))
+        artifacts.append(Artifact(video.name, video.url, "video", video.content_type, video.sha256, video.key))
 
         compat_files = [
             (out_dir / "audio" / "mix.wav", f"{prefix}/audio/mix.wav", "audio/wav"),
@@ -207,7 +210,7 @@ class ForgeExecutor:
         if frames_dir.is_dir():
             for frame in sorted(frames_dir.glob("*.jpg")):
                 stored = self.store.put_file(frame, f"{prefix}/frames/{frame.name}", content_type="image/jpeg")
-                artifacts.append(Artifact(frame.name, stored.url, "image", "image/jpeg", stored.sha256))
+                artifacts.append(Artifact(frame.name, stored.url, "image", "image/jpeg", stored.sha256, stored.key))
 
         logs_dir = out_dir / "logs"
         if logs_dir.is_dir():
@@ -219,8 +222,14 @@ class ForgeExecutor:
     def _key(job: VideoJob, name: str) -> str:
         return f"{job.offer_id}/{job.job_id}/{name}"
 
-    @staticmethod
-    def _artifacts(manifest: dict[str, Any]) -> tuple[Artifact, ...]:
-        return tuple(Artifact(str(x.get("name", "artifact")), str(x["url"]), str(x.get("kind", "file")),
-                             x.get("content_type"), x.get("sha256"))
-                     for x in manifest.get("artifacts", []) if isinstance(x, dict) and x.get("url"))
+    def _artifacts(self, manifest: dict[str, Any]) -> tuple[Artifact, ...]:
+        artifacts: list[Artifact] = []
+        for item in manifest.get("artifacts", []):
+            if not isinstance(item, dict) or not item.get("url"):
+                continue
+            name = str(item.get("name", "artifact"))
+            key = str(item["key"]) if item.get("key") else None
+            url = self.store.url_for(key) if key else str(item["url"])
+            artifacts.append(Artifact(name, url, str(item.get("kind", "file")),
+                                      item.get("content_type"), item.get("sha256"), key))
+        return tuple(artifacts)
