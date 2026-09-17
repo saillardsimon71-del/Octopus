@@ -23,22 +23,24 @@ Le navigateur intégré utilise Chromium Playwright, pas le navigateur Edge pers
 
 ## 3. Démarrer OmniRoute
 
-Docker Desktop doit être démarré :
+Docker Desktop doit être démarré. OmniRoute expose actuellement son proxy OpenAI-compatible sous `/v1` sur le port `20128` ; la documentation OmniRoute recommande aussi de publier le port sur `127.0.0.1` pour éviter une exposition LAN involontaire. citeturn132217search2turn132217search5turn132217search6
 
 ```powershell
 docker pull diegosouzapw/omniroute:latest
-docker run -d --name omniroute --restart unless-stopped -p 20128:20128 -v omniroute-data:/app/data diegosouzapw/omniroute:latest
+docker run -d --name omniroute --restart unless-stopped --stop-timeout 40 -p 127.0.0.1:20128:20128 -v omniroute-data:/app/data diegosouzapw/omniroute:latest
 docker ps
 ```
 
-Vérifier l'endpoint fourni par l'instance. Pour OCTOPUS, les valeurs par défaut sont :
+Pour OCTOPUS, les valeurs par défaut sont :
 
 ```powershell
 [Environment]::SetEnvironmentVariable("OMNIROUTE_ENABLED", "1", "User")
-[Environment]::SetEnvironmentVariable("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/api/v1", "User")
+[Environment]::SetEnvironmentVariable("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1", "User")
 [Environment]::SetEnvironmentVariable("OMNIROUTE_MODEL", "auto/free", "User")
 [Environment]::SetEnvironmentVariable("OMNIROUTE_API_KEY", "<CLE_RUNTIME>", "User")
 ```
+
+OmniRoute documente le modèle `auto` et ses variantes `auto/...`; OCTOPUS conserve `auto/free` pour privilégier le pool gratuit lorsque cette variante est disponible dans l'instance. citeturn438409search0turn438409search5
 
 La clé ne doit pas être mise dans GitHub, un test, un commit ou un fichier de configuration versionné.
 
@@ -86,7 +88,7 @@ En cloud-first, le diagnostic doit vérifier :
 - Python de contrôle ;
 - Playwright + Chromium ;
 - SQLite / journal OCTOPUS ;
-- OmniRoute + `/models` ;
+- OmniRoute + `/v1/models` ;
 - identifiants RunPod ;
 - absence de verrou de production gênant.
 
