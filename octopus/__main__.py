@@ -4,10 +4,16 @@
   python -m octopus bench --models code,deepseek/flash [--tasks podalux.write_job] [--allow-paid] [--max-cost 0.05]
   python -m octopus models
   python -m octopus doctor
+  python -m octopus worker [--once] [--max-tasks N]
+  python -m octopus enqueue podalux podalux.video_cycle --input '{"offer_id": "cash_devis_cgv01"}'
+  python -m octopus tasks [--status queued] | cancel ID | ask | answer REQUEST_ID "texte"
+  python -m octopus schedule octopus octopus.cost_report --every 86400 [--disable]
+  python -m octopus events [--since ID]
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import shutil
@@ -108,6 +114,87 @@ def cmd_doctor(args) -> int:
     return 0
 
 
+def _dump(value) -> str:
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def cmd_worker(args) -> int:
+    from . import worker
+    worker.load_handlers()
+    if args.once:
+        result = worker.run_one()
+        print(_dump(result) if result else "aucune tâche prête")
+        return 0
+    worker.loop(poll_s=args.poll, max_tasks=args.max_tasks)
+    return 0
+
+
+def cmd_enqueue(args) -> int:
+    from . import worker
+    worker.load_handlers()
+    if args.kind not in worker.HANDLERS:
+        print(f"type de tâche inconnu : {args.kind} (connus : {', '.join(sorted(worker.HANDLERS))})")
+        return 2
+    task_id = worker.enqueue(args.business, args.kind, json.loads(args.input), priority=args.priority,
+                             delay_s=args.delay)
+    print(f"tâche #{task_id} en file")
+    return 0
+
+
+def cmd_tasks(args) -> int:
+    from . import tasks
+    for t in tasks.list_tasks(status=args.status, business=args.business, limit=args.limit):
+        error = f"  erreur : {(t['error'] or '').splitlines()[0][:80]}" if t["error"] else ""
+        print(f"#{t['id']:<5} {t['status']:14} {t['business']}/{t['kind']:24} tentatives {t['attempts']}/{t['max_attempts']}"
+              f"  {_dump(t['output'])[:80] if t['output'] is not None else ''}{error}")
+    return 0
+
+
+def cmd_cancel(args) -> int:
+    from . import tasks
+    print(tasks.cancel(args.id))
+    return 0
+
+
+def cmd_ask(args) -> int:
+    from . import tasks
+    pending = tasks.pending_human_requests()
+    for r in pending:
+        print(f"#{r['id']} (tâche #{r['task_id']}, {r['business']}) {r['question']}")
+    if not pending:
+        print("aucune demande en attente")
+    return 0
+
+
+def cmd_answer(args) -> int:
+    from . import tasks
+    print(f"réponse enregistrée ; tâche #{tasks.answer(args.id, args.text)} remise en file")
+    return 0
+
+
+def cmd_schedule(args) -> int:
+    from . import tasks, worker
+    worker.load_handlers()
+    if args.kind not in worker.HANDLERS:
+        print(f"type de tâche inconnu : {args.kind}")
+        return 2
+    spec = worker.HANDLERS[args.kind]
+    sid = tasks.schedule(args.business, args.kind, args.every, json.loads(args.input), enabled=not args.disable,
+                         budget_usd=spec.budget_usd)
+    print(f"planification #{sid} : {args.kind} toutes les {args.every:g} s ({'désactivée' if args.disable else 'active'})")
+    for s in tasks.schedules():
+        print(f"  #{s['id']} {s['business']}/{s['kind']} toutes les {s['interval_s']:g} s, "
+              f"{'active' if s['enabled'] else 'désactivée'}")
+    return 0
+
+
+def cmd_events(args) -> int:
+    from . import tasks
+    for e in tasks.events(since_id=args.since, limit=args.limit):
+        print(f"{e['id']:<6} tâche #{e['task_id']} {e['type']:22} {_dump(e['data'])[:120]}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     _safe_console()
     parser = argparse.ArgumentParser(prog="octopus", description="OCTOPUS : journal, passerelle LLM, banc d'evaluation")
@@ -124,8 +211,40 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-cost", type=float, default=0.05, help="plafond du banc en USD (defaut 0.05)")
     sub.add_parser("models", help="catalogue, disponibilite et preuves")
     sub.add_parser("doctor", help="verification de l'installation")
+    p = sub.add_parser("worker", help="execute les taches de la file")
+    p.add_argument("--once", action="store_true", help="une seule tache puis sortie")
+    p.add_argument("--max-tasks", type=int, default=None)
+    p.add_argument("--poll", type=float, default=2.0)
+    p = sub.add_parser("enqueue", help="ajoute une tache")
+    p.add_argument("business")
+    p.add_argument("kind")
+    p.add_argument("--input", default="{}")
+    p.add_argument("--priority", type=int, default=0)
+    p.add_argument("--delay", type=float, default=0)
+    p = sub.add_parser("tasks", help="liste les taches")
+    p.add_argument("--status", default=None)
+    p.add_argument("--business", default=None)
+    p.add_argument("--limit", type=int, default=30)
+    p = sub.add_parser("cancel", help="annule une tache")
+    p.add_argument("id", type=int)
+    sub.add_parser("ask", help="demandes humaines en attente")
+    p = sub.add_parser("answer", help="repond a une demande humaine")
+    p.add_argument("id", type=int)
+    p.add_argument("text")
+    p = sub.add_parser("schedule", help="planifie une tache recurrente")
+    p.add_argument("business")
+    p.add_argument("kind")
+    p.add_argument("--every", type=float, required=True, help="intervalle en secondes (>= 60)")
+    p.add_argument("--input", default="{}")
+    p.add_argument("--disable", action="store_true")
+    p = sub.add_parser("events", help="evenements recents")
+    p.add_argument("--since", type=int, default=0)
+    p.add_argument("--limit", type=int, default=100)
     args = parser.parse_args(argv)
-    return {"report": cmd_report, "bench": cmd_bench, "models": cmd_models, "doctor": cmd_doctor}[args.cmd](args)
+    commands = {"report": cmd_report, "bench": cmd_bench, "models": cmd_models, "doctor": cmd_doctor,
+                "worker": cmd_worker, "enqueue": cmd_enqueue, "tasks": cmd_tasks, "cancel": cmd_cancel,
+                "ask": cmd_ask, "answer": cmd_answer, "schedule": cmd_schedule, "events": cmd_events}
+    return commands[args.cmd](args)
 
 
 if __name__ == "__main__":

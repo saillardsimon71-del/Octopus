@@ -1,12 +1,13 @@
 # OCTOPUS : noyau commun des activités
 
-Version 0.1 (M1). Trois briques, utilisées par Podalux sans changer ses signatures :
+Version 0.2. Quatre briques, utilisées par Podalux sans changer ses signatures :
 
 | Brique | Fichier | Rôle |
 |---|---|---|
 | Journal | `journal.py` | SQLite `data/octopus.db` : runs imbriqués (cycle > agent > outil), appels LLM, résultats du banc |
 | Passerelle LLM | `llm.py`, `catalog.py`, `pricing.py` | un seul point d'entrée : choix du modèle par profil, budget vérifié **avant** l'appel, coût à la grille officielle (heures pleines, cache), justification de chaque appel payant |
 | Banc | `bench.py`, `agents/evals.py` | compare code, modèles locaux, gratuits et payants sur les vraies tâches, avec des vérifications déterministes |
+| File de tâches | `tasks.py`, `worker.py` | tâches persistées, ressources exclusives, baux, reprises, annulation, demandes humaines, planifications |
 
 ## Profils (`OCTOPUS_PROFILE`)
 
@@ -38,6 +39,31 @@ python -m pytest                             tests hors-ligne (aucun appel rése
 ```
 
 Le banc refuse les modèles payants sans `--allow-paid` et s'arrête au plafond `--max-cost`.
+
+## File de tâches et worker (M2)
+
+Tables `tasks`, `events`, `human_requests`, `schedules` dans `data/octopus.db` (schéma v2, migration automatique).
+
+| Élément | Comportement |
+|---|---|
+| Prise de tâche | transaction `BEGIN IMMEDIATE` : un seul worker par tâche ; priorité puis ancienneté ; `not_before` pour les délais |
+| Ressources | une tâche `cpu_heavy` (TTS, rendu) à la fois ; les tâches sans ressource passent à côté |
+| Bail | renouvelé par le worker ; expiré (worker mort) : nouvelle tentative s'il en reste, sinon échec |
+| Échec | nouvelle tentative différée (`max_attempts`, `retry_delay_s` du handler) |
+| Annulation | immédiate en file ; coopérative en cours (`ctx.check_cancel()`, relayée à l'arrêt Podalux) |
+| Humain | `ctx.ask_human(clé, question)` met la tâche en attente ; `python -m octopus answer ID "texte"` la remet en file, le handler est rejoué et retrouve la réponse |
+| Planification | `python -m octopus schedule ...` ; une occurrence encore active n'est pas empilée |
+| Idempotence | `idempotency_key` unique (ex. `publish:<offre>:<sha256>`) |
+| Coûts | chaque tâche tourne dans un run du journal, avec le budget déclaré par son handler |
+
+Handlers chargés : `octopus.builtin_handlers` (`octopus.cost_report`) et `agents.task_handlers` (`podalux.video_cycle`, `podalux.agent_message`, `podalux.mission`), surchargeables par `OCTOPUS_HANDLERS`. Aucune planification n'est créée d'office : un cycle vidéo planifié consomme du CPU et des appels payants, c'est à décider.
+
+```
+python -m octopus worker                      boucle (Ctrl+C pour arrêter)
+python -m octopus enqueue podalux podalux.video_cycle --input "{\"offer_id\": \"cash_devis_cgv01\"}"
+python -m octopus tasks / events / ask / answer 3 "oui" / cancel 12
+python -m octopus schedule octopus octopus.cost_report --every 86400
+```
 
 ## Ajouter un fournisseur ou un modèle
 

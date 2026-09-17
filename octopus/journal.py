@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from . import enabled, paths
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -89,6 +89,71 @@ CREATE TABLE IF NOT EXISTS bench_results (
 CREATE INDEX IF NOT EXISTS idx_bench_task_model ON bench_results(task, model);
 """
 
+_SCHEMA_V2 = """
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',
+    priority INTEGER NOT NULL DEFAULT 0,
+    input TEXT NOT NULL DEFAULT '{}',
+    output TEXT,
+    error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 1,
+    not_before REAL NOT NULL DEFAULT 0,
+    resource TEXT,
+    lease_owner TEXT,
+    lease_until REAL,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    parent_id INTEGER REFERENCES tasks(id),
+    run_id INTEGER,
+    budget_usd REAL,
+    idempotency_key TEXT UNIQUE,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    finished_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_ready ON tasks(status, not_before, priority);
+CREATE INDEX IF NOT EXISTS idx_tasks_business ON tasks(business, status);
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    business TEXT,
+    task_id INTEGER,
+    type TEXT NOT NULL,
+    data TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);
+CREATE TABLE IF NOT EXISTS human_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    business TEXT NOT NULL,
+    task_id INTEGER NOT NULL REFERENCES tasks(id),
+    key TEXT NOT NULL,
+    question TEXT NOT NULL,
+    context TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    answer TEXT,
+    answered_at REAL,
+    expires_at REAL,
+    UNIQUE(task_id, key)
+);
+CREATE TABLE IF NOT EXISTS schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    input TEXT NOT NULL DEFAULT '{}',
+    interval_s REAL NOT NULL,
+    next_run REAL NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    budget_usd REAL,
+    last_task_id INTEGER,
+    UNIQUE(business, kind)
+);
+"""
+_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2))
+
 _LLM_COLUMNS = (
     "ts", "run_id", "root_run_id", "business", "agent", "task", "profile", "model", "provider",
     "cost_class", "attempt", "status", "error", "prompt_tokens", "cache_hit_tokens",
@@ -107,11 +172,14 @@ def connect() -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=10000")
-    if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version < SCHEMA_VERSION:
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.executescript(_SCHEMA_V1)
-        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-        conn.commit()
+        for target, script in _MIGRATIONS:
+            if version < target:
+                conn.executescript(script)  # IF NOT EXISTS : rejouable si deux processus migrent ensemble
+                conn.execute(f"PRAGMA user_version={target}")
+                conn.commit()
     return conn
 
 
@@ -202,7 +270,8 @@ def run(business: str, kind: str, *, label: str | None = None, budget_usd: float
         status, error = "interrupted", "KeyboardInterrupt"
         raise
     except BaseException as exc:
-        status, error = "error", f"{type(exc).__name__}: {exc}"[:500]
+        # Une exception peut porter son propre statut (attente humaine, annulation) : ce n'est pas une erreur.
+        status, error = getattr(exc, "run_status", "error"), f"{type(exc).__name__}: {exc}"[:500]
         raise
     finally:
         _current.reset(token)
