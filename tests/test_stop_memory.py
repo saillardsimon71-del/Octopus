@@ -26,9 +26,12 @@ def test_old_stop_does_not_cancel_a_new_run():
     assert cancel.requested() is False  # hors execution arretable
 
 
-def test_legacy_stop_value_is_ignored_by_new_runs():
-    db.set_state("stop", "1")
-    assert db.stop_requested() is True
+def test_legacy_stop_value_from_old_gui_is_honored_once():
+    with cancel.scope():
+        db.set_state("stop", "1")  # Podalux.exe non reconstruit
+        assert cancel.requested() is True
+        assert cancel.requested() is True  # converti en horodatage
+    time.sleep(0.01)
     with cancel.scope():
         assert cancel.requested() is False
 

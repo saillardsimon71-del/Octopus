@@ -367,6 +367,12 @@ def release_run_lock(owner: str) -> None:
 def stop_requested(since: float | None = None) -> bool:
     """Arrêt demandé. Avec `since` : seulement s'il a été demandé après ce moment."""
     value = get_state("stop")
+    if value == "1":
+        # Ancienne GUI (Podalux.exe non reconstruit) : "1" sans date. On honore l'arrêt une fois,
+        # daté de maintenant ; les exécutions lancées ensuite ne sont pas concernées.
+        requested_at = time.time()
+        set_state("stop", repr(requested_at))
+        return True
     try:
         requested_at = float(value) if value else 0.0
     except ValueError:
