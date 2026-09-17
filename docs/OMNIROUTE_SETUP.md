@@ -1,64 +1,77 @@
-# OmniRoute — LLM sans dépendance DeepSeek
+# OmniRoute — passerelle LLM locale
 
-OCTOPUS garde le contrat OpenAI-compatible de ses agents, mais les appels peuvent maintenant passer par [OmniRoute](https://github.com/diegosouzapw/OmniRoute) au lieu de l'API DeepSeek.
+OCTOPUS garde son contrat OpenAI-compatible, mais les appels des agents passent par [OmniRoute](https://github.com/diegosouzapw/OmniRoute) lorsque `OMNIROUTE_ENABLED=1` (valeur par défaut).
 
-## Principe
+## Architecture
 
 ```text
-agents/deepseek.py
-      -> octopus.llm
-      -> OmniRoute local
-      -> model virtuel auto/free
-      -> provider gratuit réellement disponible
+agents/runtime.py / agents/deepseek.py
+        ↓
+   octopus.llm
+        ↓
+OmniRoute local (Docker)
+        ↓
+   auto/free
+        ↓
+provider gratuit réellement connecté/disponible
 ```
 
-OmniRoute annonce un catalogue large de providers free et un routage avec fallback. OCTOPUS ne fige donc pas un fournisseur gratuit unique : le modèle virtuel `omniroute/auto-free` correspond par défaut à `auto/free` et laisse OmniRoute choisir le pool disponible.
+Le catalogue OCTOPUS injecte à l'exécution le modèle virtuel `omniroute/auto-free`. Il est envoyé au gateway sous le nom `auto/free`, afin qu'OmniRoute fasse son propre routage sans que le code OCTOPUS fige un fournisseur gratuit précis.
 
-## Démarrage
+## Installation locale Windows
 
-Lancer OmniRoute localement, puis configurer au minimum :
+Prérequis : Docker Desktop démarré. L'image OmniRoute est la seule grosse dépendance locale prévue pour la passerelle.
+
+```powershell
+docker pull diegosouzapw/omniroute:latest
+docker run -d --name omniroute --restart unless-stopped -p 20128:20128 -v omniroute-data:/app/data diegosouzapw/omniroute:latest
+docker ps
+```
+
+L'instance doit ensuite afficher/répondre sur l'endpoint local fourni par l'installation. Pour cette configuration OCTOPUS :
 
 ```text
 OMNIROUTE_ENABLED=1
-OMNIROUTE_BASE_URL=http://127.0.0.1:20128/v1
+OMNIROUTE_BASE_URL=http://127.0.0.1:20128/api/v1
 OMNIROUTE_MODEL=auto/free
 ```
 
-Le profil agent par défaut devient `zero_cost` quand OmniRoute est actif. Cela signifie :
+La clé ne va jamais dans Git. La définir uniquement dans l'environnement utilisateur Windows :
 
-- aucun modèle `paid` n'est choisi automatiquement ;
-- un échec ou un quota épuisé passe au candidat gratuit suivant configuré ;
-- les données ne sont pas nécessairement locales : OmniRoute peut transmettre les prompts aux providers qu'il utilise. Vérifier leurs conditions et politiques pour les données sensibles.
-
-Pour restaurer temporairement le comportement historique :
-
-```text
-OCTOPUS_PROFILE=legacy
-OMNIROUTE_ENABLED=0
+```powershell
+[Environment]::SetEnvironmentVariable("OMNIROUTE_API_KEY", "<CLE_OMNIROUTE>", "User")
+[Environment]::SetEnvironmentVariable("OMNIROUTE_ENABLED", "1", "User")
+[Environment]::SetEnvironmentVariable("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/api/v1", "User")
 ```
 
-## Intégration avec le catalogue OCTOPUS
-
-`octopus/catalog.py` ajoute à runtime un provider `omniroute` et le modèle `omniroute/auto-free` sans modifier `octopus/config/catalog.json`.
-
-Les tâches Podalux texte et vision ajoutent ce candidat en tête de `zero_cost`/`low_cost`. La tâche `web.describe_page` reste locale car elle est classée sensible.
-
-## Quotas et pannes
-
-Le mode `zero_cost` interdit les repliements payants. Une panne OmniRoute ou un provider gratuit indisponible peut donc finir en `NoEligibleModel` : c'est volontaire et préférable à une facture implicite.
-
-`CYCLE_BUDGET_USD` continue de protéger les appels payants historiques, mais le mode `zero_cost` doit être utilisé pour les exécutions ordinaires tant que la disponibilité gratuite est suffisante.
+Fermer/réouvrir PowerShell après changement d'environnement.
 
 ## Vérification
 
-```bash
-python -m pytest -q tests/test_omniroute.py
+```powershell
+$headers = @{ Authorization = "Bearer $env:OMNIROUTE_API_KEY" }
+Invoke-RestMethod -Uri "http://127.0.0.1:20128/api/v1/models" -Headers $headers
 ```
 
-Puis vérifier le gateway réel avec :
+Puis dans OCTOPUS :
 
-```bash
-curl http://127.0.0.1:20128/v1/models
+```powershell
+python -m agents.run doctor
 ```
 
-Aucun secret OmniRoute ne doit être écrit dans le dépôt. Un éventuel token de gateway reste une variable d'environnement/runtime.
+Le diagnostic contrôle désormais Playwright/Chromium, la base locale, OmniRoute et les credentials RunPod lorsque le rendu vidéo cloud est sélectionné.
+
+## Coût / sécurité
+
+`zero_cost` interdit les modèles `paid`. Une panne OmniRoute ou de tout son pool gratuit doit donc produire un échec explicite plutôt qu'un basculement implicite vers DeepSeek.
+
+OmniRoute est une passerelle locale : le prompt peut néanmoins être transmis au provider final choisi par OmniRoute. Ne pas considérer `OMNIROUTE_BASE_URL=localhost` comme une garantie que les données restent sur la machine.
+
+## Revenir temporairement au comportement historique
+
+```text
+OMNIROUTE_ENABLED=0
+OCTOPUS_PROFILE=legacy
+```
+
+Ce mode réactive les appels directs historiques et doit rester exceptionnel si le quota DeepSeek est épuisé.
