@@ -1,13 +1,16 @@
-"""Tâche `media.video_generate` : génération vidéo locale (WanGP) dans la file OCTOPUS.
+"""Tâche `media.video_generate` : WanGP local pour les petits modèles, MiniMax H3 cloud.
 
 Entrée : {"prompt": "...", "preset"?: brouillon|standard|qualite|h3, "model_type"?, "settings"?: {...réglages WanGP...}, "duration_s"?, "resolution"?,
           "seed"?, "variants"?: 1-8, "business"?, "parent_id"?, "tags"?, "allow_with_webui"?, "timeout_s"?}
 Sortie : identifiants de la bibliothèque et fichiers produits.
 
-Toutes les variantes partent dans un seul lancement du pont : le modèle n'est chargé qu'une fois.
+MiniMax H3 ne passe jamais par la détection WanGP locale : le modèle est généré sur un endpoint
+RunPod Serverless configuré par environnement, puis le fichier final est téléchargé dans la
+bibliothèque locale pour les étapes OCTOPUS suivantes.
 """
 from __future__ import annotations
 
+import json
 import os
 import random
 import re
@@ -17,14 +20,22 @@ from pathlib import Path
 
 from ..worker import TaskCancelled, handler
 from . import library, perf, presets, prompts, requirements, wangp
+from .minimax_h3_cloud import MiniMaxH3CloudError, MiniMaxH3Config, MiniMaxH3RunPodClient, save_result
+from ..journal import current_run
 
-MODEL_PREFERENCE = ("minimax_h3_fl2va_pruned", "minimax_h3_fl2va", "minimax_h3_vdn_pruned", "minimax_h3_vdn")
+MODEL_PREFERENCE = ("t2v_nexus_1.3B", "t2v_1.3B")
+H3_MODEL_MARKERS = ("minimax_h3", "minmax_h3")
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov"}
 MAX_VARIANTS = 8
 _PROMPT_INDEX = re.compile(r"Prompt\s+(\d+)\s*/\s*(\d+)", re.I)
 
 
+def _is_h3(model_type: str) -> bool:
+    return str(model_type or "").strip().lower().startswith(H3_MODEL_MARKERS)
+
+
 def default_model() -> str:
+    """Choisit un modèle réellement local ; MiniMax H3 n'est jamais auto-sélectionné ici."""
     env = os.environ.get("OCTOPUS_VIDEO_MODEL", "").strip()
     if env:
         return env
@@ -33,7 +44,7 @@ def default_model() -> str:
     for model in MODEL_PREFERENCE:
         if model in available:
             return model
-    return MODEL_PREFERENCE[1]
+    return MODEL_PREFERENCE[0]
 
 
 def build_settings(model_type: str, prompt: str, *, settings: dict | None = None, duration_s: float | None = None,
@@ -44,7 +55,7 @@ def build_settings(model_type: str, prompt: str, *, settings: dict | None = None
     base.pop("_error", None)
     merged = {**base, **(settings or {}), "model_type": model_type, "prompt": prompts.prepare(model_type, prompt)}
     if duration_s:
-        merged["video_length"] = f"{float(duration_s):g}s"  # l'API WanGP convertit en nombre d'images valide
+        merged["video_length"] = f"{float(duration_s):g}s"
     if resolution:
         if not re.fullmatch(r"\d{3,4}x\d{3,4}", resolution):
             raise ValueError(f"résolution invalide : {resolution!r} (attendu LARGEURxHAUTEUR)")
@@ -71,8 +82,106 @@ def _record_perf(ctx, workdir: Path) -> None:
         if measured and measured.get("sec_per_step"):
             ctx.emit("media.performance", {k: measured.get(k) for k in (
                 "model_type", "width", "height", "frames", "steps", "passes", "sec_per_step", "prepare_s", "total_s")})
-    except Exception as exc:  # noqa: BLE001 - la mesure est accessoire
+    except Exception as exc:
         ctx.emit("media.performance_error", {"error": f"{type(exc).__name__}: {exc}"})
+
+
+def _h3_dimensions(inp: dict) -> tuple[int, int]:
+    raw = str(inp.get("resolution") or "768x1344")
+    match = re.fullmatch(r"(\d{3,4})x(\d{3,4})", raw)
+    if not match:
+        raise ValueError(f"résolution H3 invalide : {raw!r}")
+    return int(match.group(1)), int(match.group(2))
+
+
+def _run_h3_cloud(ctx, inp: dict, prompt: str, variants: int, business: str):
+    """Exécute H3 distant sans toucher à WanGP/VRAM locale."""
+    client = MiniMaxH3RunPodClient(MiniMaxH3Config.from_env())
+    width, height = _h3_dimensions(inp)
+    duration_s = float(inp.get("duration_s") or 5)
+    steps = int((inp.get("settings") or {}).get("steps", 8))
+    base_seed = inp.get("seed")
+    if base_seed is None:
+        base_seed = random.randint(0, 2**31 - 1024)
+
+    batch = f"task-{ctx.id}"
+    generation_ids = [library.create(
+        business, "runpod", str(inp.get("model_type")), prompt, {
+            "backend": "runpod",
+            "width": width,
+            "height": height,
+            "duration_s": duration_s,
+            "steps": steps,
+            "seed": int(base_seed) + i,
+        }, task_id=ctx.id, parent_id=inp.get("parent_id"), batch_key=batch,
+        variant=i, tags=inp.get("tags")
+    ) for i in range(variants)]
+
+    produced = []
+    state_dir = Path(os.environ.get("OCTOPUS_VIDEO_H3_STATE_DIR", "" ).strip() or
+                      (Path(os.environ.get("PODALUX_ROOT", Path.cwd())) / "out" / ".h3_cloud_state"))
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    for index, gen_id in enumerate(generation_ids):
+        if ctx.cancelled():
+            for pending in generation_ids[index:]:
+                library.update(pending, status="cancelled", phase="cancelled")
+            raise TaskCancelled("annulation demandée pendant H3 cloud")
+        library.update(gen_id, status="running", phase="submitting", progress=0, error=None)
+        job_key = f"task-{ctx.id}-v{index + 1}"
+        state_path = state_dir / f"{job_key}.json"
+        remote_id = None
+        if state_path.is_file():
+            try:
+                saved = json.loads(state_path.read_text(encoding="utf-8"))
+                if saved.get("status") == "COMPLETED" and saved.get("path") and Path(saved["path"]).is_file():
+                    target = Path(saved["path"])
+                    meta = library.probe_media(target)
+                    library.update(gen_id, status="done", phase="done", progress=100, output_path=str(target), error=None, **meta)
+                    produced.append({"generation_id": gen_id, "path": str(target), **meta})
+                    continue
+                if saved.get("remote_id") and saved.get("status") in {"QUEUED", "RUNNING", "RENDERING"}:
+                    remote_id = str(saved["remote_id"])
+            except (OSError, ValueError, json.JSONDecodeError):
+                remote_id = None
+
+        try:
+            if remote_id is None:
+                workflow = None
+                # Reuse the client builder through a private stable method to keep the worker contract explicit.
+                from .minimax_h3_cloud import build_t2v_workflow
+                workflow = build_t2v_workflow(
+                    prompts.prepare("minimax_h3_fl2va_pruned_cloud", prompt),
+                    width=width, height=height, duration_s=duration_s,
+                    seed=int(base_seed) + index, steps=steps,
+                    output_prefix=f"octopus_{ctx.id}_{index + 1}",
+                )
+                state_path.write_text(json.dumps({"schema_version": "1", "remote_id": None, "status": "SUBMITTING"}), encoding="utf-8")
+                remote_id = client.submit(workflow)
+                state_path.write_text(json.dumps({"schema_version": "1", "remote_id": remote_id, "status": "QUEUED"}), encoding="utf-8")
+            library.update(gen_id, phase="rendering", progress=50, status_text=f"RunPod {remote_id}")
+            result = client.wait(remote_id)
+            target = library.generation_dir(gen_id) / f"{library.slug(prompt)}-h3-v{index + 1}.mp4"
+            save_result(result, target)
+            meta = library.probe_media(target)
+            state_path.write_text(json.dumps({"schema_version": "1", "remote_id": remote_id,
+                                               "status": "COMPLETED", "path": str(target)}), encoding="utf-8")
+            library.update(gen_id, status="done", phase="done", progress=100, output_path=str(target), error=None, **meta)
+            produced.append({"generation_id": gen_id, "path": str(target), "remote_id": remote_id, **meta})
+        except MiniMaxH3CloudError as exc:
+            library.update(gen_id, status="failed", phase="failed", error=str(exc))
+            state_path.write_text(json.dumps({"schema_version": "1", "remote_id": remote_id, "status": "FAILED", "error": str(exc)}), encoding="utf-8")
+        except Exception as exc:
+            library.update(gen_id, status="failed", phase="failed", error=f"{type(exc).__name__}: {exc}")
+            state_path.write_text(json.dumps({"schema_version": "1", "remote_id": remote_id, "status": "FAILED", "error": str(exc)}), encoding="utf-8")
+
+    ctx.emit("media.video_generated", {"count": len(produced), "model_type": inp.get("model_type"),
+                                       "backend": "runpod_minimax_h3"})
+    if not produced:
+        raise MiniMaxH3CloudError("aucune vidéo H3 produite")
+    return {"model_type": inp.get("model_type"), "backend": "runpod_minimax_h3",
+            "generations": generation_ids, "videos": produced,
+            "failed": variants - len(produced)}
 
 
 @handler("media.video_generate", resource="gpu", max_attempts=2, retry_delay_s=300)
@@ -82,6 +191,13 @@ def video_generate(ctx):
     if not prompt:
         raise ValueError("prompt vide")
     variants = max(1, min(MAX_VARIANTS, int(inp.get("variants", 1))))
+    model_type = inp.get("model_type") or default_model()
+    business = inp.get("business") or ctx.business
+
+    # MiniMax H3 : chemin cloud obligatoire, aucune découverte/preflight WanGP locale.
+    if _is_h3(model_type):
+        return _run_h3_cloud(ctx, inp, prompt, variants, business)
+
     install = wangp.discover()
     if not install.ok:
         raise wangp.WanGPError("; ".join(install.problems))
@@ -91,13 +207,11 @@ def video_generate(ctx):
         raise wangp.WanGPBusy(f"WanGP est déjà lancé (PID {pids}, interface Pinokio ?) : l'arrêter avant une génération "
                               "automatique, sinon deux copies du modèle se disputent la mémoire "
                               "(ou relancer avec allow_with_webui=true)")
-    model_type = inp.get("model_type") or default_model()
     check = requirements.preflight(model_type, (wangp.cached_probe() or {}).get("hardware"), seconds=inp.get("duration_s"))
     if check["level"] == "blocked" and not inp.get("force"):
         raise wangp.HardwareInsufficient(requirements.describe(check) + " (relancer avec force=true pour essayer quand même)")
     if check["level"] in ("warning", "blocked"):
         ctx.emit("media.hardware_warning", check)
-    business = inp.get("business") or ctx.business
     base_seed = inp.get("seed")
     if base_seed is None and variants > 1:
         base_seed = random.randint(0, 2**31 - 1024)
@@ -127,7 +241,7 @@ def video_generate(ctx):
             now = time.time()
             if now - last_write["t"] >= 1.0 or abs(pct - last_write["pct"]) >= 5:
                 if index != last_write["index"]:
-                    for done in range(index):  # variantes précédentes terminées côté génération
+                    for done in range(index):
                         library.update(gen_ids[done], progress=100, phase="saving")
                     for waiting in range(index + 1, variants):
                         library.update(gen_ids[waiting], phase="waiting", status_text="en attente de la variante précédente")
@@ -180,7 +294,7 @@ def video_generate(ctx):
                        generation_seconds=per_variant_seconds, error=None, **meta)
         produced.append({"generation_id": gen_id, "path": str(target), **meta})
     ctx.emit("media.video_generated", {"count": len(produced), "model_type": model_type,
-                                       "seconds": result.get("wall_seconds")})
+                                       "backend": "wangp_local", "seconds": result.get("wall_seconds")})
     if not produced:
         raise wangp.WanGPError(f"aucune vidéo produite : {errors or 'voir ' + str(workdir / 'bridge.log')}")
     return {"model_type": model_type, "generations": gen_ids, "videos": produced,
