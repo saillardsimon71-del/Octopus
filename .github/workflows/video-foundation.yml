@@ -26,6 +26,7 @@ on:
       - "tests/test_doctor.py"
       - "tests/test_orca.py"
       - "tests/test_gui.py"
+      - "tests/test_gui_intelligence.py"
       - "requirements-local.txt"
       - "setup-local.ps1"
       - ".github/workflows/video-foundation.yml"
@@ -65,4 +66,4 @@ jobs:
       - name: Compile local control plane
         run: python -m compileall -q agents octopus
       - name: Run browser, doctor, GUI, coordination and Orca tests
-        run: python -m pytest -q tests/test_browser_integration.py tests/test_doctor.py tests/test_gateway.py tests/test_cycle_logic.py tests/test_orca.py tests/test_gui.py
+        run: python -m pytest -q tests/test_browser_integration.py tests/test_doctor.py tests/test_gateway.py tests/test_cycle_logic.py tests/test_orca.py tests/test_gui.py tests/test_gui_intelligence.py
