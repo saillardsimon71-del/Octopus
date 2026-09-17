@@ -30,7 +30,9 @@ class CloudVideoRenderer(VideoRenderer):
         if state is not None:
             if state.remote_id:
                 result = self.client.wait(state.remote_id)
-                self.state_store.mark_status(state, result.status.value)
+                current = self.state_store.load(job.job_id)
+                if current is not None:
+                    self.state_store.mark_status(current, result.status.value)
                 return result
             self.state_store.require_resume_safe(state)
 
@@ -45,10 +47,9 @@ class CloudVideoRenderer(VideoRenderer):
             ) from exc
         self.state_store.mark_submitted(job.job_id, self.provider, remote.remote_id, remote.status.value)
         result = self.client.wait(remote.remote_id)
-        self.state_store.mark_status(
-            self.state_store.load(job.job_id) or state or self.state_store.load(job.job_id),
-            result.status.value,
-        )
+        current = self.state_store.load(job.job_id)
+        if current is not None:
+            self.state_store.mark_status(current, result.status.value)
         return result
 
 
