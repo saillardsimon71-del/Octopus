@@ -58,8 +58,10 @@ def _omniroute_enabled() -> bool:
 def _overlay_omniroute(raw: dict) -> dict:
     """Ajoute un modèle virtuel OmniRoute sans modifier le catalogue Git.
 
-    `auto/free` est résolu côté OmniRoute vers les providers réellement connectés ;
-    OCTOPUS ne prétend donc pas qu'un fournisseur précis sera toujours disponible.
+    Le gateway est local au sens du déploiement (localhost), mais il requiert une clé et
+    peut transmettre le prompt aux providers qu'il sélectionne. On le traite donc comme
+    un provider HTTP authentifié pour la disponibilité du routage ; `doctor` vérifie réellement
+    son endpoint `/models` avant un cycle.
     """
     if not _omniroute_enabled():
         return raw
@@ -68,14 +70,14 @@ def _overlay_omniroute(raw: dict) -> dict:
     model_id = "omniroute/auto-free"
     model_name = os.environ.get("OMNIROUTE_MODEL", "auto/free").strip() or "auto/free"
     raw.setdefault("providers", {})[provider_id] = {
-        "kind": "local",
+        "kind": "cloud",
         "base_url": os.environ.get("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/api/v1").rstrip("/"),
         "api_key_env": "OMNIROUTE_API_KEY",
         "timeout_s": float(os.environ.get("OMNIROUTE_TIMEOUT_S", "120")),
         "max_retries": 0,
         "health_path": "/models",
         "health_timeout_s": 2.0,
-        "data_policy": "La passerelle est locale ; le contenu peut ensuite partir vers les providers connectés à OmniRoute. Respecter leurs conditions et quotas.",
+        "data_policy": "Le gateway est local ; le contenu peut ensuite partir vers les providers connectés à OmniRoute. Respecter leurs conditions et quotas.",
         "sources": ["https://github.com/diegosouzapw/OmniRoute/wiki/Free-Tiers-Guide", "https://github.com/diegosouzapw/OmniRoute/wiki/API-Reference"],
     }
     raw.setdefault("models", {})[model_id] = {
