@@ -215,9 +215,21 @@ def _budget_block(ctx, cat: catalog.Catalog, business: str, estimate: float) -> 
                         f"> {budget:.4f} $")
     daily = cat.daily_budget_usd()
     if daily is not None:
-        spent = journal.spent_today(business or None)
+        spent = journal.spent_today(None)
         if spent + estimate > daily:
             return f"plafond journalier atteint : {spent:.4f} $ + {estimate:.4f} $ estimes > {daily:.2f} $"
+    if business:
+        from . import businesses
+        try:
+            declared = businesses.get(business)
+        except Exception:  # registre illisible : le plafond global s'applique toujours
+            declared = None
+        cap = declared.budget_daily_usd if declared else None
+        if cap is not None:
+            spent = journal.spent_today(business)
+            if spent + estimate > cap:
+                return (f"plafond journalier de l'activite {business} atteint : {spent:.4f} $ + {estimate:.4f} $ "
+                        f"estimes > {cap:.2f} $")
     return None
 
 

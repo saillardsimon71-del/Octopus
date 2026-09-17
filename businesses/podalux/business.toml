@@ -1,0 +1,8 @@
+# Podalux : Shorts vidéo qui vendent des modèles de documents aux freelances et TPE.
+# Le code historique reste dans agents/ ; ce fichier le déclare au moteur OCTOPUS.
+id = "podalux"
+name = "Podalux — Shorts qui vendent"
+description = "Cycle SOUT -> CONVERT -> FORGE -> GROWTH -> LEDGER -> ORBIT : une vidéo par offre, publication après validation humaine."
+handlers = ["agents.task_handlers"]
+budget_daily_usd = 1.00
+kpis = ["videos_produites", "score_qc", "cout_par_video"]

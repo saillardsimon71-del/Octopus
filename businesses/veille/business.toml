@@ -7,6 +7,9 @@ name = "Veille sourcée"
 description = "Brief sourcé sur un sujet ; chaque fait cite une source collectée ; relu par l'humain avant d'alimenter SOUT."
 profile = "low_cost"          # local et gratuit validés au banc d'abord, puis deepseek/flash
 budget_usd_per_brief = 0.02
+handlers = ["businesses.veille.handlers"]
+budget_daily_usd = 0.10
+kpis = ["briefs", "sources_citees", "transmis_a_sout"]
 
 [brief]
 max_sources = 8

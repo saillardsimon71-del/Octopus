@@ -50,9 +50,13 @@ def handler(kind: str, *, resource: str | None = None, budget_usd: float | None 
 
 
 def load_handlers(modules: list[str] | None = None) -> dict[str, Handler]:
-    names = modules if modules is not None else [
-        m.strip() for m in os.environ.get("OCTOPUS_HANDLERS", "octopus.builtin_handlers,octopus.media.handlers,agents.task_handlers,businesses.veille.handlers").split(",")
-        if m.strip()]
+    if modules is not None:
+        names = modules
+    elif os.environ.get("OCTOPUS_HANDLERS", "").strip():
+        names = [m.strip() for m in os.environ["OCTOPUS_HANDLERS"].split(",") if m.strip()]
+    else:
+        from . import businesses
+        names = businesses.handler_modules()  # moteur + handlers déclarés dans businesses/*/business.toml
     for name in names:
         importlib.import_module(name)
     return HANDLERS

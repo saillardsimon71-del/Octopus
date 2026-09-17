@@ -1,0 +1,7 @@
+# Studio : générations vidéo locales à la demande (WanGP), utilisables par toutes les activités.
+id = "studio"
+name = "Studio vidéo"
+description = "Générations vidéo locales (WanGP / Pinokio) depuis le Studio, la CLI ou d'autres activités."
+handlers = ["octopus.media.handlers"]
+budget_daily_usd = 0.0     # génération locale : aucun appel payant attendu
+kpis = ["videos_generees", "temps_de_generation"]
