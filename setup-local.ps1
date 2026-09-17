@@ -65,6 +65,7 @@ if (-not $docker) {
 [Environment]::SetEnvironmentVariable("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1", "User")
 [Environment]::SetEnvironmentVariable("OMNIROUTE_MODEL", "auto/free", "User")
 [Environment]::SetEnvironmentVariable("PODALUX_VIDEO_RENDERER", "cloud", "User")
+[Environment]::SetEnvironmentVariable("PODALUX_PYTHON", $pythonExe, "User")
 
 Write-Host ""
 Write-Host "Setup local terminé." -ForegroundColor Green
