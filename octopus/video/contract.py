@@ -90,7 +90,15 @@ class VideoJob:
             "soulagement": job.get("soulagement", ""),
             "cta": job.get("cta", ""),
             "prix": job.get("prix", ""),
+            "stripe_link": job.get("stripe_link", ""),
+            "sub_id": job.get("sub_id", ""),
             "segments": narration,
+        }
+        voice = dict(job.get("voix") or {})
+        metadata = {
+            "keywords": list(job.get("keywords") or []),
+            "visuel": job.get("visuel"),
+            "palette": job.get("palette"),
         }
         return cls(
             job_id=job_id,
@@ -99,14 +107,16 @@ class VideoJob:
             language=str(job.get("langue") or "fr"),
             duration_seconds=duration_f,
             script=script,
-            voice=dict(job.get("voix") or {}),
+            voice=voice,
             assets=list(job.get("assets") or []),
             quality={
                 "target_lufs": -14.0,
                 "min_lra": 5.0,
                 "min_score": 24,
+                "resolution": "1080x1920",
+                "fps": 30,
             },
-            metadata={"keywords": list(job.get("keywords") or []), "visuel": job.get("visuel")},
+            metadata=metadata,
         )
 
     @classmethod
@@ -169,6 +179,31 @@ class VideoJob:
         }
         assert_no_secrets(payload)
         return payload
+
+    def to_legacy_job(self) -> dict[str, Any]:
+        """Reconstruit le job attendu par les scripts FORGE historiques dans un worker isolé."""
+        script = dict(self.script)
+        legacy = {
+            "offer_id": self.offer_id,
+            "langue": self.language,
+            "duree_cible_s": self.duration_seconds,
+            "titre": script.get("titre", ""),
+            "hook": script.get("hook", ""),
+            "douleur": script.get("douleur", ""),
+            "preuve": script.get("preuve", ""),
+            "soulagement": script.get("soulagement", ""),
+            "cta": script.get("cta", ""),
+            "prix": script.get("prix", ""),
+            "stripe_link": script.get("stripe_link", ""),
+            "sub_id": script.get("sub_id", ""),
+            "voix": dict(self.voice),
+            "keywords": list(self.metadata.get("keywords") or []),
+            "palette": self.metadata.get("palette"),
+            "visuel": self.metadata.get("visuel"),
+            "narration": list(script.get("segments") or []),
+        }
+        assert_no_secrets(legacy)
+        return legacy
 
 
 @dataclass(frozen=True)
