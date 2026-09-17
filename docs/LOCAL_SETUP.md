@@ -23,7 +23,7 @@ Le navigateur intégré utilise Chromium Playwright, pas le navigateur Edge pers
 
 ## 3. Démarrer OmniRoute
 
-Docker Desktop doit être démarré. OmniRoute expose actuellement son proxy OpenAI-compatible sous `/v1` sur le port `20128` ; la documentation OmniRoute recommande aussi de publier le port sur `127.0.0.1` pour éviter une exposition LAN involontaire. citeturn132217search2turn132217search5turn132217search6
+Docker Desktop doit être démarré. OmniRoute expose actuellement son proxy OpenAI-compatible sous `/v1` sur le port `20128`. Le bind sur `127.0.0.1` évite aussi une exposition réseau locale involontaire.
 
 ```powershell
 docker pull diegosouzapw/omniroute:latest
@@ -40,7 +40,7 @@ Pour OCTOPUS, les valeurs par défaut sont :
 [Environment]::SetEnvironmentVariable("OMNIROUTE_API_KEY", "<CLE_RUNTIME>", "User")
 ```
 
-OmniRoute documente le modèle `auto` et ses variantes `auto/...`; OCTOPUS conserve `auto/free` pour privilégier le pool gratuit lorsque cette variante est disponible dans l'instance. citeturn438409search0turn438409search5
+OmniRoute documente le modèle `auto` et ses variantes `auto/...`; OCTOPUS conserve `auto/free` pour privilégier le pool gratuit lorsque cette variante est disponible dans l'instance.
 
 La clé ne doit pas être mise dans GitHub, un test, un commit ou un fichier de configuration versionné.
 
