@@ -53,7 +53,7 @@ Configuration locale :
 
 ```text
 OMNIROUTE_ENABLED=1
-OMNIROUTE_BASE_URL=http://127.0.0.1:20128/api/v1
+OMNIROUTE_BASE_URL=http://127.0.0.1:20128/v1
 OMNIROUTE_MODEL=auto/free
 OMNIROUTE_API_KEY=<secret>
 ```
@@ -99,16 +99,16 @@ Le navigateur agentique est Playwright/Chromium :
 - web public en contexte éphémère ;
 - comptes autorisés en profil persistant ;
 - Service Workers bloqués sur les contextes surveillés ;
-- `browserContext.route()` pour intercepter l'ensemble du contexte ;
+- `browserContext.route()` pour les requêtes du contexte et `browserContext.route_web_socket()` pour les WebSockets ;
 - navigations, redirects, `fetch`, XHR, WebSocket, EventSource et beacon soumis au garde ;
 - après lecture d'un compte, la sortie vers une page publique est refusée dans la même session ;
 - login, 2FA, CAPTCHA et confirmations passent par `handoff()` humain.
 
-Les tests de sécurité couvrent notamment l'exfiltration `fetch` pendant le chargement d'une page de compte.
+Les tests de sécurité couvrent notamment l'exfiltration `fetch` pendant le chargement d'une page de compte et la création d'un WebSocket public après lecture d'un compte.
 
 ## Installation locale légère
 
-Voir **`docs/LOCAL_SETUP.md`**.
+Voir **`docs/LOCAL_SETUP.md`** et **`docs/OMNIROUTE_SETUP.md`**.
 
 Le fichier `requirements-local.txt` contient uniquement les dépendances du control-plane :
 
