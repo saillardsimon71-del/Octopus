@@ -1,4 +1,8 @@
-"""Logique du studio vidéo, indépendante de l'interface : formulaire -> tâche, historique, réutilisation."""
+"""Logique du studio vidéo : formulaire -> tâche, historique, réutilisation.
+
+WanGP reste réservé aux petits modèles locaux. MiniMax H3 est une sélection cloud explicite
+et ne déclenche jamais un diagnostic/téléchargement H3 sur le poste.
+"""
 from __future__ import annotations
 
 import re
@@ -18,6 +22,7 @@ RESOLUTIONS = {
 PRESET_CHOICES = {**{p.label: p.key for p in presets.PRESETS.values()}, "Personnalisé (réglages ci-dessous)": ""}
 AUTO_MODEL = "Selon le préréglage"
 BUSY_STATUSES = ("queued", "running")
+H3_CLOUD_MODEL = "minimax_h3_fl2va_pruned_cloud"
 
 
 class FormError(ValueError):
@@ -25,26 +30,27 @@ class FormError(ValueError):
 
 
 def model_choices() -> list[tuple[str, str]]:
-    """(libellé, model_type) : « selon le préréglage », modèles des préréglages, puis MiniMax H3 du diagnostic."""
+    """Retourne les modèles utiles sans présenter H3 comme un téléchargement local."""
     probe = wangp.cached_probe() or {}
     by_type = {m["model_type"]: m for m in probe.get("models", [])}
     marks = {"available": "prêt", "partial": "incomplet"}
     choices = [(AUTO_MODEL, "")]
+
     for model_type in dict.fromkeys(p.model_type for p in presets.PRESETS.values() if p.model_type):
+        if str(model_type).startswith("minimax_h3"):
+            if model_type == H3_CLOUD_MODEL:
+                choices.append(("MiniMax H3 [CLOUD RunPod — aucun téléchargement local]", model_type))
+            continue
         meta = by_type.get(model_type, {})
         mark = marks.get(meta.get("availability"), "téléchargé au 1er lancement" if meta else "état inconnu")
         choices.append((f"{meta.get('name') or model_type} [{mark}]", model_type))
-    models = [m for m in probe.get("models", []) if str(m.get("model_type", "")).startswith("minimax_h3")]
-    if not models:
-        return choices + [(f"{m} (diagnostic à lancer)", m) for m in handlers.MODEL_PREFERENCE]
-    order = {"available": 0, "partial": 1}
-    models.sort(key=lambda m: (order.get(m.get("availability"), 2), m["model_type"]))
-    return choices + [(f"{m.get('name') or m['model_type']} [{marks.get(m.get('availability'), 'à télécharger')}]",
-                       m["model_type"]) for m in models]
+
+    # Le diagnostic WanGP ne doit pas inventer une présence H3 locale.
+    return choices
 
 
 def form_to_input(form: dict) -> dict:
-    """Valide le formulaire du studio et produit l'entrée de la tâche media.video_generate."""
+    """Valide le formulaire et produit l'entrée de la tâche media.video_generate."""
     prompt = str(form.get("prompt", "")).strip()
     if len(prompt) < 3:
         raise FormError("prompt trop court")
@@ -65,7 +71,7 @@ def form_to_input(form: dict) -> dict:
         if not low <= value <= high:
             raise FormError(f"{label} hors limites ({low} à {high})")
         inp[key] = value
-    settings = dict(form.get("settings") or {})  # réglages conservés d'une génération réutilisée (guidage, etc.)
+    settings = dict(form.get("settings") or {})
     steps = inp.pop("steps", None)
     if steps:
         settings["num_inference_steps"] = steps
@@ -84,15 +90,17 @@ def form_to_input(form: dict) -> dict:
 
 
 def estimate_text(form: dict) -> str:
-    """Durée prévue du formulaire en cours, d'après les générations mesurées sur cette machine."""
+    """Durée prévue du formulaire local ; H3 cloud est explicitement hors mesure locale."""
     try:
         inp = form_to_input({**form, "prompt": form.get("prompt") or "estimation"})
+        if str(inp.get("model_type") or "").startswith("minimax_h3"):
+            return "Durée prévue : MiniMax H3 cloud (RunPod), estimation locale indisponible"
         if not inp.get("preset") and not inp.get("model_type"):
             inp["model_type"] = handlers.default_model()
         return "Durée prévue : " + perf.describe(presets.estimate_for_input(inp))
     except (FormError, ValueError) as exc:
         return f"Durée prévue : formulaire incomplet ({exc})"
-    except Exception as exc:  # noqa: BLE001 - base occupée, etc. : l'estimation est accessoire
+    except Exception as exc:
         return f"Durée prévue : indisponible ({type(exc).__name__})"
 
 
@@ -104,13 +112,11 @@ def submit(form: dict) -> int:
 
 
 def form_from_generation(gen: dict) -> dict:
-    """Préremplit le formulaire depuis une génération (réutilisation du prompt et des réglages)."""
     settings = gen.get("settings") or {}
     resolution = settings.get("resolution", "")
     label = next((k for k, v in RESOLUTIONS.items() if v == resolution), resolution)
     return {"prompt": gen["prompt"], "preset": "Personnalisé (réglages ci-dessous)", "model_type": gen["model_type"],
-            "resolution": label,
-            "steps": str(settings.get("num_inference_steps", "") or ""), "seed": "", "variants": "1",
+            "resolution": label, "steps": str(settings.get("num_inference_steps", "") or ""), "seed": "", "variants": "1",
             "duration_s": _seconds(settings.get("video_length")), "parent_id": gen["id"],
             "settings": {k: v for k, v in settings.items() if k not in _FORM_KEYS}}
 
@@ -134,7 +140,6 @@ def history(limit: int = 30) -> list[dict]:
 
 
 def pending_without_generation(limit: int = 10) -> list[dict]:
-    """Tâches vidéo en file dont les lignes de bibliothèque ne sont pas encore créées (worker pas encore passé)."""
     known = {g["task_id"] for g in library.recent(200) if g.get("task_id")}
     return [t for t in tasks.list_tasks(limit=100) if t["kind"] == "media.video_generate"
             and t["status"] in ("queued", "running", "failed") and t["id"] not in known][:limit]
