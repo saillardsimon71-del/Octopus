@@ -1,9 +1,11 @@
 """Tests de migration sans appel réseau ni rendu vidéo réel."""
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
-from octopus.video.contract import VideoResult, VideoStatus
+from octopus.video.contract import Artifact, VideoResult, VideoStatus
 from octopus.video.service import VideoService, VideoServiceError, stable_job_id
 
 
@@ -80,3 +82,51 @@ def test_cloud_service_rejects_mismatched_offer_before_renderer():
 
     with pytest.raises(VideoServiceError, match="incohérence offer_id"):
         VideoService(mode="cloud", cloud_renderer=ExplodingRenderer()).render("other-offer", JOB)
+
+
+def test_cloud_service_materializes_and_verifies_sha256(tmp_path, monkeypatch):
+    payload = b"fake-mp4-payload"
+    source = tmp_path / "source.mp4"
+    source.write_bytes(payload)
+    expected = hashlib.sha256(payload).hexdigest()
+
+    class FakeRenderer:
+        def render(self, video_job):
+            return VideoResult(
+                video_job.job_id,
+                VideoStatus.COMPLETED,
+                source.as_uri(),
+                artifacts=(Artifact("final.mp4", source.as_uri(), "video", "video/mp4", expected),),
+            )
+
+    root = tmp_path / "root"
+    monkeypatch.setenv("PODALUX_ROOT", str(root))
+    result = VideoService(mode="cloud", cloud_renderer=FakeRenderer()).render(JOB["offer_id"], JOB)
+    target = root / "out" / JOB["offer_id"] / "final.mp4"
+    assert target.read_bytes() == payload
+    assert result["cloud_video_url"] == source.as_uri()
+
+
+def test_cloud_service_rejects_bad_sha256_without_replacing_target(tmp_path, monkeypatch):
+    old = b"known-good"
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"tampered")
+    expected = hashlib.sha256(old).hexdigest()
+    root = tmp_path / "root"
+    target = root / "out" / JOB["offer_id"] / "final.mp4"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(old)
+    monkeypatch.setenv("PODALUX_ROOT", str(root))
+
+    class FakeRenderer:
+        def render(self, video_job):
+            return VideoResult(
+                video_job.job_id,
+                VideoStatus.COMPLETED,
+                source.as_uri(),
+                artifacts=(Artifact("final.mp4", source.as_uri(), "video", "video/mp4", expected),),
+            )
+
+    with pytest.raises(VideoServiceError, match="checksum sha256 invalide"):
+        VideoService(mode="cloud", cloud_renderer=FakeRenderer()).render(JOB["offer_id"], JOB)
+    assert target.read_bytes() == old
