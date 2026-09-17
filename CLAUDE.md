@@ -4,7 +4,7 @@
 
 This branch is the active cloud-video migration branch. Do not restart the architecture from scratch and do not rewrite `agents/runtime.py` unless there is a concrete regression requiring it.
 
-The branch includes the cloud-first control-plane/video foundation, the integrated Chromium browser guard, OmniRoute routing, MiniMax H3 cloud routing, local diagnostics, one-command Windows bootstrap, artifact checksum verification, CI coverage, and an **optional Orca development bridge**. Recent fixes also make OmniRoute `zero_cost` the default when enabled and guard WebSocket connections. Do not claim CI is green until a fresh run passes.
+The branch includes the cloud-first control-plane/video foundation, the integrated Chromium browser guard, OmniRoute routing, MiniMax H3 cloud routing, local diagnostics, one-command Windows bootstrap, artifact checksum verification, CI coverage, an optional Orca development bridge, and a unified desktop cockpit GUI. Do not claim CI is green until a fresh run passes.
 
 Orca is deliberately scoped to repository-development work: it is invoked only through its public CLI and remains disabled unless `OCTOPUS_ORCA_ENABLED=1` is set. It must not replace the Podalux business runtime, `octopus.tasks`, or RunPod video execution.
 
@@ -12,6 +12,7 @@ Orca is deliberately scoped to repository-development work: it is invoked only t
 
 ```text
 OCTOPUS control plane
+  ├─ unified GUI cockpit (`agents/gui/app.py`)
   ├─ agents/runtime.py (stable ReAct runtime)
   ├─ agents/cycle.py
   ├─ octopus.tasks (durable local queue / leases / human handoff)
@@ -29,6 +30,23 @@ Agent roles remain:
 `SOUT -> CONVERT -> FORGE -> GROWTH -> LEDGER -> ORBIT`.
 
 `ORBIT` coordinates missions and delegates to sub-agents. `web_guard.session()` must wrap a whole mission so account-read state survives across sub-agents.
+
+## GUI cockpit
+
+`python run_gui.py` is the primary human control surface. It is deliberately an observer/controller over existing engines, not a second business runtime.
+
+Navigation:
+- Cockpit: run status, cost, queue, human requests, live activity, agent overview and direct messaging.
+- Missions: ORBIT objectives, durable task queue and worker control.
+- Agents: activity and workload cards for all six roles.
+- Production: offer selector, cycle, Studio, final output and QC metrics.
+- Humain: pending handoffs with direct response fields.
+- Navigateur: guarded Chromium observation, URL and latest screenshot.
+- Système: local preflight plus optional Orca development tasks.
+
+Long operations must stay outside the Tk event loop. Cycles, workers, messages and browser commands use the existing subprocess launcher; doctor and Orca status/tasks use background threads. Do not move business logic into Tkinter.
+
+The GUI specification is in `docs/GUI.md`.
 
 ## Local machine policy
 
@@ -102,6 +120,9 @@ Do not move business agents or cloud rendering into Orca merely because Orca can
 
 ## Important files
 
+- `agents/gui/app.py` — unified cockpit
+- `agents/gui/studio.py` — existing video studio window used by the cockpit
+- `docs/GUI.md` — cockpit workflow
 - `octopus/catalog.py` — dynamic OmniRoute overlay + safe default profile
 - `octopus/llm.py` — LLM gateway
 - `agents/browser.py` — Chromium/Playwright tool
@@ -116,11 +137,12 @@ Do not move business agents or cloud rendering into Orca merely because Orca can
 - `video_worker/executor.py` — FORGE cloud executor
 - `video_worker/runpod_handler.py` — RunPod entry point
 - `video_worker/Dockerfile` — worker image
+- `tests/test_gui.py`
 - `tests/test_browser_integration.py`
 - `tests/test_doctor.py`
 - `tests/test_omniroute.py`
-- `tests/test_minimax_h3_cloud.py`
 - `tests/test_orca.py`
+- `tests/test_minimax_h3_cloud.py`
 - `tests/test_video_executor.py`
 - `.github/workflows/video-foundation.yml`
 - `docs/LOCAL_SETUP.md`
@@ -131,8 +153,8 @@ Do not move business agents or cloud rendering into Orca merely because Orca can
 
 ## Next work order
 
-1. Inspect current branch head and recent commits before changing anything further.
-2. Inspect fresh GitHub Actions for the current HEAD; fix actual test failures rather than assuming.
+1. Let the fresh CI run for the current HEAD finish and fix actual failures.
+2. Run the GUI on Windows and verify the cockpit pages, process launches, handoff replies and browser observation.
 3. Run the real local smoke test with OmniRoute + Chromium + `doctor` on Windows.
 4. Deploy the real RunPod worker + object storage and execute one paid-safe/idempotent end-to-end video test.
 5. Only after that, run a real Podalux cycle and compare technical QC + visual QC.
@@ -148,4 +170,6 @@ Do not move business agents or cloud rendering into Orca merely because Orca can
 - Do not bypass `web_guard` for convenience.
 - Do not turn Orca into a required runtime dependency.
 - Do not move Podalux business agents or RunPod workloads into Orca.
-- Do not claim a successful real render, deployment, or green CI run unless it was actually observed.
+- Do not move business logic into the Tkinter cockpit.
+- Do not block the Tk main loop on network or long-running work.
+- Do not claim a successful GUI smoke, real render, deployment, or green CI run unless it was actually observed.
