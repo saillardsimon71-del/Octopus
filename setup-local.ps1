@@ -32,22 +32,31 @@ $docker = Get-Command docker -ErrorAction SilentlyContinue
 if (-not $docker) {
     Write-Warning "Docker CLI introuvable : installer/démarrer Docker Desktop pour OmniRoute."
 } else {
-    $running = (& docker ps --filter "name=^omniroute$" --format "{{.Names}}")
-    if ($running -eq "omniroute") {
-        Write-Host "OmniRoute est déjà démarré." -ForegroundColor Green
-    } else {
-        $existing = (& docker ps -a --filter "name=^omniroute$" --format "{{.Names}}")
-        if ($existing -eq "omniroute") {
-            Write-Host "Redémarrage du conteneur OmniRoute existant..." -ForegroundColor Yellow
-            & docker start omniroute | Out-Null
-        } else {
-            Write-Host "Téléchargement/démarrage d'OmniRoute..." -ForegroundColor Yellow
-            & docker pull diegosouzapw/omniroute:latest
-            & docker run -d --name omniroute --restart unless-stopped --stop-timeout 40 `
-                -p 127.0.0.1:20128:20128 `
-                -v omniroute-data:/app/data `
-                diegosouzapw/omniroute:latest | Out-Null
+    try {
+        & docker info *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw "daemon Docker indisponible"
         }
+
+        $running = (& docker ps --filter "name=^omniroute$" --format "{{.Names}}")
+        if ($running -eq "omniroute") {
+            Write-Host "OmniRoute est déjà démarré." -ForegroundColor Green
+        } else {
+            $existing = (& docker ps -a --filter "name=^omniroute$" --format "{{.Names}}")
+            if ($existing -eq "omniroute") {
+                Write-Host "Redémarrage du conteneur OmniRoute existant..." -ForegroundColor Yellow
+                & docker start omniroute | Out-Null
+            } else {
+                Write-Host "Téléchargement/démarrage d'OmniRoute..." -ForegroundColor Yellow
+                & docker pull diegosouzapw/omniroute:latest
+                & docker run -d --name omniroute --restart unless-stopped --stop-timeout 40 `
+                    -p 127.0.0.1:20128:20128 `
+                    -v omniroute-data:/app/data `
+                    diegosouzapw/omniroute:latest | Out-Null
+            }
+        }
+    } catch {
+        Write-Warning "Docker CLI est installé mais Docker Desktop n'est pas démarré. OmniRoute devra être lancé après démarrage de Docker Desktop."
     }
 }
 
@@ -57,7 +66,7 @@ if (-not $docker) {
 [Environment]::SetEnvironmentVariable("OMNIROUTE_MODEL", "auto/free", "User")
 [Environment]::SetEnvironmentVariable("PODALUX_VIDEO_RENDERER", "cloud", "User")
 
-Write-Host "" 
+Write-Host ""
 Write-Host "Setup local terminé." -ForegroundColor Green
 Write-Host "Le terminal courant ne recharge pas automatiquement les nouvelles variables User." -ForegroundColor DarkGray
 Write-Host "Fermer/réouvrir PowerShell, puis définir les secrets suivants sans les committer :" -ForegroundColor Yellow
@@ -65,6 +74,6 @@ Write-Host '  OMNIROUTE_API_KEY'
 Write-Host '  PODALUX_RUNPOD_ENDPOINT_ID'
 Write-Host '  PODALUX_RUNPOD_API_TOKEN'
 Write-Host '  (H3 uniquement) OCTOPUS_MINIMAX_H3_ENDPOINT_ID / OCTOPUS_MINIMAX_H3_API_TOKEN'
-Write-Host "" 
+Write-Host ""
 Write-Host "Ensuite : .\.venv\Scripts\python.exe -m agents.run doctor" -ForegroundColor Cyan
 Write-Host "Puis : .\.venv\Scripts\python.exe run_gui.py" -ForegroundColor Cyan
