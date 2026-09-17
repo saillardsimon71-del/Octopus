@@ -8,7 +8,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -77,93 +76,34 @@ def build_t2v_workflow(prompt: str, *, width: int = DEFAULT_WIDTH, height: int =
     seed = int(seed if seed is not None else 42)
 
     workflow: dict[str, Any] = {
-        "1": {
-            "inputs": {"unet_name": H3_MODELS["diffusion"], "weight_dtype": "default"},
-            "class_type": "UNETLoader",
-            "_meta": {"title": "MiniMax H3 diffusion"},
-        },
-        "3": {
-            "inputs": {"clip_name": H3_MODELS["text_encoder"], "type": "minimax", "device": "default"},
-            "class_type": "CLIPLoader",
-            "_meta": {"title": "MiniMax H3 text encoder"},
-        },
-        "4": {
-            "inputs": {"vae_name": H3_MODELS["video_vae"]},
-            "class_type": "VAELoader",
-            "_meta": {"title": "MiniMax H3 video VAE"},
-        },
-        "5": {
-            "inputs": {"vae_name": H3_MODELS["audio_vae"]},
-            "class_type": "VAELoader",
-            "_meta": {"title": "MiniMax H3 audio VAE"},
-        },
-        "10": {
-            "inputs": {"noise_seed": seed},
-            "class_type": "RandomNoise",
-        },
-        "11": {
-            "inputs": {"sampler_name": "res_multistep"},
-            "class_type": "KSamplerSelect",
-        },
-        "12": {
-            "inputs": {"scheduler": "simple", "steps": int(steps), "denoise": 1.0, "model": ["1", 0]},
-            "class_type": "BasicScheduler",
-        },
-        "13": {
-            "inputs": {"model": ["1", 0], "conditioning": ["20", 0]},
-            "class_type": "BasicGuider",
-        },
-        "20": {
-            "inputs": {
-                "prompt": prompt,
-                "width": width,
-                "height": height,
-                "length": length,
-                "clip": ["3", 0],
-                "vae": ["4", 0],
-            },
-            "class_type": "MiniMaxH3ImageToVideo",
-            "_meta": {"title": "MiniMax H3 T2V"},
-        },
-        "14": {
-            "inputs": {
-                "noise": ["10", 0],
-                "guider": ["13", 0],
-                "sampler": ["11", 0],
-                "sigmas": ["12", 0],
-                "latent_image": ["20", 1],
-            },
-            "class_type": "SamplerCustomAdvanced",
-        },
-        "50": {
-            "inputs": {"samples": ["14", 0], "vae": ["4", 0]},
-            "class_type": "VAEDecode",
-        },
-        "51": {
-            "inputs": {"samples": ["14", 0], "vae": ["5", 0]},
-            "class_type": "VAEDecodeAudio",
-        },
-        "52": {
-            "inputs": {"fps": FPS, "bit_depth": 8, "images": ["50", 0], "audio": ["51", 0]},
-            "class_type": "CreateVideo",
-        },
-        "53": {
-            "inputs": {
-                "frame_rate": FPS,
-                "loop_count": 0,
-                "filename_prefix": f"video/{output_prefix}",
-                "format": "video/h264-mp4",
-                "pix_fmt": "yuv420p",
-                "crf": 19,
-                "save_metadata": True,
-                "trim_to_audio": False,
-                "pingpong": False,
-                "save_output": True,
-                "images": ["50", 0],
-                "audio": ["51", 0],
-            },
-            "class_type": "VHS_VideoCombine",
-        },
+        "1": {"inputs": {"unet_name": H3_MODELS["diffusion"], "weight_dtype": "default"},
+              "class_type": "UNETLoader", "_meta": {"title": "MiniMax H3 diffusion"}},
+        "3": {"inputs": {"clip_name": H3_MODELS["text_encoder"], "type": "minimax", "device": "default"},
+              "class_type": "CLIPLoader", "_meta": {"title": "MiniMax H3 text encoder"}},
+        "4": {"inputs": {"vae_name": H3_MODELS["video_vae"]}, "class_type": "VAELoader",
+              "_meta": {"title": "MiniMax H3 video VAE"}},
+        "5": {"inputs": {"vae_name": H3_MODELS["audio_vae"]}, "class_type": "VAELoader",
+              "_meta": {"title": "MiniMax H3 audio VAE"}},
+        "10": {"inputs": {"noise_seed": seed}, "class_type": "RandomNoise"},
+        "11": {"inputs": {"sampler_name": "res_multistep"}, "class_type": "KSamplerSelect"},
+        "12": {"inputs": {"scheduler": "simple", "steps": int(steps), "denoise": 1.0, "model": ["1", 0]},
+               "class_type": "BasicScheduler"},
+        "13": {"inputs": {"model": ["1", 0], "conditioning": ["20", 0]}, "class_type": "BasicGuider"},
+        "20": {"inputs": {"prompt": prompt, "width": width, "height": height, "length": length,
+                             "clip": ["3", 0], "vae": ["4", 0]},
+               "class_type": "MiniMaxH3ImageToVideo", "_meta": {"title": "MiniMax H3 T2V"}},
+        "14": {"inputs": {"noise": ["10", 0], "guider": ["13", 0], "sampler": ["11", 0],
+                             "sigmas": ["12", 0], "latent_image": ["20", 1]},
+               "class_type": "SamplerCustomAdvanced"},
+        "50": {"inputs": {"samples": ["14", 0], "vae": ["4", 0]}, "class_type": "VAEDecode"},
+        "51": {"inputs": {"samples": ["14", 0], "vae": ["5", 0]}, "class_type": "VAEDecodeAudio"},
+        "52": {"inputs": {"fps": FPS, "bit_depth": 8, "images": ["50", 0], "audio": ["51", 0]},
+               "class_type": "CreateVideo"},
+        "53": {"inputs": {"frame_rate": FPS, "loop_count": 0, "filename_prefix": f"video/{output_prefix}",
+                             "format": "video/h264-mp4", "pix_fmt": "yuv420p", "crf": 19,
+                             "save_metadata": True, "trim_to_audio": False, "pingpong": False,
+                             "save_output": True, "images": ["50", 0], "audio": ["51", 0]},
+               "class_type": "VHS_VideoCombine"},
     }
     return workflow
 
@@ -293,6 +233,8 @@ def save_result(result: H3Result, target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     if result.video_bytes is not None:
         tmp = target.with_suffix(target.suffix + ".part")
+        if len(result.video_bytes) > 512 * 1024 * 1024:
+            raise MiniMaxH3CloudError("vidéo H3 dépasse 512 Mo")
         tmp.write_bytes(result.video_bytes)
         tmp.replace(target)
         return target
@@ -300,7 +242,11 @@ def save_result(result: H3Result, target: Path) -> Path:
         tmp = target.with_suffix(target.suffix + ".part")
         try:
             with urllib.request.urlopen(result.video_url, timeout=120) as response, tmp.open("wb") as out:
+                size = 0
                 while chunk := response.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > 512 * 1024 * 1024:
+                        raise MiniMaxH3CloudError("vidéo H3 distante dépasse 512 Mo")
                     out.write(chunk)
             if tmp.stat().st_size <= 0:
                 raise MiniMaxH3CloudError("vidéo H3 distante vide")
@@ -312,5 +258,5 @@ def save_result(result: H3Result, target: Path) -> Path:
     raise MiniMaxH3CloudError("résultat H3 sans bytes ni URL")
 
 
-__all__ = ["MiniMaxH3CloudConfig", "MiniMaxH3Config", "MiniMaxH3CloudError", "MiniMaxH3RunPodClient",
+__all__ = ["MiniMaxH3Config", "MiniMaxH3CloudError", "MiniMaxH3RunPodClient",
            "H3Result", "align_frames", "build_t2v_workflow", "save_result"]
