@@ -12,12 +12,22 @@ def test_doctor_cloud_first_requires_omniroute_and_runpod(isolated, monkeypatch)
     monkeypatch.setenv("OMNIROUTE_API_KEY", "test-key")
     monkeypatch.setenv("PODALUX_RUNPOD_ENDPOINT_ID", "endpoint")
     monkeypatch.setenv("PODALUX_RUNPOD_API_TOKEN", "runpod-test")
+    monkeypatch.delenv("OMNIROUTE_BASE_URL", raising=False)
     monkeypatch.setattr(doctor.importlib.util, "find_spec", lambda name: object() if name == "playwright" else None)
     monkeypatch.setattr(doctor, "_chromium_executable", lambda: sys.executable)
-    monkeypatch.setattr(doctor, "_http_ok", lambda url, api_key="", timeout=3.0: (True, "HTTP 200"))
+    seen = {}
+
+    def fake_http(url, api_key="", timeout=3.0):
+        seen["url"] = url
+        seen["api_key"] = api_key
+        return True, "HTTP 200"
+
+    monkeypatch.setattr(doctor, "_http_ok", fake_http)
     monkeypatch.setattr(config, "api_key", lambda: "")
 
     checks = {c.name: c for c in doctor.run_checks()}
+    assert seen["url"] == "http://127.0.0.1:20128/v1/models"
+    assert seen["api_key"] == "test-key"
     assert checks["Python contrôle"].ok
     assert checks["Playwright"].ok
     assert checks["Chromium Playwright"].ok
