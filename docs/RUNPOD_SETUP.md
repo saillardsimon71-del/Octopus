@@ -23,7 +23,7 @@ H3 ne doit jamais être téléchargé sur le PC local.
 
 ## 2. Endpoint Serverless
 
-RunPod documente actuellement les endpoints Serverless comme des endpoints à file : `POST /run` pour soumettre une tâche puis `GET /status/{job_id}` pour récupérer le résultat. La rétention des résultats d'un appel asynchrone `/run` est actuellement annoncée à 30 minutes. cite? Cette référence est descriptive uniquement : vérifier la documentation RunPod au moment du déploiement.
+RunPod documente actuellement les endpoints Serverless comme des endpoints à file : `POST /run` pour soumettre une tâche puis `GET /status/{job_id}` pour récupérer le résultat. La rétention annoncée pour les résultats d'un appel asynchrone `/run` est de 30 minutes. Vérifier ces paramètres dans la documentation officielle au moment du déploiement.
 
 Le client OCTOPUS utilise donc :
 
@@ -40,7 +40,7 @@ Authorization: Bearer <RUNPOD_API_TOKEN>
 
 ## 3. Timeout à régler
 
-Le client OCTOPUS attend jusqu'à 45 minutes par défaut. La documentation RunPod actuelle indique un timeout d'exécution par défaut de 10 minutes, avec une plage pouvant aller jusqu'à 7 jours. Le endpoint doit donc être configuré avec un `execution timeout` supérieur ou égal à la durée maximale réellement nécessaire au worker. cite? Vérifier la valeur choisie dans la console RunPod avant le premier rendu.
+Le client OCTOPUS attend jusqu'à 45 minutes par défaut. La configuration d'un endpoint RunPod doit donc autoriser une durée d'exécution au moins équivalente au pire cas réel du worker, avec une marge pour le cold start. Vérifier le `execution timeout` de l'endpoint avant le premier rendu.
 
 Pour H3, prévoir une marge suffisante pour le cold start et la génération.
 
@@ -101,7 +101,7 @@ La génération utilise actuellement :
 
 ```text
 24 fps
-grille temporelle 17n+5
+grid temporelle 17n+5
 canvas natif autour de 768x1344
 workflow T2VA ComfyUI
 ```
@@ -119,9 +119,8 @@ Ne pas lancer un batch commercial avant ce test.
 
 ## 8. Référence actuelle
 
-La documentation RunPod confirme le modèle Serverless asynchrone `/run` + `/status/{job_id}` et permet de régler le timeout d'exécution de l'endpoint. Voir la documentation officielle avant tout changement d'infrastructure :
+Documentation RunPod à consulter avant tout changement d'infrastructure :
 
 - https://docs.runpod.io/serverless/overview
 - https://docs.runpod.io/serverless/endpoints/endpoint-configurations
 - https://docs.runpod.io/serverless/quickstart
-
