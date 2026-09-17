@@ -240,10 +240,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("events", help="evenements recents")
     p.add_argument("--since", type=int, default=0)
     p.add_argument("--limit", type=int, default=100)
+    from .media import cli as media_cli
+    media_cli.add_parser(sub)
     args = parser.parse_args(argv)
     commands = {"report": cmd_report, "bench": cmd_bench, "models": cmd_models, "doctor": cmd_doctor,
                 "worker": cmd_worker, "enqueue": cmd_enqueue, "tasks": cmd_tasks, "cancel": cmd_cancel,
-                "ask": cmd_ask, "answer": cmd_answer, "schedule": cmd_schedule, "events": cmd_events}
+                "ask": cmd_ask, "answer": cmd_answer, "schedule": cmd_schedule, "events": cmd_events,
+                "video": media_cli.run}
     return commands[args.cmd](args)
 
 

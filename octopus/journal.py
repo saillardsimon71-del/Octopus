@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from . import enabled, paths
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -159,7 +159,40 @@ CREATE TABLE IF NOT EXISTS schedules (
     UNIQUE(business, kind)
 );
 """
-_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2))
+_SCHEMA_V3 = """
+CREATE TABLE IF NOT EXISTS media_generations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    business TEXT NOT NULL,
+    task_id INTEGER,
+    parent_id INTEGER REFERENCES media_generations(id),
+    batch_key TEXT,
+    variant INTEGER NOT NULL DEFAULT 0,
+    media_type TEXT NOT NULL DEFAULT 'video',
+    provider TEXT NOT NULL,
+    model_type TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    settings TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'queued',
+    phase TEXT,
+    progress INTEGER NOT NULL DEFAULT 0,
+    status_text TEXT,
+    preview_path TEXT,
+    output_path TEXT,
+    duration_s REAL,
+    width INTEGER,
+    height INTEGER,
+    fps REAL,
+    file_size INTEGER,
+    generation_seconds REAL,
+    error TEXT,
+    tags TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_media_status ON media_generations(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_media_task ON media_generations(task_id);
+"""
+_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3))
 
 _LLM_COLUMNS = (
     "ts", "run_id", "root_run_id", "business", "agent", "task", "profile", "model", "provider",

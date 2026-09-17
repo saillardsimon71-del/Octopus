@@ -51,7 +51,7 @@ def handler(kind: str, *, resource: str | None = None, budget_usd: float | None 
 
 def load_handlers(modules: list[str] | None = None) -> dict[str, Handler]:
     names = modules if modules is not None else [
-        m.strip() for m in os.environ.get("OCTOPUS_HANDLERS", "octopus.builtin_handlers,agents.task_handlers,businesses.veille.handlers").split(",")
+        m.strip() for m in os.environ.get("OCTOPUS_HANDLERS", "octopus.builtin_handlers,octopus.media.handlers,agents.task_handlers,businesses.veille.handlers").split(",")
         if m.strip()]
     for name in names:
         importlib.import_module(name)
