@@ -6,6 +6,8 @@ import os
 import time
 
 from octopus.journal import with_run
+from octopus.video.renderers import get_renderer
+from octopus.video.service import VideoService
 
 from . import cancel, config, db
 from .agents import CATALOG, SOUT, CONVERT, FORGE, GROWTH, LEDGER, ORBIT
@@ -14,16 +16,29 @@ YES = {"oui", "o", "yes", "y", "ok"}
 
 
 def is_yes(answer: str | None) -> bool:
-    """Réponse humaine explicite. « on verra » ou « oui mais… » ne valent pas accord (audit, risque 17)."""
+    """Réponse humaine explicite. « on verra » ou « oui mais… » ne valent pas accord."""
     return bool(answer) and answer.strip().lower().rstrip(".! ") in YES
 
 
 def already_produced() -> list[str]:
-    """Offres déjà produites (détection par la présence de final.mp4)."""
+    """Offres déjà produites côté orchestrateur local.
+
+    Le cloud n'écrit pas `out/<offer>/final.mp4`, donc cette détection reste volontairement
+    conservatrice pendant la migration. La source de vérité cloud devient le manifest.
+    """
     out_dir = config.PROJECT_ROOT / "out"
     if not out_dir.exists():
         return []
     return sorted(p.name for p in out_dir.iterdir() if (p / "final.mp4").exists())
+
+
+def _render_video(offer_id: str, job: dict) -> dict:
+    """Pont de migration : FORGE historique en local, VideoService en cloud."""
+    mode = os.environ.get("PODALUX_VIDEO_RENDERER", "local").strip().lower()
+    if mode == "local":
+        return FORGE.run(offer_id, job)
+    service = VideoService(mode="cloud", cloud_renderer=get_renderer(mode="cloud"))
+    return dict(service.render(offer_id, job))
 
 
 @with_run("podalux", "video_cycle", budget_usd=config.CYCLE_BUDGET_USD)
@@ -46,7 +61,6 @@ class CycleBusy(RuntimeError):
 
 
 def _run_cycle_locked(owner: str, offer_id: str | None, max_iterations: int) -> dict:
-    # Pas de clear_stop : l'arrêt est horodaté (agents/cancel.py), un arrêt ancien ne concerne pas ce cycle.
     with cancel.scope():
         return _run_iterations(owner, offer_id, max_iterations)
 
@@ -58,10 +72,9 @@ def _run_iterations(owner: str, offer_id: str | None, max_iterations: int) -> di
     oid, sout, ledger, orbit, iterations = offer_id, {}, {}, {}, []
 
     try:
-        # 1. SOUT — sélection d'offre
         db.update_run(rid, step="SOUT : sélection d'offre")
         already = already_produced()
-        if offer_id:  # offre imposée : pas d'appel à SOUT, angle du catalogue (audit C5)
+        if offer_id:
             sout = {"offer_id": offer_id, "angle": CATALOG[offer_id]["angle"], "rationale": "offre imposée"}
             db.post("SOUT", f"offre imposée : {offer_id} — {sout['angle']}")
         else:
@@ -75,24 +88,23 @@ def _run_iterations(owner: str, offer_id: str | None, max_iterations: int) -> di
         angle = sout.get("angle") or CATALOG[oid]["angle"]
         db.update_run(rid, offer_id=oid)
 
-        # Boucle CONVERT → FORGE → GROWTH → LEDGER → ORBIT (itère tant que ORBIT dit "iterate")
         fixes = None
         for it in range(max_iterations):
-            db.acquire_run_lock(owner)  # renouvelle le bail
+            db.acquire_run_lock(owner)
             cancel.checkpoint(f"début de l'itération {it + 1}")
             db.update_run(rid, step=f"itération {it + 1}/{max_iterations} · CONVERT")
             db.post("ORBIT", f"itération {it + 1}/{max_iterations} sur {oid}", kind="iteration")
-            job = CONVERT.run(oid, angle, fixes=fixes)          # 2. monétisation (+ fixes du QC)
+            job = CONVERT.run(oid, angle, fixes=fixes)
             cancel.checkpoint("avant FORGE")
             db.update_run(rid, step=f"itération {it + 1} · FORGE (rendu)")
-            metrics = FORGE.run(oid, job)                        # 3. rendu
+            metrics = _render_video(oid, job)
             db.update_run(rid, step=f"itération {it + 1} · GROWTH (QC vision)")
             cancel.checkpoint("avant le QC vision")
-            growth = GROWTH.run(oid, job, metrics)               # 4. QC vision
+            growth = GROWTH.run(oid, job, metrics)
             db.update_run(rid, step=f"itération {it + 1} · LEDGER")
-            ledger = LEDGER.run(oid, metrics, growth)            # 5. rubric + coût + go/no-go
+            ledger = LEDGER.run(oid, metrics, growth)
             db.update_run(rid, step=f"itération {it + 1} · ORBIT (arbitrage)")
-            orbit = ORBIT.run(oid, ledger, iterations_left=max_iterations - it - 1)  # 6. arbitrage
+            orbit = ORBIT.run(oid, ledger, iterations_left=max_iterations - it - 1)
             fixes = growth.get("fixes", []) + ledger.get("fixes", [])
             iterations.append({
                 "iteration": it + 1, "score": ledger["score"],
@@ -106,7 +118,6 @@ def _run_iterations(owner: str, offer_id: str | None, max_iterations: int) -> di
                       result=json.dumps({"score": ledger.get("score"),
                                          "decision": orbit.get("decision")}, ensure_ascii=False))
 
-        # checkpoint humain : confirmation de publication (si ORBIT a dit "done")
         if orbit.get("decision") == "done":
             db.update_run(rid, step="attente de confirmation de publication")
             ans = db.ask_human("GROWTH", "publish_confirmation",
