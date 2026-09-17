@@ -110,8 +110,11 @@ def video_generate(ctx):
             pct = int(event.get("progress") or 0)
             now = time.time()
             if now - last_write["t"] >= 1.0 or abs(pct - last_write["pct"]) >= 5:
-                for done in range(index):  # variantes précédentes terminées côté génération
-                    library.update(gen_ids[done], progress=100)
+                if index != last_write["index"]:
+                    for done in range(index):  # variantes précédentes terminées côté génération
+                        library.update(gen_ids[done], progress=100, phase="saving")
+                    for waiting in range(index + 1, variants):
+                        library.update(gen_ids[waiting], phase="waiting", status_text="en attente de la variante précédente")
                 library.update(gen_ids[index], phase=event.get("phase"), progress=pct,
                                status_text=(event.get("status") or "")[:200])
                 last_write.update(t=now, pct=pct, index=index)

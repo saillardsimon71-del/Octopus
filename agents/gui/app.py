@@ -73,9 +73,11 @@ class PodaluxApp(ctk.CTk):
                       hover_color="#1b5e20", command=self._publish).grid(row=0, column=5, padx=4, sticky="e")
         ctk.CTkButton(top, text="▶ Vidéo", width=80, fg_color="#455a64", hover_color="#37474f",
                       command=self._open_video).grid(row=0, column=6, padx=4)
+        ctk.CTkButton(top, text="🎬 Studio vidéo", width=120, fg_color="#6a1b9a", hover_color="#4a148c",
+                      command=self._open_studio).grid(row=0, column=7, padx=4)
         self.worker_btn = ctk.CTkButton(top, text="⚙ Worker", width=90, fg_color="#37474f", hover_color="#455a64",
                                         command=self._toggle_worker)
-        self.worker_btn.grid(row=0, column=7, padx=(4, 10))
+        self.worker_btn.grid(row=0, column=8, padx=(4, 10))
 
         self.salon = ctk.CTkScrollableFrame(self, label_text="Salon des agents")
         self.salon.grid(row=1, column=0, sticky="nsew", padx=(10, 5), pady=4)
@@ -335,6 +337,14 @@ class PodaluxApp(ctk.CTk):
         # dispatcher à l'agent en sous-processus (non-bloquant, la réponse arrive au salon)
         p, _ = procs.spawn(["msg", role, content], f"msg-{role}")
         self.msg_procs.append(p)
+
+    def _open_studio(self):
+        """Fenêtre de génération vidéo locale (WanGP)."""
+        from .studio import StudioWindow
+        if getattr(self, "_studio", None) is not None and self._studio.winfo_exists():
+            self._studio.focus()
+            return
+        self._studio = StudioWindow(self, start_worker=self._toggle_worker)
 
     def _toggle_worker(self):
         """Lance ou arrête le worker OCTOPUS (exécute les tâches en file et planifiées)."""
