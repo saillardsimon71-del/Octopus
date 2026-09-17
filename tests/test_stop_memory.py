@@ -87,8 +87,20 @@ def test_subprocess_tree_is_killed_on_stop(tmp_path):
     if os.name != "nt":
         grandchild = int(pid_file.read_text())
         time.sleep(0.5)
-        with pytest.raises(ProcessLookupError):
-            os.kill(grandchild, 0)
+        assert not _alive(grandchild)
+
+
+def _alive(pid: int) -> bool:
+    """Vivant = existe et n'est pas un zombie (un conteneur sans init peut ne pas les récolter)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    stat = f"/proc/{pid}/stat"
+    if os.path.exists(stat):
+        with open(stat, encoding="ascii", errors="replace") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+    return True
 
 
 def test_ask_human_can_be_cancelled():
