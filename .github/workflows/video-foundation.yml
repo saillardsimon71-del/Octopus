@@ -24,7 +24,12 @@ on:
       - "tests/test_browser_integration.py"
       - "tests/test_doctor.py"
       - "requirements-local.txt"
+      - "setup-local.ps1"
       - ".github/workflows/video-foundation.yml"
+
+concurrency:
+  group: video-foundation-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   contract-and-worker:
