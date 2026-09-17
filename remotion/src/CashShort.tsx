@@ -18,47 +18,57 @@ const P = JOB.palette as Record<string, string>;
 
 type Accent = {emoji: string; text: string; bg: string};
 type Meta = {label: string; icon: string; img: string; accent: Accent; full: boolean};
-const SEG: Record<string, Meta> = {
-  hook: {
-    label: 'FACTURE IMPAYÉE',
-    icon: '📄',
-    img: 'human.jpg',
-    full: true,
-    accent: {emoji: '⏰', text: '30 JOURS', bg: '#d90429'},
-  },
-  douleur: {
-    label: "LE CASH QUI NE RENTRE PAS",
-    icon: '💸',
-    img: 'human2.jpg',
-    full: false,
-    accent: {emoji: '💸', text: 'CASH BLOQUÉ', bg: '#b91c1c'},
-  },
+
+// Libelles propres a l'offre : fournis par le job (champ `visuel`), sinon ceux de l'offre Impayes
+// d'origine. Avant, ils etaient en dur : la video Devis/CGV affichait "FACTURE IMPAYEE" (audit C6).
+type RoleText = {label?: string; icon?: string; accent_emoji?: string; accent_text?: string};
+type Visuel = {
+  hook?: RoleText;
+  douleur?: RoleText;
+  preuve?: RoleText & {card_title?: string; card_rows?: [string, string][]};
+  soulagement?: RoleText & {banner?: string};
+  cta?: RoleText;
+};
+const DEFAULT_VISUEL: Required<Visuel> = {
+  hook: {label: 'FACTURE IMPAYÉE', icon: '📄', accent_emoji: '⏰', accent_text: '30 JOURS'},
+  douleur: {label: 'LE CASH QUI NE RENTRE PAS', icon: '💸', accent_emoji: '💸', accent_text: 'CASH BLOQUÉ'},
   preuve: {
-    label: 'LA RELANCE PRO',
-    icon: '✅',
-    img: 'human.jpg',
-    full: false,
-    accent: {emoji: '📄', text: 'RELANCE N°2', bg: '#b45309'},
+    label: 'LA RELANCE PRO', icon: '✅', accent_emoji: '📄', accent_text: 'RELANCE N°2',
+    card_title: 'RELANCE N°2',
+    card_rows: [['Facture #2026-041', '1 240 €'], ['Statut', 'ENCAISSÉ +1 240 € ✓']],
   },
-  soulagement: {
-    label: 'LE CONTRÔLE',
-    icon: '🤝',
-    img: 'face.jpg',
-    full: true,
-    accent: {emoji: '✓', text: 'PAYÉE', bg: '#15803d'},
-  },
-  cta: {
-    label: 'À VOUS DE JOUER',
-    icon: '👇',
-    img: 'face2.jpg',
-    full: true,
-    accent: {emoji: '👇', text: JOB.prix as string, bg: '#ea580c'},
-  },
+  soulagement: {label: 'LE CONTRÔLE', icon: '🤝', accent_emoji: '✓', accent_text: 'PAYÉE', banner: '+1 240 € ENCAISSÉ'},
+  cta: {label: 'À VOUS DE JOUER', icon: '👇', accent_emoji: '👇'},
+};
+const JOB_VISUEL = ((JOB as unknown as {visuel?: Visuel | null}).visuel ?? {}) as Visuel;
+const V = {
+  hook: {...DEFAULT_VISUEL.hook, ...JOB_VISUEL.hook},
+  douleur: {...DEFAULT_VISUEL.douleur, ...JOB_VISUEL.douleur},
+  preuve: {...DEFAULT_VISUEL.preuve, ...JOB_VISUEL.preuve},
+  soulagement: {...DEFAULT_VISUEL.soulagement, ...JOB_VISUEL.soulagement},
+  cta: {...DEFAULT_VISUEL.cta, ...JOB_VISUEL.cta},
+};
+const CARD_ROWS = V.preuve.card_rows ?? [];
+
+const meta = (role: keyof Visuel, img: string, full: boolean, bg: string, accentText?: string): Meta => ({
+  label: V[role].label ?? '',
+  icon: V[role].icon ?? '',
+  img,
+  full,
+  accent: {emoji: V[role].accent_emoji ?? '', text: accentText ?? V[role].accent_text ?? '', bg},
+});
+
+const SEG: Record<string, Meta> = {
+  hook: meta('hook', 'human.jpg', true, '#d90429'),
+  douleur: meta('douleur', 'human2.jpg', false, '#b91c1c'),
+  preuve: meta('preuve', 'human.jpg', false, '#b45309'),
+  soulagement: meta('soulagement', 'face.jpg', true, '#15803d'),
+  cta: meta('cta', 'face2.jpg', true, '#ea580c', JOB.prix as string),
 };
 
 const norm = (s: string) =>
   s.toLowerCase().replace(/[^a-z0-9àâçéèêëîôûùüÿñœ'-]/g, '');
-const KEY = new Set((JOB.keywords as string[]).map(norm));
+const KEY = new Set((JOB.keywords as readonly string[]).map(norm));
 
 type Seg = {seg: number; role: string; words: typeof CAPTIONS; start: number; end: number};
 const SEGS: Seg[] = [];
@@ -294,18 +304,16 @@ export const CashShort: React.FC = () => {
             }}
           >
             <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-              <span style={{fontFamily: FONT.xbold, fontSize: 44}}>RELANCE N°2</span>
+              <span style={{fontFamily: FONT.xbold, fontSize: 44}}>{V.preuve.card_title}</span>
               <span style={{fontFamily: FONT.xbold, fontSize: 38, color: '#b45309'}}>📄</span>
             </div>
             <div style={{height: 2, backgroundColor: '#f3d9b0', margin: '14px 0'}} />
-            <div style={{display: 'flex', justifyContent: 'space-between', fontSize: 34, lineHeight: 1.6}}>
-              <span>Facture #2026-041</span>
-              <span>1 240 €</span>
-            </div>
-            <div style={{display: 'flex', justifyContent: 'space-between', fontSize: 34, lineHeight: 1.6}}>
-              <span>Statut</span>
-              <span style={{color: '#15803d', fontFamily: FONT.xbold}}>ENCAISSÉ +1 240 € ✓</span>
-            </div>
+            {CARD_ROWS.map(([left, right], r) => (
+              <div key={r} style={{display: 'flex', justifyContent: 'space-between', fontSize: 34, lineHeight: 1.6}}>
+                <span>{left}</span>
+                <span style={r === CARD_ROWS.length - 1 ? {color: '#15803d', fontFamily: FONT.xbold} : undefined}>{right}</span>
+              </div>
+            ))}
           </div>
         ) : null}
 
@@ -327,7 +335,7 @@ export const CashShort: React.FC = () => {
             }}
           >
             <span style={{fontSize: 66}}>✓</span>
-            <span>+1 240 € ENCAISSÉ</span>
+            <span>{V.soulagement.banner}</span>
           </div>
         ) : null}
 

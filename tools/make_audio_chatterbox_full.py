@@ -94,6 +94,17 @@ def _bed(dur, sr):
     return (sig * lfo * fade * 0.9).astype(np.float32)
 
 
+def render_job_ts(job):
+    """Données du job lues par le template Remotion. `visuel` : libellés propres à l'offre (null = défauts)."""
+    return (
+        "export const JOB = " + json.dumps({
+            "titre": job["titre"], "prix": job["prix"], "cta": job["cta"],
+            "hook": job["hook"], "palette": job["palette"], "keywords": job["keywords"],
+            "visuel": job.get("visuel"),
+        }, ensure_ascii=False, indent=2) + " as const;\n"
+    )
+
+
 def main():
     job = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     offer = sys.argv[2]
@@ -204,13 +215,7 @@ def main():
     )
     (rem_data / "captions.ts").write_text(captions_ts, encoding="utf-8")
 
-    job_ts = (
-        "export const JOB = " + json.dumps({
-            "titre": job["titre"], "prix": job["prix"], "cta": job["cta"],
-            "hook": job["hook"], "palette": job["palette"], "keywords": job["keywords"],
-        }, ensure_ascii=False, indent=2) + " as const;\n"
-    )
-    (rem_data / "job.ts").write_text(job_ts, encoding="utf-8")
+    (rem_data / "job.ts").write_text(render_job_ts(job), encoding="utf-8")
 
     print(f"DURATION_S={round(full, 3)}  VO={round(vo_total, 3)}  WORDS={len(words)}")
     print(f"MIX={out_dir / 'mix.wav'}")

@@ -6,6 +6,7 @@ FORGE (production) · CONVERT (monétisation) · SOUT (recherche).
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -27,6 +28,51 @@ CATALOG = {
     "cash_linkedin_rdv01": {
         "nom": "LinkedIn RDV — obtenir un rendez-vous",
         "prix": "19 €", "angle": "le prospect qui ne répond jamais",
+    },
+}
+
+# Libellés affichés par le template Remotion (remotion/src/CashShort.tsx), par offre et par rôle.
+# Illustrations de l'usage du produit : aucun chiffre de résultat client inventé hors offre d'origine.
+VISUELS = {
+    "cash_impayes_relance01": {
+        "hook": {"label": "FACTURE IMPAYÉE", "icon": "📄", "accent_emoji": "⏰", "accent_text": "30 JOURS"},
+        "douleur": {"label": "LE CASH QUI NE RENTRE PAS", "icon": "💸", "accent_emoji": "💸", "accent_text": "CASH BLOQUÉ"},
+        "preuve": {"label": "LA RELANCE PRO", "icon": "✅", "accent_emoji": "📄", "accent_text": "RELANCE N°2",
+                   "card_title": "RELANCE N°2",
+                   "card_rows": [["Facture #2026-041", "1 240 €"], ["Statut", "ENCAISSÉ +1 240 € ✓"]]},
+        "soulagement": {"label": "LE CONTRÔLE", "icon": "🤝", "accent_emoji": "✓", "accent_text": "PAYÉE",
+                        "banner": "+1 240 € ENCAISSÉ"},
+        "cta": {"label": "À VOUS DE JOUER", "icon": "👇", "accent_emoji": "👇"},
+    },
+    "cash_devis_cgv01": {
+        "hook": {"label": "DEVIS BRICOLÉ", "icon": "📝", "accent_emoji": "⚠️", "accent_text": "PAS PRO"},
+        "douleur": {"label": "LE CLIENT QUI HÉSITE", "icon": "🤔", "accent_emoji": "📉", "accent_text": "DEVIS REFUSÉ"},
+        "preuve": {"label": "LE PACK DEVIS + CGV", "icon": "✅", "accent_emoji": "📑", "accent_text": "CGV INCLUSES",
+                   "card_title": "DEVIS N°2026-012",
+                   "card_rows": [["Mentions légales", "✓"], ["CGV jointes", "✓"], ["Statut", "SIGNÉ ✓"]]},
+        "soulagement": {"label": "PASSER POUR UN PRO", "icon": "🤝", "accent_emoji": "✓", "accent_text": "SIGNÉ",
+                        "banner": "DEVIS SIGNÉ"},
+        "cta": {"label": "À VOUS DE JOUER", "icon": "👇", "accent_emoji": "👇"},
+    },
+    "cash_avenant_scope01": {
+        "hook": {"label": "LE SCOPE QUI GONFLE", "icon": "📈", "accent_emoji": "➕", "accent_text": "TRAVAIL GRATUIT"},
+        "douleur": {"label": "LE CLIENT QUI ÉLARGIT", "icon": "😤", "accent_emoji": "⏳", "accent_text": "HEURES OFFERTES"},
+        "preuve": {"label": "L'AVENANT PRO", "icon": "✅", "accent_emoji": "📄", "accent_text": "AVENANT N°1",
+                   "card_title": "AVENANT N°1",
+                   "card_rows": [["Périmètre ajouté", "chiffré"], ["Délai", "mis à jour"], ["Statut", "SIGNÉ ✓"]]},
+        "soulagement": {"label": "CHAQUE AJOUT PAYÉ", "icon": "🤝", "accent_emoji": "✓", "accent_text": "SIGNÉ",
+                        "banner": "AVENANT SIGNÉ"},
+        "cta": {"label": "À VOUS DE JOUER", "icon": "👇", "accent_emoji": "👇"},
+    },
+    "cash_linkedin_rdv01": {
+        "hook": {"label": "MESSAGE SANS RÉPONSE", "icon": "💬", "accent_emoji": "👻", "accent_text": "VU, PAS RÉPONDU"},
+        "douleur": {"label": "LE PROSPECT FANTÔME", "icon": "😶", "accent_emoji": "📭", "accent_text": "0 RÉPONSE"},
+        "preuve": {"label": "LE MESSAGE QUI ACCROCHE", "icon": "✅", "accent_emoji": "✉️", "accent_text": "MESSAGE N°2",
+                   "card_title": "MESSAGE N°2",
+                   "card_rows": [["Accroche", "personnalisée"], ["Relance", "J+3"], ["Statut", "RDV CALÉ ✓"]]},
+        "soulagement": {"label": "LE RENDEZ-VOUS", "icon": "🤝", "accent_emoji": "📅", "accent_text": "RDV CALÉ",
+                        "banner": "RDV CALÉ"},
+        "cta": {"label": "À VOUS DE JOUER", "icon": "👇", "accent_emoji": "👇"},
     },
 }
 
@@ -53,6 +99,9 @@ AXES_MAX = {"hook": 5, "douleur": 4, "preuve": 4, "cta": 4, "lisibilite": 4,
             "humanite": 5, "motion": 4, "son": 3, "pacing": 2}
 assert tuple(AXES_MAX) == AXES and sum(AXES_MAX.values()) == 35
 ROLES_ORDER = ("hook", "hook", "douleur", "douleur", "preuve", "soulagement", "cta")
+
+
+_ROLE_PREFIX = re.compile(r"^\s*(hook|accroche|douleur|preuve|soulagement|cta|appel à l'action)\s*\d?\s*:", re.I)
 
 
 class InvalidLLMOutput(ValueError):
@@ -99,6 +148,10 @@ def validate_job(r) -> None:
             errors.append(f"rôles {list(roles)} au lieu de {list(ROLES_ORDER)}")
         if not all(isinstance(s, dict) and isinstance(s.get("texte"), str) and s["texte"].strip() for s in narration):
             errors.append("segment sans texte")
+        else:
+            prefixed = [s["texte"] for s in narration if _ROLE_PREFIX.match(s["texte"])]
+            if prefixed:  # vu dans une vidéo du 16/09 : « Soulagement : l'argent » affiché à l'écran
+                errors.append(f"nom de rôle recopié dans la narration : {prefixed[0][:40]!r}")
     if not isinstance(r.get("keywords"), list) or not all(isinstance(k, str) for k in r["keywords"]):
         errors.append("keywords doit être une liste de textes")
     if errors:
@@ -229,6 +282,7 @@ class CONVERT:
             "voix": {"moteur": "chatterbox", "nom": config.CHATTERBOX_VOICE},
             "keywords": r.get("keywords", []),
             "palette": PALETTE,
+            "visuel": VISUELS[offer_id],
             "narration": r.get("narration", []),
         }
         config.JOBS_DIR.mkdir(parents=True, exist_ok=True)
