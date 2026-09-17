@@ -166,3 +166,18 @@ par segment est ecrit dans `out/<offer>/audio/tts_report.json`.
 
 `piper` est le plancher : tant qu'il est installe (`pip install piper-tts`), aucun quota ne peut
 arreter un cycle. Mesure du 17/09/2026 (2 vCPU) : 7,4 s de voix synthetises en 1,8 s.
+
+## B-roll par offre
+
+`tools/fetch_broll.py` telecharge une image libre par segment (hook, douleur, preuve, soulagement, cta)
+et l'ecrit dans `remotion/public/img/<offer>/`. Le job recoit `visuel.<role>.img` ; le composant
+Remotion garde les photos du depot pour les roles sans image trouvee.
+
+| Fournisseur | Variable | Gratuit |
+|---|---|---|
+| pexels | `PEXELS_API_KEY` | 200 requetes/heure, 20 000/mois, usage commercial |
+| pixabay | `PIXABAY_API_KEY` | usage commercial |
+| openverse | aucune | sans compte ; filtre licences commerciales, CC0 d'abord |
+
+Les credits sont ecrits dans `out/<offer>/credits.txt` (a coller dans la description de la video quand
+la licence demande une attribution). `PODALUX_BROLL=0` desactive l'etape.

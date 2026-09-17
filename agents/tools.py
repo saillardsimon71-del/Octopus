@@ -135,10 +135,22 @@ def make_audio(job_json: str, offer_id: str) -> str:
         metrics = _cloud_service().render(offer_id, job)
         return json.dumps({"mode": "cloud", "job_id": metrics.get("cloud_job_id"),
                            "video_url": metrics.get("cloud_video_url")}, ensure_ascii=False)
+    fetch_broll(job_json, offer_id)
     return run_shell([
         config.PYTHON, "tools/make_audio_chatterbox_full.py",
         job_json, offer_id, config.CHATTERBOX_VOICE, "0.6", "0.4",
     ], log=step_log(offer_id, "audio"))
+
+
+def fetch_broll(job_json: str, offer_id: str) -> str:
+    """Images libres par segment. Jamais bloquant : sans reseau, le rendu garde les images du depot."""
+    if os.environ.get("PODALUX_BROLL", "1").strip().lower() in {"0", "false", "no"}:
+        return "b-roll desactive (PODALUX_BROLL=0)"
+    try:
+        return run_shell([config.PYTHON, "tools/fetch_broll.py", job_json, offer_id],
+                         log=step_log(offer_id, "broll"))
+    except StepError as exc:
+        return f"b-roll ignore : {str(exc)[:200]}"
 
 
 def remotion_render(offer_id: str) -> str:

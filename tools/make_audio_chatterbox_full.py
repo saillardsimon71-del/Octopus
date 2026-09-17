@@ -8,6 +8,7 @@ arreter le pipeline : `piper` synthetise en local sur CPU, sans compte. Le fourn
 utilise par segment est ecrit dans out/<offer>/audio/tts_report.json.
 """
 import json
+import os
 import subprocess
 import sys
 import wave
@@ -21,6 +22,8 @@ from tools import tts_providers  # noqa: E402
 SR = 44100
 GAP = 0.12
 TAIL = 1.5
+MIN_DURATION_S = float(os.environ.get("PODALUX_MIN_DURATION_S", "18.5"))  # borne basse du QC (18 s) + marge
+MAX_GAP = 0.6
 BED_LEVEL = 0.28
 SFX_LEVEL = 0.45
 
@@ -103,6 +106,20 @@ def render_job_ts(job):
     )
 
 
+def _fit_gap(seg_durs):
+    """Respiration entre segments, allongee si la narration est trop courte pour la borne QC (18 s).
+
+    Allonger les silences est sans risque visuel : l'animation continue, donc aucune image figee.
+    """
+    voice = sum(seg_durs)
+    holes = max(1, len(seg_durs) - 1)
+    needed = MIN_DURATION_S - TAIL - voice
+    gap = min(MAX_GAP, max(GAP, needed / holes)) if needed > GAP * holes else GAP
+    if gap > GAP:
+        print(f"duree courte ({voice + TAIL + GAP * holes:.1f}s) : respiration portee a {gap:.2f}s")
+    return round(gap, 3)
+
+
 def main():
     job = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     offer = sys.argv[2]
@@ -130,16 +147,17 @@ def main():
     (out_dir / "tts_report.json").write_text(json.dumps(
         {"chain": tts_providers.chain(), "segments": used_providers}, ensure_ascii=False, indent=1), encoding="utf-8")
 
+    gap = _fit_gap(seg_durs)
     seg_starts, acc = [], 0.0
     for d in seg_durs:
         seg_starts.append(acc)
-        acc += d + GAP
+        acc += d + gap
 
     parts = []
     for i, wav in enumerate(seg_wavs):
         parts.append(read_wav(wav))
         if i < len(seg_wavs) - 1:
-            parts.append(np.zeros(int(GAP * SR), dtype=np.float32))
+            parts.append(np.zeros(int(gap * SR), dtype=np.float32))
     vo = np.concatenate(parts)
     vo_total = len(vo) / SR
 

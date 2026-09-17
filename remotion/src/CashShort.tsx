@@ -21,7 +21,7 @@ type Meta = {label: string; icon: string; img: string; accent: Accent; full: boo
 
 // Libelles propres a l'offre : fournis par le job (champ `visuel`), sinon ceux de l'offre Impayes
 // d'origine. Avant, ils etaient en dur : la video Devis/CGV affichait "FACTURE IMPAYEE" (audit C6).
-type RoleText = {label?: string; icon?: string; accent_emoji?: string; accent_text?: string};
+type RoleText = {label?: string; icon?: string; accent_emoji?: string; accent_text?: string; img?: string};
 type Visuel = {
   hook?: RoleText;
   douleur?: RoleText;
@@ -58,12 +58,14 @@ const meta = (role: keyof Visuel, img: string, full: boolean, bg: string, accent
   accent: {emoji: V[role].accent_emoji ?? '', text: accentText ?? V[role].accent_text ?? '', bg},
 });
 
+// `img` vient du job quand tools/fetch_broll.py a trouve une image libre pour l'offre ;
+// sinon on garde les photos livrees avec le depot.
 const SEG: Record<string, Meta> = {
-  hook: meta('hook', 'human.jpg', true, '#d90429'),
-  douleur: meta('douleur', 'human2.jpg', false, '#b91c1c'),
-  preuve: meta('preuve', 'human.jpg', false, '#b45309'),
-  soulagement: meta('soulagement', 'face.jpg', true, '#15803d'),
-  cta: meta('cta', 'face2.jpg', true, '#ea580c', JOB.prix as string),
+  hook: meta('hook', V.hook.img ?? 'human.jpg', true, '#d90429'),
+  douleur: meta('douleur', V.douleur.img ?? 'human2.jpg', false, '#b91c1c'),
+  preuve: meta('preuve', V.preuve.img ?? 'human.jpg', false, '#b45309'),
+  soulagement: meta('soulagement', V.soulagement.img ?? 'face.jpg', true, '#15803d'),
+  cta: meta('cta', V.cta.img ?? 'face2.jpg', true, '#ea580c', JOB.prix as string),
 };
 
 const norm = (s: string) =>

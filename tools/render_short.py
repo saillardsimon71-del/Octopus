@@ -43,6 +43,10 @@ def main() -> None:
     report = {"offer_id": offer, "tts_backend": os.environ.get("CHATTERBOX_URL", "local:4123"), "steps": {}}
     total = time.time()
 
+    if os.environ.get("PODALUX_BROLL", "1").strip() not in {"0", "false", "no"}:
+        _, report["steps"]["broll_s"] = run([sys.executable, "tools/fetch_broll.py", str(job), offer],
+                                            log=logs / "broll.log")
+
     _, report["steps"]["audio_s"] = run([sys.executable, "tools/make_audio_chatterbox_full.py", str(job), offer,
                                          "vivienne-fr", "0.5", "0.5"], log=logs / "audio.log")
     for artifact in (out / "audio" / "mix.wav", ROOT / "remotion" / "src" / "data" / "captions.ts"):

@@ -87,3 +87,17 @@ def test_chatterbox_hf_space_routes_to_space(monkeypatch):
     monkeypatch.setenv("CHATTERBOX_URL", "hf-space:owner/space")
     monkeypatch.setattr(tts, "_hf_space", lambda space, text, exagg, cfg: b"RIFFspace" if space == "owner/space" else b"")
     assert tts.chatterbox("bonjour") == b"RIFFspace"
+
+
+def test_gap_stretches_short_narration_to_the_qc_floor(monkeypatch):
+    """Narration trop courte : la respiration s'allonge au lieu de laisser le QC refuser la video."""
+    import importlib
+    monkeypatch.setenv("PODALUX_MIN_DURATION_S", "18.5")
+    audio = importlib.reload(importlib.import_module("tools.make_audio_chatterbox_full"))
+    short = [2.0] * 7  # 14 s de voix : sous la borne
+    gap = audio._fit_gap(short)
+    assert gap > audio.GAP
+    assert sum(short) + gap * 6 + audio.TAIL >= 18.5
+    assert gap <= audio.MAX_GAP
+    long = [4.0] * 7  # 28 s : aucune raison d'etirer
+    assert audio._fit_gap(long) == audio.GAP

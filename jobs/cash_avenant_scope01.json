@@ -1,0 +1,128 @@
+{
+  "offer_id": "cash_avenant_scope01",
+  "langue": "fr",
+  "duree_cible_s": 24,
+  "titre": "Avenant Scope – 27 €",
+  "hook": "Vous étendez votre projet sans payer?",
+  "douleur": "Vous payez plus sans contrôle?",
+  "preuve": "Un avenant signé formalise le scope.",
+  "soulagement": "Vous gardez le budget, sans surprise.",
+  "cta": "27 € + lien en description",
+  "prix": "27 €",
+  "stripe_link": "https://buy.stripe.com/8x27sM0Dg9Ipf133X11oI0a",
+  "sub_id": "ai_prompts_freelance_short01_offre",
+  "voix": {
+    "moteur": "chatterbox",
+    "nom": "vivienne-fr"
+  },
+  "keywords": [
+    "avenant",
+    "scope",
+    "signature",
+    "client",
+    "payer",
+    "budget",
+    "contrat"
+  ],
+  "palette": {
+    "bgTop": "#ff9a3c",
+    "bgMid": "#f97316",
+    "bgBottom": "#c2410c",
+    "ink": "#2b1206",
+    "accent": "#ff6a00",
+    "highlight": "#fff1d6",
+    "pillBg": "#fff7ed",
+    "pillInk": "#c2410c"
+  },
+  "visuel": {
+    "hook": {
+      "label": "LE SCOPE QUI GONFLE",
+      "icon": "📈",
+      "accent_emoji": "➕",
+      "accent_text": "TRAVAIL GRATUIT"
+    },
+    "douleur": {
+      "label": "LE CLIENT QUI ÉLARGIT",
+      "icon": "😤",
+      "accent_emoji": "⏳",
+      "accent_text": "HEURES OFFERTES"
+    },
+    "preuve": {
+      "label": "L'AVENANT PRO",
+      "icon": "✅",
+      "accent_emoji": "📄",
+      "accent_text": "AVENANT N°1",
+      "card_title": "AVENANT N°1",
+      "card_rows": [
+        [
+          "Périmètre ajouté",
+          "chiffré"
+        ],
+        [
+          "Délai",
+          "mis à jour"
+        ],
+        [
+          "Statut",
+          "SIGNÉ ✓"
+        ]
+      ]
+    },
+    "soulagement": {
+      "label": "CHAQUE AJOUT PAYÉ",
+      "icon": "🤝",
+      "accent_emoji": "✓",
+      "accent_text": "SIGNÉ",
+      "banner": "AVENANT SIGNÉ"
+    },
+    "cta": {
+      "label": "À VOUS DE JOUER",
+      "icon": "👇",
+      "accent_emoji": "👇"
+    }
+  },
+  "narration": [
+    {
+      "id": "hook",
+      "role": "hook",
+      "rate": "-8%",
+      "texte": "Vous étendez votre projet sans payer?"
+    },
+    {
+      "id": "hook2",
+      "role": "hook",
+      "rate": "-4%",
+      "texte": "Pas de contrôle, pas de budget clair."
+    },
+    {
+      "id": "douleur",
+      "role": "douleur",
+      "rate": "+4%",
+      "texte": "Vous payez plus sans savoir pourquoi."
+    },
+    {
+      "id": "douleur2",
+      "role": "douleur",
+      "rate": "+7%",
+      "texte": "Chaque tâche supplémentaire vous coûte plus."
+    },
+    {
+      "id": "preuve",
+      "role": "preuve",
+      "rate": "+12%",
+      "texte": "Un avenant signé formalise le scope."
+    },
+    {
+      "id": "soulagement",
+      "role": "soulagement",
+      "rate": "+2%",
+      "texte": "Vous gardez le budget, sans surprise."
+    },
+    {
+      "id": "cta",
+      "role": "cta",
+      "rate": "-1%",
+      "texte": "27 € + lien en description"
+    }
+  ]
+}
