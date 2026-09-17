@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 
 from .client import CloudVideoClient, CloudVideoError
-from .contract import VideoJob, VideoResult
+from .contract import TERMINAL_STATUSES, VideoJob, VideoResult, VideoStatus
 from .runpod import RunPodConfig, RunPodServerlessClient
 from .state import AmbiguousSubmissionError, RenderStateStore
 
@@ -18,34 +18,56 @@ class VideoRenderer(ABC):
 
 
 class CloudVideoRenderer(VideoRenderer):
-    def __init__(self, client: CloudVideoClient, *, provider: str = "cloud", state_store: RenderStateStore | None = None):
+    def __init__(self, client: CloudVideoClient, *, provider: str = "cloud",
+                 state_store: RenderStateStore | None = None, max_attempts: int | None = None):
         self.client = client
         self.provider = provider
         self.state_store = state_store or RenderStateStore(
             Path(os.environ.get("PODALUX_ROOT", Path.cwd())) / "out" / ".cloud_video_state"
         )
+        self.max_attempts = max(1, int(max_attempts if max_attempts is not None else
+                                      os.environ.get("PODALUX_VIDEO_MAX_ATTEMPTS", "2")))
 
     def render(self, job: VideoJob) -> VideoResult:
         state = self.state_store.load(job.job_id)
         if state is not None:
-            if state.remote_id:
+            if state.state == "SUBMITTING" and not state.remote_id:
+                self.state_store.require_resume_safe(state)
+            if state.remote_id and state.state not in {
+                VideoStatus.FAILED.value,
+                VideoStatus.CANCELLED.value,
+                VideoStatus.EXPIRED.value,
+            }:
                 result = self.client.wait(state.remote_id)
                 current = self.state_store.load(job.job_id)
                 if current is not None:
                     self.state_store.mark_status(current, result.status.value)
                 return result
-            self.state_store.require_resume_safe(state)
+            if state.remote_id and state.state in {
+                VideoStatus.FAILED.value,
+                VideoStatus.CANCELLED.value,
+                VideoStatus.EXPIRED.value,
+            }:
+                if state.attempt >= self.max_attempts:
+                    raise CloudVideoError(
+                        f"job {job.job_id} a atteint la limite de {self.max_attempts} tentative(s)"
+                    )
+                attempt = state.attempt + 1
+                self.state_store.mark_submitting(job.job_id, self.provider, attempt=attempt)
+                return self._submit_and_wait(job, attempt)
 
-        # Écriture AVANT l'appel réseau : si le processus meurt ou si le POST expire sans
-        # renvoyer son identifiant, le prochain essai ne recrée pas automatiquement un job payé.
-        self.state_store.mark_submitting(job.job_id, self.provider)
+        self.state_store.mark_submitting(job.job_id, self.provider, attempt=1)
+        return self._submit_and_wait(job, 1)
+
+    def _submit_and_wait(self, job: VideoJob, attempt: int) -> VideoResult:
         try:
             remote = self.client.submit(job)
         except CloudVideoError as exc:
             raise AmbiguousSubmissionError(
                 f"soumission {job.job_id} non confirmée; état conservé en SUBMITTING: {exc}"
             ) from exc
-        self.state_store.mark_submitted(job.job_id, self.provider, remote.remote_id, remote.status.value)
+        self.state_store.mark_submitted(job.job_id, self.provider, remote.remote_id,
+                                        remote.status.value, attempt=attempt)
         result = self.client.wait(remote.remote_id)
         current = self.state_store.load(job.job_id)
         if current is not None:
