@@ -1,7 +1,7 @@
 """MiniMax-H3 cloud backend.
 
 Le poste local ne charge jamais H3. OCTOPUS envoie un workflow ComfyUI à un endpoint
-RunPod Serverless compatible avec les workers H3 publics de référence.
+RunPod Serverless compatible avec le worker H3 cloud configuré.
 """
 from __future__ import annotations
 
@@ -24,9 +24,10 @@ MAX_DURATION_S = 15.0
 
 H3_MODELS = {
     "diffusion": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
-    "text_encoder": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+    "text_encoder": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
     "video_vae": "minimax_h3_video_vae_fp16.safetensors",
     "audio_vae": "minimax_h3_audio_vae_fp32.safetensors",
+    "turbo_8step": "light2v-minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
 }
 
 
@@ -62,36 +63,51 @@ def _canvas(width: int, height: int) -> tuple[int, int]:
     return max(32, round(w / 32) * 32), max(32, round(h / 32) * 32)
 
 
+def _prompt_block(prompt: str) -> str:
+    text = str(prompt).strip()
+    if not text:
+        raise ValueError("prompt H3 vide")
+    # H3 is jointly multimodal. Keeping the three documented sections makes the T2VA
+    # contract explicit even when OCTOPUS only supplies visual direction.
+    if "integrated_multimodal_description:" in text:
+        return text
+    return "integrated_multimodal_description:\n" + text + "\n\noverall_soundscape:\nN/A\n\nnon_diegetic_music:\nN/A\n"
+
+
 def build_t2v_workflow(prompt: str, *, width: int = DEFAULT_WIDTH, height: int = DEFAULT_HEIGHT,
                        duration_s: float = DEFAULT_DURATION_S, seed: int | None = None,
                        steps: int = 8, output_prefix: str = "octopus_h3") -> dict[str, Any]:
-    """Construit le graphe H3 T2V à partir du graphe ComfyUI officiel, sans keyframes."""
-    prompt = str(prompt).strip()
-    if not prompt:
-        raise ValueError("prompt H3 vide")
+    """Graphe API H3 T2VA aligné sur le template ComfyUI officiel, sans keyframes.
+
+    H3 travaille à 24 fps et utilise une grille temporelle 17k+5. Le canvas est limité
+    au court-côté 768 px et à 768×1344 pixels d'aire native.
+    """
     if not 1 <= steps <= 24:
         raise ValueError("steps H3 hors limites [1,24]")
     width, height = _canvas(int(width), int(height))
     length = align_frames(float(duration_s))
     seed = int(seed if seed is not None else 42)
+    prompt = _prompt_block(prompt)
 
     workflow: dict[str, Any] = {
         "1": {"inputs": {"unet_name": H3_MODELS["diffusion"], "weight_dtype": "default"},
-              "class_type": "UNETLoader", "_meta": {"title": "MiniMax H3 diffusion"}},
+              "class_type": "UNETLoader", "_meta": {"title": "Load Diffusion Model"}},
+        "2": {"inputs": {"lora_name": H3_MODELS["turbo_8step"], "strength_model": 1.0, "model": ["1", 0]},
+              "class_type": "LoraLoaderModelOnly", "_meta": {"title": "MiniMax H3 8-step turbo"}},
         "3": {"inputs": {"clip_name": H3_MODELS["text_encoder"], "type": "minimax", "device": "default"},
-              "class_type": "CLIPLoader", "_meta": {"title": "MiniMax H3 text encoder"}},
+              "class_type": "CLIPLoader", "_meta": {"title": "Load CLIP"}},
         "4": {"inputs": {"vae_name": H3_MODELS["video_vae"]}, "class_type": "VAELoader",
-              "_meta": {"title": "MiniMax H3 video VAE"}},
+              "_meta": {"title": "Video VAE"}},
         "5": {"inputs": {"vae_name": H3_MODELS["audio_vae"]}, "class_type": "VAELoader",
-              "_meta": {"title": "MiniMax H3 audio VAE"}},
+              "_meta": {"title": "Audio VAE"}},
         "10": {"inputs": {"noise_seed": seed}, "class_type": "RandomNoise"},
         "11": {"inputs": {"sampler_name": "res_multistep"}, "class_type": "KSamplerSelect"},
-        "12": {"inputs": {"scheduler": "simple", "steps": int(steps), "denoise": 1.0, "model": ["1", 0]},
+        "12": {"inputs": {"scheduler": "simple", "steps": int(steps), "denoise": 1.0, "model": ["2", 0]},
                "class_type": "BasicScheduler"},
-        "13": {"inputs": {"model": ["1", 0], "conditioning": ["20", 0]}, "class_type": "BasicGuider"},
+        "13": {"inputs": {"model": ["2", 0], "conditioning": ["20", 0]}, "class_type": "BasicGuider"},
         "20": {"inputs": {"prompt": prompt, "width": width, "height": height, "length": length,
                              "clip": ["3", 0], "vae": ["4", 0]},
-               "class_type": "MiniMaxH3ImageToVideo", "_meta": {"title": "MiniMax H3 T2V"}},
+               "class_type": "MiniMaxH3ImageToVideo", "_meta": {"title": "MiniMax H3 T2VA"}},
         "14": {"inputs": {"noise": ["10", 0], "guider": ["13", 0], "sampler": ["11", 0],
                              "sigmas": ["12", 0], "latent_image": ["20", 1]},
                "class_type": "SamplerCustomAdvanced"},
@@ -99,11 +115,9 @@ def build_t2v_workflow(prompt: str, *, width: int = DEFAULT_WIDTH, height: int =
         "51": {"inputs": {"samples": ["14", 0], "vae": ["5", 0]}, "class_type": "VAEDecodeAudio"},
         "52": {"inputs": {"fps": FPS, "bit_depth": 8, "images": ["50", 0], "audio": ["51", 0]},
                "class_type": "CreateVideo"},
-        "53": {"inputs": {"frame_rate": FPS, "loop_count": 0, "filename_prefix": f"video/{output_prefix}",
-                             "format": "video/h264-mp4", "pix_fmt": "yuv420p", "crf": 19,
-                             "save_metadata": True, "trim_to_audio": False, "pingpong": False,
-                             "save_output": True, "images": ["50", 0], "audio": ["51", 0]},
-               "class_type": "VHS_VideoCombine"},
+        "53": {"inputs": {"filename_prefix": f"video/{output_prefix}", "format": "mp4", "codec": "h264",
+                             "codec.encoding": "auto", "video": ["52", 0]},
+               "class_type": "SaveVideo", "_meta": {"title": "Save Video"}},
     }
     return workflow
 
@@ -144,7 +158,7 @@ class H3Result:
     video_url: str | None = None
     video_bytes: bytes | None = None
     filename: str = "h3.mp4"
-    raw: Mapping[str, Any] = None
+    raw: Mapping[str, Any] | None = None
 
 
 class MiniMaxH3RunPodClient:
@@ -232,9 +246,9 @@ class MiniMaxH3RunPodClient:
 def save_result(result: H3Result, target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     if result.video_bytes is not None:
-        tmp = target.with_suffix(target.suffix + ".part")
         if len(result.video_bytes) > 512 * 1024 * 1024:
             raise MiniMaxH3CloudError("vidéo H3 dépasse 512 Mo")
+        tmp = target.with_suffix(target.suffix + ".part")
         tmp.write_bytes(result.video_bytes)
         tmp.replace(target)
         return target
