@@ -1,11 +1,12 @@
-"""Pipeline audio complet avec VO Chatterbox (serveur 4123) + word-timestamps whisper + bed/SFX/ducking.
+"""Pipeline audio complet avec VO Chatterbox + word-timestamps + bed/SFX/ducking.
 
 Usage : python tools/make_audio_chatterbox_full.py <job.json> <offer_id> [voice] [exaggeration] [cfg_weight]
 
-Produit (out/<offer_id>/audio/) : vo.wav, mix.wav, captions.json
-Et (remotion/src/data/) : captions.ts, job.ts
+`CHATTERBOX_URL` permet de déplacer le backend TTS hors du poste local sans changer
+le reste du pipeline. Par défaut, la compatibilité locale 4123 est conservée.
 """
 import json
+import os
 import re
 import subprocess
 import sys
@@ -17,10 +18,10 @@ import numpy as np
 
 SR = 44100
 GAP = 0.12
-TAIL = 1.5  # outro musicale après le dernier mot (le CTA reste à l'écran)
+TAIL = 1.5
 BED_LEVEL = 0.28
 SFX_LEVEL = 0.45
-BASE = "http://127.0.0.1:4123/v1/audio/speech"
+BASE = os.environ.get("CHATTERBOX_URL", "http://127.0.0.1:4123/v1/audio/speech").strip()
 
 
 def tts(text, voice, exaggeration, cfg_weight):
@@ -95,7 +96,6 @@ def _bed(dur, sr):
 
 
 def render_job_ts(job):
-    """Données du job lues par le template Remotion. `visuel` : libellés propres à l'offre (null = défauts)."""
     return (
         "export const JOB = " + json.dumps({
             "titre": job["titre"], "prix": job["prix"], "cta": job["cta"],
@@ -116,8 +116,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     segments = job["narration"]
-    seg_wavs = []
-    seg_durs = []
+    seg_wavs, seg_durs = [], []
     for i, seg in enumerate(segments):
         raw = tts(seg["texte"], voice, exagg, cfg)
         raw_wav = out_dir / f"cb_seg_raw_{i}.wav"
@@ -129,9 +128,8 @@ def main():
         seg_durs.append(wav_dur(seg_wav))
         print(f"seg {i} ok duree={round(seg_durs[-1], 2)}s")
 
-    seg_starts = []
-    acc = 0.0
-    for i, d in enumerate(seg_durs):
+    seg_starts, acc = [], 0.0
+    for d in seg_durs:
         seg_starts.append(acc)
         acc += d + GAP
 
@@ -143,41 +141,30 @@ def main():
     vo = np.concatenate(parts)
     vo_total = len(vo) / SR
 
-    # mots SOURCE (texte exact du job) distribués dans chaque segment, pondérés par longueur
     words = []
     for i, seg in enumerate(segments):
-        seg_start = seg_starts[i]
-        seg_end = seg_start + seg_durs[i]
+        seg_start, seg_end = seg_starts[i], seg_starts[i] + seg_durs[i]
         toks = seg["texte"].split()
         weights = [max(1, len(tok.rstrip('.,;:!?'))) for tok in toks]
         total_w = sum(weights)
         t = seg_start
         for j, tok in enumerate(toks):
             dur = (weights[j] / total_w) * (seg_end - seg_start)
-            words.append({
-                "text": tok,
-                "start": round(t, 3),
-                "end": round(t + dur, 3),
-                "seg": i,
-                "role": seg["role"],
-            })
+            words.append({"text": tok, "start": round(t, 3), "end": round(t + dur, 3),
+                          "seg": i, "role": seg["role"]})
             t += dur
     print(f"mots (source distribues): {len(words)}")
 
     full = vo_total + TAIL
     n = int(full * SR)
-    if n > len(vo):
-        vo = np.concatenate([vo, np.zeros(n - len(vo), dtype=np.float32)])
-    else:
-        vo = vo[:n]
+    vo = np.concatenate([vo, np.zeros(max(0, n - len(vo)), dtype=np.float32)])[:n]
 
     bed = _bed(full, SR) * BED_LEVEL
     env = np.abs(vo)
     k = int(0.2 * SR)
     env = np.convolve(env, np.ones(k) / k, mode="same")
     env = np.clip(env / (np.percentile(env, 95) + 1e-9), 0, 1)
-    duck = 1.0 - env
-    bed = bed * duck
+    bed *= 1.0 - env
 
     sfx = np.zeros(n, dtype=np.float32)
     for i, seg in enumerate(segments):
@@ -197,11 +184,8 @@ def main():
                 sfx[idx:idx + len(p)] += p
     sfx *= SFX_LEVEL
 
-    left = vo + bed + sfx
-    right = vo + bed + sfx
-    write_wav_stereo(out_dir / "mix.wav", left, right)
+    write_wav_stereo(out_dir / "mix.wav", vo + bed + sfx, vo + bed + sfx)
     write_wav_stereo(out_dir / "vo.wav", vo, vo)
-
     (out_dir / "captions.json").write_text(
         json.dumps({"duration_s": round(full, 3), "vo_end_s": round(vo_total, 3), "words": words},
                    ensure_ascii=False, indent=2), encoding="utf-8")
@@ -214,7 +198,6 @@ def main():
         "export const CAPTIONS: Caption[] = " + json.dumps(words, ensure_ascii=False) + ";\n"
     )
     (rem_data / "captions.ts").write_text(captions_ts, encoding="utf-8")
-
     (rem_data / "job.ts").write_text(render_job_ts(job), encoding="utf-8")
 
     print(f"DURATION_S={round(full, 3)}  VO={round(vo_total, 3)}  WORDS={len(words)}")
@@ -223,4 +206,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
