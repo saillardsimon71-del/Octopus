@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from octopus.video.contract import VideoJob, VideoResult, VideoStatus
+from octopus.video.contract import Artifact, VideoJob, VideoResult, VideoStatus
 from octopus.video.storage import ArtifactStore, ArtifactStoreError
 
 
@@ -60,8 +60,6 @@ class ForgeExecutor:
             self._copy_pipeline_sources(workspace)
             voice = str(job.voice.get("nom") or job.voice.get("voice") or self.config.tts_voice_default)
             env = os.environ.copy()
-            if os.environ.get("CHATTERBOX_URL"):
-                env["CHATTERBOX_URL"] = os.environ["CHATTERBOX_URL"]
 
             self._run(["python3", "tools/make_audio_chatterbox_full.py", str(job_path), offer, voice, "0.6", "0.4"],
                       workspace, env=env, log=out_dir / "logs" / "audio.log")
@@ -73,7 +71,7 @@ class ForgeExecutor:
             video = out_dir / "video.mp4"
             self._require_nonempty(video)
 
-            self._mux(offer, workspace, out_dir)
+            self._mux(workspace, out_dir)
             final = out_dir / "final.mp4"
             self._require_nonempty(final)
 
@@ -86,6 +84,9 @@ class ForgeExecutor:
                 raise ExecutorError("qc_metrics.json n'est pas un objet JSON")
 
             artifacts = self._upload_artifacts(job, out_dir, final, qc_path)
+            frame_urls = {artifact.name: artifact.url for artifact in artifacts if artifact.kind == "image"}
+            if isinstance(qc.get("frames"), list):
+                qc["frames"] = [frame_urls.get(Path(str(item)).name, str(item)) for item in qc["frames"]]
             video_artifact = next((a for a in artifacts if a.kind == "video"), None)
             if video_artifact is None:
                 raise ExecutorError("final.mp4 non publié")
@@ -120,12 +121,16 @@ class ForgeExecutor:
         root = self.config.project_root
         remotion = root / "remotion"
         tools_dir = root / "tools"
-        required = [remotion / "package.json", remotion / "package-lock.json",
+        required = [remotion / "package.json", remotion / "package-lock.json", remotion / "src",
                     tools_dir / "make_audio_chatterbox_full.py", tools_dir / "qc_metrics.py"]
         missing = [str(p) for p in required if not p.exists()]
         if missing:
             raise ExecutorError("sources worker manquantes: " + ", ".join(missing))
-        shutil.copytree(remotion, workspace / "remotion")
+        shutil.copytree(remotion, workspace / "remotion", symlinks=True,
+                        ignore=shutil.ignore_patterns("node_modules"))
+        node_modules = remotion / "node_modules"
+        if node_modules.is_dir():
+            (workspace / "remotion" / "node_modules").symlink_to(node_modules, target_is_directory=True)
         (workspace / "tools").mkdir()
         for name in ("make_audio_chatterbox_full.py", "qc_metrics.py"):
             shutil.copy2(tools_dir / name, workspace / "tools" / name)
@@ -155,7 +160,7 @@ class ForgeExecutor:
             if not path.is_file() or path.stat().st_size <= 0:
                 raise ExecutorError(f"artefact absent ou vide: {path}")
 
-    def _mux(self, offer: str, workspace: Path, out_dir: Path) -> None:
+    def _mux(self, workspace: Path, out_dir: Path) -> None:
         mix = out_dir / "audio" / "mix.wav"
         video = out_dir / "video.mp4"
         final = out_dir / "final.mp4"
@@ -172,13 +177,15 @@ class ForgeExecutor:
     def _upload_artifacts(self, job: VideoJob, out_dir: Path, final: Path, qc_path: Path):
         prefix = f"{job.offer_id}/{job.job_id}"
         artifacts = [self.store.put_file(final, f"{prefix}/final.mp4", content_type="video/mp4")]
-        artifacts[0] = type(artifacts[0])(artifacts[0].name, artifacts[0].url, "video",
-                                           artifacts[0].content_type, artifacts[0].sha256)
+        artifacts[0] = Artifact(artifacts[0].name, artifacts[0].url, "video",
+                                artifacts[0].content_type, artifacts[0].sha256)
         artifacts.append(self.store.put_file(qc_path, f"{prefix}/qc_metrics.json", content_type="application/json"))
         frames_dir = out_dir / "frames"
         if frames_dir.is_dir():
             for frame in sorted(frames_dir.glob("*.jpg")):
-                artifacts.append(self.store.put_file(frame, f"{prefix}/frames/{frame.name}", content_type="image/jpeg"))
+                artifacts.append(Artifact(frame.name,
+                                           self.store.put_file(frame, f"{prefix}/frames/{frame.name}", content_type="image/jpeg").url,
+                                           "image", "image/jpeg"))
         logs_dir = out_dir / "logs"
         if logs_dir.is_dir():
             for log in sorted(logs_dir.glob("*.log")):
@@ -191,7 +198,6 @@ class ForgeExecutor:
 
     @staticmethod
     def _artifacts(manifest: dict[str, Any]):
-        from octopus.video.contract import Artifact
         return tuple(Artifact(str(x.get("name", "artifact")), str(x["url"]), str(x.get("kind", "file")),
                              x.get("content_type"), x.get("sha256"))
                      for x in manifest.get("artifacts", []) if isinstance(x, dict) and x.get("url"))
