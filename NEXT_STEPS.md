@@ -1,29 +1,35 @@
-# NEXT_STEPS — reprise (17/09/2026, ~11:20 UTC)
+# NEXT_STEPS - 17/09/2026 (session autonome video)
 
-## État
-- Commité : registre des activités (`python -m octopus businesses`), pont WanGP, studio, garde-fou matériel.
-- Commité (WIP testé partiellement, tests media OK) : mesures de performance `octopus/media/perf.py` (table media_runs, schéma v4),
-  préréglages `octopus/media/presets.py` (brouillon / standard / qualite / h3), CLI `video presets`, `video perf`,
-  `video generate --preset`, estimation de durée avant lancement, studio.py (préréglage, réglages conservés à la réutilisation).
-- MESURE RÉELLE (tâche #2, GTX 1060 3 Go) : t2v_1.3B 480x832, 49 images, 20 étapes, CFG → 136-139 s/étape (≈ 47 min). Trop lent.
-- Test demandé à l'utilisateur : `python -m octopus cancel 2` puis
-  `python -m octopus video generate "..." --model t2v_nexus_1.3B --seconds 3 --resolution 288x512 --steps 6 --setting guidance_scale=1 --setting flow_shift=5 --wait`
-  (ou désormais `--preset brouillon`). Estimation théorique ≈ 2-5 min + 3,1 Go de téléchargement. NON MESURÉ.
+## Fait et verifie (mesure, pas suppose)
+- 4 videos reelles produites de bout en bout, hors machine locale : 1080x1920, 30 fps,
+  -14,0 LUFS, 0 image figee, 18,5 a 21,7 s, ~112 s de production par video, 0 euro.
+- Voix : `tools/tts_providers.py`, chaine azure -> cloudflare -> chatterbox -> piper.
+  piper (MIT, CPU, sans compte) sert de plancher : 7,4 s de voix synthetises en 1,8 s sur 2 vCPU.
+- B-roll : `tools/fetch_broll.py`, 5 images CC0 pertinentes par offre (stocksnap/rawpixel/nappy,
+  photos uniquement, filtre de pertinence), credits dans out/<offer>/credits.txt.
+- Respiration adaptative : narration trop courte -> silences allonges (17,3 s -> 18,5 s) au lieu
+  d'un refus QC.
+- Suite complete verte (438 tests), dont 20 nouveaux (chaine TTS, b-roll, respiration, doctor).
+- OmniRoute : `auto/free` n'existe pas, le catalogue envoie `auto/best-free` (verifie sur la
+  passerelle locale : 200 en 458 ms via Groq).
 
-## Priorités
-1. Récupérer le résultat du test Nexus : `python -m octopus video perf` (mesures réelles), corriger si échec.
-2. Lancer toute la suite de tests (`python -m pytest`) ; écrire tests pour perf.py / presets.py (analyze, estimate, apply, CLI perf/presets).
-3. GUI `agents/gui/studio.py` : menu préréglage (studio.PRESET_CHOICES, défaut « Brouillon rapide »), libellé durée prévue
-   (studio.estimate_text), passer `preset` et `settings` dans `_form` / `_reuse`.
-4. Calibrer TOKEN_EXPONENT avec 2 mesures de même architecture ; mettre à jour docs/GENERATION_VIDEO.md.
-5. Mode « serve » du pont (modèle gardé chargé), intégration b-roll Podalux/Remotion.
-6. `git push origin main` (à faire par l'utilisateur, pas d'identifiants dans la VM).
+## A faire sur la machine Windows
+1. `python -m pip install piper-tts` puis `python -m agents.run doctor` :
+   la ligne "Voix (chaine TTS)" doit lister piper.
+2. `python -m agents.run cycle` : premier cycle complet avec voix locale et b-roll.
+3. Pousser la branche (aucun push n'a ete fait sans autorisation) :
+   `git push origin feat/autonomous-business-foundation`
+4. Ensuite seulement : declencher `video-batch` dans l'onglet Actions (production de toutes les
+   offres en parallele, gratuit sur les runners GitHub).
 
-## Commandes de reprise
-```
-cd C:\Users\saill\Projects\video-factory
-git push origin main
-python -m pytest -q
-python -m octopus video perf
-python -m octopus video presets
-```
+## Ameliorations possibles (non faites)
+- Cle Azure Speech (F0, 500 000 caracteres/mois, sans carte) : voix neuronale a la place de piper,
+  c'est le seul levier qui fera monter la note "humanite" du QC.
+- Cle Pexels (gratuite) : b-roll de bien meilleure qualite que les banques CC0 actuelles.
+- Synchronisation des sous-titres au mot (whisper) : aujourd'hui repartie au prorata des caracteres.
+- QC vision sur le palier gratuit Gemini (1 500 requetes/jour) plutot que sur un modele generique.
+
+## Non teste
+- Cycle complet `agents.run cycle` sur Windows avec ces changements (la partie FORGE est testee,
+  SOUT/CONVERT/GROWTH/LEDGER demandent la base et les LLM de la machine).
+- Les deux workflows GitHub : rien n'a ete pousse, donc aucun run observe.
