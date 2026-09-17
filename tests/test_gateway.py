@@ -160,6 +160,21 @@ def test_unknown_profile_is_an_error():
         llm.complete("podalux.write_job", MSG, profile="turbo")
 
 
+def test_omniroute_becomes_default_when_enabled(monkeypatch):
+    monkeypatch.delenv("OCTOPUS_PROFILE", raising=False)
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    cat = catalog.load()
+    assert cat.default_profile == "zero_cost"
+    assert cat.model("omniroute/auto-free")["api_model"] == "auto/free"
+    assert cat.task("podalux.write_job")["candidates"]["zero_cost"][0] == "omniroute/auto-free"
+
+
+def test_explicit_legacy_still_overrides_omniroute_default(monkeypatch):
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    monkeypatch.setenv("OCTOPUS_PROFILE", "legacy")
+    assert catalog.load().default_profile == "legacy"
+
+
 # --- budgets -------------------------------------------------------------------------------
 
 def test_run_budget_blocks_before_the_call(transport):
