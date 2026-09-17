@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 
 from octopus.journal import with_run
 from octopus.video.renderers import get_renderer
@@ -20,16 +21,27 @@ def is_yes(answer: str | None) -> bool:
     return bool(answer) and answer.strip().lower().rstrip(".! ") in YES
 
 
-def already_produced() -> list[str]:
-    """Offres déjà produites côté orchestrateur local.
+def _cloud_result_produced(path: Path) -> bool:
+    """Détecte uniquement un manifeste de contrôle cloud valide et COMPLETED."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(value, dict) and value.get("status") == "COMPLETED" and bool(value.get("video_url"))
 
-    Le cloud n'écrit pas `out/<offer>/final.mp4`, donc cette détection reste volontairement
-    conservatrice pendant la migration. La source de vérité cloud devient le manifest.
-    """
+
+def already_produced() -> list[str]:
+    """Offres déjà produites localement ou par un rendu cloud terminé."""
     out_dir = config.PROJECT_ROOT / "out"
     if not out_dir.exists():
         return []
-    return sorted(p.name for p in out_dir.iterdir() if (p / "final.mp4").exists())
+    produced = []
+    for p in out_dir.iterdir():
+        if not p.is_dir():
+            continue
+        if (p / "final.mp4").exists() or _cloud_result_produced(p / "cloud_result.json"):
+            produced.append(p.name)
+    return sorted(produced)
 
 
 def _render_video(offer_id: str, job: dict) -> dict:
