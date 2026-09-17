@@ -46,8 +46,17 @@ class VideoService:
             raise VideoServiceError(f"mode vidéo inconnu: {self.mode!r}")
         if self.cloud_renderer is None:
             raise VideoServiceError("renderer cloud non configuré")
+        declared_offer = str(job.get("offer_id") or "")
+        if declared_offer and declared_offer != offer_id:
+            raise VideoServiceError(
+                f"incohérence offer_id: argument={offer_id!r}, job={declared_offer!r}"
+            )
+        if not declared_offer:
+            raise VideoServiceError("job cloud sans offer_id")
 
         video_job = VideoJob.from_legacy_job(job, job_id=stable_job_id(job))
+        if video_job.offer_id != offer_id:
+            raise VideoServiceError("offer_id normalisé différent de l'offre demandée")
         result = self.cloud_renderer.render(video_job)
         if result.status.value != "COMPLETED":
             raise VideoServiceError(f"renderer cloud non terminé: {result.status.value}")
@@ -57,9 +66,6 @@ class VideoService:
         metrics = dict(result.qc)
         metrics["cloud_video_url"] = result.video_url
         metrics["cloud_job_id"] = result.job_id
-        # Un renderer minimal peut ne renvoyer que video_url + qc (utile aux tests et
-        # aux providers qui publient déjà leurs propres artefacts). Le worker OCTOPUS,
-        # lui, renvoie le manifest complet et déclenche la rematérialisation ci-dessous.
         if result.artifacts:
             self._materialize_compatibility_artifacts(offer_id, metrics, result)
         self._write_control_manifest(offer_id, result)
@@ -87,8 +93,6 @@ class VideoService:
             artifact = by_name.get(name)
             if artifact is None:
                 if name == "qc_metrics.json":
-                    # Le QC est déjà disponible dans result.qc ; FORGE cloud peut le conserver
-                    # sans imposer un second téléchargement au contrôleur.
                     continue
                 raise VideoServiceError("artefact cloud requis absent: final.mp4")
             destination, max_size = destinations[name]
