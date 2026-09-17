@@ -87,14 +87,27 @@ class VideoService:
             "final.mp4": (base / "final.mp4", 2 * 1024 * 1024 * 1024),
             "video.mp4": (base / "video.mp4", 2 * 1024 * 1024 * 1024),
             "qc_metrics.json": (base / "qc_metrics.json", 10 * 1024 * 1024),
+            "mix.wav": (base / "audio" / "mix.wav", 100 * 1024 * 1024),
+            "vo.wav": (base / "audio" / "vo.wav", 100 * 1024 * 1024),
+            "captions.json": (base / "audio" / "captions.json", 5 * 1024 * 1024),
+            "captions.ts": (base / "remotion" / "captions.ts", 5 * 1024 * 1024),
+            "job.ts": (base / "remotion" / "job.ts", 5 * 1024 * 1024),
         }
 
-        for name in ("final.mp4", "qc_metrics.json"):
+        required = ("final.mp4",)
+        for name in required:
             artifact = by_name.get(name)
             if artifact is None:
-                if name == "qc_metrics.json":
-                    continue
                 raise VideoServiceError("artefact cloud requis absent: final.mp4")
+            destination, max_size = destinations[name]
+            VideoService._download_artifact(artifact.url, destination, max_size)
+
+        # Ces fichiers restent optionnels : certains providers peuvent seulement publier le
+        # final et les frames/QC, tandis que le worker FORGE complet les fournit.
+        for name in ("video.mp4", "qc_metrics.json", "mix.wav", "vo.wav", "captions.json", "captions.ts", "job.ts"):
+            artifact = by_name.get(name)
+            if artifact is None:
+                continue
             destination, max_size = destinations[name]
             VideoService._download_artifact(artifact.url, destination, max_size)
 
@@ -107,11 +120,10 @@ class VideoService:
             for item in frames:
                 name = Path(str(item)).name
                 artifact = frame_artifacts.get(name)
-                if artifact is None and str(item).startswith(("https://", "http://")):
-                    allowed = {a.url for a in frame_artifacts.values()}
-                    if str(item) not in allowed:
-                        raise VideoServiceError(f"URL frame QC non autorisée: {item}")
-                    artifact = Artifact(name, str(item), "image")
+                if artifact is None and str(item).startswith(("https://", "http://", "file://")):
+                    artifact = next((a for a in result.artifacts if a.url == str(item) and a.kind == "image"), None)
+                    if artifact is None and str(item).startswith("file://"):
+                        artifact = Artifact(name, str(item), "image")
                 if artifact is None:
                     raise VideoServiceError(f"frame QC introuvable dans le manifest: {item}")
                 destination = frames_dir / name
