@@ -4,7 +4,7 @@
 
 This branch is the active cloud-video migration branch. Do not restart the architecture from scratch and do not rewrite `agents/runtime.py` unless there is a concrete regression requiring it.
 
-The branch includes the cloud-first control-plane/video foundation, the integrated Chromium browser guard, OmniRoute routing, MiniMax H3 cloud routing, local diagnostics, one-command Windows bootstrap, artifact checksum verification, CI coverage, an optional Orca development bridge, and a unified desktop cockpit GUI. Do not claim CI is green until a fresh run passes.
+The branch includes the cloud-first control-plane/video foundation, the integrated Chromium browser guard, OmniRoute routing, MiniMax H3 cloud routing, local diagnostics, one-command Windows bootstrap, artifact checksum verification, CI coverage, an optional Orca development bridge, and a unified desktop Workbench GUI. Do not claim CI is green until a fresh run passes.
 
 Orca is deliberately scoped to repository-development work: it is invoked only through its public CLI and remains disabled unless `OCTOPUS_ORCA_ENABLED=1` is set. It must not replace the Podalux business runtime, `octopus.tasks`, or RunPod video execution.
 
@@ -12,7 +12,9 @@ Orca is deliberately scoped to repository-development work: it is invoked only t
 
 ```text
 OCTOPUS control plane
-  ├─ unified GUI cockpit (`agents/gui/app.py`)
+  ├─ GUI Workbench (`agents/gui/workbench.py`)
+  │    └─ compatibility entrypoint (`agents/gui/app.py`)
+  ├─ local Business Workspace registry (`agents/gui/workspaces.py`)
   ├─ agents/runtime.py (stable ReAct runtime)
   ├─ agents/cycle.py
   ├─ octopus.tasks (durable local queue / leases / human handoff)
@@ -31,22 +33,29 @@ Agent roles remain:
 
 `ORBIT` coordinates missions and delegates to sub-agents. `web_guard.session()` must wrap a whole mission so account-read state survives across sub-agents.
 
-## GUI cockpit
+## GUI Workbench
 
-`python run_gui.py` is the primary human control surface. It is deliberately an observer/controller over existing engines, not a second business runtime.
+`python run_gui.py` is the primary human control surface. `agents.run gui` and `agents.gui.app.main` also open the same Workbench.
+
+The Workbench is a **Business Workspace first** rather than a collection of unrelated screens. The active business is persisted locally and filters the user's working context without moving business logic into Tkinter.
 
 Navigation:
-- Cockpit: run status, cost, queue, human requests, live activity, agent overview and direct messaging.
-- Missions: ORBIT objectives, durable task queue and worker control.
+- Cockpit: run status, business KPI, active task count, human requests, activity feed, agent overview and quick actions.
+- Business: portfolio of business workspaces, offer grouping, business creation and direct navigation to Missions/Production.
+- Missions: ORBIT objectives, task filters, worker control and active business context.
 - Agents: activity and workload cards for all six roles.
-- Production: offer selector, cycle, Studio, final output and QC metrics.
+- Production: active-business offer selection, cycle, Studio, final output and QC metrics.
 - Humain: pending handoffs with direct response fields.
 - Navigateur: guarded Chromium observation, URL and latest screenshot.
-- Système: local preflight plus optional Orca development tasks.
+- Système: local preflight, logs and optional Orca status.
+
+Business metadata is stored only in ignored `agents/data/workspaces.json`. When missing, `agents/gui/workspaces.py` derives initial business groups from `jobs/*.json` offer-id prefixes. `active_business` is stored through the existing SQLite state table. `Tous les business` remains the global view.
 
 Long operations must stay outside the Tk event loop. Cycles, workers, messages and browser commands use the existing subprocess launcher; doctor and Orca status/tasks use background threads. Do not move business logic into Tkinter.
 
-The GUI specification is in `docs/GUI.md`.
+Quick command bar supports `/business`, `/mission`, `/production`, `/agents`, `/human`, `/browser`, `/system`, `/doctor`; free text is sent to ORBIT and `@ROLE ...` targets an agent.
+
+GUI specification: `docs/GUI.md`.
 
 ## Local machine policy
 
@@ -120,9 +129,11 @@ Do not move business agents or cloud rendering into Orca merely because Orca can
 
 ## Important files
 
-- `agents/gui/app.py` — unified cockpit
-- `agents/gui/studio.py` — existing video studio window used by the cockpit
-- `docs/GUI.md` — cockpit workflow
+- `agents/gui/workbench.py` — primary desktop Workbench
+- `agents/gui/app.py` — compatibility entrypoint to Workbench
+- `agents/gui/workspaces.py` — local Business Workspace registry
+- `agents/gui/studio.py` — existing video studio window used by the Workbench
+- `docs/GUI.md` — cockpit/workbench workflow
 - `octopus/catalog.py` — dynamic OmniRoute overlay + safe default profile
 - `octopus/llm.py` — LLM gateway
 - `agents/browser.py` — Chromium/Playwright tool
@@ -154,7 +165,7 @@ Do not move business agents or cloud rendering into Orca merely because Orca can
 ## Next work order
 
 1. Let the fresh CI run for the current HEAD finish and fix actual failures.
-2. Run the GUI on Windows and verify the cockpit pages, process launches, handoff replies and browser observation.
+2. Run the GUI on Windows and verify Business switching, business creation, cycle/mission launch, handoff replies and browser observation.
 3. Run the real local smoke test with OmniRoute + Chromium + `doctor` on Windows.
 4. Deploy the real RunPod worker + object storage and execute one paid-safe/idempotent end-to-end video test.
 5. Only after that, run a real Podalux cycle and compare technical QC + visual QC.
