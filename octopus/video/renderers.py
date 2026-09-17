@@ -11,6 +11,13 @@ from .runpod import RunPodConfig, RunPodServerlessClient
 from .state import AmbiguousSubmissionError, RenderStateStore
 
 
+_RETRYABLE_TERMINAL = {
+    VideoStatus.FAILED.value,
+    VideoStatus.CANCELLED.value,
+    VideoStatus.EXPIRED.value,
+}
+
+
 class VideoRenderer(ABC):
     @abstractmethod
     def render(self, job: VideoJob) -> VideoResult:
@@ -33,21 +40,9 @@ class CloudVideoRenderer(VideoRenderer):
         if state is not None:
             if state.state == "SUBMITTING" and not state.remote_id:
                 self.state_store.require_resume_safe(state)
-            if state.remote_id and state.state not in {
-                VideoStatus.FAILED.value,
-                VideoStatus.CANCELLED.value,
-                VideoStatus.EXPIRED.value,
-            }:
-                result = self.client.wait(state.remote_id)
-                current = self.state_store.load(job.job_id)
-                if current is not None:
-                    self.state_store.mark_status(current, result.status.value)
-                return result
-            if state.remote_id and state.state in {
-                VideoStatus.FAILED.value,
-                VideoStatus.CANCELLED.value,
-                VideoStatus.EXPIRED.value,
-            }:
+            if state.remote_id and state.state not in _RETRYABLE_TERMINAL:
+                return self._wait_existing(job, state)
+            if state.remote_id and state.state in _RETRYABLE_TERMINAL:
                 if state.attempt >= self.max_attempts:
                     raise CloudVideoError(
                         f"job {job.job_id} a atteint la limite de {self.max_attempts} tentative(s)"
@@ -59,6 +54,17 @@ class CloudVideoRenderer(VideoRenderer):
         self.state_store.mark_submitting(job.job_id, self.provider, attempt=1)
         return self._submit_and_wait(job, 1)
 
+    def _wait_existing(self, job: VideoJob, state) -> VideoResult:
+        try:
+            result = self.client.wait(state.remote_id)
+        except CloudVideoError as exc:
+            self._persist_remote_terminal_failure(state)
+            raise exc
+        current = self.state_store.load(job.job_id)
+        if current is not None:
+            self.state_store.mark_status(current, result.status.value)
+        return result
+
     def _submit_and_wait(self, job: VideoJob, attempt: int) -> VideoResult:
         try:
             remote = self.client.submit(job)
@@ -68,11 +74,36 @@ class CloudVideoRenderer(VideoRenderer):
             ) from exc
         self.state_store.mark_submitted(job.job_id, self.provider, remote.remote_id,
                                         remote.status.value, attempt=attempt)
-        result = self.client.wait(remote.remote_id)
+        try:
+            result = self.client.wait(remote.remote_id)
+        except CloudVideoError as exc:
+            current = self.state_store.load(job.job_id)
+            if current is not None:
+                self._persist_remote_terminal_failure(current)
+            raise exc
         current = self.state_store.load(job.job_id)
         if current is not None:
             self.state_store.mark_status(current, result.status.value)
         return result
+
+    def _persist_remote_terminal_failure(self, state) -> None:
+        """Distingue un job réellement terminal d'un simple timeout réseau.
+
+        Un appel de statut supplémentaire est volontaire : un timeout du client ne doit
+        jamais être interprété comme un échec et ne doit donc pas créer un second rendu.
+        """
+        if not state.remote_id:
+            return
+        try:
+            remote = self.client.status(state.remote_id)
+        except CloudVideoError:
+            return
+        if remote.status in {
+            VideoStatus.FAILED,
+            VideoStatus.CANCELLED,
+            VideoStatus.EXPIRED,
+        }:
+            self.state_store.mark_status(state, remote.status.value)
 
 
 class LocalVideoRenderer(VideoRenderer):
