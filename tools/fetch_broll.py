@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import zlib
 import sys
 import urllib.parse
 import urllib.request
@@ -24,13 +25,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 UA = {"User-Agent": "octopus-podalux/1.0 (https://github.com/saillardsimon71-del/Octopus)"}
 # Requetes en anglais : les banques d'images sont indexees en anglais.
+# Plusieurs formulations par role : les banques libres sont inegalement fournies, la premiere
+# requete qui donne un resultat gagne. Sans aucun resultat, l'image du depot est conservee.
 ROLE_QUERIES = {
-    "hook": "freelancer laptop desk work",
-    "douleur": "stressed office worker deadline",
-    "preuve": "contract signature document pen",
-    "soulagement": "business handshake agreement",
-    "cta": "smartphone notification hand",
+    "hook": ["laptop desk office", "freelancer working", "working computer"],
+    "douleur": ["office stress", "worried man", "tired working"],
+    "preuve": ["signing contract", "business document", "contract signature"],
+    "soulagement": ["business handshake", "handshake deal", "business meeting"],
+    "cta": ["phone hand", "using smartphone", "mobile phone"],
 }
+# Openverse agrege aussi des musees : sans filtre, "worried man" renvoie un buste romain.
+# On se limite aux banques de photos de stock libres, ce qui garde le CC0 et un rendu utilisable.
+OPENVERSE_SOURCES = "stocksnap,rawpixel,nappy"
 FREE_LICENSES = ("cc0", "pdm")
 SIZE = "1080:1350"
 
@@ -41,8 +47,8 @@ def _get(url: str, headers: dict | None = None, timeout: float = 20) -> bytes:
         return r.read()
 
 
-def pexels(query: str, key: str) -> dict | None:
-    url = ("https://api.pexels.com/v1/search?orientation=portrait&per_page=1&query="
+def pexels(query: str, key: str, page: int = 1) -> dict | None:
+    url = (f"https://api.pexels.com/v1/search?orientation=portrait&per_page=1&page={page}&query="
            + urllib.parse.quote(query))
     data = json.loads(_get(url, {"Authorization": key}))
     for photo in data.get("photos", []):
@@ -51,8 +57,8 @@ def pexels(query: str, key: str) -> dict | None:
     return None
 
 
-def pixabay(query: str, key: str) -> dict | None:
-    url = (f"https://pixabay.com/api/?key={key}&image_type=photo&orientation=vertical&per_page=3&q="
+def pixabay(query: str, key: str, page: int = 1) -> dict | None:
+    url = (f"https://pixabay.com/api/?key={key}&image_type=photo&orientation=vertical&per_page=3&page={page}&q="
            + urllib.parse.quote(query))
     data = json.loads(_get(url))
     for hit in data.get("hits", []):
@@ -61,10 +67,11 @@ def pixabay(query: str, key: str) -> dict | None:
     return None
 
 
-def openverse(query: str, _key: str = "") -> dict | None:
-    url = ("https://api.openverse.org/v1/images/?license_type=commercial&size=large&page_size=8&q="
-           + urllib.parse.quote(query))
+def openverse(query: str, _key: str = "", page: int = 1) -> dict | None:
+    url = (f"https://api.openverse.org/v1/images/?license_type=commercial&size=large&page_size=8&page={page}"
+           f"&source={OPENVERSE_SOURCES}&category=photograph&extension=jpg&q=" + urllib.parse.quote(query))
     results = json.loads(_get(url)).get("results", [])
+    results = [r for r in results if _relevant(r, query)]  # le moteur elargit : on reste sur le sujet
     results.sort(key=lambda r: 0 if (r.get("license") or "").lower() in FREE_LICENSES else 1)
     for item in results:
         if item.get("url"):
@@ -75,6 +82,13 @@ def openverse(query: str, _key: str = "") -> dict | None:
     return None
 
 
+def _relevant(item: dict, query: str) -> bool:
+    """Au moins un mot de la requete dans le titre ou les mots-cles du resultat."""
+    words = {w for w in query.lower().split() if len(w) > 3}
+    haystack = " ".join([str(item.get("title", "")), " ".join(t.get("name", "") for t in item.get("tags") or [])]).lower()
+    return any(w in haystack for w in words) if words else True
+
+
 def providers() -> list[tuple[str, callable, str]]:
     import os
     return [("pexels", pexels, os.environ.get("PEXELS_API_KEY", "").strip()),
@@ -82,17 +96,23 @@ def providers() -> list[tuple[str, callable, str]]:
             ("openverse", openverse, "always")]
 
 
-def fetch_one(query: str) -> dict | None:
+def fetch_one(query: str, page: int = 1) -> dict | None:
+    """`page` decale la recherche : deux offres qui partagent un role n'ont pas la meme image.
+
+    Une requete etroite peut n'avoir qu'une page : on retombe alors sur la page 1 plutot que
+    de renoncer a l'image.
+    """
     for name, fn, key in providers():
         if not key:
             continue
-        try:
-            found = fn(query, key) if name != "openverse" else fn(query)
-        except Exception as exc:  # reseau, quota, format : on passe au suivant
-            print(f"broll: {name} indisponible ({type(exc).__name__}: {str(exc)[:100]})")
-            continue
-        if found:
-            return found
+        for attempt in ([page, 1] if page != 1 else [1]):
+            try:
+                found = fn(query, key, attempt) if name != "openverse" else fn(query, page=attempt)
+            except Exception as exc:  # reseau, quota, format : on passe au suivant
+                print(f"broll: {name} indisponible ({type(exc).__name__}: {str(exc)[:100]})")
+                break
+            if found:
+                return found
     return None
 
 
@@ -104,8 +124,13 @@ def main() -> int:
     target_dir.mkdir(parents=True, exist_ok=True)
     credits, used = [], 0
     visuel = job.setdefault("visuel", {})
-    for role, base_query in ROLE_QUERIES.items():
-        found = fetch_one(base_query)
+    page = 1 + zlib.crc32(offer.encode()) % 4  # variete entre offres, deterministe pour une offre donnee
+    for role, queries in ROLE_QUERIES.items():
+        found = base_query = None
+        for base_query in queries:
+            found = fetch_one(base_query, page)
+            if found:
+                break
         if not found:
             print(f"broll: {role} -> image par defaut du depot")
             continue
