@@ -4,9 +4,7 @@
 
 This branch is the active cloud-video migration branch. Do not restart the architecture from scratch and do not rewrite `agents/runtime.py` unless there is a concrete regression requiring it.
 
-Current branch head at the time of this note: `8816048bc589f0231023ddadc4c3ecab7e447060`.
-
-The branch includes the cloud-first control-plane/video foundation, the integrated Chromium browser guard, OmniRoute routing, MiniMax H3 cloud routing, local diagnostics, and CI coverage. The latest known GitHub Actions run previously observed was failing in the test stage; compilation succeeded. Do not claim CI is green until a fresh run passes.
+The branch includes the cloud-first control-plane/video foundation, the integrated Chromium browser guard, OmniRoute routing, MiniMax H3 cloud routing, local diagnostics, and CI coverage. Recent fixes also make OmniRoute `zero_cost` the default when enabled and guard WebSocket connections. Do not claim CI is green until a fresh run passes.
 
 ## Architecture to preserve
 
@@ -42,11 +40,11 @@ Run `python -m agents.run doctor` before a real cycle.
 
 Default local LLM routing is OmniRoute with:
 - `OMNIROUTE_ENABLED=1`
-- `OMNIROUTE_BASE_URL=http://127.0.0.1:20128/api/v1`
+- `OMNIROUTE_BASE_URL=http://127.0.0.1:20128/v1`
 - `OMNIROUTE_MODEL=auto/free`
 - `OMNIROUTE_API_KEY` kept only in the runtime environment, never committed
 
-The zero-cost profile must not fall back to paid DeepSeek.
+When OmniRoute is enabled and `OCTOPUS_PROFILE` is not explicitly set, the catalog resolves the default profile to `zero_cost`. An explicit `OCTOPUS_PROFILE=legacy` still restores historical direct routing. `zero_cost` must not fall back to paid DeepSeek.
 
 ## Browser requirements
 
@@ -55,10 +53,10 @@ The browser is Playwright/Chromium.
 Public pages: ephemeral context.
 Account pages: persistent profile for human-authenticated sessions.
 Service workers: blocked in guarded contexts.
-Network guard: navigation + redirects + fetch/XHR/EventSource/beacon are guarded; outbound URLs after an account read must not leak to public destinations.
+Network guard: navigation + redirects + fetch/XHR/EventSource/beacon are guarded; WebSockets use Playwright `route_web_socket()` when available; outbound URLs after an account read must not leak to public destinations.
 Login/2FA/CAPTCHA/confirmation must use human handoff.
 
-There are browser integration tests in `tests/test_browser_integration.py`. A separate WebSocket interception hardening may still be desirable using Playwright's `route_web_socket()` API, but do not introduce a version-breaking dependency without checking the pinned local Playwright version.
+There are browser integration tests in `tests/test_browser_integration.py`, including account-page load exfiltration and public WebSocket blocking. The local dependency is pinned to Playwright `>=1.55` so the WebSocket route API is available.
 
 ## Video requirements
 
@@ -78,7 +76,7 @@ MiniMax H3 is cloud-only. The H3 ComfyUI workflow should track the current offic
 
 ## Important files
 
-- `octopus/catalog.py` — dynamic OmniRoute overlay
+- `octopus/catalog.py` — dynamic OmniRoute overlay + safe default profile
 - `octopus/llm.py` — LLM gateway
 - `agents/browser.py` — Chromium/Playwright tool
 - `agents/web_guard.py` — browser security boundary
@@ -102,13 +100,12 @@ MiniMax H3 is cloud-only. The H3 ComfyUI workflow should track the current offic
 
 ## Next work order
 
-1. Pull/rebase nothing blindly; inspect current branch head and recent commits first.
-2. Run/inspect fresh GitHub Actions before declaring validation complete.
-3. Fix any test failures from the current HEAD, especially video executor/H3/OmniRoute tests.
-4. Complete the first real local smoke test with OmniRoute + Chromium + `doctor`.
-5. Deploy a real RunPod worker + object storage and execute one paid-safe/idempotent end-to-end video test.
-6. Only after that, run a real Podalux cycle and compare technical QC + visual QC.
-7. Keep publication in dry-run until the whole pipeline is verified.
+1. Inspect current branch head and recent commits before changing anything further.
+2. Inspect fresh GitHub Actions for the current HEAD; fix actual test failures rather than assuming.
+3. Run the real local smoke test with OmniRoute + Chromium + `doctor` on Windows.
+4. Deploy the real RunPod worker + object storage and execute one paid-safe/idempotent end-to-end video test.
+5. Only after that, run a real Podalux cycle and compare technical QC + visual QC.
+6. Keep publication in dry-run until the whole pipeline is verified.
 
 ## Do not regress
 
