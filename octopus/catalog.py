@@ -69,7 +69,7 @@ def _overlay_omniroute(raw: dict) -> dict:
     model_name = os.environ.get("OMNIROUTE_MODEL", "auto/free").strip() or "auto/free"
     raw.setdefault("providers", {})[provider_id] = {
         "kind": "local",
-        "base_url": os.environ.get("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1").rstrip("/"),
+        "base_url": os.environ.get("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/api/v1").rstrip("/"),
         "api_key_env": "OMNIROUTE_API_KEY",
         "timeout_s": float(os.environ.get("OMNIROUTE_TIMEOUT_S", "120")),
         "max_retries": 0,
