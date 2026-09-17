@@ -164,6 +164,7 @@ def main():
     p_pub.add_argument("offer_id")
     p_pub.add_argument("--real", action="store_true", help="upload réel (nécessite validation)")
     sub.add_parser("status", help="coûts et dernières décisions")
+    sub.add_parser("doctor", help="diagnostic avant un cycle réel (rien de payant ni de lourd)")
     sub.add_parser("report", help="tableau de bord (coûts + QC + J+1)")
     sub.add_parser("gui", help="ouvre l'interface graphique")
     p_browser = sub.add_parser("browser", help="teste le navigateur (navigation + vision)")
@@ -190,6 +191,11 @@ def main():
         cmd_publish(args.offer_id, real=args.real)
     elif args.cmd == "status":
         cmd_status()
+    elif args.cmd == "doctor":
+        from .doctor import render, run_checks
+        text, code = render(run_checks())
+        print(text)
+        raise SystemExit(code)
     elif args.cmd == "report":
         cmd_report()
     elif args.cmd == "gui":
