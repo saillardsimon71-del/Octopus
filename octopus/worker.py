@@ -8,7 +8,8 @@ Un handler est une fonction `fn(ctx) -> sortie JSON`, enregistrée pour un type 
 
 - Chaque tâche tourne dans un run du journal (budget par tâche, coûts rattachés).
 - `ctx.ask_human(key, question)` : renvoie la réponse si elle existe, sinon met la tâche en attente ;
-  elle sera relancée depuis le début après la réponse (les handlers doivent être rejouables).
+  elle sera relancée depuis le début après la réponse (les handlers doivent être rejouables :
+  `ctx.memo(clé, fonction)` conserve le résultat des étapes coûteuses).
 - `ctx.cancelled()` : annulation demandée (coopérative). `ctx.enqueue(...)` : tâche suivante.
 """
 from __future__ import annotations
@@ -48,7 +49,7 @@ def handler(kind: str, *, resource: str | None = None, budget_usd: float | None 
 
 def load_handlers(modules: list[str] | None = None) -> dict[str, Handler]:
     names = modules if modules is not None else [
-        m.strip() for m in os.environ.get("OCTOPUS_HANDLERS", "octopus.builtin_handlers,agents.task_handlers").split(",")
+        m.strip() for m in os.environ.get("OCTOPUS_HANDLERS", "octopus.builtin_handlers,agents.task_handlers,businesses.veille.handlers").split(",")
         if m.strip()]
     for name in names:
         importlib.import_module(name)
@@ -102,6 +103,15 @@ class TaskContext:
     def check_cancel(self) -> None:
         if self.cancelled():
             raise TaskCancelled("annulation demandée")
+
+    def memo(self, key: str, compute: Callable):
+        """Résultat d'une étape conservé en base : une tâche rejouée (après une réponse humaine, une
+        nouvelle tentative) ne refait pas les étapes déjà faites, ni leurs appels payants."""
+        value = tasks.step_value(self.id, key, None)
+        if value is None:
+            value = compute()
+            tasks.save_step(self.id, key, value)
+        return value
 
     def ask_human(self, key: str, question: str, *, context: dict | None = None, expires_s: float | None = None) -> str:
         known = tasks.answer_for(self.id, key)

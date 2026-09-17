@@ -218,6 +218,14 @@
         "low_cost": ["ollama/qwen3.5-4b"],
         "quality_first": ["ollama/qwen3.5-4b"]
       }
+    },
+    "veille.brief": {
+      "needs": ["json"], "privacy": "public", "baseline": "deepseek/flash",
+      "candidates": {
+        "zero_cost": ["ollama/qwen3.5-4b", "groq/gpt-oss-120b", "gemini/3.5-flash-lite"],
+        "low_cost": ["ollama/qwen3.5-4b", "groq/gpt-oss-120b", "gemini/3.5-flash-lite", "deepseek/flash"],
+        "quality_first": ["deepseek/flash", "gemini/3.5-flash"]
+      }
     }
   },
   "legacy_tasks": {

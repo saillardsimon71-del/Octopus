@@ -218,6 +218,26 @@ def cancel_requested(task_id: int) -> bool:
     return bool(rows and rows[0]["cancel_requested"])
 
 
+# --- étapes mémorisées (tâches rejouables) --------------------------------------------------
+
+_MISSING = object()
+
+
+def step_value(task_id: int, key: str, default=_MISSING):
+    rows = journal.query("SELECT value FROM task_steps WHERE task_id=? AND key=?", (task_id, key))
+    if rows:
+        return json.loads(rows[0]["value"])
+    if default is _MISSING:
+        raise KeyError(key)
+    return default
+
+
+def save_step(task_id: int, key: str, value) -> None:
+    with _tx() as conn:
+        conn.execute("INSERT OR REPLACE INTO task_steps (task_id, key, value, ts) VALUES (?, ?, ?, ?)",
+                     (task_id, key, json.dumps(value, ensure_ascii=False, default=str), time.time()))
+
+
 # --- humain dans la boucle ------------------------------------------------------------------
 
 def answer_for(task_id: int, key: str) -> str | None:

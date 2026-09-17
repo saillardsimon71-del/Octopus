@@ -78,8 +78,9 @@ def test_search_failures_are_reported(monkeypatch):
     def down(query, n):
         raise ConnectionError("proxy refuse")
 
-    monkeypatch.setattr(search, "_gnews", down)
-    monkeypatch.setattr(search, "_wikipedia", lambda q, n: "- Recouvrement de créances\n  procédure")
+    monkeypatch.setattr(search, "_gnews_items", down)
+    monkeypatch.setattr(search, "_wikipedia_items", lambda q, n: [search._item(
+        "wikipedia", "Recouvrement de créances", "https://fr.wikipedia.org/wiki/Recouvrement", "Wikipédia", "", "procédure")])
     monkeypatch.setattr(search.config, "BRAVE_API_KEY", "")
     monkeypatch.setattr(search.config, "TAVILY_API_KEY", "")
     out = search.web_search("recouvrement")

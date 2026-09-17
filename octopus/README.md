@@ -56,7 +56,7 @@ Tables `tasks`, `events`, `human_requests`, `schedules` dans `data/octopus.db` (
 | Idempotence | `idempotency_key` unique (ex. `publish:<offre>:<sha256>`) |
 | Coûts | chaque tâche tourne dans un run du journal, avec le budget déclaré par son handler |
 
-Handlers chargés : `octopus.builtin_handlers` (`octopus.cost_report`) et `agents.task_handlers` (`podalux.video_cycle`, `podalux.agent_message`, `podalux.mission`), surchargeables par `OCTOPUS_HANDLERS`. Aucune planification n'est créée d'office : un cycle vidéo planifié consomme du CPU et des appels payants, c'est à décider.
+Handlers chargés : `octopus.builtin_handlers` (`octopus.cost_report`), `agents.task_handlers` (`podalux.video_cycle`, `podalux.agent_message`, `podalux.mission`) et `businesses.veille.handlers` (`veille.brief`, voir `businesses/veille/README.md`), surchargeables par `OCTOPUS_HANDLERS`. Une tâche rejouée après une réponse humaine retrouve ses étapes coûteuses via `ctx.memo`. Aucune planification n'est créée d'office : un cycle vidéo planifié consomme du CPU et des appels payants, c'est à décider.
 
 ```
 python -m octopus worker                      boucle (Ctrl+C pour arrêter)

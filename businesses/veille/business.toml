@@ -1,0 +1,25 @@
+# Business « veille » : deuxième activité sur le moteur OCTOPUS (étape 7 de l'audit).
+# Aucune planification n'est créée d'office. Pour un brief quotidien :
+#   python -m octopus schedule veille veille.brief --every 86400 --input "{\"topic\": \"recouvrement\"}"
+
+id = "veille"
+name = "Veille sourcée"
+description = "Brief sourcé sur un sujet ; chaque fait cite une source collectée ; relu par l'humain avant d'alimenter SOUT."
+profile = "low_cost"          # local et gratuit validés au banc d'abord, puis deepseek/flash
+budget_usd_per_brief = 0.02
+
+[brief]
+max_sources = 8
+max_points = 6
+min_sources_cited = 2
+max_tokens = 1500
+
+[topics.recouvrement]
+query = "recouvrement créances impayés TPE freelances"
+label = "Recouvrement et impayés des TPE et freelances"
+feeds_agent = "SOUT"
+
+[topics.facturation]
+query = "facturation électronique obligatoire TPE 2026"
+label = "Facturation électronique des TPE"
+feeds_agent = "SOUT"

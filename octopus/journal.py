@@ -139,6 +139,13 @@ CREATE TABLE IF NOT EXISTS human_requests (
     expires_at REAL,
     UNIQUE(task_id, key)
 );
+CREATE TABLE IF NOT EXISTS task_steps (
+    task_id INTEGER NOT NULL REFERENCES tasks(id),
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    ts REAL NOT NULL,
+    PRIMARY KEY (task_id, key)
+);
 CREATE TABLE IF NOT EXISTS schedules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     business TEXT NOT NULL,
