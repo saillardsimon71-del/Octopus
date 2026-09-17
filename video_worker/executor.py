@@ -60,6 +60,12 @@ class ForgeExecutor:
             self._copy_pipeline_sources(workspace)
             voice = str(job.voice.get("nom") or job.voice.get("voice") or self.config.tts_voice_default)
             env = os.environ.copy()
+            if str(job.voice.get("moteur") or job.voice.get("provider") or "chatterbox").lower() == "chatterbox":
+                if not env.get("CHATTERBOX_URL", "").strip():
+                    raise ExecutorError(
+                        "CHATTERBOX_URL doit être configuré dans le worker cloud; "
+                        "le fallback 127.0.0.1 est volontairement désactivé ici"
+                    )
 
             self._run(["python3", "tools/make_audio_chatterbox_full.py", str(job_path), offer, voice, "0.6", "0.4"],
                       workspace, env=env, log=out_dir / "logs" / "audio.log")
@@ -183,8 +189,6 @@ class ForgeExecutor:
         video = self.store.put_file(final, f"{prefix}/final.mp4", content_type="video/mp4")
         artifacts.append(Artifact(video.name, video.url, "video", video.content_type, video.sha256))
 
-        # Compatibilité FORGE : ces artefacts évitent de réintroduire un second pipeline
-        # côté contrôleur tout en laissant le worker posséder l'exécution lourde.
         compat_files = [
             (out_dir / "audio" / "mix.wav", f"{prefix}/audio/mix.wav", "audio/wav"),
             (out_dir / "audio" / "vo.wav", f"{prefix}/audio/vo.wav", "audio/wav"),
@@ -194,11 +198,9 @@ class ForgeExecutor:
         ]
         for source, key, content_type in compat_files:
             if source.is_file() and source.stat().st_size > 0:
-                stored = self.store.put_file(source, key, content_type=content_type)
-                artifacts.append(stored)
+                artifacts.append(self.store.put_file(source, key, content_type=content_type))
 
-        qc = self.store.put_file(qc_path, f"{prefix}/qc_metrics.json", content_type="application/json")
-        artifacts.append(qc)
+        artifacts.append(self.store.put_file(qc_path, f"{prefix}/qc_metrics.json", content_type="application/json"))
 
         frames_dir = out_dir / "frames"
         if frames_dir.is_dir():
