@@ -13,7 +13,7 @@ def make_job() -> VideoJob:
     return VideoJob(
         job_id="video-test-1",
         offer_id="cash_devis_cgv01",
-        template="forge-v4",
+        template="CashShort",
         language="fr",
         duration_seconds=24,
         script={
@@ -53,11 +53,13 @@ def test_executor_produces_manifest_and_is_idempotent(tmp_path):
             (data / "captions.ts").write_text("x")
             (data / "job.ts").write_text("x")
         elif cmd[0] == "npx":
+            assert cmd[1:3] == ["remotion", "render"]
+            assert cmd[3] == "CashShort"
             (offer_dir / "video.mp4").write_bytes(b"video")
         elif cmd[0] == "ffmpeg" and "ebur128" in cmd:
             return "I: -14.0 LUFS"
         elif cmd[0] == "ffmpeg":
-            (Path(cmd[-1])).write_bytes(b"final")
+            Path(cmd[-1]).write_bytes(b"final")
         elif "qc_metrics.py" in cmd:
             (offer_dir / "frames").mkdir(parents=True, exist_ok=True)
             for i in range(2):
