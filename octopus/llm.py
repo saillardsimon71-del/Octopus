@@ -131,8 +131,8 @@ def _transport(provider: dict, request: dict) -> tuple[str, Usage]:
     key = (provider["base_url"], provider.get("api_key_env"), provider.get("timeout_s"), provider.get("max_retries"))
     client = _clients.get(key)
     if client is None:
-        kwargs: dict = {"api_key": (secret(provider["api_key_env"]) if provider.get("api_key_env") else "") or "local",
-                        "base_url": provider["base_url"]}
+        api_key = secret(provider["api_key_env"]) if provider.get("api_key_env") else ""
+        kwargs: dict = {"api_key": api_key or "local", "base_url": provider["base_url"]}
         if provider.get("timeout_s") is not None:
             kwargs["timeout"] = provider["timeout_s"]
         if provider.get("max_retries") is not None:
@@ -150,9 +150,9 @@ def _opt_int(value) -> int | None:
 def _usage(u) -> Usage:
     prompt_details = getattr(u, "prompt_tokens_details", None)
     completion_details = getattr(u, "completion_tokens_details", None)
-    hit = _opt_int(getattr(u, "prompt_cache_hit_tokens", None))  # DeepSeek
+    hit = _opt_int(getattr(u, "prompt_cache_hit_tokens", None))
     if hit is None:
-        hit = _opt_int(getattr(prompt_details, "cached_tokens", None))  # format OpenAI
+        hit = _opt_int(getattr(prompt_details, "cached_tokens", None))
     return Usage(
         prompt_tokens=_opt_int(getattr(u, "prompt_tokens", None)) or 0,
         completion_tokens=_opt_int(getattr(u, "completion_tokens", None)) or 0,
@@ -197,7 +197,13 @@ def _ineligibility(cat, profile_name: str, profile: dict, task: str, task_def: d
     ok, why = provider_status(model["provider"], cat.provider(model["provider"]))
     if not ok:
         return why
-    if profile.get("require_evidence") and model_id != task_def.get("baseline"):
+    evidence_required = profile.get("require_evidence") and model_id != task_def.get("baseline")
+    # OmniRoute auto/free est un routeur virtuel : son éligibilité est déterminée par le
+    # health-check du gateway et par son propre pool free. On ne fabrique pas de bench local
+    # fictif pour autoriser le premier démarrage.
+    if evidence_required and model["provider"] == "omniroute" and profile_name in {"zero_cost", "low_cost"}:
+        evidence_required = False
+    if evidence_required:
         proof = journal.evidence(task, model_id, cat.evidence_rules())
         if not proof["eligible"]:
             return proof["reason"]
@@ -222,14 +228,14 @@ def _budget_block(ctx, cat: catalog.Catalog, business: str, estimate: float) -> 
         from . import businesses
         try:
             declared = businesses.get(business)
-        except Exception:  # registre illisible : le plafond global s'applique toujours
+        except Exception:
             declared = None
         cap = declared.budget_daily_usd if declared else None
         if cap is not None:
             spent = journal.spent_today(business)
             if spent + estimate > cap:
                 return (f"plafond journalier de l'activite {business} atteint : {spent:.4f} $ + {estimate:.4f} $ "
-                        f"estimes > {cap:.2f} $")
+                        f"> {cap:.2f} $")
     return None
 
 
@@ -317,7 +323,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 _justify(profile_name, task, model_id, model, considered, pinned), ensure_ascii=False)})
             budget_block = block
             if prof.get("fallback") and attempt < len(candidates):
-                continue  # un candidat suivant moins cher (local, quota gratuit) peut encore passer
+                continue
             raise BudgetExceeded(block)
 
         request = _build_request(model, messages, max_tokens, json_mode, reasoning)
