@@ -1,8 +1,8 @@
 """Façade de production utilisée par FORGE/cycle.
 
-Le mode local délègue au pipeline historique. Le mode cloud convertit le job vers
-VideoJob, attend le résultat distant puis rematérialise uniquement les petits frames
-nécessaires au QC vision local.
+Le mode local reste inchangé. Le mode cloud convertit le job vers le contrat vidéo,
+attend le résultat distant puis rematérialise les artefacts nécessaires au pipeline
+historique (vidéo finale, audio, métadonnées et frames de QC).
 """
 from __future__ import annotations
 
@@ -14,12 +14,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Mapping
 
-from .contract import VideoJob, VideoResult
+from .contract import Artifact, VideoJob, VideoResult
 from .renderers import VideoRenderer
 
 
 class VideoServiceError(RuntimeError):
-    pass
+    """Erreur de façade vidéo ou d'artefact distant."""
 
 
 def stable_job_id(job: Mapping[str, Any]) -> str:
@@ -49,45 +49,100 @@ class VideoService:
 
         video_job = VideoJob.from_legacy_job(job, job_id=stable_job_id(job))
         result = self.cloud_renderer.render(video_job)
+        if not result.video_url:
+            raise VideoServiceError("renderer cloud terminé sans video_url")
+
         metrics = dict(result.qc)
         metrics["cloud_video_url"] = result.video_url
         metrics["cloud_job_id"] = result.job_id
-        self._materialize_frames(offer_id, metrics, result)
+        self._materialize_compatibility_artifacts(offer_id, metrics, result)
         self._write_control_manifest(offer_id, result)
         return metrics
 
     @staticmethod
-    def _materialize_frames(offer_id: str, metrics: dict[str, Any], result: VideoResult) -> None:
-        frames = metrics.get("frames")
-        if not isinstance(frames, list) or not frames:
-            return
-        by_name = {artifact.name: artifact.url for artifact in result.artifacts if artifact.kind == "image"}
-        allowed_urls = {artifact.url for artifact in result.artifacts if artifact.kind == "image"}
+    def _materialize_compatibility_artifacts(
+        offer_id: str, metrics: dict[str, Any], result: VideoResult
+    ) -> None:
         root = Path(os.environ.get("PODALUX_ROOT", Path.cwd()))
-        target_dir = root / "out" / offer_id / "frames"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        materialized: list[str] = []
-        for item in frames:
-            raw = str(item)
-            url = by_name.get(Path(raw).name)
-            if raw.startswith(("https://", "http://")):
-                if raw not in allowed_urls:
-                    raise VideoServiceError(f"URL frame QC non autorisée par le manifest: {raw}")
-                url = raw
-            if not url:
-                raise VideoServiceError(f"frame QC introuvable dans les artefacts cloud: {raw}")
-            name = Path(raw).name or "frame.jpg"
-            target = target_dir / name
-            try:
-                with urllib.request.urlopen(url, timeout=60) as response:
-                    data = response.read(8 * 1024 * 1024 + 1)
-            except Exception as exc:
-                raise VideoServiceError(f"téléchargement frame QC échoué: {name}: {exc}") from exc
-            if len(data) > 8 * 1024 * 1024:
-                raise VideoServiceError(f"frame QC trop volumineuse: {name}")
-            target.write_bytes(data)
-            materialized.append(str(target))
-        metrics["frames"] = materialized
+        base = root / "out" / offer_id
+        base.mkdir(parents=True, exist_ok=True)
+
+        by_name = {artifact.name: artifact for artifact in result.artifacts if artifact.url}
+        if "final.mp4" not in by_name and result.video_url:
+            by_name["final.mp4"] = Artifact("final.mp4", result.video_url, "video", "video/mp4")
+
+        destinations = {
+            "final.mp4": (base / "final.mp4", 2 * 1024 * 1024 * 1024),
+            "video.mp4": (base / "video.mp4", 2 * 1024 * 1024 * 1024),
+            "qc_metrics.json": (base / "qc_metrics.json", 10 * 1024 * 1024),
+            "mix.wav": (base / "audio" / "mix.wav", 100 * 1024 * 1024),
+            "vo.wav": (base / "audio" / "vo.wav", 100 * 1024 * 1024),
+            "captions.json": (base / "audio" / "captions.json", 5 * 1024 * 1024),
+            "captions.ts": (base / "remotion" / "captions.ts", 5 * 1024 * 1024),
+            "job.ts": (base / "remotion" / "job.ts", 5 * 1024 * 1024),
+        }
+
+        requested = {"final.mp4", "video.mp4", "qc_metrics.json", "mix.wav", "captions.ts", "job.ts"}
+        # Les artefacts facultatifs servent aux débogages/réutilisations mais ne bloquent pas FORGE.
+        for name in sorted(requested):
+            artifact = by_name.get(name)
+            if artifact is None:
+                if name in {"video.mp4"}:
+                    # Le rendu cloud peut ne publier que final.mp4.
+                    continue
+                raise VideoServiceError(f"artefact cloud requis absent: {name}")
+            destination, max_size = destinations[name]
+            VideoService._download_artifact(artifact.url, destination, max_size)
+
+        frames = metrics.get("frames")
+        if isinstance(frames, list) and frames:
+            frame_artifacts = {artifact.name: artifact for artifact in result.artifacts if artifact.kind == "image"}
+            materialized: list[str] = []
+            frames_dir = base / "frames"
+            frames_dir.mkdir(parents=True, exist_ok=True)
+            for item in frames:
+                name = Path(str(item)).name
+                artifact = frame_artifacts.get(name)
+                if artifact is None and str(item).startswith(("https://", "http://")):
+                    allowed = {a.url for a in frame_artifacts.values()}
+                    if str(item) not in allowed:
+                        raise VideoServiceError(f"URL frame QC non autorisée: {item}")
+                    artifact = Artifact(name, str(item), "image")
+                if artifact is None:
+                    raise VideoServiceError(f"frame QC introuvable dans le manifest: {item}")
+                destination = frames_dir / name
+                VideoService._download_artifact(artifact.url, destination, 8 * 1024 * 1024)
+                materialized.append(str(destination))
+            metrics["frames"] = materialized
+
+    @staticmethod
+    def _download_artifact(url: str, destination: Path, max_size: int) -> None:
+        if not url.startswith(("https://", "http://", "file://")):
+            raise VideoServiceError(f"schéma d'URL artefact refusé: {url}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        tmp = destination.with_suffix(destination.suffix + ".part")
+        total = 0
+        try:
+            with urllib.request.urlopen(url, timeout=120) as response, tmp.open("wb") as out:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_size:
+                        raise VideoServiceError(
+                            f"artefact trop volumineux: {destination.name} ({total} > {max_size})"
+                        )
+                    out.write(chunk)
+            if total <= 0:
+                raise VideoServiceError(f"artefact vide: {destination.name}")
+            tmp.replace(destination)
+        except VideoServiceError:
+            tmp.unlink(missing_ok=True)
+            raise
+        except Exception as exc:
+            tmp.unlink(missing_ok=True)
+            raise VideoServiceError(f"téléchargement artefact échoué {destination.name}: {exc}") from exc
 
     @staticmethod
     def _write_control_manifest(offer_id: str, result: VideoResult) -> None:
