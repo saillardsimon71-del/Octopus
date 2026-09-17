@@ -165,7 +165,7 @@ def test_omniroute_becomes_default_when_enabled(monkeypatch):
     monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
     cat = catalog.load()
     assert cat.default_profile == "zero_cost"
-    assert cat.model("omniroute/auto-free")["api_model"] == "auto/free"
+    assert cat.model("omniroute/auto-free")["api_model"] == "auto/best-free"  # auto/free n'existe pas dans OmniRoute
     assert cat.task("podalux.write_job")["candidates"]["zero_cost"][0] == "omniroute/auto-free"
 
 
