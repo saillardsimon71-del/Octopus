@@ -39,17 +39,20 @@ def tts_hf_space(text, exaggeration, cfg_weight, attempts=4):
     space = BASE[len(HF_PREFIX):]
     ref = os.environ.get("CHATTERBOX_REF_AUDIO", "").strip() or DEFAULT_REF
     lang = os.environ.get("CHATTERBOX_LANG", "fr").strip() or "fr"
+    token = os.environ.get("HF_TOKEN", "").strip() or None  # quota ZeroGPU bien plus large une fois authentifie
     last = None
     for attempt in range(attempts):
         try:
-            out = Client(space, verbose=False).predict(
+            out = Client(space, verbose=False, hf_token=token).predict(
                 text[:300], lang, handle_file(ref), exaggeration, 0.8, 0, cfg_weight, api_name="/generate_tts_audio")
             return Path(out).read_bytes()
         except Exception as exc:  # quota ZeroGPU ou Space en réveil : attendre puis réessayer
             last = exc
             print(f"tts hf-space tentative {attempt + 1}/{attempts} : {type(exc).__name__}: {str(exc)[:160]}")
             time.sleep(20 * (attempt + 1))
-    raise RuntimeError(f"TTS hf-space indisponible après {attempts} tentatives : {last}")
+    hint = "" if token else (" — définir HF_TOKEN (https://huggingface.co/settings/tokens) pour un quota ZeroGPU "
+                             "bien plus large, ou repasser à un serveur Chatterbox local via CHATTERBOX_URL")
+    raise RuntimeError(f"TTS hf-space indisponible après {attempts} tentatives : {last}{hint}")
 
 
 def tts(text, voice, exaggeration, cfg_weight):
