@@ -175,6 +175,17 @@ def test_explicit_legacy_still_overrides_omniroute_default(monkeypatch):
     assert catalog.load().default_profile == "legacy"
 
 
+def test_orbit_mission_tasks_keep_their_gateway_contract(monkeypatch):
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    monkeypatch.delenv("OCTOPUS_PROFILE", raising=False)
+    cat = catalog.load()
+    assert cat.legacy_task("ORBIT", "planification") == "agent.plan"
+    assert cat.legacy_task("ORBIT", "synthese") == "agent.synthesize"
+    assert cat.legacy_task("ORBIT", "action") == "agent.react_step"
+    assert cat.task("agent.plan")["candidates"]["zero_cost"][0] == "omniroute/auto-free"
+    assert cat.task("agent.synthesize")["candidates"]["zero_cost"][0] == "omniroute/auto-free"
+
+
 # --- budgets -------------------------------------------------------------------------------
 
 def test_run_budget_blocks_before_the_call(transport):
