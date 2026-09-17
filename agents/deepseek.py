@@ -1,14 +1,17 @@
 """Client LLM du groupe : texte + vision, avec logging de cout systematique.
 
 Depuis OCTOPUS M1, chaque appel passe par la passerelle `octopus.llm` : journal
-(data/octopus.db), cout a la grille officielle (heures pleines, tokens en cache), budget
-par run et profils de cout (OCTOPUS_PROFILE=legacy|zero_cost|low_cost|quality_first).
-Signatures inchangees. Coupe-circuit : OCTOPUS=off retablit l'appel direct historique.
+(data/octopus.db), cout a la grille officielle, budget par run et profils de cout.
+Signatures historiques conservées. Le profil par défaut des agents Podalux est maintenant
+`zero_cost` lorsque OmniRoute est actif, afin d'éviter les appels DeepSeek payants après
+épuisement du quota ; définir explicitement `OCTOPUS_PROFILE=legacy` pour restaurer le
+routage historique.
 """
 from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 from pathlib import Path
 
@@ -16,10 +19,16 @@ import octopus
 
 from . import config, db
 
-# Modeles historiques -> identifiants du catalogue OCTOPUS
 _MODEL_IDS = {config.MODEL_FLASH: "deepseek/flash", config.MODEL_PRO: "deepseek/v4-pro"}
-
 _cli = None
+
+
+def _default_profile() -> str:
+    explicit = os.environ.get("OCTOPUS_PROFILE", "").strip()
+    if explicit:
+        return explicit
+    omni_enabled = os.environ.get("OMNIROUTE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+    return "zero_cost" if omni_enabled else "legacy"
 
 
 def _client():
@@ -35,12 +44,10 @@ def _legacy_request(model: str, messages: list[dict], max_tokens: int, reasoning
                     json_mode: bool) -> dict:
     kw: dict = {"model": model, "messages": messages, "max_tokens": max_tokens}
     if model == config.MODEL_PRO:
-        # pro : thinking ACTIVÉ + reasoning high (arbitrages)
         if reasoning:
             kw["reasoning_effort"] = reasoning
         kw["extra_body"] = {"thinking": {"type": "enabled"}}
     else:
-        # flash : thinking DÉSACTIVÉ sinon reasoning_tokens mange tout max_tokens
         kw["extra_body"] = {"thinking": {"type": "disabled"}}
     if json_mode:
         kw["response_format"] = {"type": "json_object"}
@@ -57,7 +64,7 @@ def _complete(agent: str, task: str, model: str, messages: list[dict], max_token
     from octopus import llm
     c = llm.complete(llm.legacy_task(agent, task), messages, agent=agent, business="podalux",
                      max_tokens=max_tokens, json_mode=json_mode, reasoning=reasoning, needs=needs,
-                     pin_model=_MODEL_IDS.get(model, model))
+                     pin_model=_MODEL_IDS.get(model, model), profile=_default_profile())
     used = model if c.model == _MODEL_IDS.get(model) else c.model
     db.log_cost(agent, task, used, c.usage.prompt_tokens, c.usage.completion_tokens, cost_usd=c.cost_usd)
     return c.text
@@ -92,7 +99,7 @@ def build_vision_messages(frames: list[str], prompt: str) -> list[dict]:
 
 def vision(agent: str, task: str, frames: list[str], narration: str,
            prompt: str) -> dict:
-    """QC vision (JSON) : deepseek-flash uniquement."""
+    """QC vision (JSON) via the configured zero-cost / legacy route."""
     raw = _complete(agent, task, config.MODEL_FLASH, build_vision_messages(frames, prompt), 3000,
                     needs=("vision",))
     m = re.search(r"\{.*\}", raw, re.S)
@@ -103,6 +110,6 @@ def vision(agent: str, task: str, frames: list[str], narration: str,
 
 def vision_text(agent: str, task: str, frames: list[str],
                 prompt: str, max_tokens: int = 1500) -> str:
-    """Vision en texte libre (description de page) : deepseek-flash."""
+    """Vision en texte libre (description de page)."""
     return _complete(agent, task, config.MODEL_FLASH, build_vision_messages(frames, prompt), max_tokens,
                      needs=("vision",))
