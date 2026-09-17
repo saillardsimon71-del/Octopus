@@ -25,6 +25,21 @@ PRICES = {
 # Plafond de coût par cycle (USD). Au-delà, ORBIT stoppe.
 CYCLE_BUDGET_USD = 1.00
 
+# --- Décisions du cycle (calculées en code) ---
+# ORBIT : "code" = règle écrite, reproductible, sans appel LLM ; "llm" = arbitrage deepseek-v4-pro historique.
+ORBIT_DECISION = os.environ.get("PODALUX_ORBIT_DECISION", "code").strip().lower()
+QC_SHIP_SCORE = 24     # note /35 minimale pour publier
+QC_MIN_HUMANITE = 3    # WARM_PASS
+# Contrôles objectifs bloquants (ffmpeg, tools/qc_metrics.py) : (min, max) ou valeur exacte.
+MEDIA_GATES = {
+    "duration_s": (18.0, 35.0),
+    "resolution": "1080x1920",
+    "lufs_integrated": (-16.0, -12.0),
+    "freezes_gt1_2s": (0, 0),
+}
+# Défauts corrigeables en réécrivant le script (les autres demandent une intervention sur le pipeline).
+MEDIA_FIXABLE_BY_SCRIPT = {"duration_s"}
+
 def _project_root() -> Path:
     """Racine du projet, y compris quand le code est empaqueté dans un exe PyInstaller.
 

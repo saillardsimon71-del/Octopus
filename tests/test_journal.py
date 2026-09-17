@@ -71,13 +71,14 @@ def test_spent_today_by_business():
 # --- code metier ---------------------------------------------------------------------------
 
 GROWTH_OK = {"total_calcule": 30, "humanite": 4, "warm_pass": True}
+MEDIA_OK = {"duration_s": 25.2, "resolution": "1080x1920", "lufs_integrated": -14.0, "freezes_gt1_2s": 0}
 
 
 def test_ledger_uses_the_cycle_cost_not_the_lifetime_cost():
     db.log_cost("HIST", "ancien", config.MODEL_PRO, 0, 1_000_000)  # 2,19 $ historiques
-    assert ag.LEDGER.run("o", {}, GROWTH_OK)["go"] is True  # sonde 5 : etait False
+    assert ag.LEDGER.run("o", MEDIA_OK, GROWTH_OK)["go"] is True  # sonde 5 : etait False
     with journal.run("podalux", "video_cycle", budget_usd=1.0):
-        assert ag.LEDGER.run("o", {}, GROWTH_OK)["cost_usd"] == 0
+        assert ag.LEDGER.run("o", MEDIA_OK, GROWTH_OK)["cost_usd"] == 0
 
 
 def test_ledger_no_go_when_the_cycle_itself_overspends():
@@ -85,7 +86,7 @@ def test_ledger_no_go_when_the_cycle_itself_overspends():
             "cost_class": "paid", "status": "ok"}
     with journal.run("podalux", "video_cycle", budget_usd=1.0) as ctx:
         journal.record_llm_call({**base, "ts": time.time(), "run_id": ctx.id, "cost_usd": 1.5})
-        assert ag.LEDGER.run("o", {}, GROWTH_OK)["go"] is False
+        assert ag.LEDGER.run("o", MEDIA_OK, GROWTH_OK)["go"] is False
 
 
 def test_agent_not_blocked_by_historical_spending(monkeypatch):

@@ -69,7 +69,9 @@ def captured(monkeypatch):
     def call_json(agent, task, model, messages, max_tokens=2000, reasoning=None):
         calls.append({"agent": agent, "task": task, "model": model, "messages": messages,
                       "max_tokens": max_tokens, "reasoning": reasoning})
-        return {"offer_id": "cash_devis_cgv01", "angle": "a", "decision": "done", "final": "ok", "narration": []}
+        return {"offer_id": "cash_devis_cgv01", "angle": "a", "decision": "done", "final": "ok",
+                "titre": "t", "hook": "h", "cta": "37 €, lien en description", "keywords": ["devis"],
+                "narration": [{"role": r, "texte": "texte"} for r in ag.ROLES_ORDER]}
 
     def call(agent, task, model, messages, max_tokens=1200, reasoning=None, json_mode=False):
         calls.append({"agent": agent, "task": task, "model": model, "messages": messages, "max_tokens": max_tokens})
@@ -110,7 +112,8 @@ def test_growth_prompt(monkeypatch):
     assert seen["prompt"] == FIXTURE["prompts"]["growth_prompt"]
 
 
-def test_orbit_prompt_with_human_message(captured):
+def test_orbit_prompt_with_human_message(captured, monkeypatch):
+    monkeypatch.setattr(config, "ORBIT_DECISION", "llm")  # arbitrage LLM historique, toujours disponible
     db.post("HUMAN", "vise 30/35")
     ag.ORBIT.run("cash_impayes_relance01", {"score": 27, "humanite": 4, "warm_pass": True, "cost_usd": 0.01, "go": True})
     _same(captured[0], FIXTURE["prompts"]["orbit_with_human"])

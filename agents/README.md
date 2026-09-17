@@ -107,6 +107,9 @@ L'automatisation de logins est fragile et peut violer les CGU → `handoff()` po
 - **Échecs bruyants** : toute étape de FORGE (TTS, rendu, mux, métriques) lève `StepError` sur code retour non nul, timeout (900 s) ou artefact absent/antérieur au début de l'étape. Sortie complète dans `out/<offre>/logs/<étape>.log`.
 - **Un seul cycle à la fois** : verrou `run_lock` (table `state`, bail de 30 min renouvelé à chaque itération). Un second cycle (GUI, CLI, outil `render_offer`) est refusé sans rien modifier. `python -m agents.run status` affiche le détenteur.
 - **Journaux GUI** : chaque sous-processus lancé par la GUI écrit dans `agents/data/logs/` (200 derniers conservés).
+- **Décisions en code** : LEDGER bloque la publication si un contrôle ffmpeg échoue (`MEDIA_GATES` : durée 18-35 s, 1080x1920, LUFS -16 à -12, aucun freeze). ORBIT applique sa règle écrite en code (`ORBIT_DECISION = "code"`, sans appel LLM) : `done` si GO, `iterate` s'il reste des itérations et que le défaut est corrigeable par le script, sinon `stop`. `PODALUX_ORBIT_DECISION=llm` rétablit l'arbitrage deepseek-v4-pro.
+- **Sorties LLM validées** : notes du QC vision entières et bornées par axe, job de CONVERT à 7 segments dans l'ordre ; une relance, puis échec explicite.
+- **Offre forcée** : pas d'appel à SOUT, angle pris dans le catalogue ; une offre hors catalogue est refusée.
 - **Sortant** : rien ne sort de la machine (pas d'upload/email/achat) — à ajouter en `--dry-run`.
 - **Tests** : `python -m pytest` (hors-ligne). `python -m agents._verify --live` fait des appels payants et écrit en base de production.
 

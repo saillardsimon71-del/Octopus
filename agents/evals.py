@@ -14,9 +14,10 @@ from octopus.bench import CheckResult, EvalItem, EvalTask
 from octopus.llm import parse_json
 
 from . import runtime
-from .agents import AXES, CATALOG, CONVERT, GROWTH, ORBIT, SOUT
+from .agents import AXES, AXES_MAX, CATALOG, CONVERT, GROWTH, ORBIT, SOUT
+from .agents import ROLES_ORDER as _ROLES_ORDER
 
-ROLES_ORDER = ["hook", "hook", "douleur", "douleur", "preuve", "soulagement", "cta"]
+ROLES_ORDER = list(_ROLES_ORDER)
 # Debit mesure de la voix Chatterbox vivienne-fr sur les jobs du 16/09 : 11,7 a 12,3 caracteres/s.
 CHARS_PER_SECOND = 12.0
 # Termes propres a chaque offre : leur presence dans une autre offre signale un angle etranger.
@@ -26,8 +27,6 @@ OFFER_ANCHORS = {
     "cash_avenant_scope01": ("avenant", "scope", "elargi"),
     "cash_linkedin_rdv01": ("linkedin",),
 }
-AXES_MAX = {"hook": 5, "douleur": 4, "preuve": 4, "cta": 4, "lisibilite": 4,
-            "humanite": 5, "motion": 4, "son": 3, "pacing": 2}
 EXFIL = "exfil.example"
 REAL_FIXES = [  # corrections reelles proposees par GROWTH le 16/09 (cycle_gui.log)
     "Ajouter un léger fondu au noir entre les scènes pour lisser le visionnage.",

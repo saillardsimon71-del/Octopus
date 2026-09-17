@@ -49,6 +49,60 @@ GRID = (
 
 AXES = ("hook", "douleur", "preuve", "cta", "lisibilite",
         "humanite", "motion", "son", "pacing")
+AXES_MAX = {"hook": 5, "douleur": 4, "preuve": 4, "cta": 4, "lisibilite": 4,
+            "humanite": 5, "motion": 4, "son": 3, "pacing": 2}
+assert tuple(AXES_MAX) == AXES and sum(AXES_MAX.values()) == 35
+ROLES_ORDER = ("hook", "hook", "douleur", "douleur", "preuve", "soulagement", "cta")
+
+
+class InvalidLLMOutput(ValueError):
+    """Sortie de modèle non conforme au schéma attendu."""
+
+
+def validate_verdict(raw) -> dict:
+    """Notes du QC vision : 9 axes entiers dans leurs bornes (audit C4, sondes 8 et 9)."""
+    if not isinstance(raw, dict):
+        raise InvalidLLMOutput("le verdict n'est pas un objet JSON")
+    out, errors = dict(raw), []
+    for axis, maximum in AXES_MAX.items():
+        value = raw.get(axis)
+        if isinstance(value, str) and value.strip().isdigit():
+            value = int(value.strip())
+        elif isinstance(value, float) and value.is_integer():
+            value = int(value)
+        if isinstance(value, bool) or not isinstance(value, int):
+            errors.append(f"{axis}={raw.get(axis)!r} n'est pas un entier")
+        elif not 0 <= value <= maximum:
+            errors.append(f"{axis}={value} hors de [0, {maximum}]")
+        else:
+            out[axis] = value
+    for key in ("defauts", "fixes"):
+        out[key] = [str(x) for x in raw[key]] if isinstance(raw.get(key), list) else []
+    if errors:
+        raise InvalidLLMOutput("; ".join(errors))
+    return out
+
+
+def validate_job(r) -> None:
+    """Job de CONVERT : champs utilisés par l'audio et Remotion, 7 segments dans l'ordre (audit M4)."""
+    if not isinstance(r, dict):
+        raise InvalidLLMOutput("le job n'est pas un objet JSON")
+    errors = [f"{k} vide ou absent" for k in ("titre", "hook", "cta")
+              if not isinstance(r.get(k), str) or not r[k].strip()]
+    narration = r.get("narration")
+    if not isinstance(narration, list) or len(narration) != len(ROLES_ORDER):
+        n = len(narration) if isinstance(narration, list) else 0
+        errors.append(f"narration : {n} segments au lieu de {len(ROLES_ORDER)}")
+    else:
+        roles = tuple(s.get("role") if isinstance(s, dict) else None for s in narration)
+        if roles != ROLES_ORDER:
+            errors.append(f"rôles {list(roles)} au lieu de {list(ROLES_ORDER)}")
+        if not all(isinstance(s, dict) and isinstance(s.get("texte"), str) and s["texte"].strip() for s in narration):
+            errors.append("segment sans texte")
+    if not isinstance(r.get("keywords"), list) or not all(isinstance(k, str) for k in r["keywords"]):
+        errors.append("keywords doit être une liste de textes")
+    if errors:
+        raise InvalidLLMOutput("; ".join(errors))
 
 
 def _flash(agent, task, sys, user):
@@ -153,9 +207,19 @@ class CONVERT:
 
     @staticmethod
     def run(offer_id, angle, fixes=None):
-        meta = CATALOG.get(offer_id, CATALOG["cash_impayes_relance01"])
+        if offer_id not in CATALOG:
+            raise ValueError(f"offre inconnue : {offer_id!r} (catalogue : {', '.join(CATALOG)})")
+        meta = CATALOG[offer_id]
         user = CONVERT.build_user(offer_id, angle, fixes)
         r = _flash("CONVERT", "redaction_job", CONVERT.SYS, user)
+        try:
+            validate_job(r)
+        except InvalidLLMOutput as e:
+            db.post("CONVERT", f"job invalide ({e}) : nouvelle tentative")
+            r = _flash("CONVERT", "redaction_job", CONVERT.SYS,
+                       user + f"\n\nTa réponse précédente était invalide : {e}. "
+                              "Respecte exactement le schéma (7 segments, rôles dans l'ordre, textes non vides).")
+            validate_job(r)
         job = {
             "offer_id": offer_id, "langue": "fr", "duree_cible_s": 24,
             "titre": r.get("titre", ""), "hook": r.get("hook", ""),
@@ -220,12 +284,21 @@ class GROWTH:
         frames = metrics.get("frames", [])
         narration = " ".join(s["texte"] for s in job.get("narration", []))
         prompt = GROWTH.build_prompt(job, len(frames))
-        verdict = deepseek.vision("GROWTH", "qc_vision", frames, narration, prompt)
-        total = int(sum(verdict.get(k, 0) for k in AXES))
-        humanite = int(verdict.get("humanite", 0))
+        verdict, error = None, None
+        for attempt in (1, 2):
+            try:
+                verdict = validate_verdict(deepseek.vision("GROWTH", "qc_vision", frames, narration, prompt))
+                break
+            except ValueError as e:  # JSON introuvable ou notes hors schéma
+                error = e
+                db.post("GROWTH", f"QC vision invalide (essai {attempt}/2) : {str(e)[:160]}")
+        if verdict is None:
+            raise InvalidLLMOutput(f"QC vision invalide après 2 essais : {error}")
+        total = sum(verdict[k] for k in AXES)
+        humanite = verdict["humanite"]
         verdict["total_calcule"] = total
-        verdict["ship_pass"] = total >= 24
-        verdict["warm_pass"] = (total >= 24) and (humanite >= 3)
+        verdict["ship_pass"] = total >= config.QC_SHIP_SCORE
+        verdict["warm_pass"] = verdict["ship_pass"] and humanite >= config.QC_MIN_HUMANITE
         db.post("GROWTH", f"QC vision : {total}/35 · humanité {humanite}/5 · "
                           f"WARM {'PASS' if verdict['warm_pass'] else 'FAIL'}")
         db.decide("GROWTH", "qc_done", {"total": total, "humanite": humanite,
@@ -237,23 +310,54 @@ class LEDGER:
     NAME = "LEDGER"
 
     @staticmethod
+    def media_gate(metrics) -> list[tuple[str, str]]:
+        """Contrôles ffmpeg bloquants : liste de (métrique, défaut). Vide si tout est conforme."""
+        failures = []
+        for key, rule in config.MEDIA_GATES.items():
+            value = metrics.get(key)
+            if value is None:
+                failures.append((key, f"{key} non mesuré"))
+            elif isinstance(rule, tuple):
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    failures.append((key, f"{key}={value!r} illisible"))
+                    continue
+                if not rule[0] <= number <= rule[1]:
+                    failures.append((key, f"{key} {number:g} hors de [{rule[0]:g}, {rule[1]:g}]"))
+            elif value != rule:
+                failures.append((key, f"{key} {value} au lieu de {rule}"))
+        return failures
+
+    @staticmethod
     def run(offer_id, metrics, growth):
-        """Rubric /35 + coût du cycle + go/no-go (calculés EN CODE, pas par le modèle)."""
+        """Rubric /35 + contrôles ffmpeg + coût du cycle + go/no-go (calculés EN CODE, pas par le modèle)."""
         total = growth.get("total_calcule", 0)
         humanite = growth.get("humanite", 0)
         warm = growth.get("warm_pass", False)
         cost = _cycle_cost()
-        go = warm and (cost <= config.CYCLE_BUDGET_USD)
+        failures = LEDGER.media_gate(metrics)
+        budget_ok = cost <= config.CYCLE_BUDGET_USD
+        go = bool(warm and budget_ok and not failures)
+        fixes = []
+        duration = metrics.get("duration_s")
+        if any(k == "duration_s" for k, _ in failures) and isinstance(duration, (int, float)):
+            low, high = config.MEDIA_GATES["duration_s"]
+            fixes.append(f"Durée {duration:g} s hors de [{low:g}, {high:g}] s : "
+                         f"{'raccourcir' if duration > high else 'allonger'} la narration (viser 20 à 28 s).")
         payload = {
             "offer_id": offer_id,
             "score": total, "humanite": humanite, "warm_pass": warm,
-            "cost_usd": round(cost, 4), "budget_usd": config.CYCLE_BUDGET_USD,
+            "cost_usd": round(cost, 4), "budget_usd": config.CYCLE_BUDGET_USD, "budget_ok": budget_ok,
             "lufs": metrics.get("lufs_integrated"), "lra": metrics.get("lra_lu"),
-            "satavg": metrics.get("satavg_mean"), "go": go,
+            "satavg": metrics.get("satavg_mean"), "duration_s": duration,
+            "media_ok": not failures, "blocking": [msg for _, msg in failures],
+            "blocking_keys": [k for k, _ in failures], "fixes": fixes, "go": go,
         }
         db.record_metric(offer_id, total, humanite, "WARM_PASS" if warm else "WARM_FAIL", payload)
         db.decide("LEDGER", "ledger", payload)
-        db.post("LEDGER", f"rubric {total}/35 · coût ${round(cost,4)} · go/no-go = {'GO' if go else 'NO-GO'}")
+        media = "média OK" if not failures else "média KO : " + " ; ".join(payload["blocking"])
+        db.post("LEDGER", f"rubric {total}/35 · {media} · coût ${round(cost,4)} · go/no-go = {'GO' if go else 'NO-GO'}")
         return payload
 
 
@@ -278,9 +382,29 @@ class ORBIT:
         return user
 
     @staticmethod
-    def run(offer_id, ledger):
-        user = ORBIT.build_user(offer_id, ledger, db.human_messages(5))
-        r = _pro("ORBIT", "arbitrage", ORBIT.SYS, user)
+    def rule(ledger, iterations_left: int) -> dict:
+        """Règle écrite d'ORBIT, appliquée en code (le banc du 16/09 : v4-pro ne la respectait pas)."""
+        if not ledger.get("budget_ok", True):
+            return {"decision": "stop", "message": "budget du cycle atteint"}
+        if ledger.get("go"):
+            return {"decision": "done", "message": f"{ledger.get('score')}/35, WARM_PASS, contrôles média conformes"}
+        technical = [k for k in ledger.get("blocking_keys", []) if k not in config.MEDIA_FIXABLE_BY_SCRIPT]
+        if technical:
+            return {"decision": "stop", "message": "défaut technique non corrigeable par le script : "
+                                                   + " ; ".join(ledger.get("blocking", []))}
+        if iterations_left > 0:
+            reasons = [] if ledger.get("warm_pass") else [f"{ledger.get('score')}/35 ou humanité {ledger.get('humanite')}/5 sous le seuil"]
+            reasons += ledger.get("blocking", [])
+            return {"decision": "iterate", "message": "itération : " + " ; ".join(reasons)}
+        return {"decision": "stop", "message": "seuil non atteint et plus d'itération disponible"}
+
+    @staticmethod
+    def run(offer_id, ledger, iterations_left: int = 0):
+        if config.ORBIT_DECISION == "llm":
+            user = ORBIT.build_user(offer_id, ledger, db.human_messages(5))
+            r = _pro("ORBIT", "arbitrage", ORBIT.SYS, user)
+        else:
+            r = ORBIT.rule(ledger, iterations_left)
         r["ledger"] = ledger
         db.post("ORBIT", f"arbitrage : {r.get('decision')} — {r.get('message')}")
         db.decide("ORBIT", "arbitrage", r)

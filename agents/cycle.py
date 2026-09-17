@@ -8,7 +8,14 @@ import time
 from octopus.journal import with_run
 
 from . import config, db
-from .agents import SOUT, CONVERT, FORGE, GROWTH, LEDGER, ORBIT
+from .agents import CATALOG, SOUT, CONVERT, FORGE, GROWTH, LEDGER, ORBIT
+
+YES = {"oui", "o", "yes", "y", "ok"}
+
+
+def is_yes(answer: str | None) -> bool:
+    """Réponse humaine explicite. « on verra » ou « oui mais… » ne valent pas accord (audit, risque 17)."""
+    return bool(answer) and answer.strip().lower().rstrip(".! ") in YES
 
 
 def already_produced() -> list[str]:
@@ -22,6 +29,8 @@ def already_produced() -> list[str]:
 @with_run("podalux", "video_cycle", budget_usd=config.CYCLE_BUDGET_USD)
 def run_cycle(offer_id: str | None = None, max_iterations: int = 3) -> dict:
     db.init_db()
+    if offer_id is not None and offer_id not in CATALOG:
+        raise ValueError(f"offre inconnue : {offer_id!r} (catalogue : {', '.join(CATALOG)})")
     owner = f"pid{os.getpid()}-{time.time_ns()}"
     if not db.acquire_run_lock(owner):
         db.post("ORBIT", f"cycle refusé : un autre cycle tourne déjà ({db.run_lock_holder()})", kind="cycle")
@@ -46,9 +55,18 @@ def _run_cycle_locked(owner: str, offer_id: str | None, max_iterations: int) -> 
         # 1. SOUT — sélection d'offre
         db.update_run(rid, step="SOUT : sélection d'offre")
         already = already_produced()
-        sout = SOUT.run(already)
-        oid = offer_id or sout.get("offer_id") or "cash_impayes_relance01"
-        angle = sout.get("angle", "")
+        if offer_id:  # offre imposée : pas d'appel à SOUT, angle du catalogue (audit C5)
+            sout = {"offer_id": offer_id, "angle": CATALOG[offer_id]["angle"], "rationale": "offre imposée"}
+            db.post("SOUT", f"offre imposée : {offer_id} — {sout['angle']}")
+        else:
+            sout = SOUT.run(already)
+            if sout.get("offer_id") not in CATALOG:
+                fallback = next((k for k in CATALOG if k not in already), next(iter(CATALOG)))
+                db.post("SOUT", f"offre hors catalogue proposée ({sout.get('offer_id')!r}) : repli sur {fallback}")
+                sout = {"offer_id": fallback, "angle": CATALOG[fallback]["angle"],
+                        "rationale": "repli : proposition hors catalogue"}
+        oid = sout["offer_id"]
+        angle = sout.get("angle") or CATALOG[oid]["angle"]
         db.update_run(rid, offer_id=oid)
 
         # Boucle CONVERT → FORGE → GROWTH → LEDGER → ORBIT (itère tant que ORBIT dit "iterate")
@@ -56,11 +74,13 @@ def _run_cycle_locked(owner: str, offer_id: str | None, max_iterations: int) -> 
         ledger = {}
         orbit = {}
         iterations = []
+        stopped = False
         for it in range(max_iterations):
             db.acquire_run_lock(owner)  # renouvelle le bail
             if db.stop_requested():
                 db.update_run(rid, status="stopped", step="arrêt demandé")
                 db.post("ORBIT", "arrêt demandé par l'humain", kind="cycle")
+                stopped = True
                 break
             db.update_run(rid, step=f"itération {it + 1}/{max_iterations} · CONVERT")
             db.post("ORBIT", f"itération {it + 1}/{max_iterations} sur {oid}", kind="iteration")
@@ -72,19 +92,20 @@ def _run_cycle_locked(owner: str, offer_id: str | None, max_iterations: int) -> 
             db.update_run(rid, step=f"itération {it + 1} · LEDGER")
             ledger = LEDGER.run(oid, metrics, growth)            # 5. rubric + coût + go/no-go
             db.update_run(rid, step=f"itération {it + 1} · ORBIT (arbitrage)")
-            orbit = ORBIT.run(oid, ledger)                       # 6. arbitrage
+            orbit = ORBIT.run(oid, ledger, iterations_left=max_iterations - it - 1)  # 6. arbitrage
+            fixes = growth.get("fixes", []) + ledger.get("fixes", [])
             iterations.append({
                 "iteration": it + 1, "score": ledger["score"],
-                "warm_pass": ledger["warm_pass"], "decision": orbit.get("decision"),
-                "fixes": growth.get("fixes", []),
+                "warm_pass": ledger["warm_pass"], "media_ok": ledger.get("media_ok"),
+                "decision": orbit.get("decision"), "fixes": fixes,
             })
             if orbit.get("decision") in ("done", "stop"):
                 break
-            fixes = growth.get("fixes", [])
 
-        db.update_run(rid, status="done", step="terminé",
-                      result=json.dumps({"score": ledger.get("score"),
-                                         "decision": orbit.get("decision")}, ensure_ascii=False))
+        if not stopped:
+            db.update_run(rid, status="done", step="terminé",
+                          result=json.dumps({"score": ledger.get("score"),
+                                             "decision": orbit.get("decision")}, ensure_ascii=False))
 
         # checkpoint humain : confirmation de publication (si ORBIT a dit "done")
         if orbit.get("decision") == "done":
@@ -93,7 +114,7 @@ def _run_cycle_locked(owner: str, offer_id: str | None, max_iterations: int) -> 
                                f"Publier la vidéo {oid} ({ledger.get('score')}/35) ? oui/non",
                                timeout_s=600)
             db.post("GROWTH", f"confirmation de publication : {ans}")
-            if ans and ans.strip().lower().startswith(("oui", "o", "y", "yes")):
+            if is_yes(ans):
                 db.decide("GROWTH", "publish_approved", {"offer_id": oid})
                 db.update_run(rid, step="publication approuvée (dry-run)")
     except Exception as e:
