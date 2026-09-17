@@ -36,6 +36,7 @@ class ForgeExecutor:
                  runner: Callable[..., str] | None = None):
         self.store = store
         self.config = config or ExecutorConfig()
+        self._using_real_runner = runner is None
         self.runner = runner or self._run_checked
 
     def render(self, job: VideoJob) -> VideoResult:
@@ -60,7 +61,7 @@ class ForgeExecutor:
             self._copy_pipeline_sources(workspace)
             voice = str(job.voice.get("nom") or job.voice.get("voice") or self.config.tts_voice_default)
             env = os.environ.copy()
-            if str(job.voice.get("moteur") or job.voice.get("provider") or "chatterbox").lower() == "chatterbox":
+            if self._using_real_runner and str(job.voice.get("moteur") or job.voice.get("provider") or "chatterbox").lower() == "chatterbox":
                 if not env.get("CHATTERBOX_URL", "").strip():
                     raise ExecutorError(
                         "CHATTERBOX_URL doit être configuré dans le worker cloud; "
