@@ -39,13 +39,15 @@
       "label": "LE SCOPE QUI GONFLE",
       "icon": "📈",
       "accent_emoji": "➕",
-      "accent_text": "TRAVAIL GRATUIT"
+      "accent_text": "TRAVAIL GRATUIT",
+      "img": "cash_avenant_scope01/hook.jpg"
     },
     "douleur": {
       "label": "LE CLIENT QUI ÉLARGIT",
       "icon": "😤",
       "accent_emoji": "⏳",
-      "accent_text": "HEURES OFFERTES"
+      "accent_text": "HEURES OFFERTES",
+      "img": "cash_avenant_scope01/douleur.jpg"
     },
     "preuve": {
       "label": "L'AVENANT PRO",
@@ -66,19 +68,22 @@
           "Statut",
           "SIGNÉ ✓"
         ]
-      ]
+      ],
+      "img": "cash_avenant_scope01/preuve.jpg"
     },
     "soulagement": {
       "label": "CHAQUE AJOUT PAYÉ",
       "icon": "🤝",
       "accent_emoji": "✓",
       "accent_text": "SIGNÉ",
-      "banner": "AVENANT SIGNÉ"
+      "banner": "AVENANT SIGNÉ",
+      "img": "cash_avenant_scope01/soulagement.jpg"
     },
     "cta": {
       "label": "À VOUS DE JOUER",
       "icon": "👇",
-      "accent_emoji": "👇"
+      "accent_emoji": "👇",
+      "img": "cash_avenant_scope01/cta.jpg"
     }
   },
   "narration": [

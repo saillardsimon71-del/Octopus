@@ -78,5 +78,22 @@
       "rate": "-1%",
       "texte": "19 € seulement, lien en description."
     }
-  ]
+  ],
+  "visuel": {
+    "hook": {
+      "img": "cash_linkedin_rdv01/hook.jpg"
+    },
+    "soulagement": {
+      "img": "cash_linkedin_rdv01/soulagement.jpg"
+    },
+    "douleur": {
+      "img": "cash_linkedin_rdv01/douleur.jpg"
+    },
+    "preuve": {
+      "img": "cash_linkedin_rdv01/preuve.jpg"
+    },
+    "cta": {
+      "img": "cash_linkedin_rdv01/cta.jpg"
+    }
+  }
 }

@@ -77,5 +77,22 @@
       "rate": "-1%",
       "texte": "37 €, lien en description."
     }
-  ]
+  ],
+  "visuel": {
+    "hook": {
+      "img": "cash_devis_cgv01/hook.jpg"
+    },
+    "soulagement": {
+      "img": "cash_devis_cgv01/soulagement.jpg"
+    },
+    "douleur": {
+      "img": "cash_devis_cgv01/douleur.jpg"
+    },
+    "preuve": {
+      "img": "cash_devis_cgv01/preuve.jpg"
+    },
+    "cta": {
+      "img": "cash_devis_cgv01/cta.jpg"
+    }
+  }
 }

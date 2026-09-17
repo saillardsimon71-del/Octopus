@@ -37,3 +37,6 @@ Claude outputs/
 # Configuration locale des outils IA (hors depot)
 .claude/
 .mcp.json
+
+# B-roll telecharge par offre (regenere par tools/fetch_broll.py, jamais versionne)
+remotion/public/img/*/
