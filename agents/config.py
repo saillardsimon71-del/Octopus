@@ -40,6 +40,7 @@ MEDIA_GATES = {
 # Défauts corrigeables en réécrivant le script (les autres demandent une intervention sur le pipeline).
 MEDIA_FIXABLE_BY_SCRIPT = {"duration_s"}
 
+
 def _project_root() -> Path:
     """Racine du projet, y compris quand le code est empaqueté dans un exe PyInstaller.
 
@@ -79,11 +80,13 @@ SHELL_WHITELIST = ["ffmpeg", "ffprobe", "python", "uv", "node", "npx", "git", "c
 # Arguments destructifs interdits (garde-fou : rien de récursif/destructif)
 FORBIDDEN_ARGS = ["rm -rf", "del /s", "rd /s", "rmdir /s", "-rf ", "--force", "format"]
 
-# Python du projet (MoneyPrinterTurbo .venv — a edge_tts, numpy, etc.)
-PYTHON = str(Path(os.environ.get(
-    "PODALUX_PYTHON",
-    r"C:\Users\saill\Projects\MoneyPrinterTurbo\.venv\Scripts\python.exe",
-)))
+# Python du projet : aucun chemin utilisateur codé en dur. Le venv local reste prioritaire,
+# sinon on utilise l'interpréteur qui exécute actuellement le control-plane.
+if os.name == "nt":
+    _VENV_PYTHON = PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
+else:
+    _VENV_PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python"
+PYTHON = str(_VENV_PYTHON if _VENV_PYTHON.exists() else Path(sys.executable))
 
 # Serveur Chatterbox (Phase 3)
 CHATTERBOX_URL = "http://127.0.0.1:4123/v1/audio/speech"

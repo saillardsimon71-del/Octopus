@@ -7,6 +7,7 @@ Usage :
   python -m agents.run status
   python -m agents.run report
   python -m agents.run browser <url>
+  python -m agents.run orca <status|start|workers|check> ...
 """
 from __future__ import annotations
 
@@ -154,6 +155,37 @@ def cmd_browse_open():
         _cleanup_shared()
 
 
+def _print_orca(value):
+    print(json.dumps(value, ensure_ascii=False, indent=2, default=str))
+
+
+def cmd_orca_status():
+    from . import orca
+    _print_orca(orca.status())
+
+
+def cmd_orca_start(args):
+    from . import orca
+    _print_orca(orca.start_development_task(
+        objective=args.objective,
+        spec=args.spec,
+        agent=args.agent,
+        worktree=args.worktree,
+        model=args.model,
+        effort=args.effort,
+    ))
+
+
+def cmd_orca_workers():
+    from . import orca
+    _print_orca(orca.worker_list(include_remote=True))
+
+
+def cmd_orca_check(args):
+    from . import orca
+    _print_orca(orca.check(wait=args.wait, timeout_ms=args.timeout_ms))
+
+
 def main():
     parser = argparse.ArgumentParser(prog="podalux", description="Groupe d'agents Podalux")
     sub = parser.add_subparsers(dest="cmd")
@@ -181,6 +213,22 @@ def main():
     p_msg.add_argument("role", help="rôle cible (ORBIT, SOUT, …)")
     p_msg.add_argument("text", nargs="+", help="le message")
     sub.add_parser("browse-open", help="ouvre le navigateur Chromium (visible) et le laisse ouvert")
+
+    p_orca = sub.add_parser("orca", help="intégration optionnelle Orca pour le développement")
+    orca_sub = p_orca.add_subparsers(dest="orca_cmd", required=True)
+    orca_sub.add_parser("status", help="vérifie le CLI Orca")
+    p_ostart = orca_sub.add_parser("start", help="Run → Task → Worker pour une tâche de développement")
+    p_ostart.add_argument("--objective", required=True, help="objectif du Run Orca")
+    p_ostart.add_argument("--spec", required=True, help="spécification autonome de la Task")
+    p_ostart.add_argument("--agent", required=True, help="agent Orca : claude, codex, opencode, …")
+    p_ostart.add_argument("--worktree", default="current", help="workspace Orca, par défaut current")
+    p_ostart.add_argument("--model", default=None, help="modèle facultatif")
+    p_ostart.add_argument("--effort", default=None, help="niveau d'effort facultatif")
+    orca_sub.add_parser("workers", help="liste les workers Orca")
+    p_ocheck = orca_sub.add_parser("check", help="consomme les événements Orca")
+    p_ocheck.add_argument("--wait", action="store_true", help="attendre des événements")
+    p_ocheck.add_argument("--timeout-ms", type=int, default=30000)
+
     args = parser.parse_args()
 
     if args.cmd == "cycle":
@@ -212,6 +260,22 @@ def main():
         cmd_msg(args.role, " ".join(args.text))
     elif args.cmd == "browse-open":
         cmd_browse_open()
+    elif args.cmd == "orca":
+        try:
+            if args.orca_cmd == "status":
+                cmd_orca_status()
+            elif args.orca_cmd == "start":
+                cmd_orca_start(args)
+            elif args.orca_cmd == "workers":
+                cmd_orca_workers()
+            elif args.orca_cmd == "check":
+                cmd_orca_check(args)
+        except Exception as exc:
+            from .orca import OrcaError
+            if isinstance(exc, OrcaError):
+                print(f"erreur Orca : {exc}")
+                raise SystemExit(2) from exc
+            raise
     else:
         parser.print_help()
 

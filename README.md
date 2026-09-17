@@ -62,6 +62,19 @@ La clé est uniquement une variable d'environnement. Ne jamais la committer.
 
 OmniRoute fournit un endpoint OpenAI-compatible ainsi que des routes audio/vision selon les providers connectés ; le provider réellement choisi dépend de la configuration du gateway. Voir la [documentation API](https://github.com/diegosouzapw/OmniRoute/wiki/API-Reference) et le [guide free tiers](https://github.com/diegosouzapw/OmniRoute/wiki/User-Guide).
 
+## Développement assisté : Orca (optionnel)
+
+[Orca](https://github.com/stablyai/orca) peut superviser les tâches de **développement du dépôt** — par exemple un audit, une correction ciblée ou une revue dans un workspace agentique. Il n'est pas une dépendance des cycles Podalux et ne remplace pas `octopus.tasks`, RunPod ou le runtime métier.
+
+Le pont `agents/orca.py` utilise uniquement le CLI public Orca et reste désactivé par défaut :
+
+```text
+OCTOPUS_ORCA_ENABLED=1
+OCTOPUS_ORCA_CLI=orca
+```
+
+Le flux exposé est `Run → Task → Worker`, avec supervision par `worker-list` / `check`. Voir `docs/ORCA_INTEGRATION.md`.
+
 ## Vidéo
 
 ### Cycle Podalux
@@ -149,7 +162,7 @@ Le doctor distingue les prérequis obligatoires du control-plane de ceux du rend
 ## Tests CI / hors réseau
 
 ```powershell
-python -m pytest -q tests/test_omniroute.py tests/test_minimax_h3_cloud.py tests/test_browser_integration.py tests/test_doctor.py tests/test_gateway.py tests/test_cycle_logic.py
+python -m pytest -q tests/test_omniroute.py tests/test_minimax_h3_cloud.py tests/test_browser_integration.py tests/test_doctor.py tests/test_gateway.py tests/test_cycle_logic.py tests/test_orca.py
 ```
 
 Les tests vidéo et H3 ne téléchargent pas les gros modèles ; les tests navigateur utilisent des doubles réseau et peuvent également démarrer Chromium lorsqu'il est disponible.
@@ -162,6 +175,7 @@ Le chemin de publication reste un dry-run tant que les validations humaines et i
 
 - `docs/LOCAL_SETUP.md` : installation Windows actuelle
 - `docs/OMNIROUTE_SETUP.md` : gateway OmniRoute
+- `docs/ORCA_INTEGRATION.md` : pont Orca optionnel pour le développement
 - `agents/README.md` : roster, coordination, navigateur, vidéo
 - `BRIEF-DEEPSEEK.md` : historique de conception et critères qualité
 - `AUDIT.md` : audits historiques

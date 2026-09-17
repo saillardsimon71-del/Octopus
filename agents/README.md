@@ -9,7 +9,7 @@ Orchestrateur de 6 agents pilotés par un gateway LLM compatible OpenAI. En conf
 | **ORBIT** | CEO | planifie, coordonne, arbitre et synthétise |
 | **GROWTH** | Acquisition / distribution | QC visuel + préparation distribution |
 | **LEDGER** | Data / finance | rubric /35, coûts, go/no-go |
-| **FORGE** | Production | TTS + Remotion + mux + QC technique |
+| **FORGE** | Production | TTS + Remotion + mux + QC |
 | **CONVERT** | Monétisation | offre, prix, CTA, job vidéo |
 | **SOUT** | Recherche | veille, sources, sélection d'offres |
 
@@ -41,12 +41,36 @@ Variables locales :
 
 ```text
 OMNIROUTE_ENABLED=1
-OMNIROUTE_BASE_URL=http://127.0.0.1:20128/api/v1
+OMNIROUTE_BASE_URL=http://127.0.0.1:20128/v1
 OMNIROUTE_MODEL=auto/free
 OMNIROUTE_API_KEY=<secret runtime uniquement>
 ```
 
 La clé ne doit jamais entrer dans Git.
+
+## Développement avec Orca (optionnel)
+
+[Orca](https://github.com/stablyai/orca) est intégré comme **pont de développement**, pas comme moteur du cycle business. Il peut recevoir une tâche d'audit/correction/revue et gérer son propre `Run → Task → Worker` avec Claude, Codex ou un autre agent pris en charge.
+
+Le pont `agents/orca.py` est désactivé par défaut :
+
+```text
+OCTOPUS_ORCA_ENABLED=1
+OCTOPUS_ORCA_CLI=orca
+```
+
+Commandes :
+
+```powershell
+python -m agents.run orca status
+python -m agents.run orca start --objective "Audit CI" --spec "Corriger les tests cassés sans modifier le pipeline métier." --agent codex
+python -m agents.run orca workers
+python -m agents.run orca check --wait --timeout-ms 30000
+```
+
+Le pont n'écrit pas dans la base interne d'Orca. Il considère `live`, `unverifiable` et `exited` comme vocabulaire de lifecycle ; une perte de contact reste `unverifiable`.
+
+Voir `docs/ORCA_INTEGRATION.md` pour les règles et l'installation.
 
 ## Vidéo et GPU
 
@@ -105,7 +129,8 @@ Tests : `tests/test_browser_integration.py` vérifie redirection tierce, navigat
 - `run_agent(role, goal)` : un rôle boucle en ReAct ;
 - `run_mission(goal)` : ORBIT planifie 2 à 5 sous-tâches, délègue aux rôles et synthétise ;
 - la file `octopus.tasks` gère leases, retries, idempotence, événements et demandes humaines ;
-- `task_steps` mémorise les étapes coûteuses et évite de les rejouer après un retry ou une réponse humaine.
+- `task_steps` mémorise les étapes coûteuses et évite de les rejouer après un retry ou une réponse humaine ;
+- Orca n'intervient que pour les tâches de développement explicites, en dehors du cycle économique.
 
 ## Commandes utiles
 
@@ -127,6 +152,9 @@ python -m agents.run browse-open
 # Missions
 python -m agents.run mission "…"
 python -m agents.run goal "…"
+
+# Développement Orca (optionnel)
+python -m agents.run orca status
 ```
 
 ## Installation locale légère
@@ -141,6 +169,8 @@ python -m playwright install chromium
 
 Docker Desktop + OmniRoute restent requis pour le routage LLM local. Pour le cycle vidéo cloud, `PODALUX_RUNPOD_ENDPOINT_ID` et `PODALUX_RUNPOD_API_TOKEN` doivent être présents.
 
+Orca est installé séparément uniquement pour les workflows de développement qui l'utilisent.
+
 ## Garde-fous
 
 - Secrets : variables d'environnement uniquement.
@@ -150,3 +180,4 @@ Docker Desktop + OmniRoute restent requis pour le routage LLM local. Pour le cyc
 - Annulation coopérative : checkpoints agents/worker + arrêt des sous-processus longs.
 - Contrat vidéo : validation d'IDs/templates, rejet des secrets, manifest et artefacts bornés.
 - Le diagnostic `python -m agents.run doctor` distingue ce qui est obligatoire localement du matériel cloud.
+- Le pont Orca est opt-in et ne peut pas lancer un cycle Podalux à la place du runtime métier.
