@@ -7,14 +7,14 @@ from octopus.pricing import Usage
 
 def test_catalog_injects_omniroute_free_model(monkeypatch):
     monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
-    monkeypatch.setenv("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1")
+    monkeypatch.delenv("OMNIROUTE_BASE_URL", raising=False)
     monkeypatch.setenv("OMNIROUTE_MODEL", "auto/free")
     cat = catalog.load()
     model = cat.model("omniroute/auto-free")
     assert model["api_model"] == "auto/free"
     assert model["cost_class"] == "free_quota"
     assert model["provider"] == "omniroute"
-    assert cat.provider("omniroute")["base_url"].endswith("/v1")
+    assert cat.provider("omniroute")["base_url"] == "http://127.0.0.1:20128/api/v1"
     assert cat.task("podalux.write_job")["candidates"]["zero_cost"][0] == "omniroute/auto-free"
 
 
@@ -44,7 +44,7 @@ def test_zero_cost_llm_uses_omniroute_without_paid_fallback(monkeypatch, provide
     assert result.provider == "omniroute"
     assert result.model == "omniroute/auto-free"
     assert captured["request"]["model"] == "auto/free"
-    assert captured["provider"]["base_url"] == "http://127.0.0.1:20128/v1"
+    assert captured["provider"]["base_url"] == "http://127.0.0.1:20128/api/v1"
 
 
 def test_zero_cost_does_not_pick_paid_model_when_free_route_is_down(monkeypatch, providers_up):
