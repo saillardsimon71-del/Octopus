@@ -4,7 +4,8 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     DEBIAN_FRONTEND=noninteractive \
     NODE_ENV=production \
-    PUPPETEER_SKIP_DOWNLOAD=true
+    PUPPETEER_SKIP_DOWNLOAD=true \
+    REMOTION_BROWSER_EXECUTABLE=/usr/bin/chromium
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -15,6 +16,7 @@ RUN apt-get update \
        ca-certificates \
        fonts-dejavu \
        fonts-liberation \
+       fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
