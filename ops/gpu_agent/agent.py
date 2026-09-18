@@ -84,13 +84,14 @@ class JsonlLog:
 
 
 class Toolbox:
-    def __init__(self, repo: Path):
+    def __init__(self, repo: Path, *, audit_mode: bool = False):
         self.repo = repo.resolve(strict=True)
         if not (self.repo / ".git").is_dir():
             raise ToolError(f"not a Git repository: {self.repo}")
         self.full_tests_passed_after_change = False
         self.read_paths: set[str] = set()
         self.search_calls = 0
+        self.audit_mode = audit_mode
 
     def _relative(self, raw: str, *, allow_missing: bool = False) -> Path:
         if not raw or "\x00" in raw:
@@ -160,6 +161,8 @@ class Toolbox:
 
     def read_file(self, path: str, start: int = 1, end: int = 400) -> dict[str, Any]:
         rel = self._relative(path)
+        if self.audit_mode and rel.as_posix() not in self.read_paths and len(self.read_paths) >= 40:
+            raise ToolError("audit read budget reached; synthesize evidence with write_audit_report now")
         target = self.repo / rel
         if not target.is_file():
             raise ToolError("path is not a file")
@@ -171,19 +174,22 @@ class Toolbox:
         self.read_paths.add(rel.as_posix())
         selected = lines[start - 1:end]
         numbered = "\n".join(f"{index}: {line}" for index, line in enumerate(selected, start=start))
-        return {"path": rel.as_posix(), "start": start, "end": min(end, len(lines)), "total_lines": len(lines), "content": numbered}
+        return {"path": rel.as_posix(), "start": start, "end": min(end, len(lines)), "total_lines": len(lines),
+                "audit_distinct_files": len(self.read_paths), "content": numbered}
 
     def search(self, pattern: str, paths: list[str] | None = None) -> dict[str, Any]:
         if not pattern or len(pattern) > 300:
             raise ToolError("search pattern must contain 1 to 300 characters")
+        if self.audit_mode and self.search_calls >= 12:
+            raise ToolError("audit search budget reached; synthesize evidence with write_audit_report now")
         args = ["git", "grep", "-n", "-I", "-E", pattern, "--"]
         for raw in paths or []:
             args.append(self._relative(raw).as_posix())
         self.search_calls += 1
         result = self._run(args, timeout=60)
         if result["code"] == 1:
-            return {"ok": True, "matches": ""}
-        return {"ok": result["ok"], "matches": result["output"]}
+            return {"ok": True, "audit_searches": self.search_calls, "matches": ""}
+        return {"ok": result["ok"], "audit_searches": self.search_calls, "matches": result["output"]}
 
     def _patch_paths(self, patch: str) -> list[Path]:
         if len(patch.encode("utf-8")) > MAX_PATCH_BYTES:
@@ -374,7 +380,7 @@ Available tools:
     if mode == "audit":
         return common + """
 
-Audit mission: inspect the complete repository architecture and current branch, run the full offline test suite, and create docs/audits/GPU_AUDIT_2026-09-18.md with write_audit_report. Read at least 20 distinct files spanning octopus, agents, video_worker, tests, businesses, core, and docs, and run at least three searches across the repository. Cover architecture, correctness, security boundaries, reliability, tests, performance, video pipeline, GPU integration, agent/runtime behavior, persistence, operations, and documentation drift. Include sections named Architecture, Findings, and Roadmap. Rank findings P0-P3 even when a rank has no finding. Every finding needs concrete file references and evidence; cite at least 12 distinct Python files. Separate verified facts from hypotheses. End with a dependency-aware roadmap of small independently testable improvement batches. Review the final diff, run the full suite after the report write, and create a local audit checkpoint if checks pass. A final response is rejected until these requirements are verified by the controller.
+Audit mission: inspect the complete repository architecture and current branch, run the full offline test suite, and create docs/audits/GPU_AUDIT_2026-09-18.md with write_audit_report. Read 20 to 40 strategic files spanning octopus, agents, video_worker, tests, businesses, core, and docs, and run 3 to 12 searches across the repository. Do not attempt to read every file. Once the minimum evidence is collected, stop exploring and synthesize the report. Cover architecture, correctness, security boundaries, reliability, tests, performance, video pipeline, GPU integration, agent/runtime behavior, persistence, operations, and documentation drift. Include sections named Architecture, Findings, and Roadmap. Rank findings P0-P3 even when a rank has no finding. Every finding needs concrete file references and evidence; cite at least 12 distinct Python files. Separate verified facts from hypotheses. End with a dependency-aware roadmap of small independently testable improvement batches. Review the final diff, run the full suite after the report write, and create a local audit checkpoint if checks pass. A final response is rejected until these requirements are verified by the controller.
 """
     return common + """
 
@@ -400,7 +406,7 @@ def call_model(messages: list[dict[str, str]]) -> str:
 
 
 def run_agent(repo: Path, state_dir: Path, mode: str, goal: str, max_steps: int) -> int:
-    toolbox = Toolbox(repo)
+    toolbox = Toolbox(repo, audit_mode=mode == "audit")
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     log = JsonlLog(state_dir / f"{mode}-{stamp}.jsonl")
     messages = [
@@ -410,6 +416,11 @@ def run_agent(repo: Path, state_dir: Path, mode: str, goal: str, max_steps: int)
     log.write("start", {"mode": mode, "goal": goal, "repo": str(repo), "max_steps": max_steps})
 
     for step in range(1, max_steps + 1):
+        if mode == "audit" and step in (45, 60):
+            messages.append({
+                "role": "user",
+                "content": "Synthesis deadline: stop opening new files. Write the complete audit report now, then run the full suite, checkpoint, and finish.",
+            })
         messages = trim_history(messages)
         try:
             raw = call_model(messages)

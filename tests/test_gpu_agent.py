@@ -85,6 +85,13 @@ def test_audit_gate_rejects_shallow_uncommitted_report(repo: Path):
     assert any("working tree is clean" in reason for reason in reasons)
 
 
+def test_audit_read_budget_forces_synthesis(repo: Path):
+    tools = Toolbox(repo, audit_mode=True)
+    tools.read_paths = {f"file-{index}.py" for index in range(40)}
+    with pytest.raises(ToolError, match="synthesize evidence"):
+        tools.read_file("sample.py")
+
+
 def test_history_trimming_preserves_system_goal_and_recent_messages():
     messages = [
         {"role": "system", "content": "system"},
