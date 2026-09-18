@@ -85,7 +85,8 @@ def isolated(tmp_path, monkeypatch):
     # Rendu local simule par defaut : un test ne doit jamais viser RunPod sans le demander.
     monkeypatch.setenv("PODALUX_VIDEO_RENDERER", "local")
     # Les secrets de l'utilisateur (registre Windows) ne doivent jamais fuir dans les tests.
-    monkeypatch.setitem(sys.modules, "winreg", _NoRegistry())
+    if sys.platform == "win32":
+        monkeypatch.setitem(sys.modules, "winreg", _NoRegistry())
     monkeypatch.setattr(config, "PROJECT_ROOT", root)
     monkeypatch.setattr(config, "DATA_DIR", root / "agents" / "data")
     monkeypatch.setattr(config, "DB_PATH", root / "agents" / "data" / "podalux.db")
