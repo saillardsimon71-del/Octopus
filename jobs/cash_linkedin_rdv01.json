@@ -81,19 +81,24 @@
   ],
   "visuel": {
     "hook": {
-      "img": "cash_linkedin_rdv01/hook.jpg"
+      "img": "cash_linkedin_rdv01/hook.jpg",
+      "img2": "cash_linkedin_rdv01/hook_b.jpg"
     },
     "soulagement": {
-      "img": "cash_linkedin_rdv01/soulagement.jpg"
+      "img": "cash_linkedin_rdv01/soulagement.jpg",
+      "img2": "cash_linkedin_rdv01/soulagement_b.jpg"
     },
     "douleur": {
-      "img": "cash_linkedin_rdv01/douleur.jpg"
+      "img": "cash_linkedin_rdv01/douleur.jpg",
+      "img2": "cash_linkedin_rdv01/douleur_b.jpg"
     },
     "preuve": {
-      "img": "cash_linkedin_rdv01/preuve.jpg"
+      "img": "cash_linkedin_rdv01/preuve.jpg",
+      "img2": "cash_linkedin_rdv01/preuve_b.jpg"
     },
     "cta": {
-      "img": "cash_linkedin_rdv01/cta.jpg"
+      "img": "cash_linkedin_rdv01/cta.jpg",
+      "img2": "cash_linkedin_rdv01/cta_b.jpg"
     }
   }
 }

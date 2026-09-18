@@ -80,19 +80,24 @@
   ],
   "visuel": {
     "hook": {
-      "img": "cash_impayes_relance01/hook.jpg"
+      "img": "cash_impayes_relance01/hook.jpg",
+      "img2": "cash_impayes_relance01/hook_b.jpg"
     },
     "preuve": {
-      "img": "cash_impayes_relance01/preuve.jpg"
+      "img": "cash_impayes_relance01/preuve.jpg",
+      "img2": "cash_impayes_relance01/preuve_b.jpg"
     },
     "soulagement": {
-      "img": "cash_impayes_relance01/soulagement.jpg"
+      "img": "cash_impayes_relance01/soulagement.jpg",
+      "img2": "cash_impayes_relance01/soulagement_b.jpg"
     },
     "cta": {
-      "img": "cash_impayes_relance01/cta.jpg"
+      "img": "cash_impayes_relance01/cta.jpg",
+      "img2": "cash_impayes_relance01/cta_b.jpg"
     },
     "douleur": {
-      "img": "cash_impayes_relance01/douleur.jpg"
+      "img": "cash_impayes_relance01/douleur.jpg",
+      "img2": "cash_impayes_relance01/douleur_b.jpg"
     }
   }
 }

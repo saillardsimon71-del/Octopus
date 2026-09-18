@@ -80,19 +80,24 @@
   ],
   "visuel": {
     "hook": {
-      "img": "cash_devis_cgv01/hook.jpg"
+      "img": "cash_devis_cgv01/hook.jpg",
+      "img2": "cash_devis_cgv01/hook_b.jpg"
     },
     "soulagement": {
-      "img": "cash_devis_cgv01/soulagement.jpg"
+      "img": "cash_devis_cgv01/soulagement.jpg",
+      "img2": "cash_devis_cgv01/soulagement_b.jpg"
     },
     "douleur": {
-      "img": "cash_devis_cgv01/douleur.jpg"
+      "img": "cash_devis_cgv01/douleur.jpg",
+      "img2": "cash_devis_cgv01/douleur_b.jpg"
     },
     "preuve": {
-      "img": "cash_devis_cgv01/preuve.jpg"
+      "img": "cash_devis_cgv01/preuve.jpg",
+      "img2": "cash_devis_cgv01/preuve_b.jpg"
     },
     "cta": {
-      "img": "cash_devis_cgv01/cta.jpg"
+      "img": "cash_devis_cgv01/cta.jpg",
+      "img2": "cash_devis_cgv01/cta_b.jpg"
     }
   }
 }

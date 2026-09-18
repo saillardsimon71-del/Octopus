@@ -40,14 +40,16 @@
       "icon": "📈",
       "accent_emoji": "➕",
       "accent_text": "TRAVAIL GRATUIT",
-      "img": "cash_avenant_scope01/hook.jpg"
+      "img": "cash_avenant_scope01/hook.jpg",
+      "img2": "cash_avenant_scope01/hook_b.jpg"
     },
     "douleur": {
       "label": "LE CLIENT QUI ÉLARGIT",
       "icon": "😤",
       "accent_emoji": "⏳",
       "accent_text": "HEURES OFFERTES",
-      "img": "cash_avenant_scope01/douleur.jpg"
+      "img": "cash_avenant_scope01/douleur.jpg",
+      "img2": "cash_avenant_scope01/douleur_b.jpg"
     },
     "preuve": {
       "label": "L'AVENANT PRO",
@@ -69,7 +71,8 @@
           "SIGNÉ ✓"
         ]
       ],
-      "img": "cash_avenant_scope01/preuve.jpg"
+      "img": "cash_avenant_scope01/preuve.jpg",
+      "img2": "cash_avenant_scope01/preuve_b.jpg"
     },
     "soulagement": {
       "label": "CHAQUE AJOUT PAYÉ",
@@ -77,13 +80,15 @@
       "accent_emoji": "✓",
       "accent_text": "SIGNÉ",
       "banner": "AVENANT SIGNÉ",
-      "img": "cash_avenant_scope01/soulagement.jpg"
+      "img": "cash_avenant_scope01/soulagement.jpg",
+      "img2": "cash_avenant_scope01/soulagement_b.jpg"
     },
     "cta": {
       "label": "À VOUS DE JOUER",
       "icon": "👇",
       "accent_emoji": "👇",
-      "img": "cash_avenant_scope01/cta.jpg"
+      "img": "cash_avenant_scope01/cta.jpg",
+      "img2": "cash_avenant_scope01/cta_b.jpg"
     }
   },
   "narration": [
