@@ -223,16 +223,18 @@ def main() -> int:
             clips = fetch_clips(base_query, page, wanted=2)
             if clips:
                 break
-        for rank, item in enumerate(clips[:2]):
-            suffix = "" if rank == 0 else "_b"
+        downloaded_clips = 0
+        for item in clips[:2]:
+            suffix = "" if downloaded_clips == 0 else "_b"
             mp4 = _download_clip(item["url"], clip_dir / f"{role}{suffix}.mp4")
             if mp4 is None:
                 continue
-            visuel.setdefault(role, {})["clip" if rank == 0 else "clip2"] = f"{offer}/{role}{suffix}.mp4"
+            visuel.setdefault(role, {})["clip" if downloaded_clips == 0 else "clip2"] = f"{offer}/{role}{suffix}.mp4"
             credits.append({"role": role, "query": base_query, **item})
             used += 1
+            downloaded_clips += 1
             print(f"broll: {role}{suffix} <- rush {item['provider']} ({item['licence']})")
-        if clips:
+        if downloaded_clips:
             continue  # un segment filme n'a pas besoin de photo
 
         found: list[dict] = []

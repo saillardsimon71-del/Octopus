@@ -91,3 +91,32 @@ def test_main_writes_images_credits_and_job(tmp_path, monkeypatch):
     credits = json.loads((tmp_path / "out" / "offre01" / "credits.json").read_text(encoding="utf-8"))
     assert len(credits) == 2 and credits[0]["licence"] == "cc0 1.0"
     assert "https://page" in (tmp_path / "out" / "offre01" / "credits.txt").read_text(encoding="utf-8")
+
+
+def test_main_falls_back_to_photo_when_all_clip_downloads_fail(tmp_path, monkeypatch):
+    job_path = tmp_path / "offre.json"
+    job_path.write_text(json.dumps({"visuel": {}}), encoding="utf-8")
+    monkeypatch.setattr(fetch_broll, "ROOT", tmp_path)
+    monkeypatch.setattr(fetch_broll, "ROLE_QUERIES", {"hook": ["working computer"]})
+    monkeypatch.setattr(fetch_broll, "fetch_clips", lambda *args, **kwargs: [
+        {"url": "https://clip.mp4", "credit": "video de A", "source": "https://clip",
+         "licence": "Pexels License", "provider": "pexels-video"},
+    ])
+    monkeypatch.setattr(fetch_broll, "_download_clip", lambda *args, **kwargs: None)
+    monkeypatch.setattr(fetch_broll, "fetch_candidates", lambda *args, **kwargs: [
+        {"url": "https://photo.jpg", "credit": "photo de B", "source": "https://photo",
+         "licence": "Pexels License", "provider": "pexels"},
+    ])
+
+    def save_photo(url, target):
+        target.write_bytes(b"jpeg")
+        return target
+
+    monkeypatch.setattr(fetch_broll, "_download_crop", save_photo)
+    monkeypatch.setattr(fetch_broll.sys, "argv", ["fetch_broll.py", str(job_path), "offre01"])
+
+    assert fetch_broll.main() == 0
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    assert job["visuel"]["hook"]["img"] == "offre01/hook.jpg"
+    credits = json.loads((tmp_path / "out" / "offre01" / "credits.json").read_text(encoding="utf-8"))
+    assert [credit["provider"] for credit in credits] == ["pexels"]
