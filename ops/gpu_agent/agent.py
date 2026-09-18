@@ -12,8 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-MODEL = "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-BASE_URL = "http://127.0.0.1:8000/v1"
+MODEL = os.environ.get("OCTOPUS_AGENT_MODEL", "Qwen/Qwen3.8-27B")
+BASE_URL = os.environ.get("OCTOPUS_AGENT_BASE_URL", "http://127.0.0.1:8000/v1")
 MAX_TOOL_OUTPUT = 30_000
 MAX_PATCH_BYTES = 120_000
 MAX_PATCH_FILES = 20
@@ -57,7 +57,7 @@ def parse_action(text: str) -> dict[str, Any]:
     return value
 
 
-def trim_history(messages: list[dict[str, str]], max_chars: int = 70_000) -> list[dict[str, str]]:
+def trim_history(messages: list[dict[str, str]], max_chars: int = 500_000) -> list[dict[str, str]]:
     if sum(len(m.get("content", "")) for m in messages) <= max_chars:
         return messages
     fixed = messages[:2]
@@ -382,6 +382,11 @@ Available tools:
 
 Audit mission: inspect the complete repository architecture and current branch, run the full offline test suite, and create docs/audits/GPU_AUDIT_2026-09-18.md with write_audit_report. Read 20 to 40 strategic files spanning octopus, agents, video_worker, tests, businesses, core, and docs, and run 3 to 12 searches across the repository. Do not attempt to read every file. Once the minimum evidence is collected, stop exploring and synthesize the report. Cover architecture, correctness, security boundaries, reliability, tests, performance, video pipeline, GPU integration, agent/runtime behavior, persistence, operations, and documentation drift. Include sections named Architecture, Findings, and Roadmap. Rank findings P0-P3 even when a rank has no finding. Every finding needs concrete file references and evidence; cite at least 12 distinct Python files. Separate verified facts from hypotheses. End with a dependency-aware roadmap of small independently testable improvement batches. Review the final diff, run the full suite after the report write, and create a local audit checkpoint if checks pass. A final response is rejected until these requirements are verified by the controller.
 """
+    if mode == "build":
+        return common + """
+
+Build mission: implement the concrete user goal as a small number of complete vertical slices. Inspect only the files needed for the first slice, then write tests and code. Reuse the existing OCTOPUS domain, journal, task, economy, resource, business, and GUI/service boundaries instead of creating a parallel framework. Work in local commits. After every behavior change, run targeted tests; before every checkpoint, run the full suite and inspect the diff. Treat external services as adapters with deterministic fakes unless the goal explicitly authorizes a live call. Stop adding features when less than twenty minutes remain and spend the rest on tests, adversarial review, fixes, and a clean checkpoint. Never finish with uncommitted changes or a failing suite.
+"""
     return common + """
 
 Improvement mission: read the GPU audit first, then implement only the requested roadmap batch. Add a failing test before behavior changes, make the smallest coherent patch, run targeted tests, run the full suite, inspect the final diff, and checkpoint only when all checks pass.
@@ -395,8 +400,14 @@ def call_model(messages: list[dict[str, str]]) -> str:
     request = {
         "model": MODEL,
         "messages": messages,
-        "temperature": 0.1,
-        "max_tokens": 4000,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "max_tokens": 16384,
+        "reasoning_effort": "xhigh",
+        "extra_body": {
+            "top_k": 20,
+            "chat_template_kwargs": {"enable_thinking": True, "preserve_thinking": True},
+        },
     }
     try:
         response = client.chat.completions.create(**request, response_format={"type": "json_object"})
@@ -480,7 +491,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, default=Path("/workspace/octopus"))
     parser.add_argument("--state-dir", type=Path, default=Path("/workspace/octopus-agent-state"))
-    parser.add_argument("--mode", choices=("audit", "improve"), default="audit")
+    parser.add_argument("--mode", choices=("audit", "improve", "build"), default="audit")
     parser.add_argument("--goal", default="Perform the complete OCTOPUS GPU audit described by the system prompt.")
     parser.add_argument("--max-steps", type=int, default=80)
     args = parser.parse_args()
