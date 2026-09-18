@@ -15,6 +15,7 @@ remotion/public/img/<offer>/<role>.jpg ; le job recoit visuel.<role>.img.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import zlib
 import sys
@@ -38,7 +39,9 @@ ROLE_QUERIES = {
 # On se limite aux banques de photos de stock libres, ce qui garde le CC0 et un rendu utilisable.
 OPENVERSE_SOURCES = "stocksnap,rawpixel,nappy"
 FREE_LICENSES = ("cc0", "pdm")
-SIZE = "1080:1350"
+SIZE = "1080:1350"          # photos : carte 4/5
+CLIP_SIZE = "1080:1920"     # rushes : plein cadre vertical
+CLIP_SECONDS = float(os.environ.get("PODALUX_CLIP_SECONDS", "6"))
 
 
 def _get(url: str, headers: dict | None = None, timeout: float = 20) -> bytes:
@@ -78,6 +81,67 @@ def openverse(query: str, _key: str = "", page: int = 1) -> list[dict]:
             for item in results if item.get("url")]
 
 
+def pexels_videos(query: str, key: str, page: int = 1) -> list[dict]:
+    """Rushes verticaux Pexels : de vrais plans filmes, gratuits, usage commercial (lien demande)."""
+    url = (f"https://api.pexels.com/videos/search?orientation=portrait&size=medium&per_page=8&page={page}"
+           f"&query=" + urllib.parse.quote(query))
+    data = json.loads(_get(url, {"Authorization": key}))
+    out = []
+    for video in data.get("videos", []):
+        files = [f for f in video.get("video_files", []) if f.get("height") and f.get("link")]
+        if not files:
+            continue
+        # on vise 1920 de haut : au-dessus c'est du poids pour rien, en dessous ca monte mal
+        files.sort(key=lambda f: (abs(f["height"] - 1920), -f["height"]))
+        out.append({"url": files[0]["link"], "credit": f"Video de {(video.get('user') or {}).get('name', '?')} sur Pexels",
+                    "source": video.get("url", ""), "licence": "Pexels License", "provider": "pexels-video",
+                    "seconds": video.get("duration", 0)})
+    return out
+
+
+def fetch_clips(query: str, page: int = 1, wanted: int = 2) -> list[dict]:
+    key = os.environ.get("PEXELS_API_KEY", "").strip()
+    if not key:
+        return []
+    found, seen = [], set()
+    for attempt in ([page, 1] if page != 1 else [1]):
+        try:
+            items = pexels_videos(query, key, attempt)
+        except Exception as exc:
+            print(f"broll: pexels video indisponible ({type(exc).__name__}: {str(exc)[:100]})")
+            return []
+        for item in items:
+            if item["url"] in seen:
+                continue
+            seen.add(item["url"])
+            found.append(item)
+            if len(found) >= wanted:
+                return found
+    return found
+
+
+def _download_clip(url: str, mp4: Path) -> Path | None:
+    """Telecharge un rush et le normalise : 1080x1920, 30 i/s, sans audio, `CLIP_SECONDS` secondes.
+
+    Le rush est boucle s'il est plus court que la duree voulue, pour qu'un plan ne se fige jamais.
+    """
+    raw = mp4.with_suffix(".src")
+    try:
+        raw.write_bytes(_get(url, timeout=180))
+    except Exception as exc:
+        print(f"broll: telechargement du rush echoue ({type(exc).__name__}: {str(exc)[:80]})")
+        return None
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-stream_loop", "3", "-i", str(raw), "-t", f"{CLIP_SECONDS:g}",
+           "-vf", f"scale={CLIP_SIZE}:force_original_aspect_ratio=increase,crop={CLIP_SIZE},fps=30",
+           "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", str(mp4)]
+    done = subprocess.run(cmd, capture_output=True, text=True)
+    raw.unlink(missing_ok=True)
+    if done.returncode != 0 or not mp4.exists() or mp4.stat().st_size == 0:
+        print(f"broll: normalisation du rush echouee ({done.stderr[-120:].strip()})")
+        return None
+    return mp4
+
+
 def _relevant(item: dict, query: str) -> bool:
     """Au moins un mot de la requete dans le titre ou les mots-cles du resultat."""
     words = {w for w in query.lower().split() if len(w) > 3}
@@ -86,7 +150,6 @@ def _relevant(item: dict, query: str) -> bool:
 
 
 def providers() -> list[tuple[str, callable, str]]:
-    import os
     return [("pexels", pexels, os.environ.get("PEXELS_API_KEY", "").strip()),
             ("pixabay", pixabay, os.environ.get("PIXABAY_API_KEY", "").strip()),
             ("openverse", openverse, "always")]
@@ -151,8 +214,27 @@ def main() -> int:
     target_dir.mkdir(parents=True, exist_ok=True)
     credits, used = [], 0
     visuel = job.setdefault("visuel", {})
+    clip_dir = ROOT / "remotion" / "public" / "video" / offer
+    clip_dir.mkdir(parents=True, exist_ok=True)
     page = 1 + zlib.crc32(offer.encode()) % 4  # variete entre offres, deterministe pour une offre donnee
     for role, queries in ROLE_QUERIES.items():
+        clips: list[dict] = []
+        for base_query in queries:
+            clips = fetch_clips(base_query, page, wanted=2)
+            if clips:
+                break
+        for rank, item in enumerate(clips[:2]):
+            suffix = "" if rank == 0 else "_b"
+            mp4 = _download_clip(item["url"], clip_dir / f"{role}{suffix}.mp4")
+            if mp4 is None:
+                continue
+            visuel.setdefault(role, {})["clip" if rank == 0 else "clip2"] = f"{offer}/{role}{suffix}.mp4"
+            credits.append({"role": role, "query": base_query, **item})
+            used += 1
+            print(f"broll: {role}{suffix} <- rush {item['provider']} ({item['licence']})")
+        if clips:
+            continue  # un segment filme n'a pas besoin de photo
+
         found: list[dict] = []
         for base_query in queries:
             found = fetch_candidates(base_query, page, wanted=2)

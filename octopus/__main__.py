@@ -202,6 +202,52 @@ def cmd_businesses(args) -> int:
     return 0
 
 
+def cmd_resources(args) -> int:
+    """Inventaire des ressources reelles : ce qui existe, ce qui repond, ce qui manque."""
+    from . import resources, tasks
+    action = args.resources_cmd or "list"
+    if action == "sync":
+        result = resources.sync()
+        print(f"declarees : {len(result['declared'])} ; ajoutees : {', '.join(result['added']) or 'aucune'} ; "
+              f"mises a jour : {', '.join(result['updated']) or 'aucune'}")
+        if result["unknown"]:
+            print("en base mais plus declarees : " + ", ".join(result["unknown"]))
+        return 0
+    if action == "check":
+        rows = [resources.check(args.key)] if args.key else resources.check_all()
+        print(resources.render(rows))
+        return 0
+    if action == "show":
+        item = resources.get(args.key)
+        if item is None:
+            print(f"ressource inconnue : {args.key}")
+            return 2
+        print(json.dumps(item, ensure_ascii=False, indent=1, default=str))
+        return 0
+    if action == "request":
+        task_id = resources.request(args.key, args.need, args.question, created_by="human")
+        print(f"demande en file : tache #{task_id} (lancer un worker, puis repondre avec « octopus answer »)")
+        return 0
+    if action == "grant":
+        item = resources.update(args.key, actor="human", access=args.access,
+                                state=args.state, notes=args.notes)
+        print(f"{item['key']} : acces {item['access']}, etat {item['state']}")
+        return 0
+    if action == "blocked":
+        rows = resources.blocked()
+        for r in rows:
+            needs = (" ; humain : " + ", ".join(r["needs"])) if r["needs"] else ""
+            print(f"{r['key']:22} {r['reason']}{needs}")
+        if not rows:
+            print("aucune ressource bloquee")
+        return 0
+    if action == "overview":
+        print(json.dumps(resources.overview(), ensure_ascii=False, indent=1))
+        return 0
+    print(resources.render(resources.list_resources(state=args.state, kind=args.kind)))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     _safe_console()
     parser = argparse.ArgumentParser(prog="octopus", description="OCTOPUS : journal, passerelle LLM, banc d'evaluation")
@@ -247,6 +293,29 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("events", help="evenements recents")
     p.add_argument("--since", type=int, default=0)
     p.add_argument("--limit", type=int, default=100)
+    p = sub.add_parser("resources", help="inventaire des ressources reelles (etat, sondes, blocages)")
+    rsub = p.add_subparsers(dest="resources_cmd")
+    lst = rsub.add_parser("list", help="inventaire")
+    lst.add_argument("--state", default=None)
+    lst.add_argument("--kind", default=None)
+    rsub.add_parser("sync", help="aligne la base sur resources.toml")
+    chk = rsub.add_parser("check", help="passe les sondes")
+    chk.add_argument("key", nargs="?", default=None)
+    shw = rsub.add_parser("show", help="detail d'une ressource")
+    shw.add_argument("key")
+    req = rsub.add_parser("request", help="demande a l'humain de creer/connecter/autoriser")
+    req.add_argument("key")
+    req.add_argument("need")
+    req.add_argument("question")
+    grt = rsub.add_parser("grant", help="accorde un acces ou fixe un etat constate")
+    grt.add_argument("key")
+    grt.add_argument("--access", default=None)
+    grt.add_argument("--state", default=None)
+    grt.add_argument("--notes", default=None)
+    rsub.add_parser("blocked", help="ce qui manque pour avancer")
+    rsub.add_parser("overview", help="resume chiffre")
+    p.set_defaults(state=None, kind=None, key=None)
+
     p = sub.add_parser("businesses", help="tableau de bord par activite")
     p.add_argument("--days", type=int, default=7)
     from .media import cli as media_cli
@@ -258,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
                 "worker": cmd_worker, "enqueue": cmd_enqueue, "tasks": cmd_tasks, "cancel": cmd_cancel,
                 "ask": cmd_ask, "answer": cmd_answer, "schedule": cmd_schedule, "events": cmd_events,
                 "video": media_cli.run, "businesses": cmd_businesses, "strategy": strategy_cli.run,
-                "economy": strategy_cli.run_economy}
+                "economy": strategy_cli.run_economy, "resources": cmd_resources}
     return commands[args.cmd](args)
 
 

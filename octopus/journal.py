@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from . import enabled, paths
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -452,7 +452,36 @@ CREATE TABLE IF NOT EXISTS reinvest_policies (
 );
 """
 
-_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4), (5, _SCHEMA_V5))
+_SCHEMA_V6 = """
+CREATE TABLE IF NOT EXISTS resources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,
+    label TEXT NOT NULL,
+    locator TEXT,
+    business TEXT,
+    state TEXT NOT NULL DEFAULT 'declared',
+    access TEXT NOT NULL DEFAULT 'none',
+    nature TEXT NOT NULL DEFAULT 'unverified',
+    capabilities TEXT NOT NULL DEFAULT '[]',
+    needs TEXT NOT NULL DEFAULT '[]',
+    probe TEXT,
+    probe_args TEXT NOT NULL DEFAULT '{}',
+    source_ref TEXT,
+    notes TEXT,
+    declared_at REAL,
+    last_check_at REAL,
+    last_check_ok INTEGER,
+    last_check_detail TEXT,
+    channel_id INTEGER,
+    created_by TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_resources_state ON resources(state, kind);
+"""
+
+_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4), (5, _SCHEMA_V5), (6, _SCHEMA_V6))
 
 _LLM_COLUMNS = (
     "ts", "run_id", "root_run_id", "business", "agent", "task", "profile", "model", "provider",

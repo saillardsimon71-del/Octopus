@@ -2,6 +2,8 @@ import React, {useEffect} from 'react';
 import {
   AbsoluteFill,
   Img,
+  OffthreadVideo,
+  Sequence,
   interpolate,
   spring,
   staticFile,
@@ -17,12 +19,13 @@ import {FONT, waitFonts} from './fonts';
 const P = JOB.palette as Record<string, string>;
 
 type Accent = {emoji: string; text: string; bg: string};
-type Meta = {label: string; icon: string; img: string; img2?: string; accent: Accent; full: boolean};
+type Meta = {label: string; icon: string; img: string; img2?: string; clip?: string; clip2?: string;
+  accent: Accent; full: boolean};
 
 // Libelles propres a l'offre : fournis par le job (champ `visuel`), sinon ceux de l'offre Impayes
 // d'origine. Avant, ils etaient en dur : la video Devis/CGV affichait "FACTURE IMPAYEE" (audit C6).
 type RoleText = {label?: string; icon?: string; accent_emoji?: string; accent_text?: string;
-  img?: string; img2?: string};
+  img?: string; img2?: string; clip?: string; clip2?: string};
 type Visuel = {
   hook?: RoleText;
   douleur?: RoleText;
@@ -59,6 +62,8 @@ const meta = (role: keyof Visuel, img: string, full: boolean, bg: string, accent
   icon: V[role].icon ?? '',
   img,
   img2: V[role].img2,
+  clip: V[role].clip,
+  clip2: V[role].clip2,
   full,
   accent: {emoji: V[role].accent_emoji ?? '', text: accentText ?? V[role].accent_text ?? '', bg},
 });
@@ -118,19 +123,22 @@ const countUp = (text: string, progress: number): string =>
     return Math.round(value * progress).toLocaleString('fr-FR').replace(/ /g, ' ');
   });
 
-type BackdropProps = {meta: Meta; prog: number; appear: number; opacity: number; frame: number; elapsed: number};
+type BackdropProps = {meta: Meta; prog: number; appear: number; opacity: number; frame: number;
+  elapsed: number; segStartFrame: number; fps: number};
 
 /** Image d'un segment : zoom lent, fondu d'entree, et fondu croise avec le segment precedent. */
 const BEAT_S = 1.8;
 
-const Backdrop: React.FC<BackdropProps> = ({meta, prog, appear, opacity, frame, elapsed}) => {
+const Backdrop: React.FC<BackdropProps> = ({meta, prog, appear, opacity, frame, elapsed, segStartFrame, fps}) => {
   if (opacity <= 0.01) return null;
   // Un plan fixe de 3 s ne tient pas : on change de cadrage toutes les 1,8 s sur la meme photo.
   const beat = Math.floor(elapsed / BEAT_S);
   const inBeat = (elapsed % BEAT_S) / BEAT_S;
   const tight = beat % 2 === 1;
-  const shot = tight && meta.img2 ? meta.img2 : meta.img;  // deux plans quand le segment en a deux
-  const zoom = (tight && !meta.img2 ? 1.26 : 1.0) + inBeat * 0.1;
+  const clip = tight && meta.clip2 ? meta.clip2 : meta.clip;     // rush filme si le segment en a un
+  const shot = tight && meta.img2 ? meta.img2 : meta.img;        // sinon photo
+  // Un rush bouge deja : on se contente d'une legere poussee. Une photo doit tout au zoom.
+  const zoom = clip ? 1.0 + inBeat * 0.03 : (tight && !meta.img2 ? 1.26 : 1.0) + inBeat * 0.1;
   const drift = (tight ? 2.5 : -2.5) + inBeat * (tight ? -2 : 2);
   const originY = tight ? '38%' : '52%';
   const accent = meta.accent;
@@ -143,13 +151,24 @@ const Backdrop: React.FC<BackdropProps> = ({meta, prog, appear, opacity, frame, 
       <span>{accent.text}</span>
     </div>
   );
+  const mediaStyle: React.CSSProperties = {
+    width: '100%', height: '100%', objectFit: 'cover', filter: GRADE,
+    transformOrigin: `50% ${originY}`,
+    transform: `scale(${zoom * (1 + 0.035 * (1 - appear))}) translateX(${clip ? drift * 0.3 : drift}%)`,
+  };
+  const media = clip ? (
+    <Sequence from={Math.max(0, Math.round(segStartFrame + beat * BEAT_S * fps))}
+      durationInFrames={Math.ceil(BEAT_S * fps) + 2} layout="none">
+      <OffthreadVideo src={staticFile(`video/${clip}`)} muted style={mediaStyle} />
+    </Sequence>
+  ) : (
+    <Img src={staticFile(`img/${shot}`)} style={mediaStyle} />
+  );
+
   if (meta.full) {
     return (
       <AbsoluteFill style={{opacity}}>
-        <Img src={staticFile(`img/${shot}`)}
-          style={{width: '100%', height: '100%', objectFit: 'cover', filter: GRADE,
-            transformOrigin: `50% ${originY}`,
-            transform: `scale(${zoom * (1 + 0.035 * (1 - appear))}) translateX(${drift}%)`}} />
+        {media}
         <div style={{position: 'absolute', inset: 0, background: 'linear-gradient(180deg, rgba(43,18,6,0.30) 0%, rgba(43,18,6,0.05) 40%, rgba(43,18,6,0.45) 100%)'}} />
         {badge(44, 90, 50)}
       </AbsoluteFill>
@@ -159,10 +178,7 @@ const Backdrop: React.FC<BackdropProps> = ({meta, prog, appear, opacity, frame, 
     <AbsoluteFill style={{top: 100, left: 70, width: 940, height: CARD_H, opacity: opacity * appear,
       transform: `scale(${0.96 + 0.04 * appear})`, transformOrigin: '50% 50%'}}>
       <div style={{position: 'absolute', inset: 0, borderRadius: 44, overflow: 'hidden', boxShadow: '0 24px 60px rgba(60,20,0,0.35)'}}>
-        <Img src={staticFile(`img/${shot}`)}
-          style={{width: '100%', height: '100%', objectFit: 'cover', filter: GRADE,
-            transformOrigin: `50% ${originY}`,
-            transform: `scale(${zoom}) translateY(${drift}%)`}} />
+        {media}
         <div style={{position: 'absolute', inset: 0, background: 'linear-gradient(180deg, rgba(43,18,6,0.02) 0%, rgba(43,18,6,0.48) 100%)'}} />
       </div>
       {badge(40, 26, 26)}
@@ -264,11 +280,12 @@ export const CashShort: React.FC = () => {
       ))}
 
       <Backdrop meta={prevMeta} prog={1} appear={1} opacity={1 - cross} frame={frame}
-        elapsed={Math.max(0, t - prevSeg.start)} />
+        elapsed={Math.max(0, t - prevSeg.start)} segStartFrame={prevSeg.start * fps} fps={fps} />
       <Backdrop meta={meta} prog={segProg} appear={segIn} opacity={cross} frame={frame}
-        elapsed={t - seg.start} />
+        elapsed={t - seg.start} segStartFrame={seg.start * fps} fps={fps} />
       {/* boucle : la derniere image revient vers la premiere, le replay se declenche sans decision */}
       <Backdrop meta={SEG.hook} prog={0} appear={0} frame={frame} elapsed={0}
+        segStartFrame={durationInFrames - 0.55 * fps} fps={fps}
         opacity={interpolate(t, [durationInFrames / fps - 0.55, durationInFrames / fps - 0.05], [0, 1],
           {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'})} />
 

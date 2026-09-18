@@ -81,23 +81,33 @@
   "visuel": {
     "hook": {
       "img": "cash_devis_cgv01/hook.jpg",
-      "img2": "cash_devis_cgv01/hook_b.jpg"
+      "img2": "cash_devis_cgv01/hook_b.jpg",
+      "clip": "cash_devis_cgv01/hook.mp4",
+      "clip2": "cash_devis_cgv01/hook_b.mp4"
     },
     "soulagement": {
       "img": "cash_devis_cgv01/soulagement.jpg",
-      "img2": "cash_devis_cgv01/soulagement_b.jpg"
+      "img2": "cash_devis_cgv01/soulagement_b.jpg",
+      "clip": "cash_devis_cgv01/soulagement.mp4",
+      "clip2": "cash_devis_cgv01/soulagement_b.mp4"
     },
     "douleur": {
       "img": "cash_devis_cgv01/douleur.jpg",
-      "img2": "cash_devis_cgv01/douleur_b.jpg"
+      "img2": "cash_devis_cgv01/douleur_b.jpg",
+      "clip": "cash_devis_cgv01/douleur.mp4",
+      "clip2": "cash_devis_cgv01/douleur_b.mp4"
     },
     "preuve": {
       "img": "cash_devis_cgv01/preuve.jpg",
-      "img2": "cash_devis_cgv01/preuve_b.jpg"
+      "img2": "cash_devis_cgv01/preuve_b.jpg",
+      "clip": "cash_devis_cgv01/preuve.mp4",
+      "clip2": "cash_devis_cgv01/preuve_b.mp4"
     },
     "cta": {
       "img": "cash_devis_cgv01/cta.jpg",
-      "img2": "cash_devis_cgv01/cta_b.jpg"
+      "img2": "cash_devis_cgv01/cta_b.jpg",
+      "clip": "cash_devis_cgv01/cta.mp4",
+      "clip2": "cash_devis_cgv01/cta_b.mp4"
     }
   }
 }

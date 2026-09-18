@@ -1,0 +1,252 @@
+# Inventaire des ressources reelles mises a disposition d'OCTOPUS.
+#
+# Ce fichier decrit CE QUI EXISTE, pas ce qu'il faut en faire. Aucune ligne ici n'est une consigne
+# commerciale : les decisions d'usage, de combinaison ou d'abandon appartiennent a OCTOPUS et
+# passent par la boucle strategique et economique.
+#
+# - `capabilities` : ce que la ressource permet techniquement, pas ce qu'on veut en tirer.
+# - `needs`        : les frontieres qui exigent reellement un humain (login, oauth, 2fa, kyc,
+#                    signature, bank_validation, legal, payment_method, captcha).
+# - `probe`        : sonde automatique quand un constat objectif est possible (http, dns, env,
+#                    command, host). Sans sonde, la ressource reste `declared` jusqu'a constat.
+#
+# `python -m octopus resources sync` puis `check` mettent la base a jour.
+
+# --- identite legale et obligations ---
+[[resource]]
+key = "micro_entreprise"
+kind = "legal"
+label = "Micro-entreprise francaise active (SIRET)"
+capabilities = ["facturer", "encaisser", "contracter"]
+needs = ["legal"]
+notes = "Statut et SIRET existants. Etat a constater par l'humain (aucune sonde automatique ici)."
+
+[[resource]]
+key = "impots"
+kind = "administration"
+label = "Espace impots"
+locator = "https://www.impots.gouv.fr"
+capabilities = ["declarer", "consulter_obligations"]
+needs = ["login", "2fa"]
+
+[[resource]]
+key = "urssaf"
+kind = "administration"
+label = "Espace URSSAF"
+locator = "https://www.autoentrepreneur.urssaf.fr"
+capabilities = ["declarer_chiffre_affaires", "consulter_cotisations"]
+needs = ["login", "2fa"]
+
+[[resource]]
+key = "france_travail"
+kind = "administration"
+label = "Espace France Travail"
+locator = "https://www.francetravail.fr"
+capabilities = ["consulter_droits", "declarer_situation"]
+needs = ["login", "2fa"]
+
+# --- argent ---
+[[resource]]
+key = "compte_bancaire"
+kind = "finance"
+label = "Compte bancaire personnel utilise pour l'activite"
+capabilities = ["recevoir_virement", "payer"]
+needs = ["login", "2fa", "bank_validation"]
+notes = "Separation d'un compte dedie : decision a prendre si un besoin observe l'exige, pas avant."
+
+[[resource]]
+key = "stripe"
+kind = "paiement"
+label = "Stripe (liens de paiement et produits deja commences)"
+locator = "https://dashboard.stripe.com"
+capabilities = ["encaisser", "lien_paiement", "catalogue_produits", "api"]
+needs = ["login", "oauth"]
+probe = "env"
+probe_args = { vars = ["STRIPE_API_KEY"] }
+
+[[resource]]
+key = "revolut"
+kind = "finance"
+label = "Revolut"
+capabilities = ["recevoir_virement", "payer", "multi_devises"]
+needs = ["login", "2fa"]
+
+# --- places de marche et vente ---
+[[resource]]
+key = "fiverr"
+kind = "marketplace"
+label = "Fiverr"
+locator = "https://www.fiverr.com"
+capabilities = ["vendre_prestation", "audience_entrante"]
+needs = ["login", "captcha"]
+
+[[resource]]
+key = "comeup"
+kind = "marketplace"
+label = "ComeUp"
+locator = "https://comeup.com"
+capabilities = ["vendre_prestation", "audience_entrante"]
+needs = ["login"]
+
+[[resource]]
+key = "vinted"
+kind = "marketplace"
+label = "Vinted"
+locator = "https://www.vinted.fr"
+capabilities = ["vendre_objet"]
+needs = ["login"]
+
+[[resource]]
+key = "ebay"
+kind = "marketplace"
+label = "eBay"
+locator = "https://www.ebay.fr"
+capabilities = ["vendre_objet", "api"]
+needs = ["login", "oauth"]
+
+[[resource]]
+key = "leboncoin"
+kind = "marketplace"
+label = "Leboncoin"
+locator = "https://www.leboncoin.fr"
+capabilities = ["vendre_objet", "vendre_prestation"]
+needs = ["login", "captcha"]
+
+# --- presence en ligne ---
+[[resource]]
+key = "domaine_sitequivend"
+kind = "domaine"
+label = "Domaine sitequivend.fr"
+locator = "sitequivend.fr"
+capabilities = ["heberger_site", "email", "sous_domaines"]
+probe = "dns"
+
+[[resource]]
+key = "site_sitequivend"
+kind = "site"
+label = "Site publie (Netlify)"
+locator = "https://sitequivend.fr"
+capabilities = ["publier_page", "collecter_contact", "heberger_offre"]
+probe = "http"
+
+[[resource]]
+key = "ovh"
+kind = "hebergement"
+label = "Compte OVH (registrar)"
+locator = "https://www.ovh.com/manager"
+capabilities = ["gerer_dns", "gerer_domaines", "email"]
+needs = ["login", "2fa"]
+
+[[resource]]
+key = "netlify"
+kind = "hebergement"
+label = "Compte Netlify"
+locator = "https://app.netlify.com"
+capabilities = ["deployer_site", "formulaires", "fonctions"]
+needs = ["login", "oauth"]
+
+[[resource]]
+key = "email_pro"
+kind = "email"
+label = "Email professionnel simon@sitequivend.fr"
+capabilities = ["envoyer_email", "recevoir_email"]
+needs = ["login"]
+notes = "Adresse a confirmer (sitequivend.fr / sitekivend.fr) avant tout envoi."
+
+[[resource]]
+key = "google_compte"
+kind = "compte"
+label = "Compte Google (point d'acces commun)"
+capabilities = ["oauth", "drive", "search_console", "youtube"]
+needs = ["login", "oauth", "2fa"]
+notes = "Point d'acces unique assume. Une separation future serait une decision, pas un prerequis."
+
+[[resource]]
+key = "search_console"
+kind = "analytics"
+label = "Google Search Console"
+locator = "https://search.google.com/search-console"
+capabilities = ["mesurer_requetes", "mesurer_indexation"]
+needs = ["oauth"]
+notes = "Propriete du domaine a verifier."
+
+# --- audiences ---
+[[resource]]
+key = "tiktok"
+kind = "reseau"
+label = "TikTok"
+locator = "https://www.tiktok.com"
+capabilities = ["publier_video", "audience", "messagerie"]
+needs = ["login", "captcha"]
+
+[[resource]]
+key = "instagram"
+kind = "reseau"
+label = "Instagram"
+locator = "https://www.instagram.com"
+capabilities = ["publier_video", "publier_image", "audience", "messagerie"]
+needs = ["login", "2fa"]
+
+[[resource]]
+key = "youtube"
+kind = "reseau"
+label = "YouTube"
+locator = "https://www.youtube.com"
+capabilities = ["publier_video", "audience", "api"]
+needs = ["oauth"]
+
+[[resource]]
+key = "x"
+kind = "reseau"
+label = "X"
+locator = "https://x.com"
+capabilities = ["publier_texte", "audience", "messagerie"]
+needs = ["login"]
+
+[[resource]]
+key = "reddit"
+kind = "reseau"
+label = "Reddit"
+locator = "https://www.reddit.com"
+capabilities = ["publier_texte", "audience", "messagerie", "api"]
+needs = ["login"]
+
+[[resource]]
+key = "whatsapp_business"
+kind = "messagerie"
+label = "WhatsApp Business"
+capabilities = ["messagerie", "catalogue"]
+needs = ["login", "2fa"]
+
+# --- moyens techniques ---
+[[resource]]
+key = "omniroute"
+kind = "passerelle_llm"
+label = "OmniRoute (passerelle LLM locale)"
+locator = "http://127.0.0.1:20128/v1/models"
+capabilities = ["llm", "routage_gratuit"]
+probe = "http"
+
+[[resource]]
+key = "openrouter"
+kind = "passerelle_llm"
+label = "OpenRouter"
+locator = "https://openrouter.ai"
+capabilities = ["llm", "api"]
+needs = ["login"]
+probe = "env"
+probe_args = { vars = ["OPENROUTER_API_KEY"] }
+
+[[resource]]
+key = "pc_local"
+kind = "machine"
+label = "PC local disponible en continu"
+capabilities = ["calcul", "rendu_video", "worker_24_7", "stockage"]
+probe = "host"
+
+[[resource]]
+key = "actifs_numeriques_anciens"
+kind = "inconnu"
+label = "Anciens travaux et actifs numeriques a inventorier"
+capabilities = []
+notes = "Existence probable, contenu inconnu : a decouvrir puis a declarer un par un."

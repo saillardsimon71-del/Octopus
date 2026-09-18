@@ -40,3 +40,6 @@ Claude outputs/
 
 # B-roll telecharge par offre (regenere par tools/fetch_broll.py, jamais versionne)
 remotion/public/img/*/
+
+# Rushes telecharges par offre (regeneres par tools/fetch_broll.py)
+remotion/public/video/*/

@@ -1,7 +1,7 @@
 """Handlers génériques du moteur."""
 from __future__ import annotations
 
-from . import report, strategy
+from . import report, resources, strategy
 from .worker import handler
 
 
@@ -51,3 +51,39 @@ def economy_cycle(ctx):
     result = economy.cycle(ctx.business, drive_orbit=bool(ctx.input.get("drive")), budget_usd=budget)
     ctx.emit("economy.cycle.done", {"evaluated": len(result["evaluated"]), "reinvest": result["reinvest"]["status"]})
     return result
+
+
+@handler("resources.audit", max_attempts=2, retry_delay_s=300)
+def resources_audit(ctx):
+    """Constate l'etat reel de l'inventaire : synchronise les declarations, passe les sondes.
+
+    Aucun appel LLM, aucune decision : le resultat dit ce qui repond, ce qui manque, et ce qui exige
+    un humain. Recurrente : `python -m octopus schedule octopus resources.audit --every 86400`.
+    """
+    synced = resources.sync()
+    checked = resources.check_all(kind=ctx.input.get("kind"))
+    blocked = resources.blocked()
+    summary = {"declared": len(synced["declared"]), "added": synced["added"], "checked": len(checked),
+               "available": [r["key"] for r in checked if r["state"] in ("available", "degraded")],
+               "blocked": [{"key": b["key"], "reason": b["reason"], "needs": b["needs"]} for b in blocked]}
+    ctx.emit("resources.audited", summary)
+    return summary
+
+
+@handler("resources.acquire", max_attempts=3, retry_delay_s=60)
+def resources_acquire(ctx):
+    """Frontiere humaine : demande la creation, la connexion ou l'autorisation d'une ressource.
+
+    La tache attend la reponse humaine (la tentative ne compte pas), puis repasse la sonde : si la
+    ressource repond, l'operation qui l'attendait peut reprendre sans nouvelle intervention.
+    """
+    key = str(ctx.input["key"]).strip().lower()
+    need = str(ctx.input.get("need", "create"))
+    question = str(ctx.input.get("question") or f"Ressource {key} : {need} requis")
+    answer = ctx.ask_human(f"resource:{key}:{need}", question,
+                           context={"key": key, "need": need, "requested_by": ctx.input.get("requested_by")})
+    state = resources.check(key)
+    resources.update(key, actor="human", notes=f"reponse humaine ({need}) : {answer[:200]}")
+    ctx.emit("resources.acquired", {"key": key, "need": need, "state": state["state"], "answer": answer[:200]})
+    return {"key": key, "need": need, "state": state["state"], "access": state["access"],
+            "detail": state["last_check_detail"], "answer": answer[:200]}

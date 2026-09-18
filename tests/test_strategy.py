@@ -23,7 +23,7 @@ def _chain(business: str = "podalux"):
 
 # --- migration ---------------------------------------------------------------------------
 
-def test_v4_database_migrates_to_v5_without_losing_data(tmp_path, monkeypatch):
+def test_old_database_migrates_to_the_current_schema_without_losing_data(tmp_path, monkeypatch):
     path = tmp_path / "old.db"
     conn = sqlite3.connect(path)
     for target, script in journal._MIGRATIONS[:4]:
@@ -36,13 +36,13 @@ def test_v4_database_migrates_to_v5_without_losing_data(tmp_path, monkeypatch):
 
     conn = journal.connect()
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == journal.SCHEMA_VERSION == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == journal.SCHEMA_VERSION == 6
         assert conn.execute("SELECT business FROM tasks").fetchone()[0] == "podalux"
         names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     finally:
         conn.close()
     assert {"strategy_objectives", "strategy_hypotheses", "strategy_experiments", "strategy_decisions",
-            "strategy_reviews", "strategy_evidence", "strategy_links"} <= names
+            "strategy_reviews", "strategy_evidence", "strategy_links", "resources"} <= names
 
 
 def test_no_metric_columns_are_stored_as_strategy_facts():

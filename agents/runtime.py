@@ -225,6 +225,25 @@ def _register_channel(args):
     return {"channel_id": channel_id, "access": "none", "note": "accès à qualifier avant toute action"}
 
 
+def _resources_status(args):
+    """Inventaire reel : ce qui existe, ce qui repond, ce qui manque. Aucune consigne d'usage."""
+    from octopus import resources
+    rows = resources.list_resources(capability=args.get("capability"), state=args.get("state"))
+    return {"overview": resources.overview(),
+            "resources": [{k: r[k] for k in ("key", "kind", "label", "state", "access", "capabilities",
+                                             "needs", "last_check_detail")} for r in rows[:40]]}
+
+
+def _request_resource(args):
+    """Frontiere humaine : demande la creation, la connexion ou l'autorisation d'une ressource."""
+    from octopus import resources
+    task_id = resources.request(str(args["key"]), str(args.get("need") or "create"), str(args["question"]),
+                                created_by=f"agent:{_ROLE.get()}", business=_run_business(),
+                                label=args.get("label"), kind=str(args.get("kind") or "autre"))
+    return {"task_id": task_id, "status": "en attente de l'humain",
+            "note": "la tache reprend seule apres la reponse : la sonde est repassee"}
+
+
 def _open_business(args):
     """Ouvre une nouvelle activité : un business n'existe que par ses objets (objectif, grand livre...)."""
     import re as _re
@@ -280,6 +299,8 @@ TOOLS = {
     "register_channel": {"desc": "enregistre un canal économique découvert (site, marketplace, réseau, email, API, publicité...)", "params": {"kind": "str", "name": "str", "locator": "str?", "capabilities": "list", "source_ref": "str?", "notes": "str?"}, "fn": _register_channel},
     "act_on_channel": {"desc": "agit réellement sur un canal (publier, vendre, écrire...) ; bloqué et tracé si l'accès, l'exécuteur ou la dépense manquent", "params": {"channel_id": "int", "action": "str", "payload": "dict", "experiment_id": "int?", "spend_amount": "float?", "spend_currency": "str?"}, "fn": _act_on_channel},
     "open_business": {"desc": "ouvre une nouvelle activité économique distincte (objectif initial en brouillon)", "params": {"business_id": "str", "name": "str", "thesis": "str"}, "fn": _open_business},
+    "resources_status": {"desc": "inventaire des ressources reelles disponibles (comptes, argent, audiences, machines) avec leur etat constate, leur acces et ce qui manque", "params": {"capability": "str?", "state": "str?"}, "fn": _resources_status},
+    "request_resource": {"desc": "demande a l'humain de creer, connecter ou autoriser une ressource manquante (login, oauth, 2fa, kyc, signature, validation bancaire) ; l'operation reprend seule apres la reponse", "params": {"key": "str", "need": "str", "question": "str", "label": "str?", "kind": "str?"}, "fn": _request_resource},
     "request_spend": {"desc": "demande l'autorisation de dépenser (ne paie rien) ; refusée hors enveloppe accordée", "params": {"amount": "float", "currency": "str", "purpose": "str", "experiment_id": "int?"}, "fn": _request_spend},
 }
 

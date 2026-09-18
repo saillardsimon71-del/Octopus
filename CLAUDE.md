@@ -31,6 +31,7 @@ OCTOPUS control plane
   ├─ agents/runtime.py (stable ReAct runtime)
   ├─ agents/cycle.py
   ├─ octopus.tasks (durable local queue / leases / human handoff)
+  ├─ octopus.resources (real-resource inventory: state, probes, human boundary)
   ├─ octopus.llm -> OmniRoute local gateway -> auto/free
   ├─ Playwright Chromium + agents/web_guard.py
   └─ VideoService -> RunPod Serverless -> cloud video worker
@@ -158,6 +159,11 @@ Do not move business agents or cloud rendering into Orca merely because Orca can
 - `octopus/strategy.py` — persisted strategic loop (objectives ... evidence, links, reviews, mission context)
 - `octopus/strategy_cli.py` — `python -m octopus strategy ...`
 - `octopus/connectors.py` — external data sources, unavailable unless a real probe is registered
+- `octopus/resources.py` + `octopus/resource_probes.py` — real-resource environment: inventory declared in
+  `resources.toml`, state only ever set by a probe or a human observation (`declared` until then), access
+  `none/observe/act` with `act` reserved to humans, human boundary through the existing human-request
+  mechanism (`resources.acquire` resumes on its own), `promote_to_channel` links to `economic_channels`
+  without duplicating money logic. Docs: `docs/RESOURCES.md`.
 - `octopus/builtin_handlers.py` — engine tasks, including `strategy.review`
 - `agents/task_handlers.py` — `podalux.*` tasks and generic `orbit.mission`
 - `docs/AUTONOMOUS_SESSION_REPORT.md` / `docs/AUTONOMOUS_WORK_LOG.md` — last autonomous session, verified facts vs hypotheses
@@ -213,4 +219,6 @@ Do not move business agents or cloud rendering into Orca merely because Orca can
 - Do not move business logic into the Tkinter cockpit.
 - Do not block the Tk main loop on network or long-running work.
 - Do not invent client, revenue, margin or social-platform data that has not been connected.
+- Do not mark a resource available without a probe result or a human observation, and do not turn
+  `resources.toml` into a strategy: it is an inventory, the usage decisions belong to OCTOPUS.
 - Do not claim a successful GUI smoke, real render, deployment, or green CI run unless it was actually observed.
