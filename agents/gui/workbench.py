@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import platform
+import queue
 import subprocess
 import threading
 import time
@@ -69,6 +70,7 @@ class PodaluxWorkbench(ctk.CTk):
         self._browser_image = None
         self._system_busy = False
         self._orca_busy = False
+        self._background_results: queue.SimpleQueue = queue.SimpleQueue()
         self._last_activity_signature: tuple | None = None
         self._build_shell()
         self._sync_business_menu()
@@ -763,7 +765,7 @@ class PodaluxWorkbench(ctk.CTk):
                 snapshot = [check.__dict__ for check in run_checks()]
             except Exception as exc:
                 snapshot = [{"name": "Doctor", "ok": False, "blocking": True, "detail": f"{type(exc).__name__}: {exc}"}]
-            self.after(0, lambda: self._finish_doctor(snapshot))
+            self._background_results.put(("doctor", snapshot))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -790,7 +792,7 @@ class PodaluxWorkbench(ctk.CTk):
                     text, color = f"Orca actif : {orca.status()}", COLORS["good"]
             except Exception as exc:
                 text, color = f"Orca indisponible : {exc}", COLORS["warn"]
-            self.after(0, lambda: self._finish_orca(text, color))
+            self._background_results.put(("orca", text, color))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -853,6 +855,7 @@ class PodaluxWorkbench(ctk.CTk):
 
     # refresh ----------------------------------------------------------------------------
     def _refresh(self) -> None:
+        self._drain_background_results()
         self.msg_procs = [p for p in self.msg_procs if p.poll() is None]
         if self.proc is not None and self.proc.poll() is not None:
             run = db.current_run() or {}
@@ -885,6 +888,17 @@ class PodaluxWorkbench(ctk.CTk):
         except Exception as exc:
             self._set_status(f"Interface : {type(exc).__name__}", COLORS["bad"])
         self.after(1500, self._refresh)
+
+    def _drain_background_results(self) -> None:
+        while True:
+            try:
+                result = self._background_results.get_nowait()
+            except queue.Empty:
+                return
+            if result[0] == "doctor":
+                self._finish_doctor(result[1])
+            elif result[0] == "orca":
+                self._finish_orca(result[1], result[2])
 
     def _refresh_browser_view(self) -> None:
         if not hasattr(self, "browser_preview"):

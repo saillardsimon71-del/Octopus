@@ -1,6 +1,8 @@
 """Tests unitaires du Workbench sans ouvrir de fenêtre Tk."""
 from __future__ import annotations
 
+import queue
+import threading
 import time
 
 from agents.gui import main
@@ -73,6 +75,35 @@ def test_workspace_id_normalization_refuses_reserved_all(tmp_path):
         assert "réservé" in str(exc)
     else:
         raise AssertionError("le workspace réservé doit être refusé")
+
+
+def test_background_diagnostics_never_schedule_tk_from_worker_thread(monkeypatch):
+    from agents import doctor
+
+    monkeypatch.setattr(doctor, "run_checks", lambda: [])
+    main_thread = threading.get_ident()
+
+    class Workbench:
+        _system_busy = False
+        system_checks = object()
+        _background_results = queue.SimpleQueue()
+        after_threads = []
+
+        def _set_status(self, *args):
+            pass
+
+        def after(self, *args):
+            self.after_threads.append(threading.get_ident())
+
+    app = Workbench()
+    PodaluxWorkbench._run_doctor(app)
+    deadline = time.time() + 2
+    while app._background_results.empty() and not app.after_threads and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert app.after_threads == []
+    assert app._background_results.get_nowait() == ("doctor", [])
+    assert threading.get_ident() == main_thread
 
 
 def test_workspace_registry_uses_engine_business_ids(tmp_path, monkeypatch, isolated):
