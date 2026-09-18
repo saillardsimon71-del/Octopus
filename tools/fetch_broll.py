@@ -47,39 +47,35 @@ def _get(url: str, headers: dict | None = None, timeout: float = 20) -> bytes:
         return r.read()
 
 
-def pexels(query: str, key: str, page: int = 1) -> dict | None:
-    url = (f"https://api.pexels.com/v1/search?orientation=portrait&per_page=1&page={page}&query="
+def pexels(query: str, key: str, page: int = 1) -> list[dict]:
+    url = (f"https://api.pexels.com/v1/search?orientation=portrait&per_page=6&page={page}&query="
            + urllib.parse.quote(query))
     data = json.loads(_get(url, {"Authorization": key}))
-    for photo in data.get("photos", []):
-        return {"url": photo["src"]["large2x"], "credit": f"Photo de {photo['photographer']} sur Pexels",
-                "source": photo["url"], "licence": "Pexels License", "provider": "pexels"}
-    return None
+    return [{"url": photo["src"]["large2x"], "credit": f"Photo de {photo['photographer']} sur Pexels",
+             "source": photo["url"], "licence": "Pexels License", "provider": "pexels"}
+            for photo in data.get("photos", [])]
 
 
-def pixabay(query: str, key: str, page: int = 1) -> dict | None:
-    url = (f"https://pixabay.com/api/?key={key}&image_type=photo&orientation=vertical&per_page=3&page={page}&q="
+def pixabay(query: str, key: str, page: int = 1) -> list[dict]:
+    url = (f"https://pixabay.com/api/?key={key}&image_type=photo&orientation=vertical&per_page=6&page={page}&q="
            + urllib.parse.quote(query))
     data = json.loads(_get(url))
-    for hit in data.get("hits", []):
-        return {"url": hit["largeImageURL"], "credit": f"Image de {hit['user']} sur Pixabay",
-                "source": hit["pageURL"], "licence": "Pixabay Content License", "provider": "pixabay"}
-    return None
+    return [{"url": hit["largeImageURL"], "credit": f"Image de {hit['user']} sur Pixabay",
+             "source": hit["pageURL"], "licence": "Pixabay Content License", "provider": "pixabay"}
+            for hit in data.get("hits", [])]
 
 
-def openverse(query: str, _key: str = "", page: int = 1) -> dict | None:
+def openverse(query: str, _key: str = "", page: int = 1) -> list[dict]:
     url = (f"https://api.openverse.org/v1/images/?license_type=commercial&size=large&page_size=8&page={page}"
            f"&source={OPENVERSE_SOURCES}&category=photograph&extension=jpg&q=" + urllib.parse.quote(query))
     results = json.loads(_get(url)).get("results", [])
     results = [r for r in results if _relevant(r, query)]  # le moteur elargit : on reste sur le sujet
     results.sort(key=lambda r: 0 if (r.get("license") or "").lower() in FREE_LICENSES else 1)
-    for item in results:
-        if item.get("url"):
-            return {"url": item["url"], "credit": item.get("attribution") or item.get("title", ""),
-                    "source": item.get("foreign_landing_url") or item["url"],
-                    "licence": f"{item.get('license', '?')} {item.get('license_version', '')}".strip(),
-                    "provider": "openverse"}
-    return None
+    return [{"url": item["url"], "credit": item.get("attribution") or item.get("title", ""),
+             "source": item.get("foreign_landing_url") or item["url"],
+             "licence": f"{item.get('license', '?')} {item.get('license_version', '')}".strip(),
+             "provider": "openverse"}
+            for item in results if item.get("url")]
 
 
 def _relevant(item: dict, query: str) -> bool:
@@ -96,24 +92,55 @@ def providers() -> list[tuple[str, callable, str]]:
             ("openverse", openverse, "always")]
 
 
-def fetch_one(query: str, page: int = 1) -> dict | None:
-    """`page` decale la recherche : deux offres qui partagent un role n'ont pas la meme image.
+def fetch_candidates(query: str, page: int = 1, wanted: int = 2) -> list[dict]:
+    """Jusqu'a `wanted` images distinctes pour une requete, chez le premier fournisseur qui repond.
 
-    Une requete etroite peut n'avoir qu'une page : on retombe alors sur la page 1 plutot que
-    de renoncer a l'image.
+    `page` decale la recherche : deux offres qui partagent un role n'ont pas les memes images.
+    Une requete etroite peut n'avoir qu'une page : on retombe alors sur la page 1.
     """
     for name, fn, key in providers():
         if not key:
             continue
+        found: list[dict] = []
+        seen: set[str] = set()
         for attempt in ([page, 1] if page != 1 else [1]):
             try:
-                found = fn(query, key, attempt) if name != "openverse" else fn(query, page=attempt)
-            except Exception as exc:  # reseau, quota, format : on passe au suivant
+                items = fn(query, key, attempt) if name != "openverse" else fn(query, page=attempt)
+            except Exception as exc:  # reseau, quota, format : on passe au fournisseur suivant
                 print(f"broll: {name} indisponible ({type(exc).__name__}: {str(exc)[:100]})")
                 break
-            if found:
-                return found
-    return None
+            for item in items or []:
+                if item["url"] not in seen:
+                    seen.add(item["url"])
+                    found.append(item)
+                if len(found) >= wanted:
+                    return found
+        if found:
+            return found
+    return []
+
+
+def fetch_one(query: str, page: int = 1) -> dict | None:
+    found = fetch_candidates(query, page, wanted=1)
+    return found[0] if found else None
+
+
+def _download_crop(url: str, jpg: Path) -> Path | None:
+    """Telecharge puis recadre en 1080x1350 ; None si le telechargement ou ffmpeg echoue."""
+    raw = jpg.with_suffix(".src")
+    try:
+        raw.write_bytes(_get(url, timeout=60))
+    except Exception as exc:
+        print(f"broll: telechargement echoue ({type(exc).__name__}: {str(exc)[:80]})")
+        return None
+    crop = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw), "-vf",
+                           f"scale={SIZE}:force_original_aspect_ratio=increase,crop={SIZE}",
+                           "-q:v", "3", str(jpg)], capture_output=True, text=True)
+    raw.unlink(missing_ok=True)
+    if crop.returncode != 0 or not jpg.exists():
+        print(f"broll: recadrage echoue ({crop.stderr[-120:].strip()})")
+        return None
+    return jpg
 
 
 def main() -> int:
@@ -126,39 +153,31 @@ def main() -> int:
     visuel = job.setdefault("visuel", {})
     page = 1 + zlib.crc32(offer.encode()) % 4  # variete entre offres, deterministe pour une offre donnee
     for role, queries in ROLE_QUERIES.items():
-        found = base_query = None
+        found: list[dict] = []
         for base_query in queries:
-            found = fetch_one(base_query, page)
+            found = fetch_candidates(base_query, page, wanted=2)
             if found:
                 break
         if not found:
             print(f"broll: {role} -> image par defaut du depot")
             continue
-        raw = target_dir / f"{role}.src"
-        try:
-            raw.write_bytes(_get(found["url"], timeout=60))
-        except Exception as exc:
-            print(f"broll: telechargement {role} echoue ({type(exc).__name__}: {str(exc)[:80]})")
-            continue
-        jpg = target_dir / f"{role}.jpg"
-        crop = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw), "-vf",
-                               f"scale={SIZE}:force_original_aspect_ratio=increase,crop={SIZE}",
-                               "-q:v", "3", str(jpg)], capture_output=True, text=True)
-        raw.unlink(missing_ok=True)
-        if crop.returncode != 0 or not jpg.exists():
-            print(f"broll: recadrage {role} echoue ({crop.stderr[-120:].strip()})")
-            continue
-        visuel.setdefault(role, {})["img"] = f"{offer}/{role}.jpg"
-        credits.append({"role": role, "query": f"{base_query} ({keywords})", **found})
-        used += 1
-        print(f"broll: {role} <- {found['provider']} ({found['licence']})")
+        for rank, item in enumerate(found[:2]):
+            suffix = "" if rank == 0 else "_b"
+            jpg = _download_crop(item["url"], target_dir / f"{role}{suffix}.jpg")
+            if jpg is None:
+                continue
+            visuel.setdefault(role, {})["img" if rank == 0 else "img2"] = f"{offer}/{role}{suffix}.jpg"
+            credits.append({"role": role, "query": f"{base_query} ({keywords})", **item})
+            used += 1
+            print(f"broll: {role}{suffix} <- {item['provider']} ({item['licence']})")
+
     job_path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
     out = ROOT / "out" / offer
     out.mkdir(parents=True, exist_ok=True)
     (out / "credits.json").write_text(json.dumps(credits, ensure_ascii=False, indent=2), encoding="utf-8")
     (out / "credits.txt").write_text(
         "\n".join(f"{c['credit']} — {c['licence']} — {c['source']}" for c in credits), encoding="utf-8")
-    print(f"broll: {used}/{len(ROLE_QUERIES)} images, credits dans {out / 'credits.txt'}")
+    print(f"broll: {used} images pour {len(ROLE_QUERIES)} segments, credits dans {out / 'credits.txt'}")
     return 0
 
 

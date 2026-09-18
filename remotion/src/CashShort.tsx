@@ -17,11 +17,12 @@ import {FONT, waitFonts} from './fonts';
 const P = JOB.palette as Record<string, string>;
 
 type Accent = {emoji: string; text: string; bg: string};
-type Meta = {label: string; icon: string; img: string; accent: Accent; full: boolean};
+type Meta = {label: string; icon: string; img: string; img2?: string; accent: Accent; full: boolean};
 
 // Libelles propres a l'offre : fournis par le job (champ `visuel`), sinon ceux de l'offre Impayes
 // d'origine. Avant, ils etaient en dur : la video Devis/CGV affichait "FACTURE IMPAYEE" (audit C6).
-type RoleText = {label?: string; icon?: string; accent_emoji?: string; accent_text?: string; img?: string};
+type RoleText = {label?: string; icon?: string; accent_emoji?: string; accent_text?: string;
+  img?: string; img2?: string};
 type Visuel = {
   hook?: RoleText;
   douleur?: RoleText;
@@ -57,6 +58,7 @@ const meta = (role: keyof Visuel, img: string, full: boolean, bg: string, accent
   label: V[role].label ?? '',
   icon: V[role].icon ?? '',
   img,
+  img2: V[role].img2,
   full,
   accent: {emoji: V[role].accent_emoji ?? '', text: accentText ?? V[role].accent_text ?? '', bg},
 });
@@ -127,7 +129,8 @@ const Backdrop: React.FC<BackdropProps> = ({meta, prog, appear, opacity, frame, 
   const beat = Math.floor(elapsed / BEAT_S);
   const inBeat = (elapsed % BEAT_S) / BEAT_S;
   const tight = beat % 2 === 1;
-  const zoom = (tight ? 1.26 : 1.0) + inBeat * 0.1;
+  const shot = tight && meta.img2 ? meta.img2 : meta.img;  // deux plans quand le segment en a deux
+  const zoom = (tight && !meta.img2 ? 1.26 : 1.0) + inBeat * 0.1;
   const drift = (tight ? 2.5 : -2.5) + inBeat * (tight ? -2 : 2);
   const originY = tight ? '38%' : '52%';
   const accent = meta.accent;
@@ -143,7 +146,7 @@ const Backdrop: React.FC<BackdropProps> = ({meta, prog, appear, opacity, frame, 
   if (meta.full) {
     return (
       <AbsoluteFill style={{opacity}}>
-        <Img src={staticFile(`img/${meta.img}`)}
+        <Img src={staticFile(`img/${shot}`)}
           style={{width: '100%', height: '100%', objectFit: 'cover', filter: GRADE,
             transformOrigin: `50% ${originY}`,
             transform: `scale(${zoom * (1 + 0.035 * (1 - appear))}) translateX(${drift}%)`}} />
@@ -156,7 +159,7 @@ const Backdrop: React.FC<BackdropProps> = ({meta, prog, appear, opacity, frame, 
     <AbsoluteFill style={{top: 100, left: 70, width: 940, height: CARD_H, opacity: opacity * appear,
       transform: `scale(${0.96 + 0.04 * appear})`, transformOrigin: '50% 50%'}}>
       <div style={{position: 'absolute', inset: 0, borderRadius: 44, overflow: 'hidden', boxShadow: '0 24px 60px rgba(60,20,0,0.35)'}}>
-        <Img src={staticFile(`img/${meta.img}`)}
+        <Img src={staticFile(`img/${shot}`)}
           style={{width: '100%', height: '100%', objectFit: 'cover', filter: GRADE,
             transformOrigin: `50% ${originY}`,
             transform: `scale(${zoom}) translateY(${drift}%)`}} />

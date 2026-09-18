@@ -25,7 +25,8 @@ def test_openverse_prefers_free_licenses(monkeypatch):
     ]}
     monkeypatch.setattr(fetch_broll, "_get", lambda url, headers=None, timeout=20: json.dumps(payload).encode())
     found = fetch_broll.openverse("signing contract")
-    assert found["url"] == "https://x/cc0.jpg" and found["licence"] == "cc0 1.0" and found["provider"] == "openverse"
+    assert [f["url"] for f in found] == ["https://x/cc0.jpg", "https://x/by.jpg"]  # CC0 d'abord, hors-sujet ecarte
+    assert found[0]["licence"] == "cc0 1.0" and found[0]["provider"] == "openverse"
 
 
 def test_irrelevant_results_are_dropped():
@@ -55,9 +56,9 @@ def test_page_varies_by_offer():
 def test_provider_failure_falls_through(monkeypatch):
     monkeypatch.setenv("PEXELS_API_KEY", "cle")
     monkeypatch.setattr(fetch_broll, "pexels", lambda q, k, page=1: (_ for _ in ()).throw(OSError("reseau")))
-    monkeypatch.setattr(fetch_broll, "openverse", lambda q, k="", page=1: {"provider": "openverse", "url": "u",
-                                                                                 "credit": "c", "source": "s",
-                                                                                 "licence": "cc0 1.0"})
+    monkeypatch.setattr(fetch_broll, "openverse", lambda q, k="", page=1: [{"provider": "openverse", "url": "u",
+                                                                           "credit": "c", "source": "s",
+                                                                           "licence": "cc0 1.0"}])
     assert fetch_broll.fetch_one("contrat")["provider"] == "openverse"
 
 
@@ -66,9 +67,11 @@ def test_main_writes_images_credits_and_job(tmp_path, monkeypatch):
     job_path.write_text(json.dumps({"keywords": ["avenant", "scope"], "visuel": {"hook": {"label": "H"}}}),
                         encoding="utf-8")
     monkeypatch.setattr(fetch_broll, "ROOT", tmp_path)
-    monkeypatch.setattr(fetch_broll, "fetch_one", lambda query, page=1: {
-        "url": "https://x.jpg", "credit": "photo de A", "source": "https://page", "licence": "cc0 1.0",
-        "provider": "openverse"} if "contract" in query else None)
+    monkeypatch.setattr(fetch_broll, "fetch_candidates", lambda query, page=1, wanted=2: [
+        {"url": "https://x.jpg", "credit": "photo de A", "source": "https://page", "licence": "cc0 1.0",
+         "provider": "openverse"},
+        {"url": "https://x2.jpg", "credit": "photo de B", "source": "https://page2", "licence": "cc0 1.0",
+         "provider": "openverse"}] if "contract" in query or "signing" in query else [])
     monkeypatch.setattr(fetch_broll, "_get", lambda url, headers=None, timeout=20: b"JPEGDATA")
 
     def fake_ffmpeg(cmd, capture_output=True, text=True):
@@ -81,9 +84,10 @@ def test_main_writes_images_credits_and_job(tmp_path, monkeypatch):
     assert fetch_broll.main() == 0
 
     job = json.loads(job_path.read_text(encoding="utf-8"))
-    assert job["visuel"]["preuve"]["img"] == "offre01/preuve.jpg"  # seul le role "contract..." a une image
+    assert job["visuel"]["preuve"]["img"] == "offre01/preuve.jpg"  # seul le role "signing contract" a des images
+    assert job["visuel"]["preuve"]["img2"] == "offre01/preuve_b.jpg"  # deux plans par segment
     assert "img" not in job["visuel"]["hook"] and job["visuel"]["hook"]["label"] == "H"
     assert (tmp_path / "remotion" / "public" / "img" / "offre01" / "preuve.jpg").exists()
     credits = json.loads((tmp_path / "out" / "offre01" / "credits.json").read_text(encoding="utf-8"))
-    assert len(credits) == 1 and credits[0]["licence"] == "cc0 1.0"
+    assert len(credits) == 2 and credits[0]["licence"] == "cc0 1.0"
     assert "https://page" in (tmp_path / "out" / "offre01" / "credits.txt").read_text(encoding="utf-8")
