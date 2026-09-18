@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import base64
+import json
 
-from octopus.media.minimax_h3_cloud import H3Result, MiniMaxH3Config, align_frames, build_t2v_workflow, save_result
+import pytest
+
+from octopus.media.minimax_h3_cloud import H3Result, MiniMaxH3CloudError, align_frames, build_t2v_workflow, save_result
 from octopus.media import handlers, presets
+from octopus.video.state import AmbiguousSubmissionError
 
 
 def test_h3_frame_alignment():
@@ -109,7 +113,6 @@ def test_h3_submission_is_refused_without_estimate_or_allowance(monkeypatch, iso
         def emit(self, *args, **kwargs):
             pass
 
-    import pytest
     for setup in (lambda: None, lambda: monkeypatch.setenv("OCTOPUS_H3_JOB_COST_ESTIMATE", "0.50 USD")):
         setup()
         with pytest.raises(Exception, match="aucune vidéo"):
@@ -120,3 +123,74 @@ def test_h3_submission_is_refused_without_estimate_or_allowance(monkeypatch, iso
     with pytest.raises(Exception, match="aucune vidéo"):
         handlers.video_generate(Ctx())
     assert submits == []
+
+
+def test_h3_does_not_resubmit_ambiguous_submission(monkeypatch, isolated):
+    state_dir = isolated / "h3-state"
+    state_dir.mkdir()
+    (state_dir / "task-10-v1.json").write_text(
+        json.dumps({"schema_version": "1", "remote_id": None, "status": "SUBMITTING"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OCTOPUS_VIDEO_H3_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("OCTOPUS_MINIMAX_H3_ENDPOINT_ID", "endpoint")
+    monkeypatch.setenv("OCTOPUS_MINIMAX_H3_API_TOKEN", "secret")
+
+    class NeverSubmit:
+        def __init__(self, config):
+            pass
+
+        def submit(self, workflow):
+            raise AssertionError("la soumission ambiguë ne doit pas être répétée")
+
+    monkeypatch.setattr(handlers, "MiniMaxH3RunPodClient", NeverSubmit)
+
+    class Ctx:
+        id = 10
+        input = {"preset": "h3", "prompt": "test"}
+        business = "podalux"
+
+        def cancelled(self):
+            return False
+
+        def emit(self, *args, **kwargs):
+            pass
+
+    with pytest.raises(AmbiguousSubmissionError, match="task-10-v1"):
+        handlers.video_generate(Ctx())
+
+
+def test_h3_submit_failure_keeps_ambiguous_state(monkeypatch, isolated):
+    from octopus import economy
+
+    state_dir = isolated / "h3-state"
+    monkeypatch.setenv("OCTOPUS_VIDEO_H3_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("OCTOPUS_MINIMAX_H3_ENDPOINT_ID", "endpoint")
+    monkeypatch.setenv("OCTOPUS_MINIMAX_H3_API_TOKEN", "secret")
+    monkeypatch.setenv("OCTOPUS_H3_JOB_COST_ESTIMATE", "0.50 USD")
+    economy.grant_allowance("podalux", 1, "USD", granted_by="human", rationale="test H3")
+
+    class FailingSubmit:
+        def __init__(self, config):
+            pass
+
+        def submit(self, workflow):
+            raise MiniMaxH3CloudError("timeout")
+
+    monkeypatch.setattr(handlers, "MiniMaxH3RunPodClient", FailingSubmit)
+
+    class Ctx:
+        id = 11
+        input = {"preset": "h3", "prompt": "test"}
+        business = "podalux"
+
+        def cancelled(self):
+            return False
+
+        def emit(self, *args, **kwargs):
+            pass
+
+    with pytest.raises(AmbiguousSubmissionError, match="task-11-v1"):
+        handlers.video_generate(Ctx())
+    saved = json.loads((state_dir / "task-11-v1.json").read_text(encoding="utf-8"))
+    assert saved == {"schema_version": "1", "remote_id": None, "status": "SUBMITTING"}

@@ -22,6 +22,7 @@ from ..worker import TaskCancelled, handler
 from . import library, perf, presets, prompts, requirements, wangp
 from .minimax_h3_cloud import MiniMaxH3CloudError, MiniMaxH3Config, MiniMaxH3RunPodClient, save_result
 from ..journal import current_run
+from ..video.state import AmbiguousSubmissionError
 
 MODEL_PREFERENCE = ("t2v_nexus_1.3B", "t2v_1.3B")
 H3_MODEL_MARKERS = ("minimax_h3", "minmax_h3")
@@ -142,6 +143,11 @@ def _run_h3_cloud(ctx, inp: dict, prompt: str, variants: int, business: str):
                     continue
                 if saved.get("remote_id") and saved.get("status") in {"QUEUED", "RUNNING", "RENDERING"}:
                     remote_id = str(saved["remote_id"])
+                elif saved.get("status") == "SUBMITTING" and not saved.get("remote_id"):
+                    message = (f"soumission cloud ambiguë pour {job_key} (sans remote_id); "
+                               "ne pas resoumettre automatiquement, vérifier le fournisseur puis réconcilier l'état local")
+                    library.update(gen_id, status="failed", phase="ambiguous_submission", error=message)
+                    raise AmbiguousSubmissionError(message)
             except (OSError, ValueError, json.JSONDecodeError):
                 remote_id = None
 
@@ -161,7 +167,13 @@ def _run_h3_cloud(ctx, inp: dict, prompt: str, variants: int, business: str):
                 economy.gate_paid_call(ctx.business, f"MiniMax H3 cloud {job_key}", estimate_env="OCTOPUS_H3_JOB_COST_ESTIMATE",
                                        requested_by="media.h3", experiment_id=inp.get("experiment_id"))
                 state_path.write_text(json.dumps({"schema_version": "1", "remote_id": None, "status": "SUBMITTING"}), encoding="utf-8")
-                remote_id = client.submit(workflow)
+                try:
+                    remote_id = client.submit(workflow)
+                except Exception as exc:
+                    message = (f"soumission cloud ambiguë pour {job_key} (sans remote_id après {type(exc).__name__}: {exc}); "
+                               "ne pas resoumettre automatiquement, vérifier le fournisseur puis réconcilier l'état local")
+                    library.update(gen_id, status="failed", phase="ambiguous_submission", error=message)
+                    raise AmbiguousSubmissionError(message) from exc
                 state_path.write_text(json.dumps({"schema_version": "1", "remote_id": remote_id, "status": "QUEUED"}), encoding="utf-8")
             library.update(gen_id, phase="rendering", progress=50, status_text=f"RunPod {remote_id}")
             result = client.wait(remote_id)
@@ -172,6 +184,8 @@ def _run_h3_cloud(ctx, inp: dict, prompt: str, variants: int, business: str):
                                                "status": "COMPLETED", "path": str(target)}), encoding="utf-8")
             library.update(gen_id, status="done", phase="done", progress=100, output_path=str(target), error=None, **meta)
             produced.append({"generation_id": gen_id, "path": str(target), "remote_id": remote_id, **meta})
+        except AmbiguousSubmissionError:
+            raise
         except MiniMaxH3CloudError as exc:
             library.update(gen_id, status="failed", phase="failed", error=str(exc))
             state_path.write_text(json.dumps({"schema_version": "1", "remote_id": remote_id, "status": "FAILED", "error": str(exc)}), encoding="utf-8")
