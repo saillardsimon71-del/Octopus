@@ -20,17 +20,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tools import tts_providers, word_sync  # noqa: E402
 
 SR = 44100
+# Debit par role : une narration qui garde le meme tempo du debut a la fin sonne robotique.
+ROLE_SPEED = {"hook": 1.05, "douleur": 0.97, "preuve": 1.0, "soulagement": 1.0, "cta": 1.06}
+# Traitement de la voix (ffmpeg, deja requis) : coupe des graves, presence, compression douce.
+VOICE_FILTERS = ("highpass=f=85,equalizer=f=260:t=q:w=1.2:g=-2,equalizer=f=4200:t=q:w=1.4:g=3,"
+                 "acompressor=threshold=-18dB:ratio=3:attack=5:release=140:makeup=2,alimiter=limit=0.95")
 GAP = 0.12
 TAIL = 1.5
-MIN_DURATION_S = float(os.environ.get("PODALUX_MIN_DURATION_S", "18.5"))  # borne basse du QC (18 s) + marge
+MIN_DURATION_S = float(os.environ.get("PODALUX_MIN_DURATION_S", "20.5"))  # 20 a 35 s : la zone ou la retention tient
 MAX_GAP = 0.6
 BED_LEVEL = 0.28
 SFX_LEVEL = 0.45
 
 
-def tts(text, voice, exaggeration, cfg_weight):
+def tts(text, voice, exaggeration, cfg_weight, speed=1.0):
     audio, used, failures = tts_providers.synthesize(
-        text, voice=voice, exaggeration=exaggeration, cfg_weight=cfg_weight)
+        text, voice=voice, exaggeration=exaggeration, cfg_weight=cfg_weight, speed=speed)
     for failure in failures:
         print(f"tts: {failure}")
     return audio, used
@@ -96,6 +101,22 @@ def _bed(dur, sr):
     return (sig * lfo * fade * 0.9).astype(np.float32)
 
 
+def _voice_chain(vo, out_dir):
+    """Voix travaillee par ffmpeg : graves coupes, presence, compression. Si ffmpeg echoue, brut."""
+    raw_path, done_path = out_dir / "vo_raw.wav", out_dir / "vo_chain.wav"
+    write_wav_stereo(raw_path, vo, vo)
+    proc = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw_path),
+                           "-af", VOICE_FILTERS, "-ar", str(SR), "-ac", "1", "-c:a", "pcm_s16le",
+                           str(done_path)], capture_output=True, text=True)
+    if proc.returncode != 0 or not done_path.exists():
+        print(f"voix: traitement ignore ({proc.stderr[-120:].strip()})")
+        return vo
+    treated = read_wav(done_path)
+    if len(treated) < len(vo):
+        treated = np.concatenate([treated, np.zeros(len(vo) - len(treated), dtype=np.float32)])
+    return treated[:len(vo)]
+
+
 def render_job_ts(job):
     return (
         "export const JOB = " + json.dumps({
@@ -133,7 +154,7 @@ def main():
     segments = job["narration"]
     seg_wavs, seg_durs, used_providers = [], [], []
     for i, seg in enumerate(segments):
-        raw, used = tts(seg["texte"], voice, exagg, cfg)
+        raw, used = tts(seg["texte"], voice, exagg, cfg, ROLE_SPEED.get(seg["role"], 1.0))
         used_providers.append(used)
         raw_wav = out_dir / f"cb_seg_raw_{i}.wav"
         raw_wav.write_bytes(raw)
@@ -187,6 +208,8 @@ def main():
     n = int(full * SR)
     vo = np.concatenate([vo, np.zeros(max(0, n - len(vo)), dtype=np.float32)])[:n]
 
+    vo = _voice_chain(vo, out_dir)
+
     bed = _bed(full, SR) * BED_LEVEL
     env = np.abs(vo)
     k = int(0.2 * SR)
@@ -212,7 +235,9 @@ def main():
                 sfx[idx:idx + len(p)] += p
     sfx *= SFX_LEVEL
 
-    write_wav_stereo(out_dir / "mix.wav", vo + bed + sfx, vo + bed + sfx)
+    shift = int(0.012 * SR)  # 12 ms : elargissement stereo du lit, voix centree
+    bed_r = np.concatenate([np.zeros(shift, dtype=np.float32), bed])[:len(bed)]
+    write_wav_stereo(out_dir / "mix.wav", vo + bed + sfx, vo + bed_r + sfx)
     write_wav_stereo(out_dir / "vo.wav", vo, vo)
     (out_dir / "captions.json").write_text(
         json.dumps({"duration_s": round(full, 3), "vo_end_s": round(vo_total, 3), "words": words},

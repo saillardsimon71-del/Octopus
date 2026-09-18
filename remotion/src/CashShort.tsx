@@ -29,16 +29,16 @@ type Visuel = {
   soulagement?: RoleText & {banner?: string};
   cta?: RoleText;
 };
+// Repli generique tire du job lui-meme. Avant, il reprenait les libelles de l'offre Impayes :
+// une offre generee sans `visuel` affichait "FACTURE IMPAYEE" et "+1 240 EUR ENCAISSE", chiffres
+// d'une autre offre (audit C6). Ici, rien n'est invente : pas de libelle -> pas d'element.
+const TITLE = String((JOB as unknown as {titre?: string}).titre ?? '').split(/[:–-]/)[0].trim();
 const DEFAULT_VISUEL: Required<Visuel> = {
-  hook: {label: 'FACTURE IMPAYÉE', icon: '📄', accent_emoji: '⏰', accent_text: '30 JOURS'},
-  douleur: {label: 'LE CASH QUI NE RENTRE PAS', icon: '💸', accent_emoji: '💸', accent_text: 'CASH BLOQUÉ'},
-  preuve: {
-    label: 'LA RELANCE PRO', icon: '✅', accent_emoji: '📄', accent_text: 'RELANCE N°2',
-    card_title: 'RELANCE N°2',
-    card_rows: [['Facture #2026-041', '1 240 €'], ['Statut', 'ENCAISSÉ +1 240 € ✓']],
-  },
-  soulagement: {label: 'LE CONTRÔLE', icon: '🤝', accent_emoji: '✓', accent_text: 'PAYÉE', banner: '+1 240 € ENCAISSÉ'},
-  cta: {label: 'À VOUS DE JOUER', icon: '👇', accent_emoji: '👇'},
+  hook: {label: TITLE.toUpperCase(), icon: '📌', accent_emoji: '', accent_text: ''},
+  douleur: {label: 'CE QUE ÇA COÛTE', icon: '⚠️', accent_emoji: '', accent_text: ''},
+  preuve: {label: 'LA SOLUTION', icon: '✅', accent_emoji: '', accent_text: '', card_title: '', card_rows: []},
+  soulagement: {label: 'LE RÉSULTAT', icon: '🤝', accent_emoji: '', accent_text: '', banner: ''},
+  cta: {label: 'À VOUS DE JOUER', icon: '👇', accent_emoji: '👇', accent_text: ''},
 };
 const JOB_VISUEL = ((JOB as unknown as {visuel?: Visuel | null}).visuel ?? {}) as Visuel;
 const V = {
@@ -65,8 +65,8 @@ const meta = (role: keyof Visuel, img: string, full: boolean, bg: string, accent
 // sinon on garde les photos livrees avec le depot.
 const SEG: Record<string, Meta> = {
   hook: meta('hook', V.hook.img ?? 'human.jpg', true, '#d90429'),
-  douleur: meta('douleur', V.douleur.img ?? 'human2.jpg', false, '#b91c1c'),
-  preuve: meta('preuve', V.preuve.img ?? 'human.jpg', false, '#b45309'),
+  douleur: meta('douleur', V.douleur.img ?? 'human2.jpg', true, '#b91c1c'),
+  preuve: meta('preuve', V.preuve.img ?? 'human.jpg', true, '#b45309'),
   soulagement: meta('soulagement', V.soulagement.img ?? 'face.jpg', true, '#15803d'),
   cta: meta('cta', V.cta.img ?? 'face2.jpg', true, '#ea580c', JOB.prix as string),
 };
@@ -90,11 +90,81 @@ for (const w of CAPTIONS) {
 const FLOATERS = ['💸', '⏱️', '📄', '✅', '🤝'];
 
 const TINT: Record<string, string> = {
-  hook: 'rgba(217,4,41,0.12)',
-  douleur: 'rgba(185,28,28,0.14)',
-  preuve: 'rgba(180,83,9,0.12)',
-  soulagement: 'rgba(21,128,61,0.14)',
+  hook: 'rgba(217,4,41,0.10)',
+  douleur: 'rgba(185,28,28,0.11)',
+  preuve: 'rgba(234,120,20,0.12)',
+  soulagement: 'rgba(21,128,61,0.11)',
   cta: 'rgba(234,88,12,0.12)',
+};
+// Grain argentique : un SVG de bruit fige, applique en superposition. Sans lui, l'aplat numerique
+// des degrades se voit immediatement sur un telephone.
+// Etalonnage commun : les photos libres sont souvent ternes, la marque est chaude et vive.
+const GRADE = 'saturate(1.35) contrast(1.06) brightness(1.02)';
+const GRAIN = `url("data:image/svg+xml;utf8,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="220" height="220">' +
+  '<filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="3" stitchTiles="stitch"/>' +
+  '<feColorMatrix type="saturate" values="0"/></filter>' +
+  '<rect width="220" height="220" filter="url(#n)" opacity="0.5"/></svg>'
+)}")`;
+
+
+/** Anime les nombres d'un texte ("+1 240 € ENCAISSÉ") : ils defilent jusqu'a leur valeur. */
+const countUp = (text: string, progress: number): string =>
+  text.replace(/\d[\d  .]*\d|\d/g, (raw) => {
+    const value = parseInt(raw.replace(/[^0-9]/g, ''), 10);
+    if (!Number.isFinite(value)) return raw;
+    return Math.round(value * progress).toLocaleString('fr-FR').replace(/ /g, ' ');
+  });
+
+type BackdropProps = {meta: Meta; prog: number; appear: number; opacity: number; frame: number; elapsed: number};
+
+/** Image d'un segment : zoom lent, fondu d'entree, et fondu croise avec le segment precedent. */
+const BEAT_S = 1.8;
+
+const Backdrop: React.FC<BackdropProps> = ({meta, prog, appear, opacity, frame, elapsed}) => {
+  if (opacity <= 0.01) return null;
+  // Un plan fixe de 3 s ne tient pas : on change de cadrage toutes les 1,8 s sur la meme photo.
+  const beat = Math.floor(elapsed / BEAT_S);
+  const inBeat = (elapsed % BEAT_S) / BEAT_S;
+  const tight = beat % 2 === 1;
+  const zoom = (tight ? 1.26 : 1.0) + inBeat * 0.1;
+  const drift = (tight ? 2.5 : -2.5) + inBeat * (tight ? -2 : 2);
+  const originY = tight ? '38%' : '52%';
+  const accent = meta.accent;
+  const badge = (size: number, top: number, right: number) => !accent.text ? null : (
+    <div style={{position: 'absolute', top, right, display: 'flex', alignItems: 'center', gap: 12,
+      padding: '14px 26px', borderRadius: 24, backgroundColor: accent.bg, color: '#fff',
+      fontFamily: FONT.xbold, fontSize: size, boxShadow: '0 10px 26px rgba(0,0,0,0.35)',
+      transform: `rotate(${Math.sin(frame / 12) * 2}deg) scale(${0.9 + 0.1 * appear})`, opacity: appear}}>
+      <span style={{fontSize: size + 2}}>{accent.emoji}</span>
+      <span>{accent.text}</span>
+    </div>
+  );
+  if (meta.full) {
+    return (
+      <AbsoluteFill style={{opacity}}>
+        <Img src={staticFile(`img/${meta.img}`)}
+          style={{width: '100%', height: '100%', objectFit: 'cover', filter: GRADE,
+            transformOrigin: `50% ${originY}`,
+            transform: `scale(${zoom * (1 + 0.035 * (1 - appear))}) translateX(${drift}%)`}} />
+        <div style={{position: 'absolute', inset: 0, background: 'linear-gradient(180deg, rgba(43,18,6,0.30) 0%, rgba(43,18,6,0.05) 40%, rgba(43,18,6,0.45) 100%)'}} />
+        {badge(44, 90, 50)}
+      </AbsoluteFill>
+    );
+  }
+  return (
+    <AbsoluteFill style={{top: 100, left: 70, width: 940, height: CARD_H, opacity: opacity * appear,
+      transform: `scale(${0.96 + 0.04 * appear})`, transformOrigin: '50% 50%'}}>
+      <div style={{position: 'absolute', inset: 0, borderRadius: 44, overflow: 'hidden', boxShadow: '0 24px 60px rgba(60,20,0,0.35)'}}>
+        <Img src={staticFile(`img/${meta.img}`)}
+          style={{width: '100%', height: '100%', objectFit: 'cover', filter: GRADE,
+            transformOrigin: `50% ${originY}`,
+            transform: `scale(${zoom}) translateY(${drift}%)`}} />
+        <div style={{position: 'absolute', inset: 0, background: 'linear-gradient(180deg, rgba(43,18,6,0.02) 0%, rgba(43,18,6,0.48) 100%)'}} />
+      </div>
+      {badge(40, 26, 26)}
+    </AbsoluteFill>
+  );
 };
 
 export const CashShort: React.FC = () => {
@@ -108,12 +178,11 @@ export const CashShort: React.FC = () => {
     return () => continueRender(h);
   }, []);
 
-  let segIdx = SEGS.length - 1;
+  // Segment courant = le dernier commence. Pendant les silences entre deux segments, on reste
+  // sur le precedent : sinon l'etiquette et les sous-titres disparaissent et l'ecran meurt.
+  let segIdx = 0;
   for (let i = 0; i < SEGS.length; i++) {
-    if (t < SEGS[i].end) {
-      segIdx = i;
-      break;
-    }
+    if (t >= SEGS[i].start) segIdx = i;
   }
   const seg = SEGS[segIdx];
   const meta = SEG[seg.role] ?? SEG.hook;
@@ -126,6 +195,14 @@ export const CashShort: React.FC = () => {
     extrapolateLeft: 'clamp',
     extrapolateRight: 'clamp',
   });
+  // Coupe franche entre segments (le rythme d'un Short vient des coupes), adoucie sur une image
+  // seulement : assez pour eviter le clignotement, assez sec pour rester percu comme une coupe.
+  const prevSeg = SEGS[Math.max(0, segIdx - 1)];
+  const prevMeta = SEG[prevSeg.role] ?? SEG.hook;
+  const cross = segIdx === 0 ? 1 : interpolate(t, [seg.start, seg.start + 0.04], [0, 1], {
+    extrapolateLeft: 'clamp',
+    extrapolateRight: 'clamp',
+  });
 
   const segProg = interpolate(t, [seg.start, seg.end], [0, 1], {
     extrapolateLeft: 'clamp',
@@ -135,7 +212,9 @@ export const CashShort: React.FC = () => {
   const panX = interpolate(segProg, [0, 1], [-2, 2]) * (segIdx % 2 === 0 ? 1 : -1);
 
   const maxChars = Math.max(...seg.words.map((w) => w.text.length));
-  const wordFont = Math.max(66, Math.min(92, Math.round(920 / (maxChars * 0.6))));
+  // Le premier segment porte l'accroche : il se lit plus gros que le reste.
+  const hookBoost = segIdx === 0 ? 1.18 : 1;
+  const wordFont = Math.round(Math.max(74, Math.min(108, Math.round(1020 / (maxChars * 0.58)))) * hookBoost);
 
   const isCta = seg.role === 'cta';
   const isPreuve = seg.role === 'preuve';
@@ -145,6 +224,11 @@ export const CashShort: React.FC = () => {
     extrapolateRight: 'clamp',
   });
   const progress = frame / durationInFrames;
+  // Apparition ressort de la zone d'accent + defilement des montants.
+  const accentSpring = spring({frame: Math.max(0, frame - seg.start * fps), fps,
+    config: {damping: 14, stiffness: 180, mass: 0.7}});
+  const countProg = interpolate(t, [seg.start + 0.15, seg.start + 1.1], [0, 1],
+    {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
 
   return (
     <AbsoluteFill style={{backgroundColor: P.bgBottom, overflow: 'hidden'}}>
@@ -176,30 +260,16 @@ export const CashShort: React.FC = () => {
         </div>
       ))}
 
-      {full ? (
-        <AbsoluteFill>
-          <Img
-            src={staticFile(`img/${meta.img}`)}
-            style={{width: '100%', height: '100%', objectFit: 'cover', transform: `scale(${zoom * (0.96 + 0.04 * segIn)})`}}
-          />
-          <div style={{position: 'absolute', inset: 0, background: 'linear-gradient(180deg, rgba(43,18,6,0.22) 0%, rgba(43,18,6,0.06) 45%, rgba(43,18,6,0.48) 100%)'}} />
-          <div style={{position: 'absolute', top: 90, right: 50, display: 'flex', alignItems: 'center', gap: 12, padding: '14px 26px', borderRadius: 24, backgroundColor: accent.bg, color: '#fff', fontFamily: FONT.xbold, fontSize: 44, boxShadow: '0 10px 26px rgba(0,0,0,0.35)', transform: `rotate(${Math.sin(frame / 12) * 2}deg)`}}>
-            <span style={{fontSize: 46}}>{accent.emoji}</span>
-            <span>{accent.text}</span>
-          </div>
-        </AbsoluteFill>
-      ) : (
-        <AbsoluteFill style={{top: 100, left: 70, width: 940, height: CARD_H, opacity: segIn, transform: `scale(${zoom * (0.95 + 0.05 * segIn)})`, transformOrigin: '50% 50%'}}>
-          <Img src={staticFile(`img/${meta.img}`)} style={{width: '100%', height: '100%', objectFit: 'cover', borderRadius: 44, boxShadow: '0 24px 60px rgba(60,20,0,0.35)'}} />
-          <div style={{position: 'absolute', inset: 0, borderRadius: 44, background: 'linear-gradient(180deg, rgba(43,18,6,0.02) 0%, rgba(43,18,6,0.4) 100%)'}} />
-          <div style={{position: 'absolute', top: 26, right: 26, display: 'flex', alignItems: 'center', gap: 12, padding: '14px 26px', borderRadius: 24, backgroundColor: accent.bg, color: '#fff', fontFamily: FONT.xbold, fontSize: 40, boxShadow: '0 10px 26px rgba(0,0,0,0.3)', transform: `rotate(${Math.sin(frame / 12) * 2}deg) scale(${0.9 + 0.1 * segIn})`}}>
-            <span style={{fontSize: 42}}>{accent.emoji}</span>
-            <span>{accent.text}</span>
-          </div>
-        </AbsoluteFill>
-      )}
+      <Backdrop meta={prevMeta} prog={1} appear={1} opacity={1 - cross} frame={frame}
+        elapsed={Math.max(0, t - prevSeg.start)} />
+      <Backdrop meta={meta} prog={segProg} appear={segIn} opacity={cross} frame={frame}
+        elapsed={t - seg.start} />
+      {/* boucle : la derniere image revient vers la premiere, le replay se declenche sans decision */}
+      <Backdrop meta={SEG.hook} prog={0} appear={0} frame={frame} elapsed={0}
+        opacity={interpolate(t, [durationInFrames / fps - 0.55, durationInFrames / fps - 0.05], [0, 1],
+          {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'})} />
 
-      <AbsoluteFill style={{top: 545, alignItems: 'center'}}>
+      <AbsoluteFill style={{top: 170, alignItems: 'center'}}>
         <div
           style={{
             display: 'flex',
@@ -222,7 +292,7 @@ export const CashShort: React.FC = () => {
       </AbsoluteFill>
 
       {/* kinetic typography mot à mot */}
-      <AbsoluteFill style={{top: 640, alignItems: 'center'}}>
+      <AbsoluteFill style={{top: 1220, alignItems: 'center'}}>
         <div
           style={{
             display: 'flex',
@@ -249,9 +319,11 @@ export const CashShort: React.FC = () => {
             seg.words.forEach((x, j) => {
               if (x.start * fps <= frame) currentWord = j;
             });
-            const from = Math.max(0, currentWord - 2);
+            // 2 a 4 mots par image : au-dela, l'oeil lit au lieu d'ecouter.
+            const from = Math.max(0, currentWord - 1);
+            const to = Math.min(seg.words.length - 1, Math.max(currentWord, 0) + 1);
             return seg.words.map((w, i) => {
-              if (i < from) return null;
+              if (i < from || i > to) return null;
               const wordFrame = w.start * fps;
               const delta = frame - wordFrame;
               const visible = delta >= 0;
@@ -277,10 +349,11 @@ export const CashShort: React.FC = () => {
                     fontSize: size,
                     transform: `scale(${visible ? scale * pulse : 0.3})`,
                     opacity: visible ? (isCurrent ? op : op * 0.62) : 0,
-                    color: isCurrent ? P.highlight : isKey ? P.pillInk : wordColor,
-                    backgroundColor: pill ? (isCurrent ? P.ink : P.pillBg) : 'transparent',
-                    borderRadius: pill ? 16 : 0,
-                    padding: pill ? '4px 14px' : '0px',
+                    color: isCurrent ? P.highlight : isKey ? P.pillInk : '#fff',
+                    backgroundColor: isCurrent ? P.ink : isKey ? P.pillBg : 'rgba(18,7,2,0.42)',
+                    borderRadius: 16,
+                    padding: '4px 14px',
+                    textShadow: isCurrent || isKey ? 'none' : '0 4px 16px rgba(0,0,0,0.55)',
                     whiteSpace: 'nowrap',
                   }}
                 >
@@ -293,8 +366,8 @@ export const CashShort: React.FC = () => {
       </AbsoluteFill>
 
       {/* zone d'accent : preuve / paiement / CTA */}
-      <AbsoluteFill style={{top: 1250, alignItems: 'center'}}>
-        {isPreuve ? (
+      <AbsoluteFill style={{top: 700, alignItems: 'center'}}>
+        {isPreuve && CARD_ROWS.length > 0 ? (
           <div
             style={{
               width: 820,
@@ -313,16 +386,23 @@ export const CashShort: React.FC = () => {
               <span style={{fontFamily: FONT.xbold, fontSize: 38, color: '#b45309'}}>📄</span>
             </div>
             <div style={{height: 2, backgroundColor: '#f3d9b0', margin: '14px 0'}} />
-            {CARD_ROWS.map(([left, right], r) => (
-              <div key={r} style={{display: 'flex', justifyContent: 'space-between', fontSize: 34, lineHeight: 1.6}}>
-                <span>{left}</span>
-                <span style={r === CARD_ROWS.length - 1 ? {color: '#15803d', fontFamily: FONT.xbold} : undefined}>{right}</span>
-              </div>
-            ))}
+            {CARD_ROWS.map(([left, right], r) => {
+              const rowIn = spring({frame: Math.max(0, frame - (seg.start + 0.25 + r * 0.18) * fps), fps,
+                config: {damping: 16, stiffness: 200, mass: 0.6}});
+              return (
+                <div key={r} style={{display: 'flex', justifyContent: 'space-between', fontSize: 34,
+                  lineHeight: 1.6, opacity: rowIn, transform: `translateX(${(1 - rowIn) * 26}px)`}}>
+                  <span>{left}</span>
+                  <span style={r === CARD_ROWS.length - 1 ? {color: '#15803d', fontFamily: FONT.xbold} : undefined}>
+                    {countUp(right, countProg)}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         ) : null}
 
-        {isSoulagement ? (
+        {isSoulagement && V.soulagement.banner ? (
           <div
             style={{
               display: 'flex',
@@ -336,11 +416,11 @@ export const CashShort: React.FC = () => {
               fontSize: 56,
               boxShadow: '0 18px 44px rgba(0,0,0,0.3)',
               opacity: segIn,
-              transform: `scale(${0.8 + 0.2 * segIn})`,
+              transform: `scale(${0.78 + 0.22 * accentSpring}) rotate(${(1 - accentSpring) * -2}deg)`,
             }}
           >
             <span style={{fontSize: 66}}>✓</span>
-            <span>{V.soulagement.banner}</span>
+            <span>{countUp(String(V.soulagement.banner ?? ''), countProg)}</span>
           </div>
         ) : null}
 
@@ -369,35 +449,48 @@ export const CashShort: React.FC = () => {
             >
               {JOB.prix}
             </div>
-            <div style={{fontFamily: FONT.semi, fontSize: 46, color: wordColor}}>
+            <div style={{fontFamily: FONT.semi, fontSize: 46, color: '#fff',
+              backgroundColor: 'rgba(18,7,2,0.5)', padding: '8px 26px', borderRadius: 999,
+              textShadow: '0 4px 16px rgba(0,0,0,0.5)'}}>
               Lien en description
             </div>
-            <div style={{fontSize: 56, lineHeight: 1}}>👇</div>
+            {/* la fleche rebondit : un appel a l'action fixe ne se voit pas */}
+            <div style={{fontSize: 56, lineHeight: 1,
+              transform: `translateY(${Math.abs(Math.sin(frame / 7)) * -18}px)`}}>👇</div>
           </div>
         ) : null}
       </AbsoluteFill>
 
-      {/* scrim de contraste (bas) */}
-      <div style={{position: 'absolute', inset: 0, background: 'linear-gradient(180deg, rgba(43,18,6,0) 52%, rgba(43,18,6,0.20) 100%)'}} />
-
-      {/* indicateur son (visualizer) */}
-      <div style={{position: 'absolute', bottom: 44, right: 56, display: 'flex', alignItems: 'flex-end', gap: 6, height: 40}}>
-        {[0, 1, 2, 3].map((i) => {
-          const h = 12 + 24 * Math.abs(Math.sin(frame / 8 + i * 1.1));
-          return <div key={i} style={{width: 8, height: h, borderRadius: 4, backgroundColor: 'rgba(43,18,6,0.55)'}} />;
-        })}
-      </div>
-
-      {/* barre de progression */}
-      <div style={{position: 'absolute', bottom: 40, left: 130, width: 820, height: 12, borderRadius: 999, backgroundColor: 'rgba(43,18,6,0.18)'}}>
-        <div style={{width: `${progress * 100}%`, height: 12, borderRadius: 999, backgroundColor: P.ink}} />
-      </div>
-
       {/* teinte par segment */}
       <div style={{position: 'absolute', inset: 0, backgroundColor: tint, opacity: segIn}} />
 
-      {/* vignette chaude */}
-      <div style={{position: 'absolute', inset: 0, background: 'radial-gradient(ellipse at center, rgba(0,0,0,0) 55%, rgba(60,20,0,0.28) 100%)'}} />
+      {/* lisibilite du tiers inferieur : les sous-titres passent sur n'importe quelle photo */}
+      <div style={{position: 'absolute', left: 0, right: 0, bottom: 0, height: 900,
+        background: 'linear-gradient(180deg, rgba(20,8,2,0) 0%, rgba(20,8,2,0.30) 45%, rgba(20,8,2,0.62) 100%)'}} />
+
+      {/* vignette + grain : ce qui separe une image plate d'une image filmee */}
+      <div style={{position: 'absolute', inset: 0, background: 'radial-gradient(ellipse at 50% 42%, rgba(0,0,0,0) 48%, rgba(30,10,0,0.42) 100%)'}} />
+      <div style={{position: 'absolute', inset: -40, backgroundImage: GRAIN, backgroundRepeat: 'repeat',
+        opacity: 0.09, mixBlendMode: 'overlay',
+        transform: `translate(${(frame % 5) * 7 - 14}px, ${(frame % 3) * 9 - 9}px)`}} />
+
+      {/* eclat court a chaque coupe : deux images suffisent a marquer le changement de plan */}
+      <div style={{position: 'absolute', inset: 0, backgroundColor: accent.bg, pointerEvents: 'none',
+        opacity: segIdx === 0 ? 0 : interpolate(t, [seg.start, seg.start + 0.03, seg.start + 0.16], [0, 0.32, 0],
+          {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'})}} />
+
+      {/* reperes d'interface : au-dessus du grain, en clair, sinon ils disparaissent dans le degrade */}
+      <div style={{position: 'absolute', bottom: 44, right: 56, display: 'flex', alignItems: 'flex-end', gap: 6, height: 40}}>
+        {[0, 1, 2, 3].map((i) => {
+          const h = 12 + 24 * Math.abs(Math.sin(frame / 8 + i * 1.1));
+          return <div key={i} style={{width: 8, height: h, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.75)'}} />;
+        })}
+      </div>
+
+      <div style={{position: 'absolute', bottom: 40, left: 130, width: 820, height: 10, borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.22)'}}>
+        <div style={{width: `${progress * 100}%`, height: 10, borderRadius: 999, backgroundColor: P.highlight,
+          boxShadow: '0 0 18px rgba(255,255,255,0.35)'}} />
+      </div>
     </AbsoluteFill>
   );
 };

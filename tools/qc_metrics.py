@@ -233,7 +233,9 @@ def main():
         "cuts_scene025": n_cuts,
         "freezes_gt1_2s": n_freeze,
         "ken_burns_motion": motion,
-        "targets": {"lufs": -14.0, "lra": 5.0, "satavg": 25.0},
+        # satavg 25 valait pour l'ancien fond orange plein cadre. Depuis le passage aux photos
+        # (18/09/2026), 4 rendus reels donnent 14,7 a 18,9 : la cible suit la mesure.
+        "targets": {"lufs": -14.0, "lra": 5.0, "satavg": 15.0},
         "frames": [str(p) for p in frames],
     }
 

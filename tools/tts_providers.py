@@ -40,14 +40,15 @@ def _post_json(url: str, payload: dict, headers: dict, timeout: float = 120) -> 
         return r.read()
 
 
-def azure(text: str, **_) -> bytes:
+def azure(text: str, *, speed: float = 1.0, **_) -> bytes:
     key, region = _env("AZURE_SPEECH_KEY"), _env("AZURE_SPEECH_REGION")
     if not key or not region:
         raise TTSUnavailable("azure : AZURE_SPEECH_KEY/AZURE_SPEECH_REGION absents")
     voice = _env("AZURE_TTS_VOICE") or "fr-FR-VivienneMultilingualNeural"
     lang = voice.rsplit("-", 1)[0] if voice.count("-") >= 2 else "fr-FR"
+    rate = _env("AZURE_TTS_RATE") or f"{(speed - 1) * 100:+.0f}%"
     ssml = (f"<speak version='1.0' xml:lang='{lang}'><voice name='{voice}'>"
-            f"<prosody rate='{_env('AZURE_TTS_RATE') or '0%'}'>{_escape(text)}</prosody></voice></speak>")
+            f"<prosody rate='{rate}'>{_escape(text)}</prosody></voice></speak>")
     req = urllib.request.Request(
         f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1",
         data=ssml.encode("utf-8"),
@@ -116,7 +117,7 @@ def _hf_space(space: str, text: str, exaggeration: float, cfg_weight: float) -> 
         raise TTSUnavailable(f"hf-space : {type(exc).__name__}: {str(exc)[:160]}") from exc
 
 
-def piper(text: str, **_) -> bytes:
+def piper(text: str, *, speed: float = 1.0, **_) -> bytes:
     voice = _env("PIPER_VOICE") or PIPER_DEFAULT_VOICE
     data_dir = Path(_env("PIPER_DATA_DIR") or (Path.home() / ".cache" / "piper"))
     model = data_dir / f"{voice}.onnx"
@@ -127,8 +128,11 @@ def piper(text: str, **_) -> bytes:
         if dl.returncode != 0 or not model.exists():
             raise TTSUnavailable(f"piper : telechargement de {voice} impossible ({dl.stderr[-160:].strip()})")
     out = data_dir / "_octopus_seg.wav"
+    base = float(_env("PIPER_LENGTH_SCALE") or "1.0")
     proc = subprocess.run([sys.executable, "-m", "piper", "-m", str(model), "-f", str(out),
-                           "--length-scale", _env("PIPER_LENGTH_SCALE") or "1.0", "--", text],
+                           "--length-scale", f"{base / max(0.5, speed):.3f}",
+                           "--noise-w-scale", _env("PIPER_NOISE_W") or "0.9",  # variabilite de prosodie
+                           "--", text],
                           capture_output=True, text=True)
     if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
         raise TTSUnavailable(f"piper : synthese echouee ({proc.stderr[-160:].strip()})")
