@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from octopus.media.wangp_mcp import WanGPMCPClient, WanGPMCPConfig
+import io
+from pathlib import Path
+
+import pytest
+
+from octopus.media.wangp_mcp import WanGPMCPClient, WanGPMCPConfig, WanGPMCPError
 
 
 class FakeTools:
@@ -30,6 +35,12 @@ class FakeTools:
                 "success": True, "generated_files": ["outputs/clip.mp4"], "errors": [],
                 "gallery_items": [{"media_id": "video:abc", "filename": "clip.mp4", "media_type": "video"}],
             }}
+        if name == "wangp_get_deepy_template_settings":
+            return {"tool_id": "gen_video", "template": "Wan 2.2", "default": True,
+                    "settings": {"model_type": "wan22_5B", "resolution": "1280x720"}}
+        if name == "wangp_create_gallery_download":
+            return {"media_id": arguments["media_id"], "download_url": "/wangp_api/gallery/download/token-1",
+                    "filename": "clip.mp4", "media_type": "video", "size": 11}
         raise AssertionError((name, arguments))
 
 
@@ -66,3 +77,56 @@ def test_submit_and_poll_return_observed_remote_result():
     assert result["generated_files"] == ["outputs/clip.mp4"]
     assert result["gallery_items"][0]["media_id"] == "video:abc"
     assert sleeps == [0.01]
+
+
+class FakeResponse(io.BytesIO):
+    headers = {"Content-Length": "11"}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+def test_template_settings_and_atomic_gallery_download(tmp_path):
+    tools = FakeTools()
+    requests = []
+
+    def open_url(request, timeout):
+        requests.append((request, timeout))
+        return FakeResponse(b"video-bytes")
+
+    client = WanGPMCPClient(
+        WanGPMCPConfig("https://wangp.example/mcp", username="octopus", password="secret"),
+        call_tool=tools,
+        open_url=open_url,
+    )
+
+    template = client.template_settings()
+    target = client.download("video:abc", tmp_path / "result.mp4", max_bytes=20)
+
+    assert template["settings"]["model_type"] == "wan22_5B"
+    assert target == tmp_path / "result.mp4"
+    assert target.read_bytes() == b"video-bytes"
+    assert not Path(f"{target}.part").exists()
+    request, timeout = requests[0]
+    assert request.full_url == "https://wangp.example/wangp_api/gallery/download/token-1"
+    assert request.get_header("Authorization").startswith("Basic ")
+    assert timeout == 120.0
+
+
+def test_download_rejects_oversized_media_before_http(tmp_path):
+    tools = FakeTools()
+    client = WanGPMCPClient(WanGPMCPConfig("https://wangp.example/mcp"), call_tool=tools,
+                            open_url=lambda *_: (_ for _ in ()).throw(AssertionError("HTTP interdit")))
+
+    with pytest.raises(WanGPMCPError, match="trop volumineux"):
+        client.download("video:abc", tmp_path / "result.mp4", max_bytes=10)
+
+
+def test_config_rejects_conflicting_or_incomplete_authentication():
+    with pytest.raises(ValueError, match="incomplets"):
+        WanGPMCPConfig("https://wangp.example/mcp", username="octopus")
+    with pytest.raises(ValueError, match="une seule authentification"):
+        WanGPMCPConfig("https://wangp.example/mcp", username="octopus", password="secret", bearer_token="token")
