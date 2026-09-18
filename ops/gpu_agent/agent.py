@@ -89,6 +89,8 @@ class Toolbox:
         if not (self.repo / ".git").is_dir():
             raise ToolError(f"not a Git repository: {self.repo}")
         self.full_tests_passed_after_change = False
+        self.read_paths: set[str] = set()
+        self.search_calls = 0
 
     def _relative(self, raw: str, *, allow_missing: bool = False) -> Path:
         if not raw or "\x00" in raw:
@@ -166,6 +168,7 @@ class Toolbox:
         if start < 1 or end < start or end - start > 399:
             raise ToolError("read range must contain 1 to 400 lines")
         lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+        self.read_paths.add(rel.as_posix())
         selected = lines[start - 1:end]
         numbered = "\n".join(f"{index}: {line}" for index, line in enumerate(selected, start=start))
         return {"path": rel.as_posix(), "start": start, "end": min(end, len(lines)), "total_lines": len(lines), "content": numbered}
@@ -176,6 +179,7 @@ class Toolbox:
         args = ["git", "grep", "-n", "-I", "-E", pattern, "--"]
         for raw in paths or []:
             args.append(self._relative(raw).as_posix())
+        self.search_calls += 1
         result = self._run(args, timeout=60)
         if result["code"] == 1:
             return {"ok": True, "matches": ""}
@@ -229,6 +233,18 @@ class Toolbox:
             self.full_tests_passed_after_change = False
         return {"ok": applied.returncode == 0, "paths": [p.as_posix() for p in paths], "output": applied.stdout[-MAX_TOOL_OUTPUT:]}
 
+    def write_audit_report(self, content: str) -> dict[str, Any]:
+        if len(content) < 1000 or len(content.encode("utf-8")) > MAX_PATCH_BYTES:
+            raise ToolError("audit report must contain 1,000 to 120,000 bytes")
+        rel = self._relative("docs/audits/GPU_AUDIT_2026-09-18.md", allow_missing=True)
+        target = self.repo / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(".md.tmp")
+        temporary.write_text(content.rstrip() + "\n", encoding="utf-8")
+        temporary.replace(target)
+        self.full_tests_passed_after_change = False
+        return {"ok": True, "path": rel.as_posix(), "bytes": target.stat().st_size}
+
     def run_tests(self, targets: list[str] | None = None) -> dict[str, Any]:
         checked: list[str] = []
         for target in targets or []:
@@ -272,9 +288,39 @@ class Toolbox:
         if not added["ok"]:
             return added
         committed = self._run(["git", "commit", "-m", message], timeout=120)
-        if committed["ok"]:
-            self.full_tests_passed_after_change = False
         return committed
+
+    def audit_ready(self) -> tuple[bool, list[str]]:
+        reasons: list[str] = []
+        required_prefixes = ("octopus/", "agents/", "video_worker/", "tests/", "businesses/", "core/", "docs/")
+        if len(self.read_paths) < 20:
+            reasons.append(f"inspect at least 20 distinct files; currently {len(self.read_paths)}")
+        for prefix in required_prefixes:
+            if not any(path.startswith(prefix) for path in self.read_paths):
+                reasons.append(f"inspect at least one file under {prefix}")
+        if self.search_calls < 3:
+            reasons.append(f"run at least 3 repository searches; currently {self.search_calls}")
+
+        report = self.repo / "docs" / "audits" / "GPU_AUDIT_2026-09-18.md"
+        if not report.is_file():
+            reasons.append("create docs/audits/GPU_AUDIT_2026-09-18.md with write_audit_report")
+        else:
+            content = report.read_text(encoding="utf-8", errors="replace")
+            if len(content) < 6000:
+                reasons.append(f"audit report must contain at least 6,000 characters; currently {len(content)}")
+            lowered = content.lower()
+            for label in ("architecture", "findings", "roadmap", "p0", "p1", "p2", "p3"):
+                if label not in lowered:
+                    reasons.append(f"audit report is missing required section or ranking: {label}")
+            references = set(re.findall(r"[A-Za-z0-9_./-]+\.py(?::\d+)?", content))
+            if len(references) < 12:
+                reasons.append(f"cite at least 12 distinct Python file references; currently {len(references)}")
+        if not self.full_tests_passed_after_change:
+            reasons.append("run the full test suite successfully after the final report write")
+        status = self._run(["git", "status", "--porcelain"])
+        if status["output"].strip():
+            reasons.append("checkpoint the validated audit so the working tree is clean")
+        return not reasons, reasons
 
     def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         tools = {
@@ -283,6 +329,7 @@ class Toolbox:
             "read_file": lambda: self.read_file(str(args["path"]), int(args.get("start", 1)), int(args.get("end", 400))),
             "search": lambda: self.search(str(args["pattern"]), list(args.get("paths") or [])),
             "apply_patch": lambda: self.apply_patch(str(args["patch"])),
+            "write_audit_report": lambda: self.write_audit_report(str(args["content"])),
             "run_tests": lambda: self.run_tests(list(args.get("targets") or [])),
             "compile_python": lambda: self.compile_python(),
             "git_status": lambda: self.git_status(),
@@ -301,6 +348,7 @@ TOOL_GUIDE = """
 - read_file {"path":"relative/path","start":1,"end":400}
 - search {"pattern":"extended regex","paths":["optional/path"]}
 - apply_patch {"patch":"unified diff with a/ and b/ paths"}
+- write_audit_report {"content":"complete Markdown report"} writes only the required audit path
 - run_tests {"targets":[]} for the full suite, or explicit pytest paths/node ids
 - compile_python {}
 - git_status {}
@@ -326,7 +374,7 @@ Available tools:
     if mode == "audit":
         return common + """
 
-Audit mission: inspect the complete repository architecture and current branch, run the full offline test suite, and create docs/audits/GPU_AUDIT_2026-09-18.md. Cover architecture, correctness, security boundaries, reliability, tests, performance, video pipeline, GPU integration, agent/runtime behavior, persistence, operations, and documentation drift. Rank findings P0-P3. Every finding needs concrete file references and evidence. Separate verified facts from hypotheses. End with a dependency-aware roadmap of small independently testable improvement batches. Review the final diff, run the full suite after the report patch, and create a local audit checkpoint if checks pass.
+Audit mission: inspect the complete repository architecture and current branch, run the full offline test suite, and create docs/audits/GPU_AUDIT_2026-09-18.md with write_audit_report. Read at least 20 distinct files spanning octopus, agents, video_worker, tests, businesses, core, and docs, and run at least three searches across the repository. Cover architecture, correctness, security boundaries, reliability, tests, performance, video pipeline, GPU integration, agent/runtime behavior, persistence, operations, and documentation drift. Include sections named Architecture, Findings, and Roadmap. Rank findings P0-P3 even when a rank has no finding. Every finding needs concrete file references and evidence; cite at least 12 distinct Python files. Separate verified facts from hypotheses. End with a dependency-aware roadmap of small independently testable improvement batches. Review the final diff, run the full suite after the report write, and create a local audit checkpoint if checks pass. A final response is rejected until these requirements are verified by the controller.
 """
     return common + """
 
@@ -381,6 +429,17 @@ def run_agent(repo: Path, state_dir: Path, mode: str, goal: str, max_steps: int)
             print(f"step {step}: invalid JSON response", flush=True)
             continue
         if "final" in action:
+            if mode == "audit":
+                ready, reasons = toolbox.audit_ready()
+                if not ready:
+                    rejection = {"ok": False, "error": "audit completion gate rejected final", "requirements": reasons}
+                    log.write("final_rejected", {"step": step, "reasons": reasons})
+                    messages.extend([
+                        {"role": "assistant", "content": json.dumps(action, ensure_ascii=False)},
+                        {"role": "user", "content": "Controller rejected completion: " + json.dumps(rejection, ensure_ascii=False)},
+                    ])
+                    print(f"step {step}: final rejected by audit gate", flush=True)
+                    continue
             final = str(action["final"])
             log.write("final", {"step": step, "text": final})
             print(final, flush=True)

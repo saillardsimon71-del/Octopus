@@ -67,6 +67,24 @@ def test_checkpoint_requires_fresh_full_suite(repo: Path):
         tools.checkpoint("test: safe checkpoint")
 
 
+def test_audit_report_writer_uses_only_fixed_path(repo: Path):
+    tools = Toolbox(repo)
+    result = tools.write_audit_report("# Audit\n" + ("evidence\n" * 150))
+    assert result["path"] == "docs/audits/GPU_AUDIT_2026-09-18.md"
+    assert (repo / result["path"]).is_file()
+    assert not tools.full_tests_passed_after_change
+
+
+def test_audit_gate_rejects_shallow_uncommitted_report(repo: Path):
+    tools = Toolbox(repo)
+    tools.write_audit_report("# Audit\n" + ("evidence\n" * 150))
+    ready, reasons = tools.audit_ready()
+    assert not ready
+    assert any("20 distinct files" in reason for reason in reasons)
+    assert any("6,000 characters" in reason for reason in reasons)
+    assert any("working tree is clean" in reason for reason in reasons)
+
+
 def test_history_trimming_preserves_system_goal_and_recent_messages():
     messages = [
         {"role": "system", "content": "system"},
