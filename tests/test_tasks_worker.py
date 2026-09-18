@@ -8,6 +8,7 @@ import pytest
 
 from agents import cycle, db, deepseek, task_handlers  # noqa: F401  (enregistre les handlers Podalux)
 from octopus import builtin_handlers, journal, llm, tasks, worker  # noqa: F401
+from octopus.media import library
 from octopus.pricing import Usage
 
 QUIET = dict(log=lambda s: None)
@@ -69,6 +70,42 @@ def test_expired_lease_is_retried_then_failed():
     tasks.claim("mort-aussi", lease_s=-1)
     assert tasks.reap()["failed"] == [task_id]
     assert "bail expiré" in tasks.get(task_id)["error"]
+
+
+def test_expired_lease_reconciles_linked_media_generation():
+    task_id = tasks.enqueue("b", "media.video_generate", max_attempts=2)
+    tasks.claim("mort", lease_s=-1)
+    generation_id = library.create("b", "wangp", "t2v", "test", {}, task_id=task_id)
+    library.update(generation_id, status="running", phase="rendering", progress=50)
+
+    tasks.reap()
+    retried = library.get(generation_id)
+    assert retried["status"] == "queued"
+    assert retried["phase"] == "retrying"
+    assert retried["progress"] == 0
+    assert "bail expiré" in retried["error"]
+
+    tasks.claim("mort-aussi", lease_s=-1)
+    tasks.reap()
+    failed = library.get(generation_id)
+    assert failed["status"] == "failed"
+    assert failed["phase"] == "failed"
+    assert "bail expiré" in failed["error"]
+
+
+def test_reap_repairs_preexisting_terminal_media_mismatch():
+    task_id = tasks.enqueue("b", "media.video_generate")
+    generation_id = library.create("b", "wangp", "t2v", "test", {}, task_id=task_id)
+    library.update(generation_id, status="running", phase="rendering", progress=50)
+    assert tasks.cancel(task_id, "arrêt demandé") == "cancelled"
+
+    result = tasks.reap()
+
+    repaired = library.get(generation_id)
+    assert result["reconciled_media"] == [generation_id]
+    assert repaired["status"] == "cancelled"
+    assert repaired["phase"] == "cancelled"
+    assert repaired["error"] == "arrêt demandé"
 
 
 def test_lost_lease_prevents_stale_completion():

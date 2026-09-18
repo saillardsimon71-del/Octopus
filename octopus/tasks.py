@@ -57,6 +57,32 @@ def _emit(conn, business: str | None, task_id: int | None, type_: str, data: dic
                  (time.time(), business, task_id, type_, json.dumps(data or {}, ensure_ascii=False)))
 
 
+def _set_linked_media_state(conn, task_id: int, status: str, error: str, now: float) -> list[int]:
+    generation_ids = [int(row["id"]) for row in conn.execute(
+        "SELECT id FROM media_generations WHERE task_id=? AND status NOT IN ('done', 'failed', 'cancelled')",
+        (task_id,),
+    ).fetchall()]
+    phase = "retrying" if status == "queued" else status
+    conn.execute(
+        "UPDATE media_generations SET status=?, phase=?, progress=CASE WHEN ?='queued' THEN 0 ELSE progress END, "
+        "status_text=?, error=?, updated_at=? WHERE task_id=? AND status NOT IN ('done', 'failed', 'cancelled')",
+        (status, phase, status, error, error, now, task_id),
+    )
+    return generation_ids
+
+
+def _repair_linked_media(conn, now: float) -> list[int]:
+    tasks_to_repair = conn.execute(
+        "SELECT DISTINCT t.id, t.status, t.error FROM tasks t JOIN media_generations m ON m.task_id=t.id "
+        "WHERE (t.status IN ('failed', 'cancelled') AND m.status NOT IN ('done', 'failed', 'cancelled')) "
+        "OR (t.status='queued' AND m.status NOT IN ('queued', 'done', 'failed', 'cancelled'))"
+    ).fetchall()
+    repaired = []
+    for row in tasks_to_repair:
+        repaired.extend(_set_linked_media_state(conn, row["id"], row["status"], row["error"] or "tâche interrompue", now))
+    return repaired
+
+
 def emit(business: str | None, task_id: int | None, type_: str, data: dict | None = None) -> None:
     with _tx() as conn:
         _emit(conn, business, task_id, type_, data)
@@ -311,15 +337,16 @@ def answer(request_id: int, text: str) -> int:
 def reap(now: float | None = None) -> dict:
     """Baux expirés (worker mort) et demandes humaines expirées."""
     now = now or time.time()
-    out = {"requeued": [], "failed": [], "expired_requests": []}
+    out = {"requeued": [], "failed": [], "expired_requests": [], "reconciled_media": []}
     with _tx() as conn:
         for row in conn.execute("SELECT * FROM tasks WHERE status='running' AND lease_until <= ?", (now,)).fetchall():
             retry = row["attempts"] < row["max_attempts"] and not row["cancel_requested"]
             status = "queued" if retry else ("cancelled" if row["cancel_requested"] else "failed")
+            error = f"bail expiré (worker {row['lease_owner']} arrêté ?)"
             conn.execute("UPDATE tasks SET status=?, error=?, lease_owner=NULL, lease_until=NULL, updated_at=?, "
                          "finished_at=? WHERE id=?",
-                         (status, f"bail expiré (worker {row['lease_owner']} arrêté ?)", now,
-                          None if retry else now, row["id"]))
+                         (status, error, now, None if retry else now, row["id"]))
+            out["reconciled_media"].extend(_set_linked_media_state(conn, row["id"], status, error, now))
             _emit(conn, row["business"], row["id"], "task.lease_expired", {"owner": row["lease_owner"], "status": status})
             out["requeued" if retry else "failed"].append(row["id"])
         for req in conn.execute("SELECT * FROM human_requests WHERE status='pending' AND expires_at IS NOT NULL "
@@ -330,6 +357,7 @@ def reap(now: float | None = None) -> dict:
                          (f"sans réponse humaine : {req['question'][:120]}", now, now, req["task_id"]))
             _emit(conn, req["business"], req["task_id"], "human.expired", {"request_id": req["id"]})
             out["expired_requests"].append(req["id"])
+        out["reconciled_media"].extend(_repair_linked_media(conn, now))
     return out
 
 
