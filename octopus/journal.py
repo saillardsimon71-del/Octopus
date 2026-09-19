@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from . import enabled, paths
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -481,7 +481,47 @@ CREATE TABLE IF NOT EXISTS resources (
 CREATE INDEX IF NOT EXISTS idx_resources_state ON resources(state, kind);
 """
 
-_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4), (5, _SCHEMA_V5), (6, _SCHEMA_V6))
+_SCHEMA_V7 = """
+CREATE TABLE IF NOT EXISTS business_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    playbook TEXT NOT NULL,
+    spec TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'running',
+    budget_amount REAL NOT NULL DEFAULT 0,
+    budget_currency TEXT NOT NULL DEFAULT 'EUR',
+    created_by TEXT NOT NULL,
+    origin_task_id INTEGER,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_business_runs_business ON business_runs(business, status);
+CREATE TABLE IF NOT EXISTS business_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES business_runs(id),
+    business TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    label TEXT,
+    channel_id INTEGER,
+    payload TEXT NOT NULL DEFAULT '{}',
+    requires_approval INTEGER NOT NULL DEFAULT 0,
+    cost_amount REAL NOT NULL DEFAULT 0,
+    cost_currency TEXT,
+    status TEXT NOT NULL DEFAULT 'proposed',
+    reason TEXT,
+    evidence_id INTEGER,
+    spend_request_id INTEGER,
+    idempotency_key TEXT UNIQUE,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE(run_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_business_actions_run ON business_actions(run_id, seq);
+"""
+
+_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4), (5, _SCHEMA_V5), (6, _SCHEMA_V6),
+               (7, _SCHEMA_V7))
 
 _LLM_COLUMNS = (
     "ts", "run_id", "root_run_id", "business", "agent", "task", "profile", "model", "provider",

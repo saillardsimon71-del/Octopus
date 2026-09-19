@@ -36,7 +36,7 @@ def test_old_database_migrates_to_the_current_schema_without_losing_data(tmp_pat
 
     conn = journal.connect()
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == journal.SCHEMA_VERSION == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == journal.SCHEMA_VERSION == 7
         assert conn.execute("SELECT business FROM tasks").fetchone()[0] == "podalux"
         names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     finally:
