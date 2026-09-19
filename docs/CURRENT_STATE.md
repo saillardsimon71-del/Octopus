@@ -191,21 +191,26 @@ Les audits détaillés préparés avant Work sont dans `docs/audits/`.
 
 ## 7. Point de reprise recommandé
 
-La prochaine session Work doit commencer par :
+La prochaine session de développement doit être une session **Codex à scope limité G1 uniquement** afin de préserver le quota hebdomadaire.
+
+Point de départ :
 
 ```text
-1. vérifier branche + git status + HEAD
-2. lire docs/CURRENT_STATE.md
-3. lire docs/HANDOFF_WORK.md
-4. cartographier TOUS les appels de création GPU/cloud payants
-5. empêcher tout bypass du GuardedComputeManager
-6. tester
-7. concevoir le canary Salad à quelques centimes
-8. seulement ensuite lancer un vrai benchmark
+1. lire AGENTS.md
+2. lire docs/CODEX_START.md
+3. vérifier branche / worktree / git status / HEAD
+4. G1.1 validation/fallback
+5. G1.2 attestation OmniRoute / zero_cost
+6. G1.3 routage propre
+7. G1.4 tests + preuve finale
+8. arrêt de session
 ```
 
-Voir `docs/HANDOFF_WORK.md` pour le protocole détaillé.
+Ne pas commencer G2 dans cette session sans autorisation explicite.
 
+La session doit utiliser le dépôt comme mémoire et privilégier `rg`, Git et les tests ciblés aux explorations larges.
+
+Voir `docs/CODEX_START.md` pour le protocole exact.
 
 ## 8. Pack de préparation Work du 19/09
 
