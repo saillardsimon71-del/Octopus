@@ -58,7 +58,9 @@ def load_handlers(modules: list[str] | None = None) -> dict[str, Handler]:
         from . import businesses
         names = businesses.handler_modules()  # moteur + handlers déclarés dans businesses/*/business.toml
     for name in names:
-        importlib.import_module(name)
+        module = importlib.import_module(name)
+        if not any(spec.fn.__module__ == name for spec in HANDLERS.values()):
+            importlib.reload(module)
     return HANDLERS
 
 

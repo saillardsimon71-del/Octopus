@@ -16,7 +16,7 @@ except ModuleNotFoundError:  # Python 3.10
 
 from . import journal, paths
 
-ENGINE_HANDLERS = ("octopus.builtin_handlers", "octopus.media.handlers")
+ENGINE_HANDLERS = ("octopus.builtin_handlers", "octopus.media.handlers", "octopus.dev_worker")
 _cache: dict[str, tuple[tuple, dict]] = {}
 _problems: dict[str, list[str]] = {}
 

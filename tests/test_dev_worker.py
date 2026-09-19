@@ -12,6 +12,11 @@ import pytest
 from octopus import tasks, worker
 
 
+@pytest.fixture(autouse=True)
+def load_dev_handler():
+    worker.load_handlers(["octopus.dev_worker"])
+
+
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True,
