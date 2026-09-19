@@ -39,6 +39,7 @@ class BudgetLimits:
     max_runtime_s: float = 3600.0
     idle_timeout_s: float = 300.0
     reservation_ttl_s: float = 120.0
+    watchdog_interval_s: float = 5.0
     shutdown_margin_usd_per_unit: float = 0.001
     require_allowance: bool = True
 
@@ -51,6 +52,7 @@ class BudgetLimits:
             "max_runtime_s": self.max_runtime_s,
             "idle_timeout_s": self.idle_timeout_s,
             "reservation_ttl_s": self.reservation_ttl_s,
+            "watchdog_interval_s": self.watchdog_interval_s,
         }
         if any(value <= 0 for value in values.values()):
             raise ValueError("tous les plafonds financiers/temps doivent être strictement positifs")
@@ -73,6 +75,7 @@ class BudgetLimits:
             max_runtime_s=number("OCTOPUS_GPU_MAX_RUNTIME_S", 3600.0),
             idle_timeout_s=number("OCTOPUS_GPU_IDLE_TIMEOUT_S", 300.0),
             reservation_ttl_s=number("OCTOPUS_GPU_RESERVATION_TTL_S", 120.0),
+            watchdog_interval_s=number("OCTOPUS_GPU_WATCHDOG_INTERVAL_S", 5.0),
             shutdown_margin_usd_per_unit=number("OCTOPUS_GPU_SHUTDOWN_MARGIN_PER_VIDEO_USD", 0.001),
             require_allowance=os.environ.get("OCTOPUS_GPU_REQUIRE_ALLOWANCE", "1").strip().lower()
             not in ("0", "false", "no", "off"),
@@ -451,10 +454,9 @@ class FinancialCircuitBreaker:
             started = row["started_at"] or row["created_at"]
             elapsed = max(0.0, now - started)
             accrued = elapsed * row["price_per_hour"] / 3600.0
-            trip_at = max(
-                0.0,
-                row["hard_cap_usd"] - self.limits.shutdown_margin_usd_per_unit * row["units_planned"],
-            )
+            polling_margin = row["price_per_hour"] * self.limits.watchdog_interval_s * 2.0 / 3600.0
+            configured_margin = self.limits.shutdown_margin_usd_per_unit * row["units_planned"]
+            trip_at = max(0.0, row["hard_cap_usd"] - max(configured_margin, polling_margin))
             reason = None
             if accrued >= trip_at - 1e-12:
                 reason = f"plafond coût approché ({accrued:.6f}/{row['hard_cap_usd']:.6f} USD)"
