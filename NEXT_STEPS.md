@@ -1,35 +1,99 @@
-# NEXT_STEPS - 17/09/2026 (session autonome video)
+# Prochaines étapes
 
-## Fait et verifie (mesure, pas suppose)
-- 4 videos reelles produites de bout en bout, hors machine locale : 1080x1920, 30 fps,
-  -14,0 LUFS, 0 image figee, 18,5 a 21,7 s, ~112 s de production par video, 0 euro.
-- Voix : `tools/tts_providers.py`, chaine azure -> cloudflare -> chatterbox -> piper.
-  piper (MIT, CPU, sans compte) sert de plancher : 7,4 s de voix synthetises en 1,8 s sur 2 vCPU.
-- B-roll : `tools/fetch_broll.py`, 5 images CC0 pertinentes par offre (stocksnap/rawpixel/nappy,
-  photos uniquement, filtre de pertinence), credits dans out/<offer>/credits.txt.
-- Respiration adaptative : narration trop courte -> silences allonges (17,3 s -> 18,5 s) au lieu
-  d'un refus QC.
-- Suite complete verte (438 tests), dont 20 nouveaux (chaine TTS, b-roll, respiration, doctor).
-- OmniRoute : `auto/free` n'existe pas, le catalogue envoie `auto/best-free` (verifie sur la
-  passerelle locale : 200 en 458 ms via Groq).
+**Mis à jour : 19/09/2026.**  
+L'état détaillé est dans `docs/CURRENT_STATE.md`.
 
-## A faire sur la machine Windows
-1. `python -m pip install piper-tts` puis `python -m agents.run doctor` :
-   la ligne "Voix (chaine TTS)" doit lister piper.
-2. `python -m agents.run cycle` : premier cycle complet avec voix locale et b-roll.
-3. Pousser la branche (aucun push n'a ete fait sans autorisation) :
-   `git push origin feat/autonomous-business-foundation`
-4. Ensuite seulement : declencher `video-batch` dans l'onglet Actions (production de toutes les
-   offres en parallele, gratuit sur les runners GitHub).
+## P0 — verrouiller le compute avant de dépenser
 
-## Ameliorations possibles (non faites)
-- Cle Azure Speech (F0, 500 000 caracteres/mois, sans carte) : voix neuronale a la place de piper,
-  c'est le seul levier qui fera monter la note "humanite" du QC.
-- Cle Pexels (gratuite) : b-roll de bien meilleure qualite que les banques CC0 actuelles.
-- Synchronisation des sous-titres au mot (whisper) : aujourd'hui repartie au prorata des caracteres.
-- QC vision sur le palier gratuit Gemini (1 500 requetes/jour) plutot que sur un modele generique.
+1. **Cartographier tous les chemins GPU/cloud payants.**
+   Chercher les appels directs aux providers, renderers et workers capables de créer une ressource.
 
-## Non teste
-- Cycle complet `agents.run cycle` sur Windows avec ces changements (la partie FORGE est testee,
-  SOUT/CONVERT/GROWTH/LEDGER demandent la base et les LLM de la machine).
-- Les deux workflows GitHub : rien n'a ete pousse, donc aucun run observe.
+2. **Forcer le chemin unique via `GuardedComputeManager`.**
+   Aucun caller métier ne doit pouvoir lancer Salad/GPU.ai ou un futur provider payant directement.
+
+3. **Rendre le watchdog réellement indépendant.**
+   Définir son mode de lancement/restart et tester un crash du worker vidéo suivi d'un arrêt GPU.
+
+4. **Faire un canary Salad minuscule.**
+   Une allowance faible, pas d'auto-recharge, un job court et connu.
+
+5. **Vérifier la facture réelle.**
+   Comparer coût OCTOPUS calculé, durée provider et débit du solde.
+
+## P1 — trouver le meilleur GPU en $/vidéo
+
+Benchmark strictement identique sur les GPU disponibles économiquement intéressants :
+
+- RTX 3090 ;
+- RTX 5090 Laptop ;
+- RTX 4090 ;
+- RTX 5090 desktop ;
+- autres offres uniquement si elles améliorent le coût réel.
+
+Mesurer :
+
+```text
+cold start
+image pull
+poids/cache
+préparation
+inférence
+temps total facturé
+succès/échec
+coût réel
+coût par vidéo
+```
+
+Le choix final se fait sur **$/vidéo réussie**, pas sur $/h.
+
+## P1 — rendre les machines éphémères robustes
+
+Décider puis implémenter :
+
+- image OCI Wan/worker reproductible ;
+- version du modèle et dépendances verrouillées ;
+- récupération des poids déterministe ;
+- cache si réellement rentable ;
+- bootstrap idempotent ;
+- healthcheck ;
+- résultats externalisés avant arrêt ;
+- aucun état critique seulement sur le disque éphémère.
+
+Objectif : une machine fraîche doit pouvoir démarrer sans bricolage manuel.
+
+## P1 — réutiliser intelligemment un GPU chaud
+
+Le coût cible < $0.01/vidéo sera plus réaliste si plusieurs vidéos sont produites dans une même session GPU :
+
+```text
+cold start une fois
+→ charger le modèle une fois
+→ batch de jobs
+→ arrêter dès queue vide
+```
+
+Le breaker doit toujours conserver un cap batch et global.
+
+## P2 — boucle business mesurée
+
+Après stabilisation du compute :
+
+- publication réelle ;
+- analytics ;
+- coût d'acquisition ;
+- cash observé ;
+- expériences stratégiques ;
+- réinvestissement.
+
+Ne pas optimiser dix chaînes avant qu'un premier moteur contenu → audience → revenu soit mesuré.
+
+## Conditions avant merge de la PR compute
+
+- CI compute verte ;
+- `video-foundation` verte ;
+- pas de bypass payant connu ;
+- watchdog testé après restart ;
+- doc à jour ;
+- idéalement canary live réussi et coût observé.
+
+La PR peut rester Draft tant que les points de sécurité live ne sont pas vérifiés.
