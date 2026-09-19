@@ -307,20 +307,28 @@ class SaladClient:
             payload["country_codes"] = countries
         org = urllib.parse.quote(str(self.config.organization), safe="")
         project = urllib.parse.quote(str(self.config.project), safe="")
-        data, _, _ = self._request("POST", f"/organizations/{org}/projects/{project}/containers", payload=payload)
+        submit_error = None
+        data: dict[str, Any] = {}
+        try:
+            data, _, _ = self._request("POST", f"/organizations/{org}/projects/{project}/containers", payload=payload)
+        except SaladError as exc:
+            # Un timeout/erreur réseau après POST peut avoir créé le groupe. Le nom est déterministe :
+            # lire avant toute décision, et ne jamais resoumettre aveuglément.
+            submit_error = exc
 
         # Salad recommande de vérifier toute écriture par une lecture. On ne resoumet jamais
         # la création si cette lecture échoue : une requête facturable ambiguë reste ambiguë.
         try:
             verified = self.get_group(group_name)
         except SaladError as exc:
+            detail = submit_error or exc
             return ComputeOperation(
                 provider=self.provider,
                 operation_id=str(data.get("id") or group_name),
                 state="submitted_unverified",
                 resource_id=group_name,
-                error=str(exc),
-                raw={"create_response": data, "requires_external_termination": True},
+                error=str(detail),
+                raw={"create_response": data, "requires_external_termination": True, "submit_error": str(submit_error) if submit_error else None},
             )
         operation = self._operation_from_group(verified, fallback_name=group_name)
         return ComputeOperation(
