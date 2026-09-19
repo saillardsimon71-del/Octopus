@@ -94,6 +94,19 @@ def _overlay_omniroute(raw: dict) -> dict:
         "notes": "Modèle virtuel OmniRoute : auto/best-free. La disponibilité et le provider réel dépendent des connexions OmniRoute.",
     }
 
+    devworker_models = {
+        "omniroute/devworker-gemini": "octopus-free-devworker-gemini",
+        "omniroute/devworker-groq": "octopus-free-devworker-groq",
+    }
+    for dev_model_id, dev_api_model in devworker_models.items():
+        raw.setdefault("models", {})[dev_model_id] = {
+            "provider": provider_id,
+            "api_model": dev_api_model,
+            "cost_class": "free_quota",
+            "capabilities": ["json", "tools", "reasoning_effort"],
+            "zero_cost_attestation": zero_cost_attestation,
+            "notes": "Route DevWorker dediee via LiteLLM, sans fallback cross-provider interne.",
+        }
     free_defaults = {
         "podalux.select_offer": model_id,
         "podalux.write_job": model_id,
@@ -105,7 +118,6 @@ def _overlay_omniroute(raw: dict) -> dict:
         "web.summarize": model_id,
         "web.inspect_page": model_id,
         "veille.brief": model_id,
-        "development.step": model_id,
     }
     for task_name, selected_model in free_defaults.items():
         task = raw.setdefault("tasks", {}).setdefault(task_name, {})
@@ -118,6 +130,24 @@ def _overlay_omniroute(raw: dict) -> dict:
             candidates["low_cost"] = [selected_model, *current_low]
         if raw.get("profiles", {}).get("zero_cost", {}).get("fallback"):
             task.setdefault("omniroute_bootstrap_baseline", {})["zero_cost"] = selected_model
+    dev_task = raw.setdefault("tasks", {}).setdefault("development.step", {})
+    dev_candidates = dev_task.setdefault("candidates", {})
+    dedicated = [
+        "omniroute/devworker-gemini",
+        "omniroute/devworker-groq",
+    ]
+    excluded = set(dedicated + [model_id])
+
+    for profile_name in ("zero_cost", "low_cost"):
+        current = [
+            candidate
+            for candidate in dev_candidates.get(profile_name, [])
+            if candidate not in excluded
+        ]
+        dev_candidates[profile_name] = dedicated + current
+
+    if raw.get("profiles", {}).get("zero_cost", {}).get("fallback"):
+        dev_task.setdefault("omniroute_bootstrap_baseline", {})["zero_cost"] = dedicated[0]
     return raw
 
 

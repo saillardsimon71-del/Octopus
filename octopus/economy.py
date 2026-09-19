@@ -12,6 +12,7 @@ Aucune fonction ici ne déplace d'argent : elles décident, mesurent et tracent.
 from __future__ import annotations
 
 import json
+import math
 import time
 
 from . import journal, strategy, tasks
@@ -193,8 +194,13 @@ def daily_spend_summary(business: str, *, since: float | None = None,
                         until: float | None = None) -> list[dict]:
     """Coût engagé et coût enregistré, groupés par catégorie pour la journée UTC."""
     business = strategy._business(business)
-    until = time.time() if until is None else float(until)
-    since = until - (until % 86400) if since is None else float(since)
+    if until is None:
+        now = time.time()
+        since = now - (now % 86400) if since is None else float(since)
+        until = math.nextafter(now, math.inf)
+    else:
+        until = float(until)
+        since = until - (until % 86400) if since is None else float(since)
     buckets: dict[tuple[str, str], dict] = {}
 
     engaged = journal.query(
