@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from . import enabled, paths
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -526,7 +526,16 @@ CREATE TABLE IF NOT EXISTS compute_cost_events (
 CREATE INDEX IF NOT EXISTS idx_compute_cost_events_reservation ON compute_cost_events(reservation_id, id);
 """
 
-_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4), (5, _SCHEMA_V5), (6, _SCHEMA_V6), (7, _SCHEMA_V7))
+
+_SCHEMA_V8 = """
+CREATE TABLE IF NOT EXISTS compute_spend_links (
+    reservation_id INTEGER PRIMARY KEY REFERENCES compute_reservations(id),
+    spend_request_id INTEGER NOT NULL UNIQUE REFERENCES spend_requests(id)
+);
+CREATE INDEX IF NOT EXISTS idx_compute_spend_links_request ON compute_spend_links(spend_request_id);
+"""
+
+_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4), (5, _SCHEMA_V5), (6, _SCHEMA_V6), (7, _SCHEMA_V7), (8, _SCHEMA_V8))
 
 _LLM_COLUMNS = (
     "ts", "run_id", "root_run_id", "business", "agent", "task", "profile", "model", "provider",
