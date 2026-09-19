@@ -105,6 +105,7 @@ def _overlay_omniroute(raw: dict) -> dict:
         "web.summarize": model_id,
         "web.inspect_page": model_id,
         "veille.brief": model_id,
+        "development.step": model_id,
     }
     for task_name, selected_model in free_defaults.items():
         task = raw.setdefault("tasks", {}).setdefault(task_name, {})

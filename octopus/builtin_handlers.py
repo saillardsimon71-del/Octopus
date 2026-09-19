@@ -4,6 +4,9 @@ from __future__ import annotations
 from . import report, resources, strategy
 from .worker import handler
 
+# Enregistre le handler de développement avec les handlers moteur existants.
+from . import dev_worker  # noqa: F401, E402
+
 
 @handler("octopus.cost_report")
 def cost_report(ctx):

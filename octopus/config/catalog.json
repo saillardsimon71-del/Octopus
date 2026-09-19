@@ -203,6 +203,14 @@
         "quality_first": ["deepseek/v4-pro"]
       }
     },
+    "development.step": {
+      "needs": ["json"], "privacy": "internal", "baseline": "deepseek/v4-pro",
+      "candidates": {
+        "zero_cost": ["groq/gpt-oss-120b", "ollama/qwen3.5-4b"],
+        "low_cost": ["groq/gpt-oss-120b", "ollama/qwen3.5-4b", "deepseek/flash"],
+        "quality_first": ["deepseek/v4-pro"]
+      }
+    },
     "web.summarize": {
       "needs": [], "privacy": "public", "baseline": "deepseek/flash",
       "candidates": {
