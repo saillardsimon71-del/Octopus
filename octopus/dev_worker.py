@@ -250,7 +250,7 @@ def _tool(action: dict, worktree: Path, tests: list[list[str]], tests_passed: bo
             applied = _run(["git", "apply", "--whitespace=nowarn", "-"], worktree, input_text=patch)
             if applied.returncode:
                 raise DevWorkerError((applied.stderr or applied.stdout)[-2000:])
-        return _git(worktree, "diff", "--stat"), False, None
+        return _git(worktree, "diff", "--")[-12000:], False, None
     if name == "test":
         outputs = []
         passed = True

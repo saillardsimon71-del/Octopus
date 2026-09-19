@@ -251,6 +251,7 @@ def test_devworker_applies_safe_context_patches_without_hunk_numbers(tmp_path, p
 
     assert (repo / "calc.py").read_text(encoding="utf-8") == "def answer():\n    return 2\n"
     assert "calc.py" in output
+    assert "+    return 2" in output
     assert passed is False
     assert commit is None
 
