@@ -2,16 +2,19 @@
 
 La documentation est organisée pour distinguer **état courant**, **runbooks techniques** et **historique**.
 
-## État courant — lire en priorité
+## Contexte durable — lire en priorité
 
 | Fichier | Rôle |
 |---|---|
+| `../AGENTS.md` | constitution du projet et règles globales pour agents |
+| `VISION.md` | pourquoi OCTOPUS existe et où il va |
 | `CURRENT_STATE.md` | source de vérité de l'état actuel |
+| `CODEX_START.md` | point d'entrée court pour une session Codex |
 | `HANDOFF_WORK.md` | protocole exact pour reprendre dans Work/Codex |
 | `COMPUTE_GPU.md` | architecture GPU, coûts, breaker et watchdog |
 | `ACCEPTANCE_GATES.md` | critères binaires de progression et définition de la V1 |
 | `../NEXT_STEPS.md` | prochaines actions priorisées |
-| `../CLAUDE.md` | règles de reprise pour un agent de développement |
+| `../CLAUDE.md` | compatibilité / règles pour agents historiques |
 
 ## Installation / exploitation
 
