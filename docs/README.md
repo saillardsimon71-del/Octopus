@@ -9,6 +9,7 @@ La documentation est organisée pour distinguer **état courant**, **runbooks te
 | `CURRENT_STATE.md` | source de vérité de l'état actuel |
 | `HANDOFF_WORK.md` | protocole exact pour reprendre dans Work/Codex |
 | `COMPUTE_GPU.md` | architecture GPU, coûts, breaker et watchdog |
+| `ACCEPTANCE_GATES.md` | critères binaires de progression et définition de la V1 |
 | `../NEXT_STEPS.md` | prochaines actions priorisées |
 | `../CLAUDE.md` | règles de reprise pour un agent de développement |
 
@@ -22,6 +23,13 @@ La documentation est organisée pour distinguer **état courant**, **runbooks te
 - `RESOURCES.md` — inventaire de ressources réelles ;
 - `GUI.md` — Workbench ;
 - `ORCA_INTEGRATION.md` — pont de développement optionnel.
+
+## Audits / design actifs
+
+- `audits/LLM_BRAIN_AUDIT_2026-09-19.md` — cerveau LLM / OmniRoute ;
+- `audits/PAID_PATHS_AUDIT_2026-09-19.md` — chemins payants et gaps de settlement ;
+- `design/SALAD_WAN_WORKER_V1.md` — worker Wan Salad cible ;
+- `benchmarks/GPU_COST_BENCHMARK_PLAN.md` — protocole $/vidéo.
 
 ## Conception / plans spécialisés
 
