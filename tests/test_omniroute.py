@@ -144,3 +144,59 @@ def test_zero_cost_blocks_unresolved_omniroute_response(monkeypatch, providers_u
         raise AssertionError("zero_cost doit bloquer une route OmniRoute non résolue")
     (row,) = journal.query("SELECT * FROM llm_calls")
     assert row["status"] == "blocked" and "identité résolue absente" in row["error"]
+
+
+def test_litellm_headers_resolve_real_provider_identity(monkeypatch):
+    import sys
+    import types
+    from types import SimpleNamespace
+
+    from octopus import llm
+
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok": true}'))],
+        usage=None,
+        model="octopus-free-devworker",
+    )
+
+    raw_response = SimpleNamespace(
+        headers={
+            "x-litellm-model-name": "groq/openai/gpt-oss-120b",
+            "x-litellm-model-group": "octopus-free-devworker",
+            "x-litellm-response-cost": "2.325e-05",
+        },
+        request_id="req-litellm",
+        parse=lambda: response,
+    )
+
+    create = lambda **kwargs: raw_response
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(
+            completions=SimpleNamespace(
+                with_raw_response=SimpleNamespace(create=create)
+            )
+        )
+    )
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = lambda **kwargs: fake_client
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    monkeypatch.setattr(llm, "_transport_override", None)
+    llm._clients.clear()
+
+    result = llm._transport(
+        {
+            "base_url": "http://127.0.0.1:4000/v1",
+            "api_key_env": None,
+        },
+        {
+            "model": "octopus-free-devworker",
+            "messages": [{"role": "user", "content": "test"}],
+            "max_tokens": 20,
+        },
+    )
+
+    assert result.resolved_model == "groq/openai/gpt-oss-120b"
+    assert result.resolved_provider == "groq"
+    assert result.provider_cost_usd is None
+    assert result.request_id == "req-litellm"

@@ -163,12 +163,23 @@ def _transport(provider: dict, request: dict) -> tuple[str, Usage] | TransportRe
         provider_cost_usd = float(provider_cost) if provider_cost is not None else None
     except ValueError:
         provider_cost_usd = None
+
+    litellm_model = headers.get("x-litellm-model-name")
+    resolved_model = (
+        headers.get("x-omniroute-model")
+        or litellm_model
+        or getattr(response, "model", None)
+    )
+    resolved_provider = headers.get("x-omniroute-provider")
+    if resolved_provider is None and litellm_model and "/" in litellm_model:
+        resolved_provider = litellm_model.split("/", 1)[0]
+
     return TransportResult(
         text=text,
         usage=_usage(getattr(response, "usage", None)),
         requested_model=request["model"],
-        resolved_model=headers.get("x-omniroute-model") or getattr(response, "model", None),
-        resolved_provider=headers.get("x-omniroute-provider"),
+        resolved_model=resolved_model,
+        resolved_provider=resolved_provider,
         request_id=raw_response.request_id,
         provider_cost_usd=provider_cost_usd,
     )
