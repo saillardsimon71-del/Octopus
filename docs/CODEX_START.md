@@ -41,22 +41,27 @@ Si Codex travaille dans un worktree isolé en detached HEAD :
 Le dépôt principal utilisateur peut rester sur une autre branche. Ce n'est pas une erreur.
 
 
-## 2. Lire
+## 2. Lire — contexte minimal pour cette session
 
-Ordre minimum :
+Pour G1, ne charge pas toute la documentation.
 
-1. `AGENTS.md`
-2. `docs/VISION.md`
-3. `docs/CURRENT_STATE.md`
-4. `docs/ACCEPTANCE_GATES.md`
-5. `NEXT_STEPS.md`
-6. audits/designs spécifiques à la mission.
+Lire uniquement :
 
-Pour le chantier actuel, lire aussi :
+1. `AGENTS.md` ;
+2. ce fichier `docs/CODEX_START.md` ;
+3. la section **G1** de `docs/ACCEPTANCE_GATES.md` ;
+4. `docs/audits/LLM_BRAIN_AUDIT_2026-09-19.md`.
 
-- `docs/audits/LLM_BRAIN_AUDIT_2026-09-19.md`
-- `docs/audits/PAID_PATHS_AUDIT_2026-09-19.md`
-- `docs/COMPUTE_GPU.md`
+Consulter `docs/CURRENT_STATE.md`, `NEXT_STEPS.md` ou `docs/VISION.md` uniquement si une information nécessaire manque ou si le code réel contredit le contexte courant.
+
+Ne pas lire pour cette session G1 :
+
+- `docs/audits/PAID_PATHS_AUDIT_2026-09-19.md` ;
+- `docs/COMPUTE_GPU.md` ;
+- les docs Salad/Wan/benchmark ;
+- `docs/archive/`.
+
+Ces documents concernent G2+ ou l'historique et consommeraient du contexte sans aider G1.
 
 ## 3. Mission courante
 
@@ -190,23 +195,22 @@ LLM = décision quand nécessaire
 
 ## 6. Tests
 
-Toujours commencer par les tests directement touchés.
-
-Compute minimum :
+Pour cette session G1, commencer uniquement par les tests directement liés au cerveau LLM :
 
 ```bash
 python -m pytest -q \
-  tests/test_compute_finance.py \
-  tests/test_compute_salad.py \
-  tests/test_compute_broker.py \
-  tests/test_compute_gpuai.py
+  tests/test_gateway.py \
+  tests/test_omniroute.py \
+  tests/test_pricing_catalog.py
 ```
 
-Pour G1, exécuter aussi les suites gateway/OmniRoute concernées.
+N'ajouter d'autres tests que si les fichiers réellement modifiés les rendent nécessaires.
 
-Puis exécuter les suites transversales affectées.
+Après stabilisation de G1, exécuter seulement les suites transversales directement affectées.
 
-Aucun test ne doit lancer une ressource payante réelle.
+Ne pas exécuter les suites compute/GPU pour une modification purement G1.
+
+Aucun test ne doit appeler un service payant réel.
 
 ## 7. Discipline
 
