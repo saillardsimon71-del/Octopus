@@ -210,3 +210,44 @@ def test_litellm_headers_resolve_real_provider_identity(monkeypatch):
     assert result.resolved_provider == "groq"
     assert result.provider_cost_usd is None
     assert result.request_id == "req-litellm"
+
+
+def test_transport_extracts_forced_structured_tool_call(monkeypatch):
+    import sys
+    import types
+    from types import SimpleNamespace
+
+    from octopus import llm
+
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(
+            content=None,
+            tool_calls=[SimpleNamespace(function=SimpleNamespace(
+                name="octopus_response",
+                arguments='{"action":"test"}',
+            ))],
+        ))],
+        usage=None,
+        model="octopus-free-devworker-groq",
+    )
+    raw_response = SimpleNamespace(headers={}, request_id="req-tool", parse=lambda: response)
+    fake_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        with_raw_response=SimpleNamespace(create=lambda **kwargs: raw_response),
+    )))
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = lambda **kwargs: fake_client
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    monkeypatch.setattr(llm, "_transport_override", None)
+    llm._clients.clear()
+
+    result = llm._transport(
+        {"base_url": "http://127.0.0.1:4000/v1", "api_key_env": None},
+        {
+            "model": "octopus-free-devworker-groq",
+            "messages": [{"role": "user", "content": "next"}],
+            "max_tokens": 20,
+            "tool_choice": {"type": "function", "function": {"name": "octopus_response"}},
+        },
+    )
+
+    assert result.text == '{"action":"test"}'

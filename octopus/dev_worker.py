@@ -291,8 +291,8 @@ def development_task(ctx):
     tests_passed = False
     schema_json = json.dumps(DEV_ACTION_SCHEMA, separators=(",", ":"))
     system = (
-        "You are DevWorker. Do not call tools or emit tool calls. Choose the next useful action and respond only "
-        f"with one JSON object matching this schema exactly: {schema_json}. "
+        "You are DevWorker. Do not invoke external tools. Choose the next useful action and return it through the "
+        f"structured response mechanism provided, matching this schema exactly: {schema_json}. "
         "Inspect before modifying. Return one action per response. Never request shell, push, PR, or agent. "
         "Make the smallest change needed and never reformat unrelated lines. "
         "For patch actions, patch must be a UTF-8 unified diff with ---/+++ paths accepted by git apply; "

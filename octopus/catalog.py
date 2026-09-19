@@ -108,8 +108,7 @@ def _overlay_omniroute(raw: dict) -> dict:
             "notes": "Route DevWorker dediee via LiteLLM, sans fallback cross-provider interne.",
         }
     raw["models"]["omniroute/devworker-groq"].update({
-        "json_schema_mode": "json_object",
-        "json_schema_fallback": "text",
+        "json_schema_mode": "tool_call",
         "params": {"reasoning_effort": "low"},
     })
     free_defaults = {
