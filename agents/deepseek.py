@@ -10,10 +10,9 @@ routage historique.
 from __future__ import annotations
 
 import base64
-import json
 import os
-import re
 from pathlib import Path
+from typing import Any, Callable
 
 import octopus
 
@@ -55,20 +54,34 @@ def _legacy_request(model: str, messages: list[dict], max_tokens: int, reasoning
 
 
 def _complete(agent: str, task: str, model: str, messages: list[dict], max_tokens: int,
-              reasoning: str | None = None, json_mode: bool = False, needs: tuple[str, ...] = ()) -> str:
+              reasoning: str | None = None, json_mode: bool = False, needs: tuple[str, ...] = (),
+              validate: Callable[[str], Any] | None = None) -> Any:
     if not octopus.enabled():
         r = _client().chat.completions.create(**_legacy_request(model, messages, max_tokens, reasoning, json_mode))
         content = (r.choices[0].message.content or "").strip()
         db.log_cost(agent, task, model, r.usage.prompt_tokens, r.usage.completion_tokens)
-        return content
+        return validate(content) if validate is not None else content
     from octopus import journal, llm
     run = journal.current_run()  # coûts rattachés au business du run (mission, tâche), pas toujours à Podalux
     c = llm.complete(llm.legacy_task(agent, task), messages, agent=agent, business=run.business if run else "podalux",
                      max_tokens=max_tokens, json_mode=json_mode, reasoning=reasoning, needs=needs,
-                     pin_model=_MODEL_IDS.get(model, model), profile=_default_profile())
+                     pin_model=_MODEL_IDS.get(model, model), profile=_default_profile(), validate=validate)
     used = model if c.model == _MODEL_IDS.get(model) else c.model
     db.log_cost(agent, task, used, c.usage.prompt_tokens, c.usage.completion_tokens, cost_usd=c.cost_usd)
-    return c.text
+    return c.data if validate is not None else c.text
+
+
+def _json_validator(validate: Callable[[dict], Any] | None = None) -> Callable[[str], dict]:
+    from octopus import llm
+
+    def parse_and_validate(text: str) -> dict:
+        data = llm.parse_json(text)
+        if validate is None:
+            return data
+        validated = validate(data)
+        return data if validated is None else validated
+
+    return parse_and_validate
 
 
 def call(agent: str, task: str, model: str, messages: list[dict],
@@ -79,14 +92,11 @@ def call(agent: str, task: str, model: str, messages: list[dict],
 
 
 def call_json(agent: str, task: str, model: str, messages: list[dict],
-              max_tokens: int = 2000, reasoning: str | None = None) -> dict:
+              max_tokens: int = 2000, reasoning: str | None = None,
+              validate: Callable[[dict], Any] | None = None) -> dict:
     """Appel texte, parse un objet JSON (tolérant aux balises)."""
-    raw = call(agent, task, model, messages, max_tokens=max_tokens,
-               reasoning=reasoning, json_mode=True)
-    m = re.search(r"\{.*\}", raw, re.S)
-    if not m:
-        raise ValueError(f"JSON introuvable dans la réponse de {agent}: {raw[:300]}")
-    return json.loads(m.group(0))
+    return _complete(agent, task, model, messages, max_tokens, reasoning, json_mode=True,
+                     validate=_json_validator(validate))
 
 
 def build_vision_messages(frames: list[str], prompt: str) -> list[dict]:
@@ -99,14 +109,10 @@ def build_vision_messages(frames: list[str], prompt: str) -> list[dict]:
 
 
 def vision(agent: str, task: str, frames: list[str], narration: str,
-           prompt: str) -> dict:
+           prompt: str, validate: Callable[[dict], Any] | None = None) -> dict:
     """QC vision (JSON) via the configured zero-cost / legacy route."""
-    raw = _complete(agent, task, config.MODEL_FLASH, build_vision_messages(frames, prompt), 3000,
-                    needs=("vision",))
-    m = re.search(r"\{.*\}", raw, re.S)
-    if not m:
-        raise ValueError(f"JSON introuvable dans la réponse vision: {raw[:300]}")
-    return json.loads(m.group(0))
+    return _complete(agent, task, config.MODEL_FLASH, build_vision_messages(frames, prompt), 3000,
+                     needs=("vision",), validate=_json_validator(validate))
 
 
 def vision_text(agent: str, task: str, frames: list[str],

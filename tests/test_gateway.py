@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from agents import agents as ag
 from agents import config, db, deepseek
 from octopus import catalog, journal, llm
 from octopus.pricing import Usage
@@ -133,6 +134,33 @@ def test_invalid_output_falls_back(transport, providers_up):
     transport.handler = by_model({"qwen3.5:4b": "pas du json", "deepseek-flash": '{"titre": "p"}'})
     c = llm.complete("podalux.write_job", MSG, profile="low_cost", json_mode=True, validate=llm.parse_json)
     assert c.model == "deepseek/flash" and c.data == {"titre": "p"}
+    assert [r["status"] for r in calls()] == ["invalid", "ok"]
+
+
+def test_call_json_invalid_output_falls_back_between_free_models(transport, providers_up, monkeypatch):
+    monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
+    prove("podalux.write_job", "ollama/qwen3.5-4b")
+    prove("podalux.write_job", "gemini/3.5-flash")
+    transport.handler = by_model({"qwen3.5:4b": "pas du json", "gemini-3.5-flash": '{"titre": "g"}'})
+
+    assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "g"}
+    assert transport.models == ["qwen3.5:4b", "gemini-3.5-flash"]
+    assert [r["status"] for r in calls()] == ["invalid", "ok"]
+
+
+def test_vision_invalid_verdict_falls_back_between_free_models(transport, providers_up, monkeypatch):
+    monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
+    prove("podalux.qc_vision", "ollama/qwen3.5-4b")
+    prove("podalux.qc_vision", "gemini/3.5-flash")
+    valid = {axis: 1 for axis in ag.AXES}
+    transport.handler = by_model({
+        "qwen3.5:4b": json.dumps({**valid, "hook": 40}),
+        "gemini-3.5-flash": json.dumps(valid),
+    })
+
+    result = deepseek.vision("GROWTH", "qc_vision", [], "narration", "prompt", validate=ag.validate_verdict)
+    assert result["hook"] == 1
+    assert transport.models == ["qwen3.5:4b", "gemini-3.5-flash"]
     assert [r["status"] for r in calls()] == ["invalid", "ok"]
 
 

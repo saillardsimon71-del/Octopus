@@ -66,7 +66,7 @@ def test_each_call_is_journaled_with_official_cost_and_legacy_table_kept(transpo
 def captured(monkeypatch):
     calls: list[dict] = []
 
-    def call_json(agent, task, model, messages, max_tokens=2000, reasoning=None):
+    def call_json(agent, task, model, messages, max_tokens=2000, reasoning=None, validate=None):
         calls.append({"agent": agent, "task": task, "model": model, "messages": messages,
                       "max_tokens": max_tokens, "reasoning": reasoning})
         return {"offer_id": "cash_devis_cgv01", "angle": "a", "decision": "done", "final": "ok",
@@ -102,7 +102,7 @@ def test_convert_prompts(captured):
 def test_growth_prompt(monkeypatch):
     seen = {}
 
-    def vision(agent, task, frames, narration, prompt):
+    def vision(agent, task, frames, narration, prompt, validate=None):
         seen["prompt"] = prompt
         return {k: 1 for k in ag.AXES} | {"humanite": 3}
 

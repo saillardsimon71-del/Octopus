@@ -158,10 +158,11 @@ def validate_job(r) -> None:
         raise InvalidLLMOutput("; ".join(errors))
 
 
-def _flash(agent, task, sys, user):
+def _flash(agent, task, sys, user, validate=None):
+    kwargs = {"validate": validate} if validate is not None else {}
     return deepseek.call_json(agent, task, config.MODEL_FLASH,
                               [{"role": "system", "content": sys},
-                               {"role": "user", "content": user}])
+                               {"role": "user", "content": user}], **kwargs)
 
 
 def _pro(agent, task, sys, user):
@@ -264,14 +265,15 @@ class CONVERT:
             raise ValueError(f"offre inconnue : {offer_id!r} (catalogue : {', '.join(CATALOG)})")
         meta = CATALOG[offer_id]
         user = CONVERT.build_user(offer_id, angle, fixes)
-        r = _flash("CONVERT", "redaction_job", CONVERT.SYS, user)
+        r = _flash("CONVERT", "redaction_job", CONVERT.SYS, user, validate=validate_job)
         try:
             validate_job(r)
         except InvalidLLMOutput as e:
             db.post("CONVERT", f"job invalide ({e}) : nouvelle tentative")
             r = _flash("CONVERT", "redaction_job", CONVERT.SYS,
                        user + f"\n\nTa réponse précédente était invalide : {e}. "
-                              "Respecte exactement le schéma (7 segments, rôles dans l'ordre, textes non vides).")
+                              "Respecte exactement le schéma (7 segments, rôles dans l'ordre, textes non vides).",
+                       validate=validate_job)
             validate_job(r)
         job = {
             "offer_id": offer_id, "langue": "fr", "duree_cible_s": 24,
@@ -343,7 +345,8 @@ class GROWTH:
         verdict, error = None, None
         for attempt in (1, 2):
             try:
-                verdict = validate_verdict(deepseek.vision("GROWTH", "qc_vision", frames, narration, prompt))
+                verdict = validate_verdict(deepseek.vision(
+                    "GROWTH", "qc_vision", frames, narration, prompt, validate=validate_verdict))
                 break
             except ValueError as e:  # JSON introuvable ou notes hors schéma
                 error = e
