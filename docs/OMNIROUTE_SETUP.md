@@ -65,7 +65,11 @@ Le diagnostic contrôle désormais Playwright/Chromium, la base locale, OmniRout
 
 ## Coût / sécurité
 
-`zero_cost` interdit les modèles `paid`. Une panne OmniRoute ou de tout son pool gratuit doit donc produire un échec explicite plutôt qu'un basculement implicite vers DeepSeek.
+`zero_cost` interdit les modèles marqués `paid` **dans le catalogue OCTOPUS** et empêche donc un fallback explicite d'OCTOPUS vers DeepSeek payant.
+
+Cette propriété ne constitue pas encore une attestation financière de l'upstream réellement choisi à l'intérieur d'OmniRoute. OCTOPUS journalise aujourd'hui le modèle virtuel `omniroute/auto-free`, pas encore le modèle/provider aval réellement exécuté. Tant que cette identité et son coût ne sont pas attestés, le mode zéro coût doit utiliser un pool OmniRoute free-only par construction ou rester considéré comme non vérifié financièrement.
+
+Voir `audits/LLM_BRAIN_AUDIT_2026-09-19.md`.
 
 OmniRoute est une passerelle locale : le prompt peut néanmoins être transmis au provider final choisi par OmniRoute. Ne pas considérer `OMNIROUTE_BASE_URL=localhost` comme une garantie que les données restent sur la machine.
 
