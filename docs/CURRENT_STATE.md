@@ -218,3 +218,36 @@ Cinq livrables ont été ajoutés sans modifier le comportement runtime :
 - `docs/ACCEPTANCE_GATES.md`
 
 La progression globale V1 reste estimée à **~55–60 %**, mais les gates rendent désormais cette estimation vérifiable plutôt que seulement subjective.
+
+
+## 9. Mémoire durable pour Work / Codex
+
+Le contexte de développement n'est plus dépendant de l'historique d'une conversation.
+
+Les fichiers suivants ont été ajoutés :
+
+- `AGENTS.md` — constitution globale : vision, invariants, politique LLM gratuite, fail-closed, provider-neutral, règles Git/tests ;
+- `octopus/AGENTS.md` — règles techniques propres au noyau ;
+- `docs/VISION.md` — ligne directrice produit/économique durable ;
+- `docs/CODEX_START.md` — point d'entrée court pour une nouvelle session Codex.
+
+Répartition recommandée :
+
+```text
+Chat  → décisions / architecture
+Work  → audit / recherche / workflows multi-étapes
+Codex → code / terminal / tests / Git
+```
+
+Une nouvelle session Codex peut désormais commencer avec :
+
+```text
+Lis intégralement AGENTS.md puis docs/CODEX_START.md.
+Vérifie l'état Git réel.
+Travaille sur la branche prévue.
+Exécute la mission courante jusqu'aux critères de docs/ACCEPTANCE_GATES.md.
+Ne refais pas les audits déjà versionnés.
+Ne marque jamais une gate DONE sans preuve et tests.
+```
+
+Politique LLM confirmée : **gratuit uniquement en fonctionnement normal**. DeepSeek payant n'est pas une dépendance normale et aucun fallback payant implicite n'est autorisé.
