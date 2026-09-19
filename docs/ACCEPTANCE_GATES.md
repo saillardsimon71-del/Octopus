@@ -42,15 +42,16 @@ DONE si :
 - chaque tentative a le bon statut `ok/invalid/error/blocked`.
 
 ### Paid
-- modèle payant nécessite budget + allowance ;
-- coût final rapproché du `spend_request`.
+- le mode normal n'utilise **aucun LLM payant** ;
+- un LLM payant éventuel nécessite un mode exceptionnel explicitement activé par politique humaine ;
+- aucune route payante ne peut être atteinte implicitement depuis `zero_cost`.
 
 Tests minimum :
 - OmniRoute gratuit down → aucun paid call ;
 - JSON invalide → candidat suivant ;
 - resolved model enregistré ;
 - upstream payant sous zero_cost → refus ;
-- paid LLM sans allowance → refus.
+- aucun fallback payant implicite.
 
 **État actuel : ~60 %.** Voir `audits/LLM_BRAIN_AUDIT_2026-09-19.md`.
 
@@ -68,8 +69,8 @@ DONE si aucune dépense automatique connue ne peut être créée hors politique.
 - soumission ambiguë jamais retry automatiquement.
 
 ### Autres services
-- LLM payants reliés à economy ;
 - TTS/search déclarés free_quota/paid ;
+- tout futur mode LLM payant reste exceptionnel, explicitement activé et économiquement gardé ;
 - connecteurs futurs déclarent leur propre cost class.
 
 ### Ledger
