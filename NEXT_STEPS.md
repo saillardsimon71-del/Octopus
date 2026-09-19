@@ -10,7 +10,7 @@ Critères de sortie : `docs/ACCEPTANCE_GATES.md`
 2. Capturer et journaliser la route réellement résolue derrière OmniRoute.
 3. Rendre `zero_cost` fail-closed : pool free-only ou attestation équivalente, jamais simple confiance dans le nom `auto/best-free`.
 4. Éliminer la duplication de résolution de profil entre `agents/deepseek.py` et le catalogue.
-5. Préparer l'intégration des appels LLM payants aux allowances économiques.
+5. Verrouiller le mode normal sur les LLM gratuits ; traiter un éventuel mode payant uniquement comme capacité future explicitement activée.
 
 Audit : `docs/audits/LLM_BRAIN_AUDIT_2026-09-19.md`.
 
