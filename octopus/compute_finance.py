@@ -40,6 +40,7 @@ class BudgetLimits:
     idle_timeout_s: float = 300.0
     reservation_ttl_s: float = 120.0
     shutdown_margin_usd_per_unit: float = 0.001
+    require_allowance: bool = True
 
     def __post_init__(self) -> None:
         values = {
@@ -73,6 +74,8 @@ class BudgetLimits:
             idle_timeout_s=number("OCTOPUS_GPU_IDLE_TIMEOUT_S", 300.0),
             reservation_ttl_s=number("OCTOPUS_GPU_RESERVATION_TTL_S", 120.0),
             shutdown_margin_usd_per_unit=number("OCTOPUS_GPU_SHUTDOWN_MARGIN_PER_VIDEO_USD", 0.001),
+            require_allowance=os.environ.get("OCTOPUS_GPU_REQUIRE_ALLOWANCE", "1").strip().lower()
+            not in ("0", "false", "no", "off"),
         )
 
 
@@ -120,6 +123,77 @@ class FinancialCircuitBreaker:
     def _committed(self, conn, where: str, params: list[Any]) -> float:
         sql, values = self._committed_sql(where, params)
         return float(conn.execute(sql, values).fetchone()["total"] or 0.0)
+
+    def _authorize_allowance(self, conn, *, business: str, amount: float, purpose: str, now: float) -> int | None:
+        if not self.limits.require_allowance:
+            return None
+        candidates = conn.execute(
+            "SELECT * FROM spend_allowances WHERE business=? AND currency='USD' AND status='active' "
+            "AND (expires_at IS NULL OR expires_at>?) AND experiment_id IS NULL ORDER BY id",
+            (business, now),
+        ).fetchall()
+        allowance_id = None
+        for allowance in candidates:
+            committed = float(conn.execute(
+                "SELECT COALESCE(SUM(amount), 0) FROM spend_requests WHERE allowance_id=? "
+                "AND status IN ('authorized', 'executed')", (allowance["id"],)
+            ).fetchone()[0])
+            if allowance["amount"] - committed + 1e-9 >= amount:
+                allowance_id = int(allowance["id"])
+                break
+        if allowance_id is None:
+            raise FinancialCircuitOpen(
+                "aucune enveloppe USD active ne couvre le plafond GPU; grant_allowance humain requis"
+            )
+        request_id = int(conn.execute(
+            "INSERT INTO spend_requests "
+            "(business, experiment_id, allowance_id, amount, currency, purpose, status, reason, requested_by, "
+            "created_at, updated_at) VALUES (?, NULL, ?, ?, 'USD', ?, 'authorized', NULL, 'compute.finance', ?, ?)",
+            (business, allowance_id, amount, purpose, now, now),
+        ).lastrowid)
+        tasks._emit(conn, business, None, "economy.spend.authorized", {
+            "id": request_id, "amount": amount, "currency": "USD", "requested_by": "compute.finance",
+        })
+        return request_id
+
+    @staticmethod
+    def _linked_spend_request(conn, reservation_id: int):
+        return conn.execute(
+            "SELECT s.* FROM compute_spend_links l JOIN spend_requests s ON s.id=l.spend_request_id "
+            "WHERE l.reservation_id=?", (reservation_id,)
+        ).fetchone()
+
+    def _settle_allowance(self, conn, row, actual: float, now: float) -> None:
+        request = self._linked_spend_request(conn, int(row["id"]))
+        if request is None:
+            return
+        if actual <= 1e-12:
+            conn.execute(
+                "UPDATE spend_requests SET status='cancelled', reason='GPU non facturé', updated_at=? WHERE id=?",
+                (now, request["id"]),
+            )
+            tasks._emit(conn, row["business"], row["task_id"], "economy.spend.cancelled",
+                        {"id": request["id"], "actor": "compute.finance"})
+            return
+        overrun = actual > float(request["amount"]) + 1e-9
+        conn.execute(
+            "UPDATE spend_requests SET amount=?, status='executed', reason=?, updated_at=? WHERE id=?",
+            (actual, "dépassement observé du plafond réservé" if overrun else None, now, request["id"]),
+        )
+        source = f"{row['provider']}:{row['resource_id'] or row['operation_id'] or row['id']}"
+        conn.execute(
+            "INSERT INTO ledger_entries "
+            "(business, experiment_id, channel_id, direction, amount, currency, category, description, nature, "
+            "source_ref, occurred_at, reverses_id, spend_request_id, created_by, origin_task_id, created_at) "
+            "VALUES (?, NULL, NULL, 'out', ?, 'USD', 'gpu_compute', ?, 'unverified', ?, ?, NULL, ?, "
+            "'compute.finance', ?, ?)",
+            (row["business"], actual, f"GPU {row['provider']} reservation #{row['id']}", source,
+             now, request["id"], row["task_id"], now),
+        )
+        tasks._emit(conn, row["business"], row["task_id"], "economy.cash.recorded", {
+            "direction": "out", "amount": actual, "currency": "USD", "nature": "unverified",
+            "spend_request_id": request["id"], "overrun": overrun,
+        })
 
     def reserve(self, *, business: str, provider: str, idempotency_key: str, estimated_cost_usd: float,
                 price_per_hour: float, units_planned: int = 1, batch_key: str | None = None,
@@ -175,6 +249,13 @@ class FinancialCircuitBreaker:
                     f"coût estimé {estimated_cost_usd:.6f} USD > plafond disponible {hard_cap:.6f} USD"
                 )
 
+            spend_request_id = self._authorize_allowance(
+                conn,
+                business=business,
+                amount=hard_cap,
+                purpose=f"GPU {provider} {job_key or batch_key or key}",
+                now=now,
+            )
             cost_runtime = hard_cap / price_per_hour * 3600.0
             effective_runtime = min(requested_runtime, cost_runtime)
             cur = conn.execute(
@@ -188,6 +269,11 @@ class FinancialCircuitBreaker:
                  requested_idle, now, now, now),
             )
             reservation_id = int(cur.lastrowid)
+            if spend_request_id is not None:
+                conn.execute(
+                    "INSERT INTO compute_spend_links (reservation_id, spend_request_id) VALUES (?, ?)",
+                    (reservation_id, spend_request_id),
+                )
             _event(conn, reservation_id, "reserved", amount_usd=hard_cap, data={
                 "estimated_cost_usd": estimated_cost_usd,
                 "limits": {
@@ -265,6 +351,7 @@ class FinancialCircuitBreaker:
                 "UPDATE compute_reservations SET status='cancelled', actual_cost_usd=0, cost_nature='computed', "
                 "reason=?, closed_at=?, updated_at=? WHERE id=?", (reason[:1000], now, now, reservation_id),
             )
+            self._settle_allowance(conn, row, 0.0, now)
             _event(conn, reservation_id, "cancelled", amount_usd=0, data={"reason": reason[:1000]})
             return dict(conn.execute("SELECT * FROM compute_reservations WHERE id=?", (reservation_id,)).fetchone())
 
@@ -292,6 +379,7 @@ class FinancialCircuitBreaker:
                 "reason=COALESCE(?, reason), closed_at=?, updated_at=? WHERE id=?",
                 (status, completed, actual, nature, reason, now, now, reservation_id),
             )
+            self._settle_allowance(conn, row, actual, now)
             _event(conn, reservation_id, status, amount_usd=actual, data={
                 "units_completed": completed,
                 "cost_per_unit_usd": (actual / completed) if completed else None,
@@ -314,6 +402,7 @@ class FinancialCircuitBreaker:
                     "reason=?, closed_at=?, updated_at=? WHERE id=?",
                     (operation.error or operation.state, now, now, reservation_id),
                 )
+                self._settle_allowance(conn, row, 0.0, now)
                 _event(conn, reservation_id, "provider_operation_failed", amount_usd=0,
                        data={"state": operation.state, "error": operation.error})
             else:
