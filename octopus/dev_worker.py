@@ -16,6 +16,20 @@ class DevWorkerError(RuntimeError):
     retryable = False
 
 
+DEV_ACTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {"type": "string", "enum": ["read", "search", "patch", "test", "commit"]},
+        "path": {"type": ["string", "null"]},
+        "query": {"type": ["string", "null"]},
+        "patch": {"type": ["string", "null"]},
+        "message": {"type": ["string", "null"]},
+    },
+    "required": ["action", "path", "query", "patch", "message"],
+    "additionalProperties": False,
+}
+
+
 def _run(args: list[str], cwd: Path, *, input_text: str | None = None, timeout: int = 300) -> subprocess.CompletedProcess:
     return subprocess.run(args, cwd=str(cwd), input=input_text, capture_output=True, text=True, timeout=timeout)
 
@@ -107,7 +121,7 @@ def _tool(action: dict, worktree: Path, tests: list[list[str]], tests_passed: bo
             raise DevWorkerError(f"fichier absent ou trop grand: {action['path']}")
         return path.read_text(encoding="utf-8"), tests_passed, None
     if name == "search":
-        target = resolve_path(worktree, action.get("path", "."))
+        target = resolve_path(worktree, action.get("path") or ".")
         result = _run(["rg", "-n", "--fixed-strings", "--", action["query"], str(target)], worktree)
         if result.returncode not in {0, 1}:
             raise DevWorkerError((result.stderr or "rg failed")[-2000:])
@@ -161,10 +175,9 @@ def development_task(ctx):
     transcript = []
     tests_passed = False
     system = (
-        "Tu es DevWorker. Travaille uniquement avec les outils JSON suivants: "
-        "read(path), search(query,path optionnel), patch(patch unified diff), test(), commit(message). "
-        "Un seul outil par réponse. Inspecte avant de modifier. Ne demande jamais shell, push, PR ou agent. "
-        "Le commit n'est permis qu'après test vert."
+        "You are DevWorker. Choose the next useful action and respond only with the required JSON schema. "
+        "Inspect before modifying. Return one action per response. Never request shell, push, PR, or agent. "
+        "Commit only after tests pass."
     )
     for _ in range(max_steps):
         ctx.check_cancel()
@@ -177,7 +190,7 @@ def development_task(ctx):
         ]
         completion = llm.complete(
             "development.step", messages, agent="DEVWORKER", business=ctx.business,
-            profile="zero_cost", json_mode=True, max_tokens=1600, validate=_parse_action,
+            profile="zero_cost", json_schema=DEV_ACTION_SCHEMA, max_tokens=1600, validate=_parse_action,
         )
         action = completion.data if completion.data is not None else _parse_action(completion.text)
         try:

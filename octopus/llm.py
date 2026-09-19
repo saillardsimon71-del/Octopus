@@ -289,14 +289,23 @@ def _budget_block(ctx, cat: catalog.Catalog, business: str, estimate: float) -> 
 
 
 def _build_request(model: dict, messages: list[dict], max_tokens: int, json_mode: bool,
-                   reasoning: str | None) -> dict:
+                   reasoning: str | None, json_schema: dict | None = None) -> dict:
     request: dict = {"model": model["api_model"], "messages": messages, "max_tokens": max_tokens}
     capabilities = model.get("capabilities", [])
     if reasoning and "reasoning_effort" in capabilities:
         request["reasoning_effort"] = reasoning
     for key, value in copy.deepcopy(model.get("params", {})).items():
         request.setdefault(key, value)
-    if json_mode and "json" in capabilities:
+    if json_schema is not None and "json" in capabilities:
+        request["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "octopus_response",
+                "strict": True,
+                "schema": copy.deepcopy(json_schema),
+            },
+        }
+    elif json_mode and "json" in capabilities:
         request["response_format"] = {"type": "json_object"}
     return request
 
@@ -336,7 +345,8 @@ def _zero_cost_violation(profile_name: str, model: dict, result: TransportResult
 
 
 def complete(task: str, messages: list[dict], *, agent: str = "", business: str | None = None,
-             max_tokens: int = 1200, json_mode: bool = False, reasoning: str | None = None,
+             max_tokens: int = 1200, json_mode: bool = False, json_schema: dict | None = None,
+             reasoning: str | None = None,
              needs: tuple[str, ...] = (), pin_model: str | None = None, profile: str | None = None,
              validate: Callable[[str], Any] | None = None) -> Completion:
     cat = catalog.load()
@@ -344,7 +354,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
     profile_name = _resolve_profile(cat, profile, ctx)
     prof = cat.profile(profile_name)
     task_def = cat.task(task)
-    need = set(task_def.get("needs", [])) | set(needs) | ({"json"} if json_mode else set())
+    need = set(task_def.get("needs", [])) | set(needs) | ({"json"} if json_mode or json_schema is not None else set())
     business_name = business or (ctx.business if ctx else "")
     pinned = bool(pin_model and prof.get("honor_pins"))
     if pinned:
@@ -388,7 +398,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 continue
             raise BudgetExceeded(block)
 
-        request = _build_request(model, messages, max_tokens, json_mode, reasoning)
+        request = _build_request(model, messages, max_tokens, json_mode, reasoning, json_schema)
         started = time.perf_counter()
         try:
             result = _transport_result(_transport(provider, request), request["model"], model["provider"])

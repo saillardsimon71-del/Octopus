@@ -88,6 +88,7 @@ index 4c47471..f208b75 100644
     assert (repo / "calc.py").read_text(encoding="utf-8").endswith("return 1\n")
     assert git(worktree, "status", "--porcelain") == ""
     assert all(task == "development.step" and kwargs["profile"] == "zero_cost" for task, kwargs in calls)
+    assert all(kwargs["json_schema"] == dev_worker.DEV_ACTION_SCHEMA for _, kwargs in calls)
     assert tasks.get(task_id)["output"]["branch"].startswith("codex/devtask-")
 
 
@@ -105,6 +106,51 @@ def test_devworker_rejects_unapproved_test_commands():
 
     with pytest.raises(DevWorkerError, match="pytest"):
         validate_test_commands([["powershell", "-Command", "Write-Host unsafe"]])
+
+
+def test_devworker_strict_schema_builds_structured_output_request():
+    from octopus import dev_worker, llm
+
+    request = llm._build_request(
+        {"api_model": "dummy", "capabilities": ["json"], "params": {}},
+        [{"role": "user", "content": "next"}],
+        100,
+        False,
+        None,
+        dev_worker.DEV_ACTION_SCHEMA,
+    )
+
+    assert request["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "octopus_response",
+            "strict": True,
+            "schema": dev_worker.DEV_ACTION_SCHEMA,
+        },
+    }
+
+
+def test_devworker_search_null_path_defaults_to_worktree(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    seen = {}
+
+    def fake_run(args, cwd, **kwargs):
+        seen["args"] = args
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(dev_worker, "_run", fake_run)
+    output, passed, commit = dev_worker._tool(
+        {"action": "search", "query": "needle", "path": None},
+        tmp_path,
+        [],
+        False,
+    )
+
+    assert seen["args"][-1] == str(tmp_path.resolve())
+    assert output == "aucun r\u00e9sultat"
+    assert passed is False
+    assert commit is None
 
 
 def test_devworker_cannot_commit_after_failed_tests(tmp_path, monkeypatch):
