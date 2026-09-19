@@ -1,3 +1,5 @@
+> **Statut : fondation historique du renderer cloud RunPod.** Elle décrit encore des briques réelles, mais la stratégie compute actuelle (Salad/GPU.ai, broker, breaker, watchdog) est dans `COMPUTE_GPU.md`. Ne pas utiliser ce fichier comme état global du projet.
+
 # Vidéo cloud — fondations
 
 Cette branche prépare OCTOPUS à sortir le rendu vidéo lourd du poste local sans créer un deuxième moteur de rendu.

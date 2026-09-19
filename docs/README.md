@@ -16,7 +16,7 @@ La documentation est organisée pour distinguer **état courant**, **runbooks te
 
 - `LOCAL_SETUP.md` — poste Windows / control-plane ;
 - `CLOUD_RENDERER_RUNBOOK.md` — renderer vidéo cloud historique ;
-- `RUNPOD_SETUP.md` — adapter RunPod existant ;
+- `RUNPOD_SETUP.md` — adapter RunPod existant, provider-spécifique ;
 - `GENERATION_VIDEO.md` — WanGP/Wan2GP local ;
 - `OMNIROUTE_SETUP.md` — gateway LLM ;
 - `RESOURCES.md` — inventaire de ressources réelles ;
@@ -25,7 +25,7 @@ La documentation est organisée pour distinguer **état courant**, **runbooks te
 
 ## Conception / plans spécialisés
 
-Les autres fichiers de `docs/` décrivent des briques précises. Un plan daté n'est pas automatiquement un état courant.
+Les autres fichiers de `docs/` décrivent des briques précises. Un plan daté n'est pas automatiquement un état courant. Les documents à statut historique portent désormais un bandeau en tête.
 
 `docs/superpowers/` contient notamment des plans expérimentaux de développement GPU/Qwen ; ils ne définissent pas la plateforme compute de production.
 

@@ -15,6 +15,9 @@ Ils décrivent les premières phases Podalux / usine vidéo.
 
 ## 2026-09-17
 
+- `2026-09-17/PROMPT-OCTOPUS.md` — ancien prompt de reprise, remplacé par `../HANDOFF_WORK.md`.
+
+
 - `2026-09-17/HANDOFF-AUTONOMOUS-BUSINESS.md`
 - `2026-09-17/AUTONOMOUS_SESSION_REPORT.md`
 - `2026-09-17/AUTONOMOUS_WORK_LOG.md`

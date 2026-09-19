@@ -1,3 +1,5 @@
+> **Statut : runbook provider-spécifique.** RunPod reste un adapter historique du renderer vidéo ; il n'est pas la décision finale pour le compute GPU. Voir `COMPUTE_GPU.md` pour Salad/GPU.ai et le disjoncteur financier.
+
 # RunPod — mise en place du cloud vidéo
 
 Cette étape concerne le **cloud uniquement**. Le PC Windows n'a pas besoin des poids vidéo, de Remotion, de FFmpeg ou de Chatterbox pour le chemin normal `PODALUX_VIDEO_RENDERER=cloud`.
