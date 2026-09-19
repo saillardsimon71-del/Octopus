@@ -141,19 +141,24 @@ Sur Salad, `restart_policy=never` évite une boucle de redémarrage facturée si
 
 ### P0 — obligatoire avant vrai usage payant
 
+Les audits détaillés préparés avant Work sont dans `docs/audits/`.
+
 1. **Forcer tous les chemins GPU payants à passer par `GuardedComputeManager`.**
    Le breaker existe, mais du code plus ancien peut encore théoriquement appeler un provider sans lui.
 
-2. **Déployer le watchdog comme processus réellement indépendant.**
+2. **Corriger la frontière LLM/OmniRoute.**
+   Le profil OCTOPUS `zero_cost` interdit les modèles marqués paid dans son propre catalogue, mais OCTOPUS ne journalise pas encore le modèle upstream réellement choisi par OmniRoute. De plus, `agents/deepseek.call_json()` parse actuellement le JSON après le gateway, ce qui empêche le fallback `invalid output` de `octopus.llm`.
+
+3. **Déployer le watchdog comme processus réellement indépendant.**
    Le script existe ; il faut décider comment il vit en continu sur l'environnement d'exécution et vérifier sa reprise automatique.
 
-3. **Faire un canary Salad réel très petit.**
+4. **Faire un canary Salad réel très petit.**
    Pas d'auto-recharge. Allowance volontairement minuscule. Un seul workload connu.
 
-4. **Mesurer le coût réel du même workload Wan sur plusieurs GPU.**
-   3090 / 5090 Laptop / 4090 / 5090 selon disponibilité.
+5. **Mesurer le coût réel du même workload Wan sur plusieurs GPU.**
+   3090 / 5090 Laptop / 4090 / 5090 selon disponibilité réelle.
 
-5. **Valider cold start + image + cache + arrêt.**
+6. **Valider cold start + image + cache + arrêt.**
    Le prix horaire seul ne suffit pas.
 
 ### P1 — robustesse de production
@@ -200,3 +205,16 @@ La prochaine session Work doit commencer par :
 ```
 
 Voir `docs/HANDOFF_WORK.md` pour le protocole détaillé.
+
+
+## 8. Pack de préparation Work du 19/09
+
+Cinq livrables ont été ajoutés sans modifier le comportement runtime :
+
+- `docs/audits/LLM_BRAIN_AUDIT_2026-09-19.md`
+- `docs/audits/PAID_PATHS_AUDIT_2026-09-19.md`
+- `docs/design/SALAD_WAN_WORKER_V1.md`
+- `docs/benchmarks/GPU_COST_BENCHMARK_PLAN.md`
+- `docs/ACCEPTANCE_GATES.md`
+
+La progression globale V1 reste estimée à **~55–60 %**, mais les gates rendent désormais cette estimation vérifiable plutôt que seulement subjective.
