@@ -12,7 +12,9 @@ from tools import tts_providers as tts
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
     for var in ("TTS_CHAIN", "AZURE_SPEECH_KEY", "AZURE_SPEECH_REGION", "AZURE_TTS_VOICE", "CF_ACCOUNT_ID",
-                "CF_API_TOKEN", "CHATTERBOX_URL", "HF_TOKEN", "PIPER_VOICE"):
+                "CF_API_TOKEN", "CHATTERBOX_URL", "HF_TOKEN", "PIPER_VOICE",
+                "OCTOPUS_TTS_AZURE_COST_CLASS", "OCTOPUS_TTS_CLOUDFLARE_COST_CLASS",
+                "OCTOPUS_TTS_HF_COST_CLASS"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -37,6 +39,7 @@ def test_azure_sends_ssml_with_voice_and_key(monkeypatch):
     monkeypatch.setenv("AZURE_SPEECH_KEY", "cle")
     monkeypatch.setenv("AZURE_SPEECH_REGION", "westeurope")
     monkeypatch.setenv("AZURE_TTS_VOICE", "fr-FR-DeniseNeural")
+    monkeypatch.setenv("OCTOPUS_TTS_AZURE_COST_CLASS", "free_quota")
     seen = {}
 
     class Response:
@@ -61,6 +64,7 @@ def test_azure_sends_ssml_with_voice_and_key(monkeypatch):
 def test_cloudflare_decodes_base64_audio(monkeypatch):
     monkeypatch.setenv("CF_ACCOUNT_ID", "compte")
     monkeypatch.setenv("CF_API_TOKEN", "jeton")
+    monkeypatch.setenv("OCTOPUS_TTS_CLOUDFLARE_COST_CLASS", "free_quota")
     payload = json.dumps({"success": True, "result": {"audio": base64.b64encode(b"ID3audio").decode()}}).encode()
     monkeypatch.setattr(tts, "_post_json", lambda url, body, headers, timeout=120: payload)
     assert tts.cloudflare("bonjour") == b"ID3audio"
@@ -69,6 +73,7 @@ def test_cloudflare_decodes_base64_audio(monkeypatch):
 def test_cloudflare_error_is_skippable(monkeypatch):
     monkeypatch.setenv("CF_ACCOUNT_ID", "compte")
     monkeypatch.setenv("CF_API_TOKEN", "jeton")
+    monkeypatch.setenv("OCTOPUS_TTS_CLOUDFLARE_COST_CLASS", "free_quota")
     monkeypatch.setattr(tts, "_post_json",
                         lambda *a, **k: json.dumps({"success": False, "errors": [{"message": "quota"}]}).encode())
     with pytest.raises(tts.TTSUnavailable, match="quota"):
@@ -85,8 +90,29 @@ def test_chain_reports_every_failure_when_all_fail(monkeypatch):
 
 def test_chatterbox_hf_space_routes_to_space(monkeypatch):
     monkeypatch.setenv("CHATTERBOX_URL", "hf-space:owner/space")
+    monkeypatch.setenv("OCTOPUS_TTS_HF_COST_CLASS", "free_quota")
     monkeypatch.setattr(tts, "_hf_space", lambda space, text, exagg, cfg: b"RIFFspace" if space == "owner/space" else b"")
     assert tts.chatterbox("bonjour") == b"RIFFspace"
+
+
+@pytest.mark.parametrize("provider,setup", [
+    ("azure", {"AZURE_SPEECH_KEY": "cle", "AZURE_SPEECH_REGION": "westeurope"}),
+    ("cloudflare", {"CF_ACCOUNT_ID": "compte", "CF_API_TOKEN": "jeton"}),
+])
+def test_remote_tts_is_blocked_without_free_quota_declaration(monkeypatch, provider, setup):
+    for key, value in setup.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(tts.urllib.request, "urlopen", lambda *a, **k: pytest.fail("aucun appel réseau attendu"))
+    monkeypatch.setattr(tts, "_post_json", lambda *a, **k: pytest.fail("aucun appel réseau attendu"))
+    with pytest.raises(tts.TTSUnavailable, match="cost class"):
+        getattr(tts, provider)("bonjour")
+
+
+def test_hf_tts_is_blocked_without_free_quota_declaration(monkeypatch):
+    monkeypatch.setenv("CHATTERBOX_URL", "hf-space:owner/space")
+    monkeypatch.setattr(tts, "_hf_space", lambda *a, **k: pytest.fail("aucun appel réseau attendu"))
+    with pytest.raises(tts.TTSUnavailable, match="cost class"):
+        tts.chatterbox("bonjour")
 
 
 def test_gap_stretches_short_narration_to_the_qc_floor(monkeypatch):

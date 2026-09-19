@@ -24,6 +24,11 @@ from pathlib import Path
 DEFAULT_CHAIN = "azure,cloudflare,chatterbox,piper"
 HF_PREFIX = "hf-space:"
 PIPER_DEFAULT_VOICE = "fr_FR-siwis-medium"
+REMOTE_COST_CLASS_ENV = {
+    "azure": "OCTOPUS_TTS_AZURE_COST_CLASS",
+    "cloudflare": "OCTOPUS_TTS_CLOUDFLARE_COST_CLASS",
+    "hf": "OCTOPUS_TTS_HF_COST_CLASS",
+}
 
 
 class TTSUnavailable(RuntimeError):
@@ -32,6 +37,15 @@ class TTSUnavailable(RuntimeError):
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
+
+
+def _require_free_quota(provider: str) -> None:
+    env_name = REMOTE_COST_CLASS_ENV[provider]
+    cost_class = _env(env_name).lower()
+    if cost_class == "paid":
+        raise TTSUnavailable(f"{provider} : cost class paid bloquée sans allowance")
+    if cost_class != "free_quota":
+        raise TTSUnavailable(f"{provider} : cost class non déclarée ({env_name}=free_quota requis)")
 
 
 def _post_json(url: str, payload: dict, headers: dict, timeout: float = 120) -> bytes:
@@ -44,6 +58,7 @@ def azure(text: str, *, speed: float = 1.0, **_) -> bytes:
     key, region = _env("AZURE_SPEECH_KEY"), _env("AZURE_SPEECH_REGION")
     if not key or not region:
         raise TTSUnavailable("azure : AZURE_SPEECH_KEY/AZURE_SPEECH_REGION absents")
+    _require_free_quota("azure")
     voice = _env("AZURE_TTS_VOICE") or "fr-FR-VivienneMultilingualNeural"
     lang = voice.rsplit("-", 1)[0] if voice.count("-") >= 2 else "fr-FR"
     rate = _env("AZURE_TTS_RATE") or f"{(speed - 1) * 100:+.0f}%"
@@ -69,6 +84,7 @@ def cloudflare(text: str, **_) -> bytes:
     account, token = _env("CF_ACCOUNT_ID"), _env("CF_API_TOKEN")
     if not account or not token:
         raise TTSUnavailable("cloudflare : CF_ACCOUNT_ID/CF_API_TOKEN absents")
+    _require_free_quota("cloudflare")
     model = _env("CF_TTS_MODEL") or "@cf/myshell-ai/melotts"
     url = f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/run/{model}"
     payload = {"prompt": text, "lang": _env("CF_TTS_LANG") or "fr"}
@@ -92,6 +108,7 @@ def chatterbox(text: str, *, voice: str = "vivienne-fr", exaggeration: float = 0
                cfg_weight: float = 0.5, **_) -> bytes:
     base = _env("CHATTERBOX_URL") or "http://127.0.0.1:4123/v1/audio/speech"
     if base.startswith(HF_PREFIX):
+        _require_free_quota("hf")
         return _hf_space(base[len(HF_PREFIX):], text, exaggeration, cfg_weight)
     payload = {"model": "chatterbox", "input": text, "voice": voice, "response_format": "wav",
                "exaggeration": exaggeration, "cfg_weight": cfg_weight, "temperature": 0.7}
