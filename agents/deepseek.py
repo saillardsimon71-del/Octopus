@@ -10,6 +10,7 @@ routage historique.
 from __future__ import annotations
 
 import base64
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,7 +23,7 @@ _cli = None
 
 
 def _client():
-    """Client direct historique (utilise seulement avec OCTOPUS=off)."""
+    """Client direct historique (double activation explicite uniquement)."""
     global _cli
     if _cli is None:
         from openai import OpenAI
@@ -48,6 +49,10 @@ def _complete(agent: str, task: str, model: str, messages: list[dict], max_token
               reasoning: str | None = None, json_mode: bool = False, needs: tuple[str, ...] = (),
               validate: Callable[[str], Any] | None = None) -> Any:
     if not octopus.enabled():
+        legacy_allowed = (os.environ.get("OCTOPUS", "").strip().lower() == "off"
+                          and os.environ.get("OCTOPUS_ALLOW_LEGACY_DIRECT", "").strip() == "1")
+        if not legacy_allowed:
+            raise RuntimeError("le bypass legacy direct exige OCTOPUS=off et OCTOPUS_ALLOW_LEGACY_DIRECT=1")
         r = _client().chat.completions.create(**_legacy_request(model, messages, max_tokens, reasoning, json_mode))
         content = (r.choices[0].message.content or "").strip()
         db.log_cost(agent, task, model, r.usage.prompt_tokens, r.usage.completion_tokens)

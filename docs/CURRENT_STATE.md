@@ -147,7 +147,7 @@ Les audits détaillés préparés avant Work sont dans `docs/audits/`.
    Le breaker existe, mais du code plus ancien peut encore théoriquement appeler un provider sans lui.
 
 2. **Finaliser la preuve opérationnelle LLM/OmniRoute.**
-   G1.1 à G1.4 sont implémentés et testés hors réseau : validation dans le gateway, route résolue journalisée, `zero_cost` fail-closed et profil résolu uniquement par le catalogue. Il reste à vérifier ces métadonnées sur l'instance OmniRoute live free-only et à verrouiller le kill-switch direct legacy derrière une activation humaine exceptionnelle.
+   G1.1 à G1.5 sont implémentés et testés hors réseau : validation dans le gateway, route résolue journalisée, `zero_cost` fail-closed, profil résolu uniquement par le catalogue et bypass legacy sous double activation explicite. Il reste à vérifier les métadonnées sur l'instance OmniRoute live free-only.
 
 3. **Déployer le watchdog comme processus réellement indépendant.**
    Le script existe ; il faut décider comment il vit en continu sur l'environnement d'exécution et vérifier sa reprise automatique.

@@ -80,8 +80,8 @@ OmniRoute est une passerelle locale : le prompt peut néanmoins être transmis a
 ## Revenir temporairement au comportement historique
 
 ```text
-OMNIROUTE_ENABLED=0
-OCTOPUS_PROFILE=legacy
+OCTOPUS=off
+OCTOPUS_ALLOW_LEGACY_DIRECT=1
 ```
 
-Ce mode réactive les appels directs historiques et doit rester exceptionnel si le quota DeepSeek est épuisé.
+Les deux variables sont obligatoires. Ce mode réactive les appels directs historiques sans les protections OCTOPUS et doit rester exceptionnel.

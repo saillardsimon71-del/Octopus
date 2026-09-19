@@ -65,8 +65,9 @@ def test_zero_cost_without_evidence_never_pays(transport, providers_up, monkeypa
     assert calls() == []
 
 
-def test_zero_cost_routes_to_proven_local_model(transport, providers_up, monkeypatch):
+def test_normal_zero_cost_routes_to_proven_local_model(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
+    monkeypatch.setattr(deepseek, "_client", lambda: pytest.fail("le mode normal ne doit pas appeler DeepSeek directement"))
     prove("podalux.write_job", "ollama/qwen3.5-4b")
     transport.reply('{"titre": "ok"}')
     assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "ok"}
@@ -299,8 +300,32 @@ class _FakeClient:
         self.chat = type("Chat", (), {"completions": Completions()})()
 
 
-def test_kill_switch_restores_direct_calls(transport, monkeypatch, tmp_path):
+def test_octopus_off_alone_refuses_direct_legacy(transport, monkeypatch):
     monkeypatch.setenv("OCTOPUS", "off")
+    monkeypatch.delenv("OCTOPUS_ALLOW_LEGACY_DIRECT", raising=False)
+    client = _FakeClient()
+    monkeypatch.setattr(deepseek, "_client", lambda: client)
+
+    with pytest.raises(RuntimeError, match="OCTOPUS_ALLOW_LEGACY_DIRECT=1"):
+        deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG)
+
+    assert client.kwargs == [] and transport.calls == []
+
+
+def test_legacy_opt_in_alone_does_not_bypass_gateway(transport, providers_up, monkeypatch):
+    monkeypatch.setenv("OCTOPUS_ALLOW_LEGACY_DIRECT", "1")
+    monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
+    prove("podalux.write_job", "ollama/qwen3.5-4b")
+    transport.reply('{"titre": "local"}')
+    monkeypatch.setattr(deepseek, "_client", lambda: pytest.fail("opt-in seul ne doit pas appeler DeepSeek"))
+
+    assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "local"}
+    assert transport.models == ["qwen3.5:4b"]
+
+
+def test_double_opt_in_restores_direct_legacy_calls(transport, monkeypatch, tmp_path):
+    monkeypatch.setenv("OCTOPUS", "off")
+    monkeypatch.setenv("OCTOPUS_ALLOW_LEGACY_DIRECT", "1")
     monkeypatch.setenv("OCTOPUS_DB", str(tmp_path / "must-not-exist.db"))
     client = _FakeClient()
     monkeypatch.setattr(deepseek, "_client", lambda: client)

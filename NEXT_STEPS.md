@@ -10,7 +10,7 @@ Critères de sortie : `docs/ACCEPTANCE_GATES.md`
 - [x] G1.2 Capturer et journaliser la route réellement résolue derrière OmniRoute.
 - [x] G1.3 Rendre `zero_cost` fail-closed : attestation explicite du pool free-only, jamais simple confiance dans le nom `auto/best-free`.
 - [x] G1.4 Éliminer la duplication de résolution de profil entre `agents/deepseek.py` et le catalogue.
-- [ ] G1.5 Verrouiller le mode normal sur les LLM gratuits ; traiter un éventuel mode payant uniquement comme capacité future explicitement activée.
+- [x] G1.5 Verrouiller le bypass legacy direct derrière `OCTOPUS=off` et `OCTOPUS_ALLOW_LEGACY_DIRECT=1`.
 
 Preuve live encore requise : vérifier sur l'instance OmniRoute free-only que les headers de modèle, provider, coût et request id sont présents et cohérents. Ne lancer aucun appel tant que le pool n'est pas configuré free-only.
 
