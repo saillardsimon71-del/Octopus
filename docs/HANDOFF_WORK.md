@@ -15,15 +15,27 @@ PR : **#2**, encore en Draft.
 Lire d'abord :
 
 1. `docs/CURRENT_STATE.md`
-2. `docs/COMPUTE_GPU.md`
-3. `NEXT_STEPS.md`
-4. seulement ensuite les runbooks techniques utiles.
+2. `docs/ACCEPTANCE_GATES.md`
+3. `docs/audits/LLM_BRAIN_AUDIT_2026-09-19.md`
+4. `docs/audits/PAID_PATHS_AUDIT_2026-09-19.md`
+5. `docs/design/SALAD_WAN_WORKER_V1.md`
+6. `docs/benchmarks/GPU_COST_BENCHMARK_PLAN.md`
+7. `docs/COMPUTE_GPU.md`
+8. `NEXT_STEPS.md`
+9. seulement ensuite les runbooks techniques utiles.
 
 Les documents sous `docs/archive/` sont historiques.
 
 ## Mission immédiate
 
-Le prochain chantier est de rendre le compute GPU **impossible à contourner**, puis de préparer un canary Salad à coût minuscule.
+La prochaine session vise **G1 + G2** de `docs/ACCEPTANCE_GATES.md` avant tout canary réel.
+
+Deux P0 ont été identifiés pendant l'audit pré-Work :
+
+1. rendre le compute GPU **impossible à contourner** ;
+2. rendre le profil LLM `zero_cost` **attestable de bout en bout**, et faire passer les validateurs JSON/vision dans `octopus.llm` afin que le fallback fonctionne réellement.
+
+Le canary Salad vient seulement après ces deux frontières.
 
 ### Étape A — vérifier l'état réel
 
@@ -170,3 +182,16 @@ Avant d'arrêter Work :
 4. `NEXT_STEPS.md` réduit aux vraies prochaines actions ;
 5. aucun ancien fichier d'état créé à la racine ;
 6. PR mise à jour avec ce qui est réellement vérifié.
+
+
+## Pack d'analyse préparé avant Work
+
+Les cinq travaux préparatoires demandés sont terminés et versionnés :
+
+- audit cerveau LLM : `docs/audits/LLM_BRAIN_AUDIT_2026-09-19.md` ;
+- audit dépenses : `docs/audits/PAID_PATHS_AUDIT_2026-09-19.md` ;
+- design worker Salad : `docs/design/SALAD_WAN_WORKER_V1.md` ;
+- protocole benchmark : `docs/benchmarks/GPU_COST_BENCHMARK_PLAN.md` ;
+- critères binaires : `docs/ACCEPTANCE_GATES.md`.
+
+Ne refaire ces audits que si le code a changé matériellement. Utiliser les findings pour coder directement.
