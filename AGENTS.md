@@ -280,6 +280,26 @@ Voir `docs/benchmarks/GPU_COST_BENCHMARK_PLAN.md`.
 - ne jamais lancer de ressource payante dans les tests ;
 - aucun secret dans Git.
 
+## 7.1 Principe de modification minimale
+
+Résoudre le problème démontré avec la plus petite modification architecturalement correcte.
+
+Ne pas profiter d'une tâche pour :
+
+- réécrire les modules voisins ;
+- « moderniser » du code sain sans besoin démontré ;
+- créer des abstractions hypothétiques ;
+- élargir spontanément le périmètre de la mission.
+
+Toute nouvelle abstraction doit répondre à au moins un besoin actuel mesurable, une frontière déjà démontrée ou un critère d'acceptation existant.
+
+Quand deux solutions sont correctes, préférer celle qui :
+
+1. touche moins de fichiers ;
+2. préserve davantage de comportements existants ;
+3. réduit le risque de régression ;
+4. est plus facile à tester et à annuler.
+
 ## 8. Source de vérité documentaire
 
 Lire dans cet ordre avant une tâche importante :
