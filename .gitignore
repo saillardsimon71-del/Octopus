@@ -43,3 +43,6 @@ remotion/public/img/*/
 
 # Rushes telecharges par offre (regeneres par tools/fetch_broll.py)
 remotion/public/video/*/
+
+# GPU worker test artifacts (tmp_path en production, ces dossiers sont des restes de premier run)
+tests/.test_gpu_*/
