@@ -67,6 +67,15 @@ def test_checkpoint_requires_fresh_full_suite(repo: Path):
         tools.checkpoint("test: safe checkpoint")
 
 
+def test_build_gate_rejects_early_or_dirty_completion(repo: Path):
+    tools = Toolbox(repo)
+    ready, reasons = tools.build_ready()
+    assert not ready
+    assert any("validated checkpoint" in reason for reason in reasons)
+    assert any("full test suite" in reason for reason in reasons)
+    assert any("working tree is clean" in reason for reason in reasons)
+
+
 def test_audit_report_writer_uses_only_fixed_path(repo: Path):
     tools = Toolbox(repo)
     result = tools.write_audit_report("# Audit\n" + ("evidence\n" * 150))

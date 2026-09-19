@@ -92,6 +92,7 @@ class Toolbox:
         self.read_paths: set[str] = set()
         self.search_calls = 0
         self.audit_mode = audit_mode
+        self.checkpoint_count = 0
 
     def _relative(self, raw: str, *, allow_missing: bool = False) -> Path:
         if not raw or "\x00" in raw:
@@ -294,7 +295,20 @@ class Toolbox:
         if not added["ok"]:
             return added
         committed = self._run(["git", "commit", "-m", message], timeout=120)
+        if committed["ok"]:
+            self.checkpoint_count += 1
         return committed
+
+    def build_ready(self) -> tuple[bool, list[str]]:
+        reasons: list[str] = []
+        if self.checkpoint_count < 1:
+            reasons.append("create at least one validated checkpoint in this build run")
+        if not self.full_tests_passed_after_change:
+            reasons.append("run the full test suite successfully after the final change")
+        status = self._run(["git", "status", "--porcelain"])
+        if status["output"].strip():
+            reasons.append("checkpoint all validated changes so the working tree is clean")
+        return not reasons, reasons
 
     def audit_ready(self) -> tuple[bool, list[str]]:
         reasons: list[str] = []
@@ -461,6 +475,17 @@ def run_agent(repo: Path, state_dir: Path, mode: str, goal: str, max_steps: int)
                         {"role": "user", "content": "Controller rejected completion: " + json.dumps(rejection, ensure_ascii=False)},
                     ])
                     print(f"step {step}: final rejected by audit gate", flush=True)
+                    continue
+            if mode == "build":
+                ready, reasons = toolbox.build_ready()
+                if not ready:
+                    rejection = {"ok": False, "error": "build completion gate rejected final", "requirements": reasons}
+                    log.write("final_rejected", {"step": step, "reasons": reasons})
+                    messages.extend([
+                        {"role": "assistant", "content": json.dumps(action, ensure_ascii=False)},
+                        {"role": "user", "content": "Controller rejected completion: " + json.dumps(rejection, ensure_ascii=False)},
+                    ])
+                    print(f"step {step}: final rejected by build gate", flush=True)
                     continue
             final = str(action["final"])
             log.write("final", {"step": step, "text": final})
