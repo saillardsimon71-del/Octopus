@@ -152,8 +152,16 @@ def test_devworker_groq_uses_json_object_with_local_validation(monkeypatch):
     assert request["reasoning_effort"] == "low"
 
 
+def test_devworker_local_validation_normalizes_unused_nullable_fields():
+    from octopus.dev_worker import _parse_action
+
+    assert _parse_action('{"action":"test"}') == {
+        "action": "test", "path": None, "query": None, "patch": None, "message": None,
+    }
+
+
 @pytest.mark.parametrize("payload", [
-    {"action": "test"},
+    {"action": "read", "query": None, "patch": None, "message": None},
     {"action": "test", "path": 7, "query": None, "patch": None, "message": None},
     {"action": "test", "path": None, "query": None, "patch": None, "message": None, "extra": True},
 ])

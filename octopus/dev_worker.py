@@ -75,10 +75,11 @@ def validate_test_commands(commands) -> list[list[str]]:
 def _parse_action(text: str) -> dict:
     value = llm.parse_json(text)
     fields = set(DEV_ACTION_SCHEMA["properties"])
-    if set(value) != fields:
-        missing = sorted(fields - set(value))
-        unexpected = sorted(set(value) - fields)
-        raise ValueError(f"champs invalides: manquants={missing}, inattendus={unexpected}")
+    unexpected = sorted(set(value) - fields)
+    if unexpected:
+        raise ValueError(f"champs inattendus: {unexpected}")
+    for name in fields:
+        value.setdefault(name, None)
     action = value.get("action")
     if action not in {"read", "search", "patch", "test", "commit"}:
         raise ValueError("action attendue: read, search, patch, test ou commit")
