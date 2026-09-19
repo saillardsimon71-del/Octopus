@@ -18,11 +18,12 @@ Audit : `docs/audits/LLM_BRAIN_AUDIT_2026-09-19.md`.
 
 ## P0 — G2 frontière financière
 
-1. Ajouter un test statique/AST interdisant les créations Salad/GPU.ai directes depuis les modules métier.
-2. Forcer tout compute provisionné à passer par `GuardedComputeManager`.
-3. Concevoir une `MeteredSpendLease` pour les jobs serverless/API.
-4. Migrer RunPod renderer + MiniMax H3 vers réservation → soumission → settlement/cancel/ambiguous.
-5. Rendre le watchdog réellement indépendant et redémarrable.
+- [x] Interdire par AST les créations Salad/GPU.ai directes depuis les modules métier.
+- [x] Imposer `GuardedComputeManager` au compute provisionné.
+- [x] Désactiver RunPod renderer et MiniMax H3 du fonctionnement normal ; opt-in legacy explicite plus allowance obligatoire.
+- [x] Rendre TTS/search fail-closed sans déclaration `free_quota` et imposer une cost class aux connecteurs.
+- [x] Exposer engagé/réel du jour par business et catégorie.
+- [x] Prouver hors réseau la reprise persistée du watchdog indépendant.
 
 Audit : `docs/audits/PAID_PATHS_AUDIT_2026-09-19.md`.
 

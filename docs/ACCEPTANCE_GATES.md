@@ -64,7 +64,8 @@ DONE si aucune dépense automatique connue ne peut être créée hors politique.
 - un test statique/AST empêche la régression.
 
 ### Serverless/API metered
-- RunPod renderer et H3 ont réservation, soumission et settlement ;
+- tout chemin metered actif a réservation, soumission et settlement ;
+- RunPod renderer et H3 sont legacy, désactivés en fonctionnement normal et exigent l'opt-in explicite `OCTOPUS_ALLOW_LEGACY_RUNPOD=1` en plus de leur allowance existante ;
 - timeout local n'est jamais interprété comme annulation distante ;
 - soumission ambiguë jamais retry automatiquement.
 
@@ -76,7 +77,7 @@ DONE si aucune dépense automatique connue ne peut être créée hors politique.
 ### Ledger
 Une requête peut produire le coût engagé et le coût réellement observé/calculé du jour, par business et catégorie, sans addition manuelle de dashboards.
 
-**État actuel : ~60 %.** Compute instance bien avancé ; autres familles partielles. Voir `audits/PAID_PATHS_AUDIT_2026-09-19.md`.
+**État actuel : DONE hors déploiement/live.** Le compute provisionné est fermé par AST et `GuardedComputeManager`; RunPod/H3 sont legacy et fail-closed sans opt-in; TTS/search distants exigent `free_quota`; les connecteurs déclarent leur cost class; le ledger expose engagé/réel par jour, business et catégorie; la reprise persistée du watchdog est testée hors réseau.
 
 ## G3 — Worker Salad lifecycle prouvé
 
@@ -231,7 +232,7 @@ Ce tableau est une estimation d'ingénierie, pas une moyenne mathématique.
 |---|---:|---|
 | G0 Dépôt/reprise | 90 % | docs/CI synchronisées |
 | G1 LLM broker | 60 % | attestation OmniRoute + fallback validation |
-| G2 Finance universelle | 60 % | metered lease + no-bypass |
+| G2 Finance universelle | 100 % hors live | déploiement watchdog et canary relèvent de G3 |
 | G3 Salad live | 20 % | canary + crash test |
 | G4 Benchmark GPU | 10 % | premiers runs comparables |
 | G5 <1¢ vidéo | 25 % | série réelle de 10 vidéos |

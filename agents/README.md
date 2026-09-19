@@ -1,6 +1,6 @@
 # Groupe d'agents Podalux
 
-Orchestrateur de 6 agents pilotés par un gateway LLM compatible OpenAI. En configuration normale, les appels passent par OmniRoute en `zero_cost` ; le rendu vidéo lourd est cloud-first.
+Orchestrateur de 6 agents pilotés par un gateway LLM compatible OpenAI. En configuration normale, les appels passent par OmniRoute en `zero_cost` ; RunPod reste un renderer legacy sous opt-in explicite.
 
 ## Roster
 

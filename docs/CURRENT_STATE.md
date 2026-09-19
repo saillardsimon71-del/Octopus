@@ -102,6 +102,8 @@ Implémenté sur la branche active :
 - coût réel par unité ;
 - tests de crash/restart, idempotence et caps.
 
+G2 est fermé hors live : un test AST interdit les imports directs Salad/GPU.ai dans le métier, RunPod/H3 sont legacy et inactifs sans `OCTOPUS_ALLOW_LEGACY_RUNPOD=1`, les APIs TTS/search distantes exigent une déclaration `free_quota`, les connecteurs déclarent leur cost class et le ledger expose les coûts engagés/réels du jour par catégorie.
+
 ## 4. Disjoncteur financier GPU
 
 Valeurs par défaut :
@@ -143,22 +145,16 @@ Sur Salad, `restart_policy=never` évite une boucle de redémarrage facturée si
 
 Les audits détaillés préparés avant Work sont dans `docs/audits/`.
 
-1. **Forcer tous les chemins GPU payants à passer par `GuardedComputeManager`.**
-   Le breaker existe, mais du code plus ancien peut encore théoriquement appeler un provider sans lui.
-
-2. **Finaliser la preuve opérationnelle LLM/OmniRoute.**
+1. **Finaliser la preuve opérationnelle LLM/OmniRoute.**
    G1.1 à G1.5 sont implémentés et testés hors réseau : validation dans le gateway, route résolue journalisée, `zero_cost` fail-closed, profil résolu uniquement par le catalogue et bypass legacy sous double activation explicite. Il reste à vérifier les métadonnées sur l'instance OmniRoute live free-only.
 
-3. **Déployer le watchdog comme processus réellement indépendant.**
-   Le script existe ; il faut décider comment il vit en continu sur l'environnement d'exécution et vérifier sa reprise automatique.
+2. **Déployer le watchdog puis faire un canary Salad réel très petit.**
+   Le script indépendant et sa reprise persistée sont testés hors réseau ; son déploiement appartient à G3. Pas d'auto-recharge. Allowance volontairement minuscule. Un seul workload connu.
 
-4. **Faire un canary Salad réel très petit.**
-   Pas d'auto-recharge. Allowance volontairement minuscule. Un seul workload connu.
-
-5. **Mesurer le coût réel du même workload Wan sur plusieurs GPU.**
+3. **Mesurer le coût réel du même workload Wan sur plusieurs GPU.**
    3090 / 5090 Laptop / 4090 / 5090 selon disponibilité réelle.
 
-6. **Valider cold start + image + cache + arrêt.**
+4. **Valider cold start + image + cache + arrêt.**
    Le prix horaire seul ne suffit pas.
 
 ### P1 — robustesse de production
