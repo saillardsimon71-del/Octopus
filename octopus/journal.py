@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from . import enabled, paths
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -535,13 +535,23 @@ CREATE TABLE IF NOT EXISTS compute_spend_links (
 CREATE INDEX IF NOT EXISTS idx_compute_spend_links_request ON compute_spend_links(spend_request_id);
 """
 
-_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4), (5, _SCHEMA_V5), (6, _SCHEMA_V6), (7, _SCHEMA_V7), (8, _SCHEMA_V8))
+_SCHEMA_V9 = """
+ALTER TABLE llm_calls ADD COLUMN requested_model TEXT;
+ALTER TABLE llm_calls ADD COLUMN resolved_model TEXT;
+ALTER TABLE llm_calls ADD COLUMN resolved_provider TEXT;
+ALTER TABLE llm_calls ADD COLUMN request_id TEXT;
+ALTER TABLE llm_calls ADD COLUMN provider_cost_usd REAL;
+"""
+
+_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4), (5, _SCHEMA_V5),
+               (6, _SCHEMA_V6), (7, _SCHEMA_V7), (8, _SCHEMA_V8), (9, _SCHEMA_V9))
 
 _LLM_COLUMNS = (
     "ts", "run_id", "root_run_id", "business", "agent", "task", "profile", "model", "provider",
     "cost_class", "attempt", "status", "error", "prompt_tokens", "cache_hit_tokens",
     "cache_miss_tokens", "completion_tokens", "reasoning_tokens", "cost_usd", "peak",
-    "duration_ms", "prompt_sha256", "prompt_chars", "output_preview", "justification",
+    "duration_ms", "prompt_sha256", "prompt_chars", "output_preview", "justification", "requested_model",
+    "resolved_model", "resolved_provider", "request_id", "provider_cost_usd",
 )
 _BENCH_COLUMNS = (
     "ts", "bench_run_id", "suite", "task", "item", "model", "repeat", "prompt_version", "passed",

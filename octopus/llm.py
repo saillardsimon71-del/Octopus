@@ -27,8 +27,8 @@ from typing import Any, Callable
 from . import catalog, journal, pricing
 from .pricing import Usage
 
-__all__ = ["BudgetExceeded", "Completion", "GatewayError", "InvalidOutput", "NoEligibleModel", "Usage",
-           "complete", "legacy_task", "parse_json"]
+__all__ = ["BudgetExceeded", "Completion", "GatewayError", "InvalidOutput", "NoEligibleModel", "TransportResult",
+           "Usage", "complete", "legacy_task", "parse_json"]
 
 
 class GatewayError(RuntimeError):
@@ -58,8 +58,24 @@ class Completion:
     cost_usd: float
     usage: Usage
     call_id: int
+    requested_model: str | None = None
+    resolved_model: str | None = None
+    resolved_provider: str | None = None
+    request_id: str | None = None
+    provider_cost_usd: float | None = None
     data: Any = None
     justification: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TransportResult:
+    text: str
+    usage: Usage
+    requested_model: str
+    resolved_model: str | None = None
+    resolved_provider: str | None = None
+    request_id: str | None = None
+    provider_cost_usd: float | None = None
 
 
 _JSON_RE = re.compile(r"\{.*\}", re.S)
@@ -119,11 +135,11 @@ def provider_status(name: str, provider: dict) -> tuple[bool, str]:
 
 # --- transport (remplacable dans les tests) ----------------------------------------------
 
-_transport_override: Callable[[dict, dict], tuple[str, Usage]] | None = None
+_transport_override: Callable[[dict, dict], tuple[str, Usage] | TransportResult] | None = None
 _clients: dict[tuple, Any] = {}
 
 
-def _transport(provider: dict, request: dict) -> tuple[str, Usage]:
+def _transport(provider: dict, request: dict) -> tuple[str, Usage] | TransportResult:
     if _transport_override is not None:
         return _transport_override(provider, request)
     from openai import OpenAI
@@ -138,9 +154,39 @@ def _transport(provider: dict, request: dict) -> tuple[str, Usage]:
         if provider.get("max_retries") is not None:
             kwargs["max_retries"] = provider["max_retries"]
         client = _clients[key] = OpenAI(**kwargs)
-    response = client.chat.completions.create(**request)
+    raw_response = client.chat.completions.with_raw_response.create(**request)
+    response = raw_response.parse()
+    headers = raw_response.headers
     text = (response.choices[0].message.content or "").strip()
-    return text, _usage(getattr(response, "usage", None))
+    provider_cost = headers.get("x-omniroute-response-cost")
+    try:
+        provider_cost_usd = float(provider_cost) if provider_cost is not None else None
+    except ValueError:
+        provider_cost_usd = None
+    return TransportResult(
+        text=text,
+        usage=_usage(getattr(response, "usage", None)),
+        requested_model=request["model"],
+        resolved_model=headers.get("x-omniroute-model") or getattr(response, "model", None),
+        resolved_provider=headers.get("x-omniroute-provider"),
+        request_id=raw_response.request_id,
+        provider_cost_usd=provider_cost_usd,
+    )
+
+
+def _transport_result(value: tuple[str, Usage] | TransportResult, requested_model: str,
+                      requested_provider: str) -> TransportResult:
+    if isinstance(value, TransportResult):
+        return value
+    text, usage = value
+    resolved = requested_provider != "omniroute"
+    return TransportResult(
+        text=text,
+        usage=usage,
+        requested_model=requested_model,
+        resolved_model=requested_model if resolved else None,
+        resolved_provider=requested_provider if resolved else None,
+    )
 
 
 def _opt_int(value) -> int | None:
@@ -312,6 +358,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
             "ts": now, "run_id": ctx.id if ctx else None, "root_run_id": ctx.root_id if ctx else None,
             "business": business_name, "agent": agent, "task": task, "profile": profile_name,
             "model": model_id, "provider": model["provider"], "cost_class": model["cost_class"],
+            "requested_model": model["api_model"],
             "attempt": attempt, "peak": int(peak), "prompt_sha256": digest, "prompt_chars": prompt_chars,
         }
         estimate = pricing.estimate_max_cost(model.get("price"), prompt_chars + images * pricing.IMAGE_CHARS_ESTIMATE,
@@ -329,7 +376,8 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
         request = _build_request(model, messages, max_tokens, json_mode, reasoning)
         started = time.perf_counter()
         try:
-            text, usage = _transport(provider, request)
+            result = _transport_result(_transport(provider, request), request["model"], model["provider"])
+            text, usage = result.text, result.usage
         except Exception as exc:
             failure = f"echec : {type(exc).__name__}: {str(exc)[:160]}"
             considered.append({"model": model_id, "eligible": True, "reason": failure})
@@ -342,7 +390,8 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 continue
             raise
         duration_ms = int((time.perf_counter() - started) * 1000)
-        cost = pricing.call_cost(model.get("price"), usage, peak)
+        cost = (result.provider_cost_usd if result.provider_cost_usd is not None
+                else pricing.call_cost(model.get("price"), usage, peak))
         data, status, error = None, "ok", None
         if validate is not None:
             try:
@@ -356,6 +405,8 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
             "cache_hit_tokens": usage.cache_hit_tokens, "cache_miss_tokens": usage.cache_miss_tokens,
             "completion_tokens": usage.completion_tokens, "reasoning_tokens": usage.reasoning_tokens,
             "cost_usd": cost, "duration_ms": duration_ms, "output_preview": text[:300],
+            "resolved_model": result.resolved_model, "resolved_provider": result.resolved_provider,
+            "request_id": result.request_id, "provider_cost_usd": result.provider_cost_usd,
             "justification": json.dumps(justification, ensure_ascii=False),
         })
         if status == "invalid":
@@ -365,7 +416,10 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 continue
             raise last_error
         return Completion(text=text, model=model_id, provider=model["provider"], cost_usd=cost, usage=usage,
-                          call_id=call_id, data=data, justification=justification)
+                          call_id=call_id, requested_model=result.requested_model,
+                          resolved_model=result.resolved_model, resolved_provider=result.resolved_provider,
+                          request_id=result.request_id, provider_cost_usd=result.provider_cost_usd,
+                          data=data, justification=justification)
 
     if budget_block:
         detail = "; ".join(f"{c['model']} : {c['reason']}" for c in considered)

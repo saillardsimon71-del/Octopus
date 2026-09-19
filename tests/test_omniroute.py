@@ -1,7 +1,7 @@
 """Tests hors-réseau du routage OmniRoute."""
 from __future__ import annotations
 
-from octopus import catalog, llm
+from octopus import catalog, journal, llm
 from octopus.pricing import Usage
 
 
@@ -65,3 +65,27 @@ def test_zero_cost_does_not_pick_paid_model_when_free_route_is_down(monkeypatch,
         assert all(item["model"] not in {"deepseek/flash", "deepseek/v4-pro"} for item in exc.considered)
     else:
         raise AssertionError("zero_cost ne doit pas retomber sur DeepSeek payant")
+
+
+def test_resolved_omniroute_route_is_exposed_and_journaled(monkeypatch, providers_up):
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    monkeypatch.setenv("OMNIROUTE_MODEL", "auto/free")
+    providers_up.discard("omniroute")
+    monkeypatch.setattr(llm, "_transport_override", lambda provider, request: llm.TransportResult(
+        text='{"ok": true}',
+        usage=Usage(prompt_tokens=10, completion_tokens=5),
+        requested_model="auto/free",
+        resolved_model="qwen/qwen3-32b",
+        resolved_provider="groq",
+        request_id="req-123",
+        provider_cost_usd=0.0,
+    ))
+
+    result = llm.complete("podalux.write_job", [{"role": "user", "content": "test"}], profile="zero_cost")
+
+    assert (result.requested_model, result.resolved_model, result.resolved_provider, result.request_id) == (
+        "auto/free", "qwen/qwen3-32b", "groq", "req-123")
+    (row,) = journal.query("SELECT * FROM llm_calls")
+    assert (row["requested_model"], row["resolved_model"], row["resolved_provider"], row["request_id"]) == (
+        "auto/free", "qwen/qwen3-32b", "groq", "req-123")
+    assert row["provider_cost_usd"] == 0.0
