@@ -31,8 +31,8 @@ PRESETS: dict[str, Preset] = {p.key: p for p in (
     Preset("qualite", "Qualité Wan 1.3B (lent)", "t2v_1.3B", "480x832", 3,
            {"num_inference_steps": 20, "guidance_scale": 5.0},
            "modèle de base avec CFG : deux évaluations par étape"),
-    Preset("h3", "MiniMax H3 cloud", "minimax_h3_fl2va_pruned_cloud", "768x1344", 5, {},
-           "RunPod GPU : H3 est entièrement externalisé et ne consomme pas la VRAM du PC local"),
+    Preset("h3", "MiniMax H3 cloud (legacy)", "minimax_h3_fl2va_pruned_cloud", "768x1344", 5, {},
+           "RunPod legacy : exige OCTOPUS_ALLOW_LEGACY_RUNPOD=1 et une autorisation de dépense"),
 )}
 
 

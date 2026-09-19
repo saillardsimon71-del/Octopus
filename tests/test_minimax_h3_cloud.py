@@ -53,6 +53,7 @@ def test_h3_handler_bypasses_local_wangp(monkeypatch, isolated):
     from octopus import economy
     monkeypatch.setenv("OCTOPUS_MINIMAX_H3_ENDPOINT_ID", "endpoint")
     monkeypatch.setenv("OCTOPUS_MINIMAX_H3_API_TOKEN", "secret")
+    monkeypatch.setenv("OCTOPUS_ALLOW_LEGACY_RUNPOD", "1")
     monkeypatch.setenv("OCTOPUS_H3_JOB_COST_ESTIMATE", "0.50 USD")
     economy.grant_allowance("podalux", 1, "USD", granted_by="human", rationale="test H3")
 
@@ -90,6 +91,7 @@ def test_h3_submission_is_refused_without_estimate_or_allowance(monkeypatch, iso
     from octopus import economy
     monkeypatch.setenv("OCTOPUS_MINIMAX_H3_ENDPOINT_ID", "endpoint")
     monkeypatch.setenv("OCTOPUS_MINIMAX_H3_API_TOKEN", "secret")
+    monkeypatch.setenv("OCTOPUS_ALLOW_LEGACY_RUNPOD", "1")
     submits = []
 
     class FakeClient:
@@ -135,6 +137,7 @@ def test_h3_does_not_resubmit_ambiguous_submission(monkeypatch, isolated):
     monkeypatch.setenv("OCTOPUS_VIDEO_H3_STATE_DIR", str(state_dir))
     monkeypatch.setenv("OCTOPUS_MINIMAX_H3_ENDPOINT_ID", "endpoint")
     monkeypatch.setenv("OCTOPUS_MINIMAX_H3_API_TOKEN", "secret")
+    monkeypatch.setenv("OCTOPUS_ALLOW_LEGACY_RUNPOD", "1")
 
     class NeverSubmit:
         def __init__(self, config):
@@ -167,6 +170,7 @@ def test_h3_submit_failure_keeps_ambiguous_state(monkeypatch, isolated):
     monkeypatch.setenv("OCTOPUS_VIDEO_H3_STATE_DIR", str(state_dir))
     monkeypatch.setenv("OCTOPUS_MINIMAX_H3_ENDPOINT_ID", "endpoint")
     monkeypatch.setenv("OCTOPUS_MINIMAX_H3_API_TOKEN", "secret")
+    monkeypatch.setenv("OCTOPUS_ALLOW_LEGACY_RUNPOD", "1")
     monkeypatch.setenv("OCTOPUS_H3_JOB_COST_ESTIMATE", "0.50 USD")
     economy.grant_allowance("podalux", 1, "USD", granted_by="human", rationale="test H3")
 
@@ -194,3 +198,11 @@ def test_h3_submit_failure_keeps_ambiguous_state(monkeypatch, isolated):
         handlers.video_generate(Ctx())
     saved = json.loads((state_dir / "task-11-v1.json").read_text(encoding="utf-8"))
     assert saved == {"schema_version": "1", "remote_id": None, "status": "SUBMITTING"}
+
+
+def test_h3_requires_explicit_legacy_opt_in(monkeypatch):
+    monkeypatch.setenv("OCTOPUS_MINIMAX_H3_ENDPOINT_ID", "endpoint")
+    monkeypatch.setenv("OCTOPUS_MINIMAX_H3_API_TOKEN", "secret")
+    monkeypatch.delenv("OCTOPUS_ALLOW_LEGACY_RUNPOD", raising=False)
+    with pytest.raises(MiniMaxH3CloudError, match="legacy.*désactivé"):
+        handlers.MiniMaxH3RunPodClient(handlers.MiniMaxH3Config.from_env())
