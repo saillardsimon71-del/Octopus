@@ -94,6 +94,9 @@ index 4c47471..f208b75 100644
     assert all("Do not call tools" in messages[0]["content"] for _, messages, _ in calls)
     assert all("unified diff with ---/+++ paths" in messages[0]["content"] for _, messages, _ in calls)
     assert all("smallest change" in messages[0]["content"] for _, messages, _ in calls)
+    for _, messages, _ in calls[2:]:
+        history = json.loads(messages[1]["content"])["history"]
+        assert all(item["action"] != "read" for item in history)
     assert tasks.get(task_id)["output"]["branch"].startswith("codex/devtask-")
 
 
@@ -151,6 +154,48 @@ def test_devworker_groq_uses_json_object_with_local_validation(monkeypatch):
 
     assert request["response_format"] == {"type": "json_object"}
     assert request["reasoning_effort"] == "low"
+    assert model["json_schema_fallback"] == "text"
+
+
+def test_devworker_groq_retries_format_400_as_text_with_local_validation(monkeypatch, providers_up):
+    from octopus import catalog, dev_worker, llm
+    from octopus.pricing import Usage
+
+    class ResponseFormatError(RuntimeError):
+        status_code = 400
+
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
+    cat = catalog.load()
+    cat.raw["tasks"]["development.step"]["candidates"]["zero_cost"] = ["omniroute/devworker-groq"]
+    monkeypatch.setattr(llm.catalog, "load", lambda: cat)
+    requests = []
+
+    def transport(provider, request):
+        requests.append(request)
+        if len(requests) == 1:
+            raise ResponseFormatError("400 json_validate_failed")
+        return llm.TransportResult(
+            text='{"action":"test"}',
+            usage=Usage(prompt_tokens=10, completion_tokens=5),
+            requested_model=request["model"],
+            resolved_model="groq/openai/gpt-oss-120b",
+            resolved_provider="groq",
+        )
+
+    monkeypatch.setattr(llm, "_transport_override", transport)
+
+    result = llm.complete(
+        "development.step",
+        [{"role": "system", "content": "Return one JSON action."}],
+        profile="zero_cost",
+        json_schema=dev_worker.DEV_ACTION_SCHEMA,
+        validate=dev_worker._parse_action,
+    )
+
+    assert requests[0]["response_format"] == {"type": "json_object"}
+    assert "response_format" not in requests[1]
+    assert result.data == {"action": "test", "path": None, "query": None, "patch": None, "message": None}
 
 
 def test_devworker_local_validation_normalizes_unused_nullable_fields():

@@ -324,6 +324,17 @@ def _build_request(model: dict, messages: list[dict], max_tokens: int, json_mode
     return request
 
 
+def _retry_without_response_format(model: dict, request: dict, exc: Exception) -> bool:
+    if model.get("json_schema_fallback") != "text" or request.get("response_format") != {"type": "json_object"}:
+        return False
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    error = str(exc).lower()
+    return any(marker in error for marker in (
+        "json_validate_failed", "generated json does not match", "tool_use_failed",
+    ))
+
+
 def _justify(profile_name: str, task: str, model_id: str, model: dict, considered: list[dict],
              pinned: bool) -> dict:
     justification = {"profile": profile_name, "task": task, "chosen": model_id,
@@ -418,16 +429,30 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
             result = _transport_result(_transport(provider, request), request["model"], model["provider"])
             text, usage = result.text, result.usage
         except Exception as exc:
-            failure = f"echec : {type(exc).__name__}: {str(exc)[:160]}"
-            considered.append({"model": model_id, "eligible": True, "reason": failure})
-            journal.record_llm_call({**base, "status": "error", "error": failure,
-                                     "duration_ms": int((time.perf_counter() - started) * 1000),
-                                     "justification": json.dumps(_justify(profile_name, task, model_id, model,
-                                                                          considered, pinned), ensure_ascii=False)})
-            last_error = exc
-            if prof.get("fallback") and attempt < len(candidates):
-                continue
-            raise
+            failure_exc: Exception | None = exc
+            if _retry_without_response_format(model, request, exc):
+                fallback_request = copy.deepcopy(request)
+                fallback_request.pop("response_format", None)
+                try:
+                    result = _transport_result(
+                        _transport(provider, fallback_request), fallback_request["model"], model["provider"],
+                    )
+                    text, usage = result.text, result.usage
+                    request = fallback_request
+                    failure_exc = None
+                except Exception as fallback_exc:
+                    failure_exc = fallback_exc
+            if failure_exc is not None:
+                failure = f"echec : {type(failure_exc).__name__}: {str(failure_exc)[:160]}"
+                considered.append({"model": model_id, "eligible": True, "reason": failure})
+                journal.record_llm_call({**base, "status": "error", "error": failure,
+                                         "duration_ms": int((time.perf_counter() - started) * 1000),
+                                         "justification": json.dumps(_justify(profile_name, task, model_id, model,
+                                                                              considered, pinned), ensure_ascii=False)})
+                last_error = failure_exc
+                if prof.get("fallback") and attempt < len(candidates):
+                    continue
+                raise failure_exc
         duration_ms = int((time.perf_counter() - started) * 1000)
         cost = (result.provider_cost_usd if result.provider_cost_usd is not None
                 else pricing.call_cost(model.get("price"), usage, peak))

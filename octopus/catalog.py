@@ -109,6 +109,7 @@ def _overlay_omniroute(raw: dict) -> dict:
         }
     raw["models"]["omniroute/devworker-groq"].update({
         "json_schema_mode": "json_object",
+        "json_schema_fallback": "text",
         "params": {"reasoning_effort": "low"},
     })
     free_defaults = {

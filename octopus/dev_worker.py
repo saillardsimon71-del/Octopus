@@ -310,10 +310,14 @@ def development_task(ctx):
             profile="zero_cost", json_schema=DEV_ACTION_SCHEMA, max_tokens=1600, validate=_parse_action,
         )
         action = completion.data if completion.data is not None else _parse_action(completion.text)
+        tool_failed = False
         try:
             output, tests_passed, commit = _tool(action, worktree, tests, tests_passed)
         except (DevWorkerError, OSError, subprocess.SubprocessError) as exc:
             output, commit = f"outil refusé/échoué: {type(exc).__name__}: {exc}", None
+            tool_failed = True
+        if action["action"] == "patch" and not tool_failed:
+            transcript = [entry for entry in transcript if entry["action"] != "read"]
         transcript.append({"action": action["action"], "result": output[-12000:]})
         ctx.emit("development.tool", {"action": action["action"], "ok": not output.startswith("outil refusé")})
         if commit:
