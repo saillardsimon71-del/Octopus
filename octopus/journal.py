@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from . import enabled, paths
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -559,8 +559,43 @@ CREATE INDEX IF NOT EXISTS idx_funnel_events_run ON funnel_events(run_id, kind);
 CREATE INDEX IF NOT EXISTS idx_funnel_events_business ON funnel_events(business, kind);
 """
 
+_SCHEMA_V9 = """
+CREATE TABLE IF NOT EXISTS commerce_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    run_id INTEGER NOT NULL REFERENCES business_runs(id),
+    order_id TEXT NOT NULL UNIQUE,
+    supplier_id TEXT NOT NULL,
+    amount REAL NOT NULL,
+    currency TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'created',
+    payment_ref TEXT,
+    spend_request_id INTEGER,
+    supplier_ref TEXT,
+    evidence_id INTEGER,
+    reason TEXT,
+    idempotency_key TEXT UNIQUE,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_commerce_orders_run ON commerce_orders(run_id, business);
+CREATE INDEX IF NOT EXISTS idx_commerce_orders_business ON commerce_orders(business, status);
+CREATE TABLE IF NOT EXISTS commerce_payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    order_id TEXT NOT NULL,
+    amount REAL NOT NULL,
+    currency TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'confirmed',
+    payment_ref TEXT NOT NULL UNIQUE,
+    idempotency_key TEXT UNIQUE,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_commerce_payments_order ON commerce_payments(order_id, business);
+"""
+
 _MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4), (5, _SCHEMA_V5), (6, _SCHEMA_V6),
-               (7, _SCHEMA_V7), (8, _SCHEMA_V8))
+               (7, _SCHEMA_V7), (8, _SCHEMA_V8), (9, _SCHEMA_V9))
 
 _LLM_COLUMNS = (
     "ts", "run_id", "root_run_id", "business", "agent", "task", "profile", "model", "provider",
