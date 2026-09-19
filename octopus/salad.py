@@ -287,7 +287,7 @@ class SaladClient:
             "display_name": group_name,
             "replicas": 1,
             "autostart_policy": True,
-            "restart_policy": "always",
+            "restart_policy": "never",
             "container": {
                 "image": image,
                 "image_caching": True,
