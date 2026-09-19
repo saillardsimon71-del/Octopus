@@ -121,6 +121,7 @@ def test_create_is_deterministic_idempotent_and_verified():
     create = next(req for req in calls if req.method == "POST" and req.full_url.endswith("/containers"))
     sent = json.loads(create.data)
     assert sent["replicas"] == 1
+    assert sent["restart_policy"] == "never"
     assert sent["container"]["priority"] == "batch"
     assert sent["container"]["resources"]["gpu_classes"] == ["5090"]
     assert sent["container"]["image"] == "ghcr.io/octopus/wan:1"
