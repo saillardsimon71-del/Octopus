@@ -308,14 +308,17 @@ def _build_request(model: dict, messages: list[dict], max_tokens: int, json_mode
     for key, value in copy.deepcopy(model.get("params", {})).items():
         request.setdefault(key, value)
     if json_schema is not None and "json" in capabilities:
-        request["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "octopus_response",
-                "strict": True,
-                "schema": copy.deepcopy(json_schema),
-            },
-        }
+        if model.get("json_schema_mode") == "json_object":
+            request["response_format"] = {"type": "json_object"}
+        else:
+            request["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "octopus_response",
+                    "strict": True,
+                    "schema": copy.deepcopy(json_schema),
+                },
+            }
     elif json_mode and "json" in capabilities:
         request["response_format"] = {"type": "json_object"}
     return request

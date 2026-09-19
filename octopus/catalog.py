@@ -107,6 +107,10 @@ def _overlay_omniroute(raw: dict) -> dict:
             "zero_cost_attestation": zero_cost_attestation,
             "notes": "Route DevWorker dediee via LiteLLM, sans fallback cross-provider interne.",
         }
+    raw["models"]["omniroute/devworker-groq"].update({
+        "json_schema_mode": "json_object",
+        "params": {"reasoning_effort": "low"},
+    })
     free_defaults = {
         "podalux.select_offer": model_id,
         "podalux.write_job": model_id,
@@ -136,15 +140,8 @@ def _overlay_omniroute(raw: dict) -> dict:
         "omniroute/devworker-gemini",
         "omniroute/devworker-groq",
     ]
-    excluded = set(dedicated + [model_id])
-
     for profile_name in ("zero_cost", "low_cost"):
-        current = [
-            candidate
-            for candidate in dev_candidates.get(profile_name, [])
-            if candidate not in excluded
-        ]
-        dev_candidates[profile_name] = dedicated + current
+        dev_candidates[profile_name] = list(dedicated)
 
     if raw.get("profiles", {}).get("zero_cost", {}).get("fallback"):
         dev_task.setdefault("omniroute_bootstrap_baseline", {})["zero_cost"] = dedicated[0]

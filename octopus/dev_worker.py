@@ -74,9 +74,17 @@ def validate_test_commands(commands) -> list[list[str]]:
 
 def _parse_action(text: str) -> dict:
     value = llm.parse_json(text)
+    fields = set(DEV_ACTION_SCHEMA["properties"])
+    if set(value) != fields:
+        missing = sorted(fields - set(value))
+        unexpected = sorted(set(value) - fields)
+        raise ValueError(f"champs invalides: manquants={missing}, inattendus={unexpected}")
     action = value.get("action")
     if action not in {"read", "search", "patch", "test", "commit"}:
         raise ValueError("action attendue: read, search, patch, test ou commit")
+    for name in fields - {"action"}:
+        if value[name] is not None and not isinstance(value[name], str):
+            raise ValueError(f"champ {name} attendu: string ou null")
     required = {"read": "path", "search": "query", "patch": "patch", "commit": "message"}
     field = required.get(action)
     if field and not isinstance(value.get(field), str):
@@ -174,9 +182,13 @@ def development_task(ctx):
     worktree, branch = _create_worktree(repository, ctx.id)
     transcript = []
     tests_passed = False
+    schema_json = json.dumps(DEV_ACTION_SCHEMA, separators=(",", ":"))
     system = (
-        "You are DevWorker. Choose the next useful action and respond only with the required JSON schema. "
+        "You are DevWorker. Do not call tools or emit tool calls. Choose the next useful action and respond only "
+        f"with one JSON object matching this schema exactly: {schema_json}. "
         "Inspect before modifying. Return one action per response. Never request shell, push, PR, or agent. "
+        "For patch actions, patch must be a UTF-8 unified diff with ---/+++ paths accepted by git apply; "
+        "never use Begin Patch or SEARCH/REPLACE markers. "
         "Commit only after tests pass."
     )
     for _ in range(max_steps):

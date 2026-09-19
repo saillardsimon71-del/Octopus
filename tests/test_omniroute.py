@@ -19,6 +19,16 @@ def test_catalog_injects_omniroute_free_model(monkeypatch):
     assert cat.task("web.inspect_page")["candidates"]["zero_cost"][0] == "omniroute/auto-free"
 
 
+def test_devworker_uses_only_dedicated_omniroute_routes(monkeypatch):
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+
+    candidates = catalog.load().task("development.step")["candidates"]
+
+    expected = ["omniroute/devworker-gemini", "omniroute/devworker-groq"]
+    assert candidates["zero_cost"] == expected
+    assert candidates["low_cost"] == expected
+
+
 def test_zero_cost_llm_uses_omniroute_without_paid_fallback(monkeypatch, providers_up):
     monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
     monkeypatch.setenv("OMNIROUTE_MODEL", "auto/free")

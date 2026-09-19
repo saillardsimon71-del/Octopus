@@ -44,7 +44,7 @@ def scripted(monkeypatch, dev_worker, actions):
     iterator = iter(actions)
 
     def complete(task, messages, **kwargs):
-        calls.append((task, kwargs))
+        calls.append((task, messages, kwargs))
         action = next(iterator)
         return SimpleNamespace(data=action, text=json.dumps(action))
 
@@ -87,8 +87,12 @@ index 4c47471..f208b75 100644
     assert git(repo, "rev-parse", "HEAD") == source_head
     assert (repo / "calc.py").read_text(encoding="utf-8").endswith("return 1\n")
     assert git(worktree, "status", "--porcelain") == ""
-    assert all(task == "development.step" and kwargs["profile"] == "zero_cost" for task, kwargs in calls)
-    assert all(kwargs["json_schema"] == dev_worker.DEV_ACTION_SCHEMA for _, kwargs in calls)
+    assert all(task == "development.step" and kwargs["profile"] == "zero_cost" for task, _, kwargs in calls)
+    assert all(kwargs["json_schema"] == dev_worker.DEV_ACTION_SCHEMA for _, _, kwargs in calls)
+    schema_json = json.dumps(dev_worker.DEV_ACTION_SCHEMA, separators=(",", ":"))
+    assert all(schema_json in messages[0]["content"] for _, messages, _ in calls)
+    assert all("Do not call tools" in messages[0]["content"] for _, messages, _ in calls)
+    assert all("unified diff with ---/+++ paths" in messages[0]["content"] for _, messages, _ in calls)
     assert tasks.get(task_id)["output"]["branch"].startswith("codex/devtask-")
 
 
@@ -128,6 +132,36 @@ def test_devworker_strict_schema_builds_structured_output_request():
             "schema": dev_worker.DEV_ACTION_SCHEMA,
         },
     }
+
+
+def test_devworker_groq_uses_json_object_with_local_validation(monkeypatch):
+    from octopus import catalog, dev_worker, llm
+
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    model = catalog.load().model("omniroute/devworker-groq")
+    request = llm._build_request(
+        model,
+        [{"role": "user", "content": "next"}],
+        100,
+        False,
+        None,
+        dev_worker.DEV_ACTION_SCHEMA,
+    )
+
+    assert request["response_format"] == {"type": "json_object"}
+    assert request["reasoning_effort"] == "low"
+
+
+@pytest.mark.parametrize("payload", [
+    {"action": "test"},
+    {"action": "test", "path": 7, "query": None, "patch": None, "message": None},
+    {"action": "test", "path": None, "query": None, "patch": None, "message": None, "extra": True},
+])
+def test_devworker_local_validation_enforces_full_schema(payload):
+    from octopus.dev_worker import _parse_action
+
+    with pytest.raises(ValueError):
+        _parse_action(json.dumps(payload))
 
 
 def test_devworker_search_null_path_defaults_to_worktree(tmp_path, monkeypatch):
