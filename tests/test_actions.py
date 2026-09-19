@@ -54,7 +54,7 @@ def test_executed_action_produces_observed_evidence_for_the_experiment():
         return {"observation": "annonce en ligne", "source_ref": "https://place-x.example/annonce/42",
                 "metric": "ventes", "value": 1}
 
-    actions.register_executor("Marketplace", "list_product", list_product)
+    actions.register_executor("Marketplace", "list_product", list_product, cost_class="free_quota")
     result = actions.propose(B, channel, "LIST_PRODUCT", {"title": "Guide"}, requested_by="agent:GROWTH",
                              experiment_id=experiment, idempotency_key="exp1-list")
     assert result["status"] == "executed" and seen == [("Place X", {"title": "Guide"})]
@@ -68,14 +68,17 @@ def test_executed_action_produces_observed_evidence_for_the_experiment():
 def test_paid_action_needs_an_allowance_and_failures_release_the_spend():
     channel = _channel()
     economy.update_channel(B, channel, actor="human", status="active", access="act")
-    actions.register_executor("marketplace", "boost", lambda c, p: (_ for _ in ()).throw(TimeoutError("API lente")))
+    actions.register_executor("marketplace", "boost", lambda c, p: (_ for _ in ()).throw(TimeoutError("API lente")),
+                              cost_class="paid")
+    undeclared = actions.propose(B, channel, "boost", {}, requested_by="agent:GROWTH")
+    assert undeclared["status"] == "blocked" and "coût" in undeclared["reason"]
     blocked = actions.propose(B, channel, "boost", {}, requested_by="agent:GROWTH", spend_amount=5, spend_currency="EUR")
     assert blocked["status"] == "blocked" and "dépense" in blocked["reason"]
     economy.grant_allowance(B, 5, "EUR", granted_by="human", rationale="boost")
     failed = actions.propose(B, channel, "boost", {}, requested_by="agent:GROWTH", spend_amount=5, spend_currency="EUR")
     assert failed["status"] == "failed" and "TimeoutError" in failed["reason"]
     assert economy.authorize_spend(B, 5, "EUR", "réutilisable", requested_by="human")["status"] == "authorized"
-    actions.register_executor("marketplace", "silent", lambda c, p: {"observation": "ok"})
+    actions.register_executor("marketplace", "silent", lambda c, p: {"observation": "ok"}, cost_class="local")
     assert actions.propose(B, channel, "silent", {}, requested_by="agent:GROWTH")["status"] == "failed"
 
 
