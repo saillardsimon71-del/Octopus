@@ -240,6 +240,9 @@ def _ineligibility(cat, profile_name: str, profile: dict, task: str, task_def: d
     missing = needs - set(model.get("capabilities", []))
     if missing:
         return "capacites manquantes : " + ", ".join(sorted(missing))
+    if (profile_name == "zero_cost" and model["provider"] == "omniroute"
+            and model.get("zero_cost_attestation") != "free_only"):
+        return "pool OmniRoute : attestation free_only absente"
     ok, why = provider_status(model["provider"], cat.provider(model["provider"]))
     if not ok:
         return why
@@ -302,6 +305,8 @@ def _justify(profile_name: str, task: str, model_id: str, model: dict, considere
              pinned: bool) -> dict:
     justification = {"profile": profile_name, "task": task, "chosen": model_id,
                      "cost_class": model["cost_class"], "considered": considered}
+    if profile_name == "zero_cost" and model["provider"] == "omniroute":
+        justification["zero_cost_attestation"] = model.get("zero_cost_attestation")
     if model["cost_class"] != "paid":
         return justification
     others = [c for c in considered if c["model"] != model_id]
@@ -318,6 +323,16 @@ def _justify(profile_name: str, task: str, model_id: str, model: dict, considere
         justification["paid_reason"] = "alternatives_ineligible"
         justification["explanation"] = "alternatives ecartees : " + "; ".join(f"{c['model']} ({c['reason']})" for c in others)
     return justification
+
+
+def _zero_cost_violation(profile_name: str, model: dict, result: TransportResult) -> str | None:
+    if profile_name != "zero_cost":
+        return None
+    if result.provider_cost_usd not in {None, 0.0}:
+        return f"route zero_cost bloquée : coût résolu {result.provider_cost_usd:.6f} $"
+    if model["provider"] == "omniroute" and not (result.resolved_model and result.resolved_provider):
+        return "route zero_cost bloquée : identité résolue absente"
+    return None
 
 
 def complete(task: str, messages: list[dict], *, agent: str = "", business: str | None = None,
@@ -392,8 +407,10 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
         duration_ms = int((time.perf_counter() - started) * 1000)
         cost = (result.provider_cost_usd if result.provider_cost_usd is not None
                 else pricing.call_cost(model.get("price"), usage, peak))
-        data, status, error = None, "ok", None
-        if validate is not None:
+        data, status, error = None, "ok", _zero_cost_violation(profile_name, model, result)
+        if error is not None:
+            status = "blocked"
+        elif validate is not None:
             try:
                 data = validate(text)
             except Exception as exc:
@@ -409,6 +426,12 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
             "request_id": result.request_id, "provider_cost_usd": result.provider_cost_usd,
             "justification": json.dumps(justification, ensure_ascii=False),
         })
+        if status == "blocked":
+            considered.append({"model": model_id, "eligible": False, "reason": error})
+            last_error = GatewayError(error)
+            if prof.get("fallback") and attempt < len(candidates):
+                continue
+            break
         if status == "invalid":
             considered.append({"model": model_id, "eligible": True, "reason": f"sortie invalide : {error}"})
             last_error = InvalidOutput(f"{model_id} : {error}")

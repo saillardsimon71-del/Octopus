@@ -36,7 +36,10 @@ L'instance doit ensuite afficher/répondre sur l'endpoint local fourni par l'ins
 OMNIROUTE_ENABLED=1
 OMNIROUTE_BASE_URL=http://127.0.0.1:20128/v1
 OMNIROUTE_MODEL=auto/best-free
+OMNIROUTE_ZERO_COST_ATTESTATION=free_only
 ```
+
+Définir `OMNIROUTE_ZERO_COST_ATTESTATION=free_only` uniquement pour une clé ou une instance dont toutes les connexions accessibles sont gratuites. Sans cette attestation explicite, OmniRoute est refusé par le profil `zero_cost` avant l'appel.
 
 La clé ne va jamais dans Git. La définir uniquement dans l'environnement utilisateur Windows :
 
@@ -44,6 +47,7 @@ La clé ne va jamais dans Git. La définir uniquement dans l'environnement utili
 [Environment]::SetEnvironmentVariable("OMNIROUTE_API_KEY", "<CLE_OMNIROUTE>", "User")
 [Environment]::SetEnvironmentVariable("OMNIROUTE_ENABLED", "1", "User")
 [Environment]::SetEnvironmentVariable("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1", "User")
+[Environment]::SetEnvironmentVariable("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only", "User")
 ```
 
 Fermer/réouvrir PowerShell après changement d'environnement.
@@ -67,7 +71,7 @@ Le diagnostic contrôle désormais Playwright/Chromium, la base locale, OmniRout
 
 `zero_cost` interdit les modèles marqués `paid` **dans le catalogue OCTOPUS** et empêche donc un fallback explicite d'OCTOPUS vers DeepSeek payant.
 
-Cette propriété ne constitue pas encore une attestation financière de l'upstream réellement choisi à l'intérieur d'OmniRoute. OCTOPUS journalise aujourd'hui le modèle virtuel `omniroute/auto-free`, pas encore le modèle/provider aval réellement exécuté. Tant que cette identité et son coût ne sont pas attestés, le mode zéro coût doit utiliser un pool OmniRoute free-only par construction ou rester considéré comme non vérifié financièrement.
+Le profil `zero_cost` exige l'attestation explicite d'un pool OmniRoute free-only avant l'appel. Après la réponse, OCTOPUS journalise le modèle, le provider, le request id et le coût annoncés par OmniRoute. Une réponse sans identité résolue ou avec un coût non nul est bloquée et ne déclenche aucun fallback payant.
 
 Voir `audits/LLM_BRAIN_AUDIT_2026-09-19.md`.
 

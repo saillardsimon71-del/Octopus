@@ -73,6 +73,7 @@ def _overlay_omniroute(raw: dict) -> dict:
     provider_id = "omniroute"
     model_id = "omniroute/auto-free"
     model_name = os.environ.get("OMNIROUTE_MODEL", "auto/best-free").strip() or "auto/best-free"
+    zero_cost_attestation = os.environ.get("OMNIROUTE_ZERO_COST_ATTESTATION", "").strip().lower()
     raw.setdefault("providers", {})[provider_id] = {
         "kind": "cloud",
         "base_url": os.environ.get("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1").rstrip("/"),
@@ -89,6 +90,7 @@ def _overlay_omniroute(raw: dict) -> dict:
         "api_model": model_name,
         "cost_class": "free_quota",
         "capabilities": ["json", "vision", "tools", "reasoning_effort"],
+        "zero_cost_attestation": zero_cost_attestation,
         "notes": "Modèle virtuel OmniRoute : auto/best-free. La disponibilité et le provider réel dépendent des connexions OmniRoute.",
     }
 
@@ -121,7 +123,9 @@ def _overlay_omniroute(raw: dict) -> dict:
 def load(path: Path | None = None) -> Catalog:
     p = Path(path) if path else paths.catalog_path()
     mtime = p.stat().st_mtime
-    cache_key = f"{p}|omni={_omniroute_enabled()}|model={os.environ.get('OMNIROUTE_MODEL','')}|base={os.environ.get('OMNIROUTE_BASE_URL','')}"
+    cache_key = (f"{p}|omni={_omniroute_enabled()}|model={os.environ.get('OMNIROUTE_MODEL','')}|"
+                 f"base={os.environ.get('OMNIROUTE_BASE_URL','')}|"
+                 f"zero_cost={os.environ.get('OMNIROUTE_ZERO_COST_ATTESTATION','')}")
     cached = _cache.get(cache_key)
     if cached and cached[0] == mtime:
         return cached[1]
