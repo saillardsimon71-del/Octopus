@@ -29,6 +29,18 @@ Ne jamais travailler directement sur `main`.
 
 Si le worktree local contient des modifications inconnues, les préserver et les examiner avant toute action.
 
+### Worktree Codex
+
+Si Codex travaille dans un worktree isolé en detached HEAD :
+
+- ne pas modifier un autre worktree ;
+- ne pas changer la branche du dépôt principal ;
+- ne pas faire de `git switch` dans le répertoire principal utilisateur ;
+- avant le premier commit, créer si nécessaire une branche de tâche basée exactement sur `feat/salad-compute-provider`.
+
+Le dépôt principal utilisateur peut rester sur une autre branche. Ce n'est pas une erreur.
+
+
 ## 2. Lire
 
 Ordre minimum :
@@ -48,31 +60,91 @@ Pour le chantier actuel, lire aussi :
 
 ## 3. Mission courante
 
-Priorité :
+### Scope de CETTE session Codex
 
 ```text
-G1 — cerveau LLM
-+
-G2 — frontière financière
+G1 — cerveau LLM UNIQUEMENT
 ```
 
-Avant le canary Salad.
+Ne pas commencer G2 après G1.
 
-### G1
+Quand le critère de sortie G1 de cette session est atteint :
 
-- rendre le fallback JSON/validation effectif dans `octopus.llm` ;
-- connaître le provider/modèle réellement résolu derrière OmniRoute ;
-- garantir que `zero_cost` reste réellement gratuit ;
-- aucun fallback LLM payant implicite ;
-- DeepSeek payant n'est pas une dépendance normale.
+1. arrêter les modifications ;
+2. exécuter les tests nécessaires ;
+3. produire le rapport compact ;
+4. laisser G2 pour une session explicitement autorisée.
 
-### G2
+Le but est de préserver le quota agentique et d'éviter l'expansion spontanée de la mission.
 
-- empêcher les bypasses directs Salad/GPU.ai ;
-- imposer `GuardedComputeManager` au compute provisionné ;
-- créer une abstraction de settlement pour RunPod/H3 metered ;
-- conserver un seul ledger ;
-- rendre le watchdog réellement indépendant.
+### G1.1 — validation / fallback
+
+Objectif :
+
+- déplacer le parsing/validation JSON nécessaire au fallback dans `octopus.llm` ;
+- faire de même pour les validateurs métier/vision lorsque leur échec doit déclencher un autre candidat ;
+- journaliser correctement `ok/invalid/error/blocked`.
+
+Critère de sortie :
+
+```text
+sortie invalide d'un candidat gratuit
+→ tentative marquée invalid
+→ candidat gratuit suivant
+→ test prouvé
+```
+
+Puis tests ciblés et commit cohérent.
+
+### G1.2 — attestation OmniRoute / zero_cost
+
+Objectif :
+
+- capturer la route demandée ;
+- capturer le provider/modèle réellement résolu si OmniRoute l'expose ;
+- conserver request id / usage / metadata utiles disponibles ;
+- rendre `zero_cost` fail-closed ;
+- aucun fallback payant implicite.
+
+Inspecter l'API/runtime OmniRoute réellement disponible avant de supposer la forme des métadonnées.
+
+Critère de sortie :
+
+```text
+route non attestable ou upstream payant sous zero_cost
+→ refus / blocage
+→ jamais compté comme coût certain = 0
+```
+
+Puis tests ciblés et commit cohérent.
+
+### G1.3 — routage propre
+
+Objectif :
+
+- supprimer la duplication inutile de résolution du profil ;
+- garder une seule source de vérité ;
+- permettre des intentions/capacités distinctes quand utile : general, reasoning, vision, coding ;
+- rester provider-neutral ;
+- ne pas hardcoder arbitrairement une marque de modèle dans les callers métier.
+
+Puis tests ciblés et commit cohérent.
+
+### G1.4 — preuve finale G1
+
+Seulement après stabilisation des lots précédents :
+
+- exécuter les tests gateway/OmniRoute concernés ;
+- exécuter les suites transversales réellement affectées ;
+- comparer le résultat aux critères G1 de `docs/ACCEPTANCE_GATES.md`.
+
+Si une preuve dépend d'un service live ou d'une capacité indisponible :
+
+```text
+PARTIAL — preuve manquante : ...
+```
+
+Ne pas lancer G2 pour utiliser le temps/quota restant.
 
 ## 4. Ce qui a déjà été fait
 
@@ -88,7 +160,35 @@ Ne pas refaire sans preuve de divergence :
 - breaker financier ;
 - watchdog initial.
 
-## 5. Tests
+## 5. Discipline de contexte / quota
+
+Le quota agentique est une ressource rare.
+
+Règles obligatoires pour cette session :
+
+- ne jamais explorer tout le dépôt « pour comprendre » ;
+- commencer par `rg`, `git grep`, Git et les symboles concernés ;
+- ouvrir uniquement les fichiers nécessaires au lot courant ;
+- ne pas relire un document déjà lu sauf nécessité ;
+- ne jamais utiliser `docs/archive/` comme contexte de travail courant ;
+- préférer les tests ciblés à la full suite pendant le développement ;
+- lancer les suites larges seulement après stabilisation du lot ;
+- ne pas produire de longs rapports intermédiaires ;
+- ne pas réanalyser une conclusion déjà documentée si le code réel ne la contredit pas ;
+- ne pas élargir spontanément la mission ;
+- ne pas refactorer du code sain adjacent ;
+- utiliser les diffs, tests et sorties du terminal comme preuves plutôt qu'une nouvelle analyse LLM ;
+- arrêter la session après G1, même si du quota reste.
+
+Principe :
+
+```text
+repo = mémoire
+terminal/tests = preuve
+LLM = décision quand nécessaire
+```
+
+## 6. Tests
 
 Toujours commencer par les tests directement touchés.
 
@@ -108,7 +208,7 @@ Puis exécuter les suites transversales affectées.
 
 Aucun test ne doit lancer une ressource payante réelle.
 
-## 6. Discipline
+## 7. Discipline
 
 Une session doit avoir :
 
@@ -128,7 +228,7 @@ Utiliser :
 PARTIAL — preuve manquante : ...
 ```
 
-## 7. Fin de session
+## 8. Fin de session
 
 Avant d'arrêter :
 
@@ -143,9 +243,10 @@ Avant d'arrêter :
 
 ```text
 Lis intégralement AGENTS.md puis docs/CODEX_START.md.
-Vérifie l'état Git réel.
-Travaille sur la branche prévue.
-Exécute la mission courante jusqu'aux critères de docs/ACCEPTANCE_GATES.md.
+Vérifie l'état Git réel et respecte le worktree courant.
+Exécute uniquement G1 selon l'ordre G1.1 → G1.4.
 Ne refais pas les audits déjà versionnés.
+Préserve le quota : contexte minimal, tests ciblés, aucun élargissement spontané.
 Ne marque jamais une gate DONE sans preuve et tests.
+Arrête-toi après le rapport compact G1 ; ne commence pas G2.
 ```
