@@ -93,6 +93,7 @@ index 4c47471..f208b75 100644
     assert all(schema_json in messages[0]["content"] for _, messages, _ in calls)
     assert all("Do not call tools" in messages[0]["content"] for _, messages, _ in calls)
     assert all("unified diff with ---/+++ paths" in messages[0]["content"] for _, messages, _ in calls)
+    assert all("smallest change" in messages[0]["content"] for _, messages, _ in calls)
     assert tasks.get(task_id)["output"]["branch"].startswith("codex/devtask-")
 
 
@@ -241,6 +242,25 @@ def test_devworker_context_patch_rejects_ambiguous_match(tmp_path):
 
     with pytest.raises(dev_worker.DevWorkerError, match="unique"):
         dev_worker._tool({"action": "patch", "patch": patch}, repo, [], False)
+
+
+def test_devworker_context_patch_tolerates_hybrid_wrapper_and_unprefixed_addition(tmp_path):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path)
+    patch = """--- a/calc.py
++++ b/calc.py
+@@
+-def answer():
++def answer(
+):
+     return 1
+*** End Patch
+"""
+
+    dev_worker._tool({"action": "patch", "patch": patch}, repo, [], False)
+
+    assert (repo / "calc.py").read_text(encoding="utf-8") == "def answer(\n):\n    return 1\n"
 
 
 def test_devworker_wrapped_patch_rejects_path_outside_worktree(tmp_path):

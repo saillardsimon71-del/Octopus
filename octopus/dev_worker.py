@@ -186,10 +186,11 @@ def _apply_context_patch(worktree: Path, patch: str) -> None:
         for hunk in hunks:
             old, new = [], []
             for line in hunk:
-                if line == "\\ No newline at end of file":
+                if line in {"\\ No newline at end of file", "*** End Patch"}:
                     continue
                 if not line or line[0] not in {" ", "+", "-"}:
-                    raise DevWorkerError(f"ligne de patch invalide: {relative}")
+                    new.append(line)
+                    continue
                 if line[0] in {" ", "-"}:
                     old.append(line[1:])
                 if line[0] in {" ", "+"}:
@@ -290,6 +291,7 @@ def development_task(ctx):
         "You are DevWorker. Do not call tools or emit tool calls. Choose the next useful action and respond only "
         f"with one JSON object matching this schema exactly: {schema_json}. "
         "Inspect before modifying. Return one action per response. Never request shell, push, PR, or agent. "
+        "Make the smallest change needed and never reformat unrelated lines. "
         "For patch actions, patch must be a UTF-8 unified diff with ---/+++ paths accepted by git apply; "
         "never use Begin Patch or SEARCH/REPLACE markers. "
         "Commit only after tests pass."
