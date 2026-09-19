@@ -1,3 +1,5 @@
+> **Statut : document d'architecture/implémentation historique.** Pour l'état réellement déployé et les priorités actuelles, lire `CURRENT_STATE.md` et `HANDOFF_WORK.md`. Ce fichier reste utile pour comprendre les choix de conception de la couche Autonomous Business.
+
 # OCTOPUS — Autonomous Business Implementation Foundation
 
 ## Mission

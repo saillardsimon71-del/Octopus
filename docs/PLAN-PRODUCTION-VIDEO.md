@@ -1,3 +1,5 @@
+> **Statut : snapshot de réflexion daté du 18/09/2026, pas état courant.** Les prix, hypothèses marché et priorités de ce document peuvent avoir vieilli. Pour la reprise actuelle, utiliser `CURRENT_STATE.md` et `NEXT_STEPS.md`.
+
 # Plan de production video — etat, ecart avec le marche, et chemin
 
 Ecrit le 18/09/2026. Toutes les valeurs chiffrees viennent soit de nos mesures (`out/*/qc_metrics.json`),

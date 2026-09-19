@@ -1,5 +1,8 @@
 # Installation locale OCTOPUS — Windows cloud-first
 
+> **Statut 19/09/2026 :** ce runbook décrit le control-plane Windows et le renderer RunPod historique.  
+> La nouvelle couche Salad/GPU.ai + disjoncteur financier est documentée dans [COMPUTE_GPU.md](COMPUTE_GPU.md) et n'est pas encore imposée à tous les chemins vidéo. Ne confondre ni le renderer RunPod existant, ni WanGP local, ni le nouveau compute broker.
+
 Cette configuration garde le poste local léger : **contrôle OCTOPUS + GUI + navigateur + OmniRoute**. Les modèles vidéo lourds, MiniMax H3, Remotion/FFmpeg et le TTS cloud s'exécutent hors de la machine quand `PODALUX_VIDEO_RENDERER=cloud`.
 
 ## 0. Bootstrap recommandé
