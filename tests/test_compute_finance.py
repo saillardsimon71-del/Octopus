@@ -4,6 +4,7 @@ import pytest
 
 from octopus.compute import ComputeOffer, ComputeOperation, ComputeRequest
 from octopus.compute_broker import ComputeBroker
+from octopus import economy, journal
 from octopus.compute_finance import (
     BudgetLimits,
     FinancialCircuitBreaker,
@@ -33,6 +34,7 @@ def limits(**overrides):
         idle_timeout_s=300,
         reservation_ttl_s=120,
         shutdown_margin_usd_per_unit=0.001,
+        require_allowance=False,
     )
     values.update(overrides)
     return BudgetLimits(**values)
@@ -241,3 +243,36 @@ def test_snapshot_reports_actual_cost_per_completed_video():
     assert snap["completed_units"] == 2
     assert snap["actual_cost_usd"] == pytest.approx(0.012)
     assert snap["actual_cost_per_unit_usd"] == pytest.approx(0.006)
+
+
+def test_default_policy_requires_human_allowance_and_settles_actual_spend():
+    clock = Clock()
+    strict = limits(require_allowance=True)
+    breaker = FinancialCircuitBreaker(strict, now=clock)
+
+    with pytest.raises(FinancialCircuitOpen, match="enveloppe USD"):
+        breaker.reserve(
+            business="podalux", provider="salad", idempotency_key="needs-allowance",
+            estimated_cost_usd=0.004, price_per_hour=0.25,
+        )
+
+    economy.grant_allowance(
+        "podalux", 0.10, "USD", granted_by="human",
+        rationale="budget GPU de test",
+    )
+    saved = breaker.reserve(
+        business="podalux", provider="salad", idempotency_key="allowed",
+        estimated_cost_usd=0.004, price_per_hour=0.25,
+    )
+    breaker.attach_operation(saved["id"], ComputeOperation("salad", "op", "running", "group"))
+    breaker.finalize(saved["id"], actual_cost_usd=0.0035, units_completed=1, nature="observed")
+
+    request = journal.query(
+        "SELECT s.* FROM compute_spend_links l JOIN spend_requests s ON s.id=l.spend_request_id "
+        "WHERE l.reservation_id=?", (saved["id"],)
+    )[0]
+    ledger = journal.query("SELECT * FROM ledger_entries WHERE spend_request_id=?", (request["id"],))[0]
+    assert request["status"] == "executed"
+    assert request["amount"] == pytest.approx(0.0035)
+    assert ledger["amount"] == pytest.approx(0.0035)
+    assert ledger["category"] == "gpu_compute"
