@@ -33,6 +33,7 @@ def limits(**overrides):
         max_runtime_s=3600,
         idle_timeout_s=300,
         reservation_ttl_s=120,
+        watchdog_interval_s=5,
         shutdown_margin_usd_per_unit=0.001,
         require_allowance=False,
     )
