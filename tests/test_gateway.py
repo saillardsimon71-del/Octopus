@@ -203,6 +203,22 @@ def test_explicit_legacy_still_overrides_omniroute_default(monkeypatch):
     assert catalog.load().default_profile == "legacy"
 
 
+def test_legacy_wrapper_uses_catalog_default_profile(transport, providers_up, monkeypatch, tmp_path):
+    raw = copy.deepcopy(catalog.load().raw)
+    raw["default_profile"] = "zero_cost"
+    path = tmp_path / "catalog.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setenv("OCTOPUS_CATALOG", str(path))
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "0")
+    monkeypatch.delenv("OCTOPUS_PROFILE", raising=False)
+    prove("podalux.write_job", "ollama/qwen3.5-4b")
+    transport.reply('{"titre": "local"}')
+
+    assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "local"}
+    assert transport.models == ["qwen3.5:4b"]
+    assert calls()[0]["profile"] == "zero_cost"
+
+
 def test_orbit_mission_tasks_keep_their_gateway_contract(monkeypatch):
     monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
     monkeypatch.delenv("OCTOPUS_PROFILE", raising=False)

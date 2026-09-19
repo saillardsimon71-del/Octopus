@@ -10,7 +10,6 @@ routage historique.
 from __future__ import annotations
 
 import base64
-import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -20,14 +19,6 @@ from . import config, db
 
 _MODEL_IDS = {config.MODEL_FLASH: "deepseek/flash", config.MODEL_PRO: "deepseek/v4-pro"}
 _cli = None
-
-
-def _default_profile() -> str:
-    explicit = os.environ.get("OCTOPUS_PROFILE", "").strip()
-    if explicit:
-        return explicit
-    omni_enabled = os.environ.get("OMNIROUTE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
-    return "zero_cost" if omni_enabled else "legacy"
 
 
 def _client():
@@ -65,7 +56,7 @@ def _complete(agent: str, task: str, model: str, messages: list[dict], max_token
     run = journal.current_run()  # coûts rattachés au business du run (mission, tâche), pas toujours à Podalux
     c = llm.complete(llm.legacy_task(agent, task), messages, agent=agent, business=run.business if run else "podalux",
                      max_tokens=max_tokens, json_mode=json_mode, reasoning=reasoning, needs=needs,
-                     pin_model=_MODEL_IDS.get(model, model), profile=_default_profile(), validate=validate)
+                     pin_model=_MODEL_IDS.get(model, model), validate=validate)
     used = model if c.model == _MODEL_IDS.get(model) else c.model
     db.log_cost(agent, task, used, c.usage.prompt_tokens, c.usage.completion_tokens, cost_usd=c.cost_usd)
     return c.data if validate is not None else c.text
