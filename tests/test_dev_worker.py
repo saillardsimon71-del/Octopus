@@ -195,6 +195,73 @@ def test_devworker_search_null_path_defaults_to_worktree(tmp_path, monkeypatch):
     assert commit is None
 
 
+@pytest.mark.parametrize("patch", [
+    """--- a/calc.py
++++ b/calc.py
+@@
+ def answer():
+-    return 1
++    return 2
+""",
+    """*** Begin Patch
+*** Update File: calc.py
+@@
+ def answer():
+-    return 1
++    return 2
+*** End Patch
+""",
+])
+def test_devworker_applies_safe_context_patches_without_hunk_numbers(tmp_path, patch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path)
+
+    output, passed, commit = dev_worker._tool(
+        {"action": "patch", "patch": patch}, repo, [], True,
+    )
+
+    assert (repo / "calc.py").read_text(encoding="utf-8") == "def answer():\n    return 2\n"
+    assert "calc.py" in output
+    assert passed is False
+    assert commit is None
+
+
+def test_devworker_context_patch_rejects_ambiguous_match(tmp_path):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path)
+    (repo / "calc.py").write_text("value = 1\nvalue = 1\n", encoding="utf-8")
+    patch = """--- a/calc.py
++++ b/calc.py
+@@
+-value = 1
++value = 2
+"""
+
+    with pytest.raises(dev_worker.DevWorkerError, match="unique"):
+        dev_worker._tool({"action": "patch", "patch": patch}, repo, [], False)
+
+
+def test_devworker_wrapped_patch_rejects_path_outside_worktree(tmp_path):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path)
+    outside = tmp_path / "secret.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    patch = """*** Begin Patch
+*** Update File: ../secret.txt
+@@
+-secret
++changed
+*** End Patch
+"""
+
+    with pytest.raises(dev_worker.DevWorkerError, match="hors worktree"):
+        dev_worker._tool({"action": "patch", "patch": patch}, repo, [], False)
+    assert outside.read_text(encoding="utf-8") == "secret\n"
+
+
 def test_devworker_cannot_commit_after_failed_tests(tmp_path, monkeypatch):
     from octopus import dev_worker
 

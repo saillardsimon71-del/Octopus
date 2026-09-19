@@ -103,8 +103,109 @@ def _check_patch_paths(worktree: Path, patch: str) -> None:
             relative = raw[2:] if raw.startswith(("a/", "b/")) else raw
             resolve_path(worktree, relative)
             targets.append(relative)
+        elif line.startswith("*** Update File: "):
+            relative = line.removeprefix("*** Update File: ").strip()
+            resolve_path(worktree, relative)
+            targets.append(relative)
     if not targets:
         raise DevWorkerError("patch sans chemin de fichier")
+
+
+def _context_patch_sections(patch: str) -> list[tuple[str, list[str]]]:
+    lines = patch.splitlines()
+    sections = []
+    if lines and lines[0] == "*** Begin Patch":
+        if lines[-1:] != ["*** End Patch"]:
+            raise DevWorkerError("patch encapsulé sans fin")
+        index = 1
+        while index < len(lines) - 1:
+            marker = lines[index]
+            if not marker.startswith("*** Update File: "):
+                raise DevWorkerError(f"opération de patch non prise en charge: {marker}")
+            relative = marker.removeprefix("*** Update File: ").strip()
+            index += 1
+            body = []
+            while index < len(lines) - 1 and not lines[index].startswith("*** "):
+                body.append(lines[index])
+                index += 1
+            sections.append((relative, body))
+        return sections
+
+    index = 0
+    while index < len(lines):
+        if not lines[index].startswith("--- "):
+            index += 1
+            continue
+        if index + 1 >= len(lines) or not lines[index + 1].startswith("+++ "):
+            raise DevWorkerError("en-têtes ---/+++ incomplets")
+        raw = lines[index + 1][4:].split("\t", 1)[0]
+        if raw == "/dev/null":
+            raise DevWorkerError("création ou suppression de fichier interdite dans ce format")
+        relative = raw[2:] if raw.startswith(("a/", "b/")) else raw
+        index += 2
+        body = []
+        while index < len(lines) and not lines[index].startswith(("diff --git ", "--- ")):
+            body.append(lines[index])
+            index += 1
+        sections.append((relative, body))
+    if not sections:
+        raise DevWorkerError("format de patch contextuel invalide")
+    return sections
+
+
+def _apply_context_patch(worktree: Path, patch: str) -> None:
+    prepared: dict[Path, tuple[list[str], str, bool]] = {}
+    for relative, body in _context_patch_sections(patch):
+        path = resolve_path(worktree, relative)
+        if not path.is_file() or path.stat().st_size > 100_000:
+            raise DevWorkerError(f"fichier absent ou trop grand: {relative}")
+        if path not in prepared:
+            try:
+                text = path.read_bytes().decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise DevWorkerError(f"fichier non UTF-8: {relative}") from exc
+            newline = "\r\n" if "\r\n" in text else "\n"
+            normalized = text.replace("\r\n", "\n")
+            prepared[path] = (normalized.splitlines(), newline, normalized.endswith("\n"))
+        source, newline, final_newline = prepared[path]
+        hunks: list[list[str]] = []
+        current: list[str] | None = None
+        for line in body:
+            if line.startswith("@@"):
+                if current is not None:
+                    hunks.append(current)
+                current = []
+            elif current is not None:
+                current.append(line)
+            elif line:
+                raise DevWorkerError(f"contenu avant le premier hunk: {relative}")
+        if current is not None:
+            hunks.append(current)
+        if not hunks:
+            raise DevWorkerError(f"patch sans hunk: {relative}")
+        for hunk in hunks:
+            old, new = [], []
+            for line in hunk:
+                if line == "\\ No newline at end of file":
+                    continue
+                if not line or line[0] not in {" ", "+", "-"}:
+                    raise DevWorkerError(f"ligne de patch invalide: {relative}")
+                if line[0] in {" ", "-"}:
+                    old.append(line[1:])
+                if line[0] in {" ", "+"}:
+                    new.append(line[1:])
+            if not old:
+                raise DevWorkerError(f"insertion sans contexte interdite: {relative}")
+            matches = [i for i in range(len(source) - len(old) + 1) if source[i:i + len(old)] == old]
+            if len(matches) != 1:
+                raise DevWorkerError(f"contexte non unique ({len(matches)} correspondances): {relative}")
+            start = matches[0]
+            source = source[:start] + new + source[start + len(old):]
+        prepared[path] = (source, newline, final_newline)
+
+    for path, (lines, newline, final_newline) in prepared.items():
+        text = newline.join(lines) + (newline if final_newline else "")
+        path.write_bytes(text.encode("utf-8"))
 
 
 def _create_worktree(repository: Path, task_id: int) -> tuple[Path, str]:
@@ -140,10 +241,11 @@ def _tool(action: dict, worktree: Path, tests: list[list[str]], tests_passed: bo
         _check_patch_paths(worktree, patch)
         check = _run(["git", "apply", "--check", "--whitespace=nowarn", "-"], worktree, input_text=patch)
         if check.returncode:
-            raise DevWorkerError((check.stderr or check.stdout)[-2000:])
-        applied = _run(["git", "apply", "--whitespace=nowarn", "-"], worktree, input_text=patch)
-        if applied.returncode:
-            raise DevWorkerError((applied.stderr or applied.stdout)[-2000:])
+            _apply_context_patch(worktree, patch)
+        else:
+            applied = _run(["git", "apply", "--whitespace=nowarn", "-"], worktree, input_text=patch)
+            if applied.returncode:
+                raise DevWorkerError((applied.stderr or applied.stdout)[-2000:])
         return _git(worktree, "diff", "--stat"), False, None
     if name == "test":
         outputs = []
