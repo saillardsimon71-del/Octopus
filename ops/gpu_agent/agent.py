@@ -451,7 +451,7 @@ def call_model(messages: list[dict[str, str]]) -> str:
         "temperature": 1.0,
         "top_p": 0.95,
         "max_tokens": 16384,
-        "reasoning_effort": "high",
+        "reasoning_effort": "medium",
         "extra_body": {
             "top_k": 20,
             "chat_template_kwargs": {"enable_thinking": True, "preserve_thinking": True},
