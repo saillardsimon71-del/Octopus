@@ -1,99 +1,72 @@
 # Prochaines étapes
 
-**Mis à jour : 19/09/2026.**  
-L'état détaillé est dans `docs/CURRENT_STATE.md`.
+**Mis à jour : 19/09/2026 après audit pré-Work.**  
+État : `docs/CURRENT_STATE.md`  
+Critères de sortie : `docs/ACCEPTANCE_GATES.md`
 
-## P0 — verrouiller le compute avant de dépenser
+## P0 — G1 cerveau LLM
 
-1. **Cartographier tous les chemins GPU/cloud payants.**
-   Chercher les appels directs aux providers, renderers et workers capables de créer une ressource.
+1. Faire passer parsing/validation JSON et vision dans `octopus.llm.complete(validate=...)` afin que les sorties invalides déclenchent réellement le fallback.
+2. Capturer et journaliser la route réellement résolue derrière OmniRoute.
+3. Rendre `zero_cost` fail-closed : pool free-only ou attestation équivalente, jamais simple confiance dans le nom `auto/best-free`.
+4. Éliminer la duplication de résolution de profil entre `agents/deepseek.py` et le catalogue.
+5. Préparer l'intégration des appels LLM payants aux allowances économiques.
 
-2. **Forcer le chemin unique via `GuardedComputeManager`.**
-   Aucun caller métier ne doit pouvoir lancer Salad/GPU.ai ou un futur provider payant directement.
+Audit : `docs/audits/LLM_BRAIN_AUDIT_2026-09-19.md`.
 
-3. **Rendre le watchdog réellement indépendant.**
-   Définir son mode de lancement/restart et tester un crash du worker vidéo suivi d'un arrêt GPU.
+## P0 — G2 frontière financière
 
-4. **Faire un canary Salad minuscule.**
-   Une allowance faible, pas d'auto-recharge, un job court et connu.
+1. Ajouter un test statique/AST interdisant les créations Salad/GPU.ai directes depuis les modules métier.
+2. Forcer tout compute provisionné à passer par `GuardedComputeManager`.
+3. Concevoir une `MeteredSpendLease` pour les jobs serverless/API.
+4. Migrer RunPod renderer + MiniMax H3 vers réservation → soumission → settlement/cancel/ambiguous.
+5. Rendre le watchdog réellement indépendant et redémarrable.
 
-5. **Vérifier la facture réelle.**
-   Comparer coût OCTOPUS calculé, durée provider et débit du solde.
+Audit : `docs/audits/PAID_PATHS_AUDIT_2026-09-19.md`.
 
-## P1 — trouver le meilleur GPU en $/vidéo
+## P0 — G3 canary Salad
 
-Benchmark strictement identique sur les GPU disponibles économiquement intéressants :
+Seulement après G1/G2 :
 
-- RTX 3090 ;
-- RTX 5090 Laptop ;
-- RTX 4090 ;
-- RTX 5090 desktop ;
-- autres offres uniquement si elles améliorent le coût réel.
+- petit solde ;
+- pas d'auto-recharge ;
+- allowance minuscule ;
+- un worker ;
+- un job canonique ;
+- watchdog indépendant ;
+- stop explicite immédiat après résultat ;
+- crash test.
 
-Mesurer :
+Design : `docs/design/SALAD_WAN_WORKER_V1.md`.
 
-```text
-cold start
-image pull
-poids/cache
-préparation
-inférence
-temps total facturé
-succès/échec
-coût réel
-coût par vidéo
-```
+## P1 — G4 benchmark économique
 
-Le choix final se fait sur **$/vidéo réussie**, pas sur $/h.
+Exécuter `docs/benchmarks/GPU_COST_BENCHMARK_PLAN.md` sur les GPU réellement disponibles.
 
-## P1 — rendre les machines éphémères robustes
+Décision = **$/vidéo réussie**, pas $/h. Le résultat doit alimenter `ComputeBroker`.
 
-Décider puis implémenter :
+## P1 — G5 coût GPU < 1 centime
 
-- image OCI Wan/worker reproductible ;
-- version du modèle et dépendances verrouillées ;
-- récupération des poids déterministe ;
-- cache si réellement rentable ;
-- bootstrap idempotent ;
-- healthcheck ;
-- résultats externalisés avant arrêt ;
-- aucun état critique seulement sur le disque éphémère.
+Prouver sur 10 vidéos finales consécutives :
 
-Objectif : une machine fraîche doit pouvoir démarrer sans bricolage manuel.
+- moyenne <= $0.008 ;
+- maximum normal <= $0.010 ;
+- échecs/préemptions inclus ;
+- 0 double génération facturable ;
+- 0 GPU orphelin.
 
-## P1 — réutiliser intelligemment un GPU chaud
-
-Le coût cible < $0.01/vidéo sera plus réaliste si plusieurs vidéos sont produites dans une même session GPU :
-
-```text
-cold start une fois
-→ charger le modèle une fois
-→ batch de jobs
-→ arrêter dès queue vide
-```
-
-Le breaker doit toujours conserver un cap batch et global.
-
-## P2 — boucle business mesurée
+## P2 — G6/G7 monde réel
 
 Après stabilisation du compute :
 
-- publication réelle ;
-- analytics ;
-- coût d'acquisition ;
-- cash observé ;
-- expériences stratégiques ;
-- réinvestissement.
+- executor de publication réel ;
+- analytics observées ;
+- expérience réelle ;
+- revenu/coût dans ledger ;
+- décision et learning au cycle suivant.
 
-Ne pas optimiser dix chaînes avant qu'un premier moteur contenu → audience → revenu soit mesuré.
+## Condition de merge de la PR compute
 
-## Conditions avant merge de la PR compute
+La PR reste Draft tant que G2/G3 ne sont pas prouvées live.
 
-- CI compute verte ;
-- `video-foundation` verte ;
-- pas de bypass payant connu ;
-- watchdog testé après restart ;
-- doc à jour ;
-- idéalement canary live réussi et coût observé.
-
-La PR peut rester Draft tant que les points de sécurité live ne sont pas vérifiés.
+CI verte est nécessaire mais pas suffisante.
