@@ -4,10 +4,13 @@ Ce fichier donne les règles de reprise à un agent de développement. Il ne con
 
 ## À lire en premier
 
-1. `docs/CURRENT_STATE.md`
-2. `docs/HANDOFF_WORK.md`
-3. `NEXT_STEPS.md`
-4. `docs/COMPUTE_GPU.md` si le travail touche le cloud/GPU.
+1. `AGENTS.md`
+2. `docs/VISION.md`
+3. `docs/CURRENT_STATE.md`
+4. `docs/ACCEPTANCE_GATES.md`
+5. `docs/HANDOFF_WORK.md`
+6. `NEXT_STEPS.md`
+7. `docs/COMPUTE_GPU.md` si le travail touche le cloud/GPU.
 
 Les fichiers sous `docs/archive/` sont historiques et ne doivent jamais être pris comme source de vérité courante.
 
@@ -64,7 +67,14 @@ Comparer l'état réel avec `docs/CURRENT_STATE.md`. Si le Git réel diffère, l
 
 ## Focus actuel
 
-Le P0 est le compute :
+La politique LLM normale est **gratuit uniquement** via `zero_cost`/OmniRoute. Aucun fallback payant implicite.
+
+Les P0 actuels sont G1 + G2 :
+
+- fiabiliser/attester le cerveau LLM gratuit ;
+- verrouiller la frontière financière/compute.
+
+Pour le compute :
 
 1. trouver les bypasses de `GuardedComputeManager` ;
 2. les supprimer ;
