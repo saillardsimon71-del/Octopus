@@ -320,12 +320,14 @@ def _build_request(model: dict, messages: list[dict], max_tokens: int, json_mode
     if json_schema is not None and "json" in capabilities:
         schema_mode = model.get("json_schema_mode")
         if schema_mode == "tool_call":
+            tool_schema = copy.deepcopy(json_schema)
+            tool_schema["required"] = ["action"]
             request["tools"] = [{
                 "type": "function",
                 "function": {
                     "name": "octopus_response",
                     "description": "Return the structured OCTOPUS response.",
-                    "parameters": copy.deepcopy(json_schema),
+                    "parameters": tool_schema,
                 },
             }]
             request["tool_choice"] = {

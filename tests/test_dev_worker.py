@@ -171,7 +171,7 @@ def test_devworker_groq_uses_tool_call_with_local_validation(monkeypatch):
         "function": {
             "name": "octopus_response",
             "description": "Return the structured OCTOPUS response.",
-            "parameters": dev_worker.DEV_ACTION_SCHEMA,
+            "parameters": {**dev_worker.DEV_ACTION_SCHEMA, "required": ["action"]},
         },
     }]
     assert request["tool_choice"] == {
