@@ -6,11 +6,13 @@ Critères de sortie : `docs/ACCEPTANCE_GATES.md`
 
 ## P0 — G1 cerveau LLM
 
-1. Faire passer parsing/validation JSON et vision dans `octopus.llm.complete(validate=...)` afin que les sorties invalides déclenchent réellement le fallback.
-2. Capturer et journaliser la route réellement résolue derrière OmniRoute.
-3. Rendre `zero_cost` fail-closed : pool free-only ou attestation équivalente, jamais simple confiance dans le nom `auto/best-free`.
-4. Éliminer la duplication de résolution de profil entre `agents/deepseek.py` et le catalogue.
-5. Verrouiller le mode normal sur les LLM gratuits ; traiter un éventuel mode payant uniquement comme capacité future explicitement activée.
+- [x] G1.1 Faire passer parsing/validation JSON et vision dans `octopus.llm.complete(validate=...)` afin que les sorties invalides déclenchent réellement le fallback.
+- [x] G1.2 Capturer et journaliser la route réellement résolue derrière OmniRoute.
+- [x] G1.3 Rendre `zero_cost` fail-closed : attestation explicite du pool free-only, jamais simple confiance dans le nom `auto/best-free`.
+- [x] G1.4 Éliminer la duplication de résolution de profil entre `agents/deepseek.py` et le catalogue.
+- [ ] G1.5 Verrouiller le mode normal sur les LLM gratuits ; traiter un éventuel mode payant uniquement comme capacité future explicitement activée.
+
+Preuve live encore requise : vérifier sur l'instance OmniRoute free-only que les headers de modèle, provider, coût et request id sont présents et cohérents. Ne lancer aucun appel tant que le pool n'est pas configuré free-only.
 
 Audit : `docs/audits/LLM_BRAIN_AUDIT_2026-09-19.md`.
 

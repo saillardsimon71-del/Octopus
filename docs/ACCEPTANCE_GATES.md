@@ -53,7 +53,7 @@ Tests minimum :
 - upstream payant sous zero_cost → refus ;
 - aucun fallback payant implicite.
 
-**État actuel : ~60 %.** Voir `audits/LLM_BRAIN_AUDIT_2026-09-19.md`.
+**État actuel : PARTIAL.** G1.1 à G1.4 sont couverts hors réseau. Preuves manquantes : vérification live du pool OmniRoute free-only et activation humaine explicite de tout mode LLM payant/legacy direct. Voir `audits/LLM_BRAIN_AUDIT_2026-09-19.md`.
 
 ## G2 — Frontière financière universelle
 

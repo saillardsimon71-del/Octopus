@@ -72,7 +72,7 @@ Podalux reste le premier business réellement intégré et sert de banc d'essai.
 - navigateur Playwright avec garde de contexte ;
 - OmniRoute comme gateway LLM optionnel.
 
-Le schéma du journal OCTOPUS est actuellement **v8**.
+Le schéma du journal OCTOPUS est actuellement **v9**.
 
 ### Vidéo
 
@@ -146,8 +146,8 @@ Les audits détaillés préparés avant Work sont dans `docs/audits/`.
 1. **Forcer tous les chemins GPU payants à passer par `GuardedComputeManager`.**
    Le breaker existe, mais du code plus ancien peut encore théoriquement appeler un provider sans lui.
 
-2. **Corriger la frontière LLM/OmniRoute.**
-   Le profil OCTOPUS `zero_cost` interdit les modèles marqués paid dans son propre catalogue, mais OCTOPUS ne journalise pas encore le modèle upstream réellement choisi par OmniRoute. De plus, `agents/deepseek.call_json()` parse actuellement le JSON après le gateway, ce qui empêche le fallback `invalid output` de `octopus.llm`.
+2. **Finaliser la preuve opérationnelle LLM/OmniRoute.**
+   G1.1 à G1.4 sont implémentés et testés hors réseau : validation dans le gateway, route résolue journalisée, `zero_cost` fail-closed et profil résolu uniquement par le catalogue. Il reste à vérifier ces métadonnées sur l'instance OmniRoute live free-only et à verrouiller le kill-switch direct legacy derrière une activation humaine exceptionnelle.
 
 3. **Déployer le watchdog comme processus réellement indépendant.**
    Le script existe ; il faut décider comment il vit en continu sur l'environnement d'exécution et vérifier sa reprise automatique.
