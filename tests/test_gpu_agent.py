@@ -55,6 +55,27 @@ new file mode 100644
         tools.apply_patch(patch)
 
 
+def test_replace_text_requires_one_exact_match(repo: Path):
+    tools = Toolbox(repo)
+    result = tools.replace_text("sample.py", "value = 1\n", "value = 2\n")
+    assert result == {"ok": True, "path": "sample.py", "replacements": 1}
+    assert (repo / "sample.py").read_text(encoding="utf-8") == "value = 2\n"
+    assert not tools.full_tests_passed_after_change
+
+    (repo / "sample.py").write_text("same\nsame\n", encoding="utf-8")
+    with pytest.raises(ToolError, match="exactly once; found 2"):
+        tools.replace_text("sample.py", "same", "changed")
+
+
+def test_write_file_creates_without_overwriting(repo: Path):
+    tools = Toolbox(repo)
+    result = tools.write_file("tests/new_test.py", "def test_new():\n    assert True\n")
+    assert result["path"] == "tests/new_test.py"
+    assert (repo / "tests/new_test.py").is_file()
+    with pytest.raises(ToolError, match="already exists"):
+        tools.write_file("tests/new_test.py", "changed\n")
+
+
 def test_test_runner_rejects_flags(repo: Path):
     tools = Toolbox(repo)
     with pytest.raises(ToolError, match="invalid test target"):
