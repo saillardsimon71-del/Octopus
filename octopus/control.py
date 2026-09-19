@@ -30,6 +30,16 @@ PLAYBOOKS = {
             {"kind": "publish_page", "label": "Publier la page", "cost_amount": 5.0,
              "cost_currency": "EUR", "requires_approval": True, "capability": "publish"},
         ],
+    },
+    "tiktok_funnel": {
+        "id": "tiktok_funnel",
+        "description": "Brief contenu, vidéo, publication sur TikTok, puis capture de leads via mot-clé.",
+        "actions": [
+            {"kind": "prepare_brief", "label": "Préparer le brief", "cost_amount": 0, "requires_approval": False},
+            {"kind": "request_video", "label": "Demander la vidéo", "cost_amount": 0, "requires_approval": False},
+            {"kind": "publish_video", "label": "Publier la vidéo", "cost_amount": 5.0,
+             "cost_currency": "EUR", "requires_approval": True, "capability": "publish"},
+        ],
     }
 }
 

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from . import enabled, paths
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -520,8 +520,47 @@ CREATE TABLE IF NOT EXISTS business_actions (
 CREATE INDEX IF NOT EXISTS idx_business_actions_run ON business_actions(run_id, seq);
 """
 
+_SCHEMA_V8 = """
+CREATE TABLE IF NOT EXISTS funnel_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL UNIQUE REFERENCES business_runs(id),
+    business TEXT NOT NULL,
+    offer_id TEXT NOT NULL,
+    keyword TEXT NOT NULL DEFAULT 'GO',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_funnel_runs_business ON funnel_runs(business);
+CREATE TABLE IF NOT EXISTS funnel_leads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    run_id INTEGER NOT NULL REFERENCES business_runs(id),
+    handle TEXT NOT NULL,
+    consent INTEGER NOT NULL DEFAULT 0,
+    source_ref TEXT,
+    idempotency_key TEXT UNIQUE,
+    created_at REAL NOT NULL,
+    UNIQUE(business, handle)
+);
+CREATE INDEX IF NOT EXISTS idx_funnel_leads_run ON funnel_leads(run_id);
+CREATE TABLE IF NOT EXISTS funnel_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business TEXT NOT NULL,
+    run_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    lead_id INTEGER,
+    idempotency_key TEXT UNIQUE,
+    source_ref TEXT,
+    amount REAL,
+    currency TEXT,
+    evidence_id INTEGER,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_funnel_events_run ON funnel_events(run_id, kind);
+CREATE INDEX IF NOT EXISTS idx_funnel_events_business ON funnel_events(business, kind);
+"""
+
 _MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4), (5, _SCHEMA_V5), (6, _SCHEMA_V6),
-               (7, _SCHEMA_V7))
+               (7, _SCHEMA_V7), (8, _SCHEMA_V8))
 
 _LLM_COLUMNS = (
     "ts", "run_id", "root_run_id", "business", "agent", "task", "profile", "model", "provider",
