@@ -131,6 +131,19 @@ def test_experiment_budget_caps_spending_and_execution_is_traced():
     assert status == "executed"
 
 
+def test_daily_spend_summary_groups_engaged_and_actual_by_category():
+    economy.grant_allowance(B, 100, "EUR", granted_by="human", rationale="test")
+    pending = economy.authorize_spend(B, 15, "EUR", "outil", requested_by="test")
+    executed = economy.authorize_spend(B, 20, "EUR", "publicité", requested_by="test")
+    economy.record_cash(B, "out", 12, "EUR", "advertising", nature="observed", created_by="test",
+                        source_ref="invoice-1", spend_request_id=executed["request_id"])
+
+    rows = {(row["category"], row["currency"]): row for row in economy.daily_spend_summary(B)}
+    assert rows[("unclassified", "EUR")]["engaged"] == pytest.approx(15)
+    assert rows[("advertising", "EUR")]["actual_observed"] == pytest.approx(12)
+    assert pending["status"] == "authorized"
+
+
 def test_spend_refused_for_inactive_experiment():
     experiment = _experiment()
     economy.grant_allowance(B, 100, "EUR", granted_by="human", rationale="x")
