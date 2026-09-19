@@ -214,7 +214,7 @@ class Toolbox:
     def apply_patch(self, patch: str) -> dict[str, Any]:
         paths = self._patch_paths(patch)
         check = subprocess.run(
-            ["git", "apply", "--check", "-"],
+            ["git", "apply", "--recount", "--check", "-"],
             input=patch,
             cwd=self.repo,
             text=True,
@@ -226,7 +226,7 @@ class Toolbox:
         if check.returncode != 0:
             return {"ok": False, "stage": "check", "output": check.stdout[-MAX_TOOL_OUTPUT:]}
         applied = subprocess.run(
-            ["git", "apply", "-"],
+            ["git", "apply", "--recount", "-"],
             input=patch,
             cwd=self.repo,
             text=True,
