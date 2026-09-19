@@ -116,6 +116,19 @@ def test_devworker_rejects_unapproved_test_commands():
         validate_test_commands([["powershell", "-Command", "Write-Host unsafe"]])
 
 
+def test_devworker_subprocess_input_is_utf8(tmp_path):
+    from octopus.dev_worker import _run
+
+    result = _run(
+        [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"],
+        tmp_path,
+        input_text="tiret‑insécable",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "tiret‑insécable"
+
+
 def test_devworker_strict_schema_builds_structured_output_request():
     from octopus import dev_worker, llm
 

@@ -31,7 +31,10 @@ DEV_ACTION_SCHEMA = {
 
 
 def _run(args: list[str], cwd: Path, *, input_text: str | None = None, timeout: int = 300) -> subprocess.CompletedProcess:
-    return subprocess.run(args, cwd=str(cwd), input=input_text, capture_output=True, text=True, timeout=timeout)
+    return subprocess.run(
+        args, cwd=str(cwd), input=input_text, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=timeout,
+    )
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> str:
