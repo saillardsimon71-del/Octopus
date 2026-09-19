@@ -1,6 +1,9 @@
 name: Compute finance safety
 
 on:
+  push:
+    branches:
+      - "feat/salad-compute-provider"
   pull_request:
     paths:
       - "octopus/compute.py"
