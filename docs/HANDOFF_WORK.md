@@ -14,15 +14,17 @@ PR : **#2**, encore en Draft.
 
 Lire d'abord :
 
-1. `docs/CURRENT_STATE.md`
-2. `docs/ACCEPTANCE_GATES.md`
-3. `docs/audits/LLM_BRAIN_AUDIT_2026-09-19.md`
-4. `docs/audits/PAID_PATHS_AUDIT_2026-09-19.md`
-5. `docs/design/SALAD_WAN_WORKER_V1.md`
-6. `docs/benchmarks/GPU_COST_BENCHMARK_PLAN.md`
-7. `docs/COMPUTE_GPU.md`
-8. `NEXT_STEPS.md`
-9. seulement ensuite les runbooks techniques utiles.
+1. `AGENTS.md`
+2. `docs/VISION.md`
+3. `docs/CURRENT_STATE.md`
+4. `docs/ACCEPTANCE_GATES.md`
+5. `docs/audits/LLM_BRAIN_AUDIT_2026-09-19.md`
+6. `docs/audits/PAID_PATHS_AUDIT_2026-09-19.md`
+7. `docs/design/SALAD_WAN_WORKER_V1.md`
+8. `docs/benchmarks/GPU_COST_BENCHMARK_PLAN.md`
+9. `docs/COMPUTE_GPU.md`
+10. `NEXT_STEPS.md`
+11. seulement ensuite les runbooks techniques utiles.
 
 Les documents sous `docs/archive/` sont historiques.
 
@@ -195,3 +197,19 @@ Les cinq travaux préparatoires demandés sont terminés et versionnés :
 - critères binaires : `docs/ACCEPTANCE_GATES.md`.
 
 Ne refaire ces audits que si le code a changé matériellement. Utiliser les findings pour coder directement.
+
+
+## Répartition Work / Codex
+
+Cette session Work doit profiter du contexte conversationnel et des capacités d'audit/multi-étapes.
+
+Le développement lourd suivant peut basculer vers Codex parce que le contexte durable est désormais versionné dans le dépôt :
+
+- `AGENTS.md` — constitution ;
+- `octopus/AGENTS.md` — règles du noyau ;
+- `docs/VISION.md` — ligne directrice ;
+- `docs/CODEX_START.md` — point d'entrée ;
+- `docs/CURRENT_STATE.md` — état ;
+- `docs/ACCEPTANCE_GATES.md` — définition de DONE.
+
+Le but est qu'une session Codex n'ait plus besoin de l'historique complet des conversations pour comprendre OCTOPUS.
