@@ -2,9 +2,11 @@
 
 OCTOPUS est un **control-plane entrepreneurial multi-business**. Il orchestre des agents, des tâches durables, un navigateur contrôlé, une boucle économique persistante et plusieurs chemins de production média. Podalux est aujourd'hui son premier business réellement intégré.
 
-> **État de référence :** lire [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) avant toute reprise de travail.  
-> **Reprise Work / Codex :** lire [docs/HANDOFF_WORK.md](docs/HANDOFF_WORK.md).  
-> **Compute GPU / coûts :** lire [docs/COMPUTE_GPU.md](docs/COMPUTE_GPU.md).
+> **Constitution / règles agents :** lire [AGENTS.md](AGENTS.md).  
+> **Vision durable :** lire [docs/VISION.md](docs/VISION.md).  
+> **État de référence :** lire [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md).  
+> **Reprise Codex :** lire [docs/CODEX_START.md](docs/CODEX_START.md).  
+> **Reprise Work :** lire [docs/HANDOFF_WORK.md](docs/HANDOFF_WORK.md).
 
 ## Architecture
 
@@ -40,11 +42,14 @@ La GUI Workbench est une surface de pilotage ; elle ne doit pas devenir un secon
 
 ## Sources de vérité
 
+- **Constitution du projet** : `AGENTS.md`
+- **Vision / ligne directrice** : `docs/VISION.md`
 - **État actuel vérifié** : `docs/CURRENT_STATE.md`
-- **Ordre de reprise en Work** : `docs/HANDOFF_WORK.md`
+- **Critères de DONE** : `docs/ACCEPTANCE_GATES.md`
+- **Reprise Codex** : `docs/CODEX_START.md`
+- **Reprise Work** : `docs/HANDOFF_WORK.md`
 - **Prochaines étapes** : `NEXT_STEPS.md`
 - **Compute GPU et disjoncteur financier** : `docs/COMPUTE_GPU.md`
-- **Installation locale** : `docs/LOCAL_SETUP.md`
 - **Index de la documentation** : `docs/README.md`
 
 Les anciens rapports de session et prompts d'implémentation sont conservés sous `docs/archive/` et ne doivent pas être utilisés comme état courant.
@@ -111,9 +116,18 @@ Le workflow historique `video-foundation` couvre aussi le renderer, le control-p
 
 Avant de modifier l'architecture :
 
-1. vérifier la branche et l'arbre Git ;
-2. lire `docs/CURRENT_STATE.md` ;
-3. lire `NEXT_STEPS.md` ;
-4. vérifier les tests réellement verts sur le HEAD courant ;
-5. faire un changement petit, vérifiable et réversible ;
-6. mettre à jour `docs/CURRENT_STATE.md` si l'état réel change.
+1. lire `AGENTS.md` ;
+2. vérifier branche, status, log et diff ;
+3. lire `docs/CURRENT_STATE.md` et `docs/ACCEPTANCE_GATES.md` ;
+4. utiliser `docs/CODEX_START.md` en Codex ou `docs/HANDOFF_WORK.md` en Work ;
+5. vérifier les tests réellement verts sur le HEAD courant ;
+6. faire un changement petit, vérifiable et réversible ;
+7. mettre à jour l'état documentaire si la réalité change.
+
+Répartition recommandée :
+
+```text
+Chat  → décisions / architecture
+Work  → audit / recherche / workflows multi-étapes
+Codex → code / terminal / tests / Git
+```
