@@ -75,6 +75,7 @@ index 4c47471..f208b75 100644
     task_id = worker.enqueue("octopus", "development.task", {
         "repository": str(repo), "goal": "Make the deterministic test pass.",
         "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]], "max_steps": 4,
+        "backend": "declarative",
     })
 
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
@@ -256,6 +257,7 @@ def test_devworker_bounds_history_results_for_free_provider_tpm(tmp_path, monkey
         "goal": "Keep the free-provider prompt bounded.",
         "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
         "max_steps": 3,
+        "backend": "declarative",
     })
 
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
@@ -290,6 +292,7 @@ def test_devworker_refuses_excess_prepatch_inspection(tmp_path, monkeypatch):
         "goal": "Stop inspecting and make the requested change.",
         "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
         "max_steps": dev_worker.DEV_INSPECTION_LIMIT + 2,
+        "backend": "declarative",
     })
 
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
@@ -331,6 +334,7 @@ def test_devworker_retries_two_bounded_provider_rate_limits(tmp_path, monkeypatc
         "goal": "Retry one bounded transient provider limit.",
         "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
         "max_steps": 1,
+        "backend": "declarative",
     })
 
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
@@ -394,6 +398,7 @@ def test_devworker_retries_one_malformed_provider_tool_call(tmp_path, monkeypatc
         "goal": "Retry one malformed declarative tool call.",
         "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
         "max_steps": 1,
+        "backend": "declarative",
     })
 
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
@@ -541,6 +546,7 @@ def test_devworker_cannot_commit_after_failed_tests(tmp_path, monkeypatch):
     worker.enqueue("octopus", "development.task", {
         "repository": str(repo), "goal": "Do not bypass tests.",
         "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]], "max_steps": 2,
+        "backend": "declarative",
     })
 
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
@@ -549,3 +555,254 @@ def test_devworker_cannot_commit_after_failed_tests(tmp_path, monkeypatch):
     worktrees = list((Path(os.environ["OCTOPUS_HOME"]) / "data" / "dev-worktrees").glob("*"))
     assert len(worktrees) == 1
     assert git(worktrees[0], "rev-parse", "HEAD") == source_head
+
+
+def test_devworker_kilo_run_is_inline_configured_and_deny_by_default(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    captured = {}
+
+    def fake_run(args, cwd, **kwargs):
+        captured.update(args=args, cwd=cwd, kwargs=kwargs)
+        return SimpleNamespace(returncode=0, stdout='{"type":"text","text":"done"}\n', stderr="")
+
+    monkeypatch.setattr(dev_worker.subprocess, "run", fake_run)
+    output = dev_worker._run_kilo(
+        worktree,
+        "Change only calc.py.",
+        [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+    )
+
+    args = captured["args"]
+    assert args[:2] == ["kilo.cmd" if os.name == "nt" else "kilo", "run"]
+    assert "--auto" in args
+    assert "--pure" not in args
+    assert args[args.index("--dir") + 1] == str(worktree)
+    assert args[args.index("--model") + 1] == "kilo/nex-agi/nex-n2.5-pro:free"
+    assert args[args.index("--agent") + 1] == "octopus-devworker"
+    assert args[args.index("--format") + 1] == "json"
+    assert "Change only calc.py." in args[-1]
+    assert "test_calc.py" in args[-1]
+    assert captured["cwd"] == str(worktree)
+    assert captured["kwargs"]["timeout"] == dev_worker.KILO_TIMEOUT_S
+    assert output.endswith("done\"}\n")
+
+    env = captured["kwargs"]["env"]
+    assert env["KILO_DISABLE_PROJECT_CONFIG"] == "1"
+    assert env["KILO_PURE"] == "1"
+    assert env["XDG_CONFIG_HOME"]
+    assert "KILO_CONFIG" not in env
+    assert "KILO_CONFIG_DIR" not in env
+
+    config = json.loads(env["KILO_CONFIG_CONTENT"])
+    assert config["plugin"] == []
+    assert config["mcp"] == {}
+    agent = config["agent"]["octopus-devworker"]
+    assert agent["mode"] == "primary"
+    permissions = agent["permission"]
+    assert permissions["*"] == "deny"
+    assert set(permissions) >= {
+        "*", "read", "glob", "grep", "edit", "bash", "task", "agent_manager",
+        "skill", "websearch", "webfetch", "external_directory",
+    }
+    for name in ("bash", "task", "agent_manager", "skill", "websearch", "webfetch", "external_directory"):
+        assert permissions[name] == "deny"
+    for name in ("read", "glob", "grep", "edit"):
+        assert permissions[name] != "deny"
+    for name in ("read", "edit"):
+        assert permissions[name]["*"] == "allow"
+        assert permissions[name]["**/.env"] == "deny"
+        assert permissions[name]["**/.env.*"] == "deny"
+
+
+def test_devworker_kilo_failure_includes_bounded_cli_error(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    monkeypatch.setattr(
+        dev_worker.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=7, stdout="partial", stderr="gateway failed"),
+    )
+
+    with pytest.raises(dev_worker.DevWorkerError, match="gateway failed"):
+        dev_worker._run_kilo(tmp_path, "change", [[sys.executable, "-m", "pytest", "-q", "test_x.py"]])
+
+
+def test_development_task_uses_kilo_then_validates_tests_and_commits(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=False)
+    source_head = git(repo, "rev-parse", "HEAD")
+    seen = {}
+
+    def fake_kilo(worktree, goal, tests):
+        seen.update(worktree=worktree, goal=goal, tests=tests)
+        (worktree / "calc.py").write_text("def answer():\n    return 2\n", encoding="utf-8")
+        return "edited"
+
+    monkeypatch.setattr(dev_worker, "_run_kilo", fake_kilo)
+    monkeypatch.setattr(
+        dev_worker.llm,
+        "complete",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("declarative backend not expected")),
+    )
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Make the deterministic test pass.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "done"
+    output = result["output"]
+    worktree = Path(output["worktree"])
+    assert seen["worktree"] == worktree
+    assert output["backend"] == "kilo"
+    assert output["changed_paths"] == ["calc.py"]
+    assert output["commit"] == git(worktree, "rev-parse", "HEAD")
+    assert output["commit"] != source_head
+    assert git(repo, "rev-parse", "HEAD") == source_head
+    assert git(worktree, "status", "--porcelain") == ""
+
+
+def test_development_task_falls_back_only_when_kilo_left_worktree_clean(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=False)
+    patch = """diff --git a/calc.py b/calc.py
+--- a/calc.py
++++ b/calc.py
+@@ -1,2 +1,2 @@
+ def answer():
+-    return 1
++    return 2
+"""
+    monkeypatch.setattr(
+        dev_worker,
+        "_run_kilo",
+        lambda *args, **kwargs: (_ for _ in ()).throw(dev_worker.DevWorkerError("Kilo unavailable")),
+    )
+    scripted(monkeypatch, dev_worker, [
+        {"action": "patch", "patch": patch},
+        {"action": "test"},
+        {"action": "commit", "message": "fix: complete clean fallback"},
+    ])
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Make the deterministic test pass.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "max_steps": 3,
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "done"
+    assert result["output"]["backend"] == "declarative"
+    assert result["output"]["fallback_from"] == "kilo"
+
+
+def test_development_task_does_not_fallback_after_kilo_modification(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=False)
+    source_head = git(repo, "rev-parse", "HEAD")
+    declarative_calls = []
+
+    def dirty_failure(worktree, goal, tests):
+        (worktree / "calc.py").write_text("def answer():\n    return 3\n", encoding="utf-8")
+        raise dev_worker.DevWorkerError("Kilo failed after editing")
+
+    monkeypatch.setattr(dev_worker, "_run_kilo", dirty_failure)
+    monkeypatch.setattr(dev_worker.llm, "complete", lambda *args, **kwargs: declarative_calls.append(args))
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Make the deterministic test pass.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "failed"
+    assert declarative_calls == []
+    worktree = next((Path(os.environ["OCTOPUS_HOME"]) / "data" / "dev-worktrees").glob("*"))
+    assert git(worktree, "rev-parse", "HEAD") == source_head
+    assert "calc.py" in git(worktree, "status", "--porcelain")
+
+
+def test_development_task_rejects_commit_created_by_kilo(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=False)
+    source_head = git(repo, "rev-parse", "HEAD")
+
+    def committing_kilo(worktree, goal, tests):
+        (worktree / "calc.py").write_text("def answer():\n    return 2\n", encoding="utf-8")
+        git(worktree, "add", "calc.py")
+        git(worktree, "commit", "-qm", "forbidden Kilo commit")
+        return "committed"
+
+    monkeypatch.setattr(dev_worker, "_run_kilo", committing_kilo)
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Make the deterministic test pass.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "failed"
+    worktree = next((Path(os.environ["OCTOPUS_HOME"]) / "data" / "dev-worktrees").glob("*"))
+    assert git(worktree, "rev-parse", "HEAD") != source_head
+
+
+def test_development_task_rejects_forbidden_kilo_path(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=False)
+    source_head = git(repo, "rev-parse", "HEAD")
+
+    def secret_edit(worktree, goal, tests):
+        (worktree / ".env").write_text("TOKEN=forbidden\n", encoding="utf-8")
+        return "edited secret"
+
+    monkeypatch.setattr(dev_worker, "_run_kilo", secret_edit)
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Make the deterministic test pass.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "failed"
+    worktree = next((Path(os.environ["OCTOPUS_HOME"]) / "data" / "dev-worktrees").glob("*"))
+    assert git(worktree, "rev-parse", "HEAD") == source_head
+    assert (worktree / ".env").is_file()
+
+
+def test_development_task_does_not_commit_when_kilo_tests_fail(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=False)
+    source_head = git(repo, "rev-parse", "HEAD")
+
+    def wrong_edit(worktree, goal, tests):
+        (worktree / "calc.py").write_text("def answer():\n    return 3\n", encoding="utf-8")
+        return "edited"
+
+    monkeypatch.setattr(dev_worker, "_run_kilo", wrong_edit)
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Make the deterministic test pass.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "failed"
+    worktree = next((Path(os.environ["OCTOPUS_HOME"]) / "data" / "dev-worktrees").glob("*"))
+    assert git(worktree, "rev-parse", "HEAD") == source_head
+    assert "calc.py" in git(worktree, "status", "--porcelain")
