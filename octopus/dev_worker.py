@@ -102,6 +102,7 @@ DEV_ACTION_TOOLS = [
     },
 ]
 DEV_HISTORY_CHARS = 10_000
+DEV_INSPECTION_LIMIT = 6
 _RETRY_DELAY_RE = re.compile(r"try again in ([0-9]+(?:\.[0-9]+)?)\s*(?:s|seconds?)\b", re.IGNORECASE)
 
 
@@ -384,6 +385,8 @@ def development_task(ctx):
     worktree, branch = _create_worktree(repository, ctx.id)
     transcript = []
     tests_passed = False
+    inspection_actions = 0
+    patch_applied = False
     schema_json = json.dumps(DEV_ACTION_SCHEMA, separators=(",", ":"))
     system = (
         "You are DevWorker. Choose the next useful action through the structured response mechanism provided. "
@@ -392,6 +395,7 @@ def development_task(ctx):
         f"{schema_json}. "
         "Inspect before modifying. Return one action per response. Never request shell, push, PR, or agent. "
         "Do not repeat the same action with identical arguments when its result is already in history. "
+        f"Before the first successful patch, use at most {DEV_INSPECTION_LIMIT} read/search actions. "
         "Make the smallest change needed and never reformat unrelated lines. "
         "For patch actions, patch must be a UTF-8 unified diff with ---/+++ paths accepted by git apply; "
         "never use Begin Patch or SEARCH/REPLACE markers. "
@@ -412,7 +416,13 @@ def development_task(ctx):
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps({
-                "goal": goal, "worktree_status": state, "tests": tests, "history": history,
+                "goal": goal,
+                "worktree_status": state,
+                "tests": tests,
+                "inspection_actions_remaining": (
+                    None if patch_applied else max(0, DEV_INSPECTION_LIMIT - inspection_actions)
+                ),
+                "history": history,
             }, ensure_ascii=False)},
         ]
         completion_messages = messages
@@ -445,12 +455,21 @@ def development_task(ctx):
                 raise
         action = completion.data if completion.data is not None else _parse_action(completion.text)
         tool_failed = False
-        try:
-            output, tests_passed, commit = _tool(action, worktree, tests, tests_passed)
-        except (DevWorkerError, OSError, subprocess.SubprocessError) as exc:
-            output, commit = f"outil refusé/échoué: {type(exc).__name__}: {exc}", None
+        if (not patch_applied and action["action"] in {"read", "search"}
+                and inspection_actions >= DEV_INSPECTION_LIMIT):
+            output = "outil refusé/échoué: budget d'inspection épuisé; utiliser patch, test ou commit"
+            commit = None
             tool_failed = True
+        else:
+            if not patch_applied and action["action"] in {"read", "search"}:
+                inspection_actions += 1
+            try:
+                output, tests_passed, commit = _tool(action, worktree, tests, tests_passed)
+            except (DevWorkerError, OSError, subprocess.SubprocessError) as exc:
+                output, commit = f"outil refusé/échoué: {type(exc).__name__}: {exc}", None
+                tool_failed = True
         if action["action"] == "patch" and not tool_failed:
+            patch_applied = True
             transcript = [entry for entry in transcript if entry["action"] != "read"]
         arguments = {}
         for name in ("path", "query", "patch", "message"):

@@ -267,6 +267,40 @@ def test_devworker_bounds_history_results_for_free_provider_tpm(tmp_path, monkey
     assert history[-1]["arguments"] == {"path": "octopus/dev_worker.py"}
 
 
+def test_devworker_refuses_excess_prepatch_inspection(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path)
+    actions = [
+        {"action": "search", "query": f"query-{index}"}
+        for index in range(dev_worker.DEV_INSPECTION_LIMIT + 1)
+    ] + [{"action": "commit", "message": "fix: bounded inspection"}]
+    calls = scripted(monkeypatch, dev_worker, actions)
+    executed = []
+
+    def fake_tool(action, worktree, tests, tests_passed):
+        executed.append(action)
+        if action["action"] == "commit":
+            return "fake-commit", True, "fake-commit"
+        return "search result", tests_passed, None
+
+    monkeypatch.setattr(dev_worker, "_tool", fake_tool)
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Stop inspecting and make the requested change.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "max_steps": dev_worker.DEV_INSPECTION_LIMIT + 2,
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "done"
+    assert len([action for action in executed if action["action"] == "search"]) == dev_worker.DEV_INSPECTION_LIMIT
+    state = json.loads(calls[-1][1][1]["content"])
+    assert state["inspection_actions_remaining"] == 0
+    assert "inspection épuisé" in state["history"][-1]["result"]
+
+
 def test_devworker_retries_two_bounded_provider_rate_limits(tmp_path, monkeypatch):
     from octopus import dev_worker
 
