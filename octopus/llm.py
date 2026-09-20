@@ -139,6 +139,56 @@ _transport_override: Callable[[dict, dict], tuple[str, Usage] | TransportResult]
 _clients: dict[tuple, Any] = {}
 
 
+def _matches_json_type(value: Any, expected: str | list[str]) -> bool:
+    types = [expected] if isinstance(expected, str) else expected
+    checks = {
+        "null": value is None,
+        "string": isinstance(value, str),
+        "object": isinstance(value, dict),
+        "array": isinstance(value, list),
+        "boolean": isinstance(value, bool),
+        "integer": isinstance(value, int) and not isinstance(value, bool),
+        "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+    }
+    return any(checks.get(kind, False) for kind in types)
+
+
+def _declarative_tool_text(request: dict, message: Any) -> str:
+    declared = {
+        tool["function"]["name"]: tool["function"]
+        for tool in request.get("tools", [])
+        if tool.get("type") == "function" and isinstance(tool.get("function"), dict)
+    }
+    tool_calls = getattr(message, "tool_calls", None) or []
+    if len(tool_calls) != 1:
+        raise ValueError("un appel d'outil structuré est requis")
+    call = tool_calls[0].function
+    if call.name not in declared:
+        raise ValueError(f"outil structuré inconnu: {call.name}")
+    if not isinstance(call.arguments, str) or not call.arguments.strip():
+        raise ValueError(f"arguments absents pour l'outil structuré: {call.name}")
+    try:
+        arguments = json.loads(call.arguments)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"arguments JSON invalides pour l'outil structuré: {call.name}") from exc
+    if not isinstance(arguments, dict):
+        raise ValueError(f"arguments objet attendus pour l'outil structuré: {call.name}")
+
+    parameters = declared[call.name].get("parameters", {})
+    properties = parameters.get("properties", {})
+    unexpected = sorted(set(arguments) - set(properties))
+    if parameters.get("additionalProperties") is False and unexpected:
+        raise ValueError(f"arguments inattendus pour l'outil structuré {call.name}: {unexpected}")
+    missing = sorted(set(parameters.get("required", [])) - set(arguments))
+    if missing:
+        raise ValueError(f"arguments requis absents pour l'outil structuré {call.name}: {missing}")
+    for name, value in arguments.items():
+        expected = properties.get(name, {}).get("type")
+        if expected is not None and not _matches_json_type(value, expected):
+            raise ValueError(f"type invalide pour l'argument {name} de l'outil structuré {call.name}")
+    return json.dumps({"action": call.name, **arguments}, ensure_ascii=False, separators=(",", ":"))
+
+
 def _transport(provider: dict, request: dict) -> tuple[str, Usage] | TransportResult:
     if _transport_override is not None:
         return _transport_override(provider, request)
@@ -159,15 +209,19 @@ def _transport(provider: dict, request: dict) -> tuple[str, Usage] | TransportRe
     headers = raw_response.headers
     message = response.choices[0].message
     text = (message.content or "").strip()
-    expected_tool = request.get("tool_choice", {}).get("function", {}).get("name")
-    if expected_tool:
+    tool_choice = request.get("tool_choice")
+    if tool_choice == "required":
+        text = _declarative_tool_text(request, message)
+    elif isinstance(tool_choice, dict):
+        expected_tool = tool_choice.get("function", {}).get("name")
         tool_calls = getattr(message, "tool_calls", None) or []
-        if len(tool_calls) != 1 or tool_calls[0].function.name != expected_tool:
+        if expected_tool and (len(tool_calls) != 1 or tool_calls[0].function.name != expected_tool):
             raise ValueError(f"appel structuré attendu: {expected_tool}")
-        arguments = tool_calls[0].function.arguments
-        if not isinstance(arguments, str) or not arguments.strip():
+        arguments = tool_calls[0].function.arguments if expected_tool else None
+        if expected_tool and (not isinstance(arguments, str) or not arguments.strip()):
             raise ValueError(f"arguments absents pour l'appel structuré: {expected_tool}")
-        text = arguments.strip()
+        if expected_tool:
+            text = arguments.strip()
     provider_cost = headers.get("x-omniroute-response-cost")
     try:
         provider_cost_usd = float(provider_cost) if provider_cost is not None else None
@@ -310,7 +364,8 @@ def _budget_block(ctx, cat: catalog.Catalog, business: str, estimate: float) -> 
 
 
 def _build_request(model: dict, messages: list[dict], max_tokens: int, json_mode: bool,
-                   reasoning: str | None, json_schema: dict | None = None) -> dict:
+                   reasoning: str | None, json_schema: dict | None = None,
+                   tool_schemas: list[dict] | None = None) -> dict:
     request: dict = {"model": model["api_model"], "messages": messages, "max_tokens": max_tokens}
     capabilities = model.get("capabilities", [])
     if reasoning and "reasoning_effort" in capabilities:
@@ -320,19 +375,10 @@ def _build_request(model: dict, messages: list[dict], max_tokens: int, json_mode
     if json_schema is not None and "json" in capabilities:
         schema_mode = model.get("json_schema_mode")
         if schema_mode == "tool_call":
-            tool_schema = copy.deepcopy(json_schema)
-            tool_schema["required"] = ["action"]
-            request["tools"] = [{
-                "type": "function",
-                "function": {
-                    "name": "octopus_response",
-                    "description": "Return the structured OCTOPUS response.",
-                    "parameters": tool_schema,
-                },
-            }]
-            request["tool_choice"] = {
-                "type": "function", "function": {"name": "octopus_response"},
-            }
+            if not tool_schemas:
+                raise ValueError("schémas d'outils déclaratifs requis pour le mode tool_call")
+            request["tools"] = copy.deepcopy(tool_schemas)
+            request["tool_choice"] = "required"
         elif schema_mode == "json_object":
             request["response_format"] = {"type": "json_object"}
         else:
@@ -385,6 +431,7 @@ def _zero_cost_violation(profile_name: str, model: dict, result: TransportResult
 
 def complete(task: str, messages: list[dict], *, agent: str = "", business: str | None = None,
              max_tokens: int = 1200, json_mode: bool = False, json_schema: dict | None = None,
+             tool_schemas: list[dict] | None = None,
              reasoning: str | None = None,
              needs: tuple[str, ...] = (), pin_model: str | None = None, profile: str | None = None,
              validate: Callable[[str], Any] | None = None) -> Completion:
@@ -437,7 +484,9 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 continue
             raise BudgetExceeded(block)
 
-        request = _build_request(model, messages, max_tokens, json_mode, reasoning, json_schema)
+        request = _build_request(
+            model, messages, max_tokens, json_mode, reasoning, json_schema, tool_schemas,
+        )
         started = time.perf_counter()
         try:
             result = _transport_result(_transport(provider, request), request["model"], model["provider"])

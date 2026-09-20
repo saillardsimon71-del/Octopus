@@ -89,9 +89,10 @@ index 4c47471..f208b75 100644
     assert git(worktree, "status", "--porcelain") == ""
     assert all(task == "development.step" and kwargs["profile"] == "zero_cost" for task, _, kwargs in calls)
     assert all(kwargs["json_schema"] == dev_worker.DEV_ACTION_SCHEMA for _, _, kwargs in calls)
+    assert all(kwargs["tool_schemas"] == dev_worker.DEV_ACTION_TOOLS for _, _, kwargs in calls)
     schema_json = json.dumps(dev_worker.DEV_ACTION_SCHEMA, separators=(",", ":"))
     assert all(schema_json in messages[0]["content"] for _, messages, _ in calls)
-    assert all("Do not invoke external tools" in messages[0]["content"] for _, messages, _ in calls)
+    assert all("do not execute anything provider-side" in messages[0]["content"] for _, messages, _ in calls)
     assert all("unified diff with ---/+++ paths" in messages[0]["content"] for _, messages, _ in calls)
     assert all("smallest change" in messages[0]["content"] for _, messages, _ in calls)
     for _, messages, _ in calls[2:]:
@@ -163,21 +164,66 @@ def test_devworker_groq_uses_tool_call_with_local_validation(monkeypatch):
         False,
         None,
         dev_worker.DEV_ACTION_SCHEMA,
+        tool_schemas=dev_worker.DEV_ACTION_TOOLS,
     )
 
     assert "response_format" not in request
-    assert request["tools"] == [{
-        "type": "function",
-        "function": {
-            "name": "octopus_response",
-            "description": "Return the structured OCTOPUS response.",
-            "parameters": {**dev_worker.DEV_ACTION_SCHEMA, "required": ["action"]},
-        },
-    }]
-    assert request["tool_choice"] == {
-        "type": "function", "function": {"name": "octopus_response"},
-    }
+    assert request["tools"] == dev_worker.DEV_ACTION_TOOLS
+    assert [tool["function"]["name"] for tool in request["tools"]] == [
+        "read", "search", "patch", "test", "commit",
+    ]
+    assert request["tool_choice"] == "required"
+    for tool in request["tools"]:
+        parameters = tool["function"]["parameters"]
+        assert parameters["type"] == "object"
+        assert parameters["additionalProperties"] is False
+    search = request["tools"][1]["function"]["parameters"]
+    assert search["required"] == ["query"]
+    assert search["properties"]["path"] == {"type": ["string", "null"]}
     assert request["reasoning_effort"] == "low"
+
+
+def test_devworker_falls_back_from_gemini_429_to_groq_tools(
+        monkeypatch, providers_up, transport):
+    from octopus import dev_worker, llm
+
+    class RateLimitError(Exception):
+        pass
+
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
+
+    def reply(provider, request):
+        if request["model"] == "octopus-free-devworker-gemini":
+            return RateLimitError("429 quota exhausted")
+        assert request["tools"] == dev_worker.DEV_ACTION_TOOLS
+        assert request["tool_choice"] == "required"
+        return llm.TransportResult(
+            text='{"action":"search","query":"needle"}',
+            usage=llm.Usage(prompt_tokens=10, completion_tokens=5),
+            requested_model=request["model"],
+            resolved_model="groq/openai/gpt-oss-120b",
+            resolved_provider="groq",
+            provider_cost_usd=0.0,
+        )
+
+    transport.handler = reply
+    completion = llm.complete(
+        "development.step",
+        [{"role": "user", "content": "next"}],
+        agent="DEVWORKER",
+        profile="zero_cost",
+        json_schema=dev_worker.DEV_ACTION_SCHEMA,
+        tool_schemas=dev_worker.DEV_ACTION_TOOLS,
+        validate=dev_worker._parse_action,
+    )
+
+    assert transport.models == [
+        "octopus-free-devworker-gemini", "octopus-free-devworker-groq",
+    ]
+    assert completion.data == {
+        "action": "search", "path": None, "query": "needle", "patch": None, "message": None,
+    }
 
 
 def test_devworker_local_validation_normalizes_unused_nullable_fields():

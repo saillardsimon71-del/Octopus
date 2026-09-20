@@ -29,6 +29,77 @@ DEV_ACTION_SCHEMA = {
     "additionalProperties": False,
 }
 
+DEV_ACTION_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read",
+            "description": "Read one UTF-8 file inside the task worktree.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search",
+            "description": "Search for a fixed string inside the task worktree.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "path": {"type": ["string", "null"]},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "patch",
+            "description": "Apply a UTF-8 unified diff inside the task worktree.",
+            "parameters": {
+                "type": "object",
+                "properties": {"patch": {"type": "string"}},
+                "required": ["patch"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "test",
+            "description": "Run the pre-approved deterministic pytest commands.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "commit",
+            "description": "Commit task worktree changes after tests pass.",
+            "parameters": {
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
 
 def _run(args: list[str], cwd: Path, *, input_text: str | None = None, timeout: int = 300) -> subprocess.CompletedProcess:
     return subprocess.run(
@@ -291,8 +362,10 @@ def development_task(ctx):
     tests_passed = False
     schema_json = json.dumps(DEV_ACTION_SCHEMA, separators=(",", ":"))
     system = (
-        "You are DevWorker. Do not invoke external tools. Choose the next useful action and return it through the "
-        f"structured response mechanism provided, matching this schema exactly: {schema_json}. "
+        "You are DevWorker. Choose the next useful action through the structured response mechanism provided. "
+        "If declarative action tools are available, call exactly one; they only represent the response and do not "
+        "execute anything provider-side. Return an action matching this schema exactly: "
+        f"{schema_json}. "
         "Inspect before modifying. Return one action per response. Never request shell, push, PR, or agent. "
         "Make the smallest change needed and never reformat unrelated lines. "
         "For patch actions, patch must be a UTF-8 unified diff with ---/+++ paths accepted by git apply; "
@@ -310,7 +383,8 @@ def development_task(ctx):
         ]
         completion = llm.complete(
             "development.step", messages, agent="DEVWORKER", business=ctx.business,
-            profile="zero_cost", json_schema=DEV_ACTION_SCHEMA, max_tokens=1600, validate=_parse_action,
+            profile="zero_cost", json_schema=DEV_ACTION_SCHEMA, tool_schemas=DEV_ACTION_TOOLS,
+            max_tokens=1600, validate=_parse_action,
         )
         action = completion.data if completion.data is not None else _parse_action(completion.text)
         tool_failed = False
