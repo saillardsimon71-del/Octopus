@@ -573,6 +573,7 @@ def test_devworker_kilo_run_is_inline_configured_and_deny_by_default(tmp_path, m
         worktree,
         "Change only calc.py.",
         [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        4,
     )
 
     args = captured["args"]
@@ -585,6 +586,10 @@ def test_devworker_kilo_run_is_inline_configured_and_deny_by_default(tmp_path, m
     assert args[args.index("--format") + 1] == "json"
     assert "Change only calc.py." in args[-1]
     assert "test_calc.py" in args[-1]
+    assert "Inspect only files directly relevant to the goal." in args[-1]
+    assert "Prefer grep or glob before reading files." in args[-1]
+    assert "Do not survey the entire repository." in args[-1]
+    assert "Avoid reading large unrelated files." in args[-1]
     assert captured["cwd"] == str(worktree)
     assert captured["kwargs"]["timeout"] == dev_worker.KILO_TIMEOUT_S
     assert output.endswith("done\"}\n")
@@ -599,8 +604,10 @@ def test_devworker_kilo_run_is_inline_configured_and_deny_by_default(tmp_path, m
     config = json.loads(env["KILO_CONFIG_CONTENT"])
     assert config["plugin"] == []
     assert config["mcp"] == {}
+    assert config["compaction"] == {"auto": True, "prune": True, "threshold_percent": 65}
     agent = config["agent"]["octopus-devworker"]
     assert agent["mode"] == "primary"
+    assert agent["steps"] == 4
     permissions = agent["permission"]
     assert permissions["*"] == "deny"
     assert set(permissions) >= {
@@ -627,7 +634,9 @@ def test_devworker_kilo_failure_includes_bounded_cli_error(tmp_path, monkeypatch
     )
 
     with pytest.raises(dev_worker.DevWorkerError, match="gateway failed"):
-        dev_worker._run_kilo(tmp_path, "change", [[sys.executable, "-m", "pytest", "-q", "test_x.py"]])
+        dev_worker._run_kilo(
+            tmp_path, "change", [[sys.executable, "-m", "pytest", "-q", "test_x.py"]], 2,
+        )
 
 
 def test_development_task_uses_kilo_then_validates_tests_and_commits(tmp_path, monkeypatch):
@@ -637,8 +646,8 @@ def test_development_task_uses_kilo_then_validates_tests_and_commits(tmp_path, m
     source_head = git(repo, "rev-parse", "HEAD")
     seen = {}
 
-    def fake_kilo(worktree, goal, tests):
-        seen.update(worktree=worktree, goal=goal, tests=tests)
+    def fake_kilo(worktree, goal, tests, max_steps):
+        seen.update(worktree=worktree, goal=goal, tests=tests, max_steps=max_steps)
         (worktree / "calc.py").write_text("def answer():\n    return 2\n", encoding="utf-8")
         return "edited"
 
@@ -652,6 +661,7 @@ def test_development_task_uses_kilo_then_validates_tests_and_commits(tmp_path, m
         "repository": str(repo),
         "goal": "Make the deterministic test pass.",
         "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "max_steps": 7,
     })
 
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
@@ -660,6 +670,7 @@ def test_development_task_uses_kilo_then_validates_tests_and_commits(tmp_path, m
     output = result["output"]
     worktree = Path(output["worktree"])
     assert seen["worktree"] == worktree
+    assert seen["max_steps"] == 7
     assert output["backend"] == "kilo"
     assert output["changed_paths"] == ["calc.py"]
     assert output["commit"] == git(worktree, "rev-parse", "HEAD")
@@ -711,7 +722,7 @@ def test_development_task_does_not_fallback_after_kilo_modification(tmp_path, mo
     source_head = git(repo, "rev-parse", "HEAD")
     declarative_calls = []
 
-    def dirty_failure(worktree, goal, tests):
+    def dirty_failure(worktree, goal, tests, max_steps):
         (worktree / "calc.py").write_text("def answer():\n    return 3\n", encoding="utf-8")
         raise dev_worker.DevWorkerError("Kilo failed after editing")
 
@@ -738,7 +749,7 @@ def test_development_task_rejects_commit_created_by_kilo(tmp_path, monkeypatch):
     repo = repository(tmp_path, passing=False)
     source_head = git(repo, "rev-parse", "HEAD")
 
-    def committing_kilo(worktree, goal, tests):
+    def committing_kilo(worktree, goal, tests, max_steps):
         (worktree / "calc.py").write_text("def answer():\n    return 2\n", encoding="utf-8")
         git(worktree, "add", "calc.py")
         git(worktree, "commit", "-qm", "forbidden Kilo commit")
@@ -764,7 +775,7 @@ def test_development_task_rejects_forbidden_kilo_path(tmp_path, monkeypatch):
     repo = repository(tmp_path, passing=False)
     source_head = git(repo, "rev-parse", "HEAD")
 
-    def secret_edit(worktree, goal, tests):
+    def secret_edit(worktree, goal, tests, max_steps):
         (worktree / ".env").write_text("TOKEN=forbidden\n", encoding="utf-8")
         return "edited secret"
 
@@ -789,7 +800,7 @@ def test_development_task_does_not_commit_when_kilo_tests_fail(tmp_path, monkeyp
     repo = repository(tmp_path, passing=False)
     source_head = git(repo, "rev-parse", "HEAD")
 
-    def wrong_edit(worktree, goal, tests):
+    def wrong_edit(worktree, goal, tests, max_steps):
         (worktree / "calc.py").write_text("def answer():\n    return 3\n", encoding="utf-8")
         return "edited"
 

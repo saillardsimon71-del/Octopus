@@ -145,15 +145,17 @@ def _kilo_permissions() -> dict:
     return permissions
 
 
-def _run_kilo(worktree: Path, goal: str, tests: list[list[str]]) -> str:
+def _run_kilo(worktree: Path, goal: str, tests: list[list[str]], max_steps: int) -> str:
     config = {
         "plugin": [],
         "mcp": {},
+        "compaction": {"auto": True, "prune": True, "threshold_percent": 65},
         "agent": {
             KILO_AGENT: {
                 "description": "Restricted OCTOPUS development worker",
                 "mode": "primary",
                 "model": KILO_MODEL,
+                "steps": max_steps,
                 "permission": _kilo_permissions(),
             },
         },
@@ -162,7 +164,9 @@ def _run_kilo(worktree: Path, goal: str, tests: list[list[str]]) -> str:
         "Modify this isolated worktree to satisfy the goal below. Use only read, glob, grep, and edit. "
         "Do not run commands or tests, access secrets or .env files, change Kilo configuration, commit, push, "
         "merge, or modify anything outside this worktree. Make the smallest focused change and stop after saving "
-        "the edits. OCTOPUS will validate the diff and run these deterministic tests itself.\n\n"
+        "the edits. Inspect only files directly relevant to the goal. Prefer grep or glob before reading files. "
+        "Do not survey the entire repository. Avoid reading large unrelated files. OCTOPUS will validate the "
+        "diff and run these deterministic tests itself.\n\n"
         f"Goal:\n{goal}\n\nTests:\n{json.dumps(tests, ensure_ascii=False)}"
     )
     with tempfile.TemporaryDirectory(prefix="octopus-kilo-config-") as config_root:
@@ -656,7 +660,7 @@ def development_task(ctx):
     original_head = _git(worktree, "rev-parse", "HEAD")
     original_status = _status_entries(worktree)
     try:
-        _run_kilo(worktree, goal, tests)
+        _run_kilo(worktree, goal, tests, max_steps)
     except (DevWorkerError, OSError, subprocess.SubprocessError) as exc:
         pristine = (
             _git(worktree, "rev-parse", "HEAD") == original_head
