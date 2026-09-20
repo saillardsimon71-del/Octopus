@@ -124,7 +124,12 @@ _RETRY_DELAY_RE = re.compile(r"try again in ([0-9]+(?:\.[0-9]+)?)\s*(?:s|seconds
 
 _KILO_SENSITIVE_PATTERNS = (
     ".env", ".env.*", "**/.env", "**/.env.*", "**/*.pem", "**/*.key",
-    "**/credentials*", "**/secrets*",
+    "**/credentials*", "**/*credential*", "**/secrets*", "**/*secret*",
+    ".netrc", "**/.netrc", ".npmrc", "**/.npmrc", ".pypirc", "**/.pypirc",
+    ".git", ".git/**", "**/.git", "**/.git/**",
+    ".kilo/**", "**/.kilo/**", ".kilocode/**", "**/.kilocode/**",
+    "kilo.json", "kilo.jsonc", "opencode.json", "opencode.jsonc",
+    "**/kilo.json", "**/kilo.jsonc", "**/opencode.json", "**/opencode.jsonc",
 )
 _KILO_PROTECTED_PATTERNS = (
     ".git/**", "**/.git/**", ".kilo/**", "**/.kilo/**", ".kilocode/**", "**/.kilocode/**",
@@ -160,35 +165,88 @@ def _kilo_permissions() -> dict:
     return permissions
 
 
-def _build_kilo_prompt(goal: str, tests: list[list[str]], max_steps: int, last_test_output: str = "", attempt: int = 0,
-                       allowed_paths: list[str] | None = None) -> str:
+def _validate_acceptance_criteria(raw) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise DevWorkerError("acceptance_criteria doit être une liste")
+    out = []
+    for value in raw:
+        if not isinstance(value, str) or not value.strip():
+            raise DevWorkerError("acceptance_criteria contient une valeur invalide")
+        text = " ".join(value.split())
+        if text not in out:
+            out.append(text)
+    return out
+
+
+def _repository_context(worktree: Path) -> str:
+    head = _git(worktree, "rev-parse", "HEAD")
+    branch = _git(worktree, "branch", "--show-current")
+    recent = _git(worktree, "log", "-5", "--oneline").replace("\n", " | ")
+    return f"branch={branch}; head={head}; recent_commits={recent}"
+
+
+def _kilo_output_summary(output: str) -> dict:
+    counts: dict[str, int] = {}
+    texts = []
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        type_ = str(event.get("type") or "unknown")
+        counts[type_] = counts.get(type_, 0) + 1
+        if type_ == "text" and isinstance(event.get("text"), str):
+            texts.append(event["text"])
+    final_text = texts[-1].strip() if texts else ""
+    return {"event_types": counts, "final_text": final_text[-2000:]}
+
+
+def _kilo_declares_noop(output: str) -> bool:
+    text = _kilo_output_summary(output)["final_text"].strip()
+    return bool(text) and text.splitlines()[-1].strip() == "NO_CHANGE_NEEDED"
+
+
+def _build_kilo_prompt(
+        goal: str, tests: list[list[str]], max_steps: int, last_test_output: str = "", attempt: int = 0,
+        allowed_paths: list[str] | None = None, acceptance_criteria: list[str] | None = None,
+        noop_allowed: bool = False, repository_context: str = "") -> str:
     goal_text = " ".join(goal.split())
     tests_text = " ; ".join(" ".join(command) for command in tests)
-    prefix = (
-        "Modify this isolated worktree to satisfy the task. "
-        "Use only read, glob, grep, edit, and write. "
-        "Use write only when a required new file must be created. "
-        "Do not run commands or tests, access secrets or .env files, change Kilo configuration, commit, push, "
-        "merge, or modify anything outside this worktree. "
-        "Make the smallest focused change and stop after saving the edits. "
-        "Inspect only files directly relevant to the goal. Prefer grep or glob before reading files. "
-        "Do not survey the entire repository. Avoid reading large unrelated files. "
-        "OCTOPUS will validate the diff and run deterministic tests itself. "
-    )
-    if attempt == 0:
-        prefix += f"GOAL: {goal_text} "
-    else:
-        prefix += (
-            "A previous Kilo attempt failed external validation or deterministic tests. "
-            "Make the smallest focused correction to satisfy the original goal. "
-            f"GOAL: {goal_text} "
+    modifiable = ", ".join(allowed_paths) if allowed_paths is not None else "task-relevant files"
+    criteria = acceptance_criteria or ["satisfy the stated objective", "leave the repository consistent"]
+    criteria_text = " ; ".join(criteria)
+    first_edit_target = max(1, int(max_steps * 0.4))
+    parts = [
+        "Work in this isolated worktree and solve the ticket.",
+        f"OBJECTIVE: {goal_text}",
+        f"MODIFIABLE: {modifiable}. All other tracked repository files may be read as needed but must not be modified.",
+        f"SUCCESS_CRITERIA: {criteria_text}.",
+        f"OCTOPUS_WILL_RUN: {tests_text}. Do not run tests yourself; OCTOPUS is the final test authority.",
+        f"BUDGET: {max_steps} steps. Aim to make the first useful edit before step {first_edit_target}.",
+        "Explore enough repository context to make a correct change; choose your own investigation method.",
+        "Do not access secrets, external directories, Kilo configuration, or Git internals. Do not commit, push, or merge.",
+        "If a fact cannot be verified from readable repository context or the supplied repository facts, do not invent it.",
+        "Finish with a concise final report: files changed, facts verified, and any facts still unverified.",
+    ]
+    if repository_context:
+        parts.append("REPOSITORY_FACTS: " + " ".join(repository_context.split()))
+    if noop_allowed:
+        parts.append(
+            "If verification shows that no edit is actually needed, explain the verified basis briefly and end the final "
+            "response with a separate line containing exactly NO_CHANGE_NEEDED."
         )
-    prompt = prefix + f"TESTS THAT OCTOPUS WILL RUN: {tests_text}"
-    if allowed_paths is not None:
-        prompt += " HARD_ALLOWED_PATHS: " + ", ".join(allowed_paths) + ". Do not modify any other path."
+    if attempt:
+        parts.append(
+            "RETRY: a previous pass did not satisfy external validation or tests. Use the feedback below to make a "
+            "meaningfully different correction; do not merely repeat the previous pass."
+        )
     if last_test_output:
-        prompt += f" PREVIOUS_TEST_OUTPUT: {last_test_output[-KILO_TEST_FEEDBACK_CHARS:]}"
-    return prompt
+        parts.append("PREVIOUS_FEEDBACK: " + " ".join(last_test_output[-KILO_TEST_FEEDBACK_CHARS:].split()))
+    return " ".join(parts)
 
 
 def _run_kilo(worktree: Path, goal: str, tests: list[list[str]], max_steps: int, prompt: str | None = None) -> str:
@@ -748,13 +806,15 @@ def development_task(ctx):
     if not repository.is_dir():
         raise DevWorkerError("repository introuvable")
     tests = validate_test_commands(ctx.input.get("tests"))
-    max_steps = int(ctx.input.get("max_steps", 12))
-    if not 1 <= max_steps <= 20:
-        raise DevWorkerError("max_steps doit être compris entre 1 et 20")
+    max_steps = int(ctx.input.get("max_steps", 15))
+    if not 1 <= max_steps <= 30:
+        raise DevWorkerError("max_steps doit être compris entre 1 et 30")
     backend = str(ctx.input.get("backend") or "kilo").strip().lower()
     if backend not in {"kilo", "declarative"}:
         raise DevWorkerError("backend attendu: kilo ou declarative")
     allowed_paths = _validate_allowed_paths(ctx.input.get("allowed_paths"))
+    acceptance_criteria = _validate_acceptance_criteria(ctx.input.get("acceptance_criteria"))
+    noop_allowed = bool(ctx.input.get("noop_allowed", False))
     allow_declarative_fallback = bool(ctx.input.get("allow_declarative_fallback", True))
     if backend == "declarative" and allowed_paths is not None:
         raise DevWorkerError("allowed_paths exige backend=kilo")
@@ -767,11 +827,24 @@ def development_task(ctx):
     original_status = _status_entries(worktree)
     last_test_output = ""
     for attempt in range(KILO_MAX_PASSES):
+        repository_context = _repository_context(worktree)
         prompt = _build_kilo_prompt(
-            goal, tests, max_steps, last_test_output, attempt, allowed_paths=allowed_paths,
+            goal, tests, max_steps, last_test_output, attempt,
+            allowed_paths=allowed_paths,
+            acceptance_criteria=acceptance_criteria,
+            noop_allowed=noop_allowed,
+            repository_context=repository_context,
         )
         try:
-            _run_kilo(worktree, goal, tests, max_steps, prompt=prompt)
+            kilo_output = _run_kilo(worktree, goal, tests, max_steps, prompt=prompt)
+            summary = _kilo_output_summary(kilo_output)
+            ctx.emit("development.kilo_pass", {
+                "attempt": attempt + 1,
+                "max_passes": KILO_MAX_PASSES,
+                "max_steps": max_steps,
+                "event_types": summary["event_types"],
+                "final_text": summary["final_text"][-1000:],
+            })
         except (DevWorkerError, OSError, subprocess.SubprocessError) as exc:
             pristine = (
                 _git(worktree, "rev-parse", "HEAD") == original_head
@@ -792,7 +865,24 @@ def development_task(ctx):
         try:
             changed_paths = _validate_kilo_result(worktree, original_head, branch, allowed_paths=allowed_paths)
         except KiloRepairableError as exc:
+            if exc.kind == "no_changes" and noop_allowed and _kilo_declares_noop(kilo_output):
+                result = {
+                    "commit": None,
+                    "branch": branch,
+                    "worktree": str(worktree),
+                    "tests": tests,
+                    "backend": "kilo",
+                    "model": KILO_MODEL,
+                    "changed_paths": [],
+                    "noop": True,
+                    "final_text": _kilo_output_summary(kilo_output)["final_text"],
+                }
+                ctx.emit("development.noop", result)
+                return result
+            final_text = _kilo_output_summary(kilo_output)["final_text"]
             last_test_output = f"{exc.kind}: {exc.feedback}"
+            if final_text:
+                last_test_output += f" | PREVIOUS_FINAL: {final_text}"
             if attempt < KILO_MAX_PASSES - 1:
                 ctx.emit("development.kilo_retry", {
                     "attempt": attempt + 1,
