@@ -1261,13 +1261,46 @@ def development_task(ctx):
     max_lines_deleted = _validate_positive_limit(
         ctx.input.get("max_lines_deleted"), "max_lines_deleted", maximum=5000,
     )
+    strict_repository_preflight = bool(ctx.input.get("strict_repository_preflight", False))
+    require_baseline_oracle = bool(ctx.input.get("require_baseline_oracle", False))
+    python_canary_ast = bool(ctx.input.get("python_canary_ast", False))
     allow_declarative_fallback = bool(ctx.input.get("allow_declarative_fallback", True))
     if backend == "declarative" and allowed_paths is not None:
         raise DevWorkerError("allowed_paths exige backend=kilo")
 
     worktree, branch = _create_worktree(repository, ctx.id)
+    _assert_safe_allowed_paths(worktree, allowed_paths)
+    if strict_repository_preflight:
+        _strict_repository_preflight(worktree)
     if backend == "declarative":
         return _run_declarative_backend(ctx, goal, worktree, branch, tests, max_steps)
+
+    effective_test_image = test_sandbox_image
+    if test_sandbox == "docker":
+        effective_test_image = _docker_image_id(worktree, test_sandbox_image)
+
+    baseline_signature: tuple[tuple[str, str], ...] | None = None
+    if require_baseline_oracle:
+        signatures = []
+        for baseline_attempt in range(2):
+            baseline_output, baseline_green = _run_tests(
+                worktree, tests, sandbox=test_sandbox, sandbox_image=effective_test_image,
+            )
+            signature = _pytest_oracle_signature(baseline_output)
+            if not baseline_green or not signature or any(status != "PASSED" for status, _ in signature):
+                raise DevWorkerError(
+                    f"oracle baseline invalide avant Kilo (run {baseline_attempt + 1}): "
+                    + baseline_output[-2000:]
+                )
+            signatures.append(signature)
+        if signatures[0] != signatures[1]:
+            raise DevWorkerError("oracle baseline instable entre deux exécutions")
+        baseline_signature = signatures[0]
+        ctx.emit("development.baseline", {
+            "tests": len(baseline_signature),
+            "sandbox": test_sandbox,
+            "image": effective_test_image if test_sandbox == "docker" else None,
+        })
 
     original_head = _git(worktree, "rev-parse", "HEAD")
     original_status = _status_entries(worktree)
@@ -1315,12 +1348,19 @@ def development_task(ctx):
                 max_lines_added=max_lines_added,
                 max_lines_deleted=max_lines_deleted,
             )
+            if python_canary_ast:
+                _validate_python_canary_ast(worktree, original_head, changed_paths)
         except KiloRepairableError as exc:
             if exc.kind == "no_changes" and noop_allowed and _kilo_declares_noop(kilo_output):
                 test_output, tests_passed, _ = _tool(
                     {"action": "test"}, worktree, tests, False,
-                    test_sandbox=test_sandbox, test_sandbox_image=test_sandbox_image,
+                    test_sandbox=test_sandbox, test_sandbox_image=effective_test_image,
                 )
+                if tests_passed and baseline_signature is not None:
+                    noop_signature = _pytest_oracle_signature(test_output)
+                    tests_passed = noop_signature == baseline_signature
+                    if not tests_passed:
+                        test_output += "\nORACLE_SIGNATURE_MISMATCH"
                 ctx.emit("development.tool", {"action": "test", "ok": tests_passed, "noop": True})
                 if tests_passed:
                     result = {
@@ -1363,8 +1403,13 @@ def development_task(ctx):
         ctx.emit("development.kilo_completed", {"changed_paths": changed_paths})
         test_output, tests_passed, _ = _tool(
             {"action": "test"}, worktree, tests, False,
-            test_sandbox=test_sandbox, test_sandbox_image=test_sandbox_image,
+            test_sandbox=test_sandbox, test_sandbox_image=effective_test_image,
         )
+        if tests_passed and baseline_signature is not None:
+            post_signature = _pytest_oracle_signature(test_output)
+            tests_passed = post_signature == baseline_signature
+            if not tests_passed:
+                test_output += "\nORACLE_SIGNATURE_MISMATCH"
         ctx.emit("development.tool", {"action": "test", "ok": tests_passed})
         if tests_passed:
             changed_paths = _validate_kilo_result(
@@ -1373,10 +1418,12 @@ def development_task(ctx):
                 max_lines_added=max_lines_added,
                 max_lines_deleted=max_lines_deleted,
             )
+            if python_canary_ast:
+                _validate_python_canary_ast(worktree, original_head, changed_paths)
             commit_message = f"chore: complete development task {ctx.id}"
             _, _, commit = _tool(
                 {"action": "commit", "message": commit_message}, worktree, tests, tests_passed,
-                test_sandbox=test_sandbox, test_sandbox_image=test_sandbox_image,
+                test_sandbox=test_sandbox, test_sandbox_image=effective_test_image,
             )
             result = {
                 "commit": commit,
@@ -1387,6 +1434,8 @@ def development_task(ctx):
                 "model": KILO_MODEL,
                 "changed_paths": changed_paths,
                 "test_sandbox": test_sandbox,
+                "test_sandbox_image": effective_test_image if test_sandbox == "docker" else None,
+                "oracle_tests": len(baseline_signature or ()),
             }
             ctx.emit("development.committed", result)
             return result
