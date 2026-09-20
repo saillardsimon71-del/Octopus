@@ -234,6 +234,37 @@ def test_devworker_local_validation_normalizes_unused_nullable_fields():
     }
 
 
+def test_devworker_bounds_history_results_for_free_provider_tpm(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path)
+    calls = scripted(monkeypatch, dev_worker, [
+        {"action": "search", "query": "worktree"},
+        {"action": "read", "path": "octopus/dev_worker.py"},
+        {"action": "commit", "message": "fix: bounded history"},
+    ])
+
+    def fake_tool(action, worktree, tests, tests_passed):
+        if action["action"] == "commit":
+            return "fake-commit", True, "fake-commit"
+        return action["action"] * 12_000, tests_passed, None
+
+    monkeypatch.setattr(dev_worker, "_tool", fake_tool)
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Keep the free-provider prompt bounded.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "max_steps": 3,
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "done"
+    history = json.loads(calls[2][1][1]["content"])["history"]
+    assert sum(len(item["result"]) for item in history) <= dev_worker.DEV_HISTORY_CHARS
+    assert history[-1]["action"] == "read"
+
+
 @pytest.mark.parametrize("payload", [
     {"action": "read", "query": None, "patch": None, "message": None},
     {"action": "test", "path": 7, "query": None, "patch": None, "message": None},

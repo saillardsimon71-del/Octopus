@@ -99,6 +99,7 @@ DEV_ACTION_TOOLS = [
         },
     },
 ]
+DEV_HISTORY_CHARS = 10_000
 
 
 def _run(args: list[str], cwd: Path, *, input_text: str | None = None, timeout: int = 300) -> subprocess.CompletedProcess:
@@ -375,10 +376,19 @@ def development_task(ctx):
     for _ in range(max_steps):
         ctx.check_cancel()
         state = _git(worktree, "status", "--short") or "clean"
+        history = []
+        remaining = DEV_HISTORY_CHARS
+        for entry in reversed(transcript[-8:]):
+            if remaining <= 0:
+                break
+            result = entry["result"][-remaining:]
+            history.append({"action": entry["action"], "result": result})
+            remaining -= len(result)
+        history.reverse()
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps({
-                "goal": goal, "worktree_status": state, "tests": tests, "history": transcript[-8:],
+                "goal": goal, "worktree_status": state, "tests": tests, "history": history,
             }, ensure_ascii=False)},
         ]
         completion = llm.complete(
