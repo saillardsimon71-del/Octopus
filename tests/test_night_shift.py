@@ -385,6 +385,32 @@ def test_night_run_stops_after_consecutive_failures(tmp_path, monkeypatch):
     assert len(result["tickets"]) == 2
 
 
+def test_fast_forward_imports_from_independent_clone(tmp_path):
+    from octopus import night_shift
+
+    base = tmp_path / "base"
+    task = tmp_path / "task"
+    base.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=base, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=base, check=True)
+    (base / "x.txt").write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "add", "x.txt"], cwd=base, check=True)
+    subprocess.run(["git", "commit", "-qm", "one"], cwd=base, check=True)
+
+    subprocess.run(["git", "clone", "-q", "--no-local", str(base / ".git"), str(task)], check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=task, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=task, check=True)
+    subprocess.run(["git", "checkout", "-qb", "codex/devtask-test"], cwd=task, check=True)
+    (task / "x.txt").write_text("two\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-qam", "two"], cwd=task, check=True)
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=task, text=True).strip()
+
+    night_shift._fast_forward(base, commit, task, "codex/devtask-test")
+
+    assert subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=base, text=True).strip() == commit
+
+
 def test_fast_forward_requires_direct_child(tmp_path):
     from octopus import night_shift
 
