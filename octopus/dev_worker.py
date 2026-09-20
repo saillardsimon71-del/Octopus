@@ -164,14 +164,20 @@ def _run_kilo(worktree: Path, goal: str, tests: list[list[str]], max_steps: int)
             },
         },
     }
+    goal_text = " ".join(goal.split())
+    tests_text = " ; ".join(" ".join(command) for command in tests)
     prompt = (
-        "Modify this isolated worktree to satisfy the goal below. Use only read, glob, grep, edit, and write. Use write only when a required new file must be created. "
+        "Modify this isolated worktree to satisfy the task. "
+        "Use only read, glob, grep, edit, and write. "
+        "Use write only when a required new file must be created. "
         "Do not run commands or tests, access secrets or .env files, change Kilo configuration, commit, push, "
-        "merge, or modify anything outside this worktree. Make the smallest focused change and stop after saving "
-        "the edits. Inspect only files directly relevant to the goal. Prefer grep or glob before reading files. "
-        "Do not survey the entire repository. Avoid reading large unrelated files. OCTOPUS will validate the "
-        "diff and run these deterministic tests itself.\n\n"
-        f"Goal:\n{goal}\n\nTests:\n{json.dumps(tests, ensure_ascii=False)}"
+        "merge, or modify anything outside this worktree. "
+        "Make the smallest focused change and stop after saving the edits. "
+        "Inspect only files directly relevant to the goal. Prefer grep or glob before reading files. "
+        "Do not survey the entire repository. Avoid reading large unrelated files. "
+        "OCTOPUS will validate the diff and run deterministic tests itself. "
+        f"GOAL: {goal_text} "
+        f"TESTS THAT OCTOPUS WILL RUN: {tests_text}"
     )
     with tempfile.TemporaryDirectory(prefix="octopus-kilo-config-") as config_root:
         env = dict(os.environ)
