@@ -624,6 +624,19 @@ def test_devworker_kilo_run_is_inline_configured_and_deny_by_default(tmp_path, m
         assert permissions[name]["**/*secret*"] == "deny"
 
 
+def test_kilo_permissions_restrict_writes_to_allowed_paths():
+    from octopus import dev_worker
+
+    permissions = dev_worker._kilo_permissions(["octopus/capabilities.py"])
+
+    assert permissions["edit"]["*"] == "deny"
+    assert permissions["write"]["*"] == "deny"
+    assert permissions["edit"]["octopus/capabilities.py"] == "allow"
+    assert permissions["write"]["octopus/capabilities.py"] == "allow"
+    assert permissions["edit"]["**/.git/**"] == "deny"
+    assert permissions["write"]["*.pem"] == "deny"
+
+
 def test_devworker_kilo_failure_includes_bounded_cli_error(tmp_path, monkeypatch):
     from octopus import dev_worker
 
@@ -667,7 +680,7 @@ def test_development_task_retries_kilo_after_diff_check_failure(tmp_path, monkey
     repo = repository(tmp_path, passing=False)
     prompts = []
 
-    def repairing_kilo(worktree, goal, tests, max_steps, prompt=None):
+    def repairing_kilo(worktree, goal, tests, max_steps, prompt=None, allowed_paths=None):
         prompts.append(prompt)
         if len(prompts) == 1:
             (worktree / "calc.py").write_text(
@@ -714,7 +727,7 @@ def test_development_task_rejects_kilo_change_outside_allowed_paths(tmp_path, mo
 
     repo = repository(tmp_path, passing=False)
 
-    def out_of_scope_kilo(worktree, goal, tests, max_steps, prompt=None):
+    def out_of_scope_kilo(worktree, goal, tests, max_steps, prompt=None, allowed_paths=None):
         (worktree / "calc.py").write_text("def answer():\n    return 2\n", encoding="utf-8")
         (worktree / "extra.py").write_text("x = 1\n", encoding="utf-8")
         return "edited"
@@ -869,7 +882,7 @@ def test_development_task_can_use_docker_test_sandbox(tmp_path, monkeypatch):
 
     repo = repository(tmp_path, passing=False)
 
-    def fake_kilo(worktree, goal, tests, max_steps, prompt=None):
+    def fake_kilo(worktree, goal, tests, max_steps, prompt=None, allowed_paths=None):
         (worktree / "calc.py").write_text("def answer():\n    return 2\n", encoding="utf-8")
         return "edited"
 
@@ -1065,7 +1078,7 @@ def test_development_task_uses_kilo_then_validates_tests_and_commits(tmp_path, m
     source_head = git(repo, "rev-parse", "HEAD")
     seen = {}
 
-    def fake_kilo(worktree, goal, tests, max_steps, prompt=None):
+    def fake_kilo(worktree, goal, tests, max_steps, prompt=None, allowed_paths=None):
         seen.update(worktree=worktree, goal=goal, tests=tests, max_steps=max_steps)
         (worktree / "calc.py").write_text("def answer():\n    return 2\n", encoding="utf-8")
         return "edited"
@@ -1141,7 +1154,7 @@ def test_development_task_does_not_fallback_after_kilo_modification(tmp_path, mo
     source_head = git(repo, "rev-parse", "HEAD")
     declarative_calls = []
 
-    def dirty_failure(worktree, goal, tests, max_steps, prompt=None):
+    def dirty_failure(worktree, goal, tests, max_steps, prompt=None, allowed_paths=None):
         (worktree / "calc.py").write_text("def answer():\n    return 3\n", encoding="utf-8")
         raise dev_worker.DevWorkerError("Kilo failed after editing")
 
@@ -1168,7 +1181,7 @@ def test_development_task_rejects_commit_created_by_kilo(tmp_path, monkeypatch):
     repo = repository(tmp_path, passing=False)
     source_head = git(repo, "rev-parse", "HEAD")
 
-    def committing_kilo(worktree, goal, tests, max_steps, prompt=None):
+    def committing_kilo(worktree, goal, tests, max_steps, prompt=None, allowed_paths=None):
         (worktree / "calc.py").write_text("def answer():\n    return 2\n", encoding="utf-8")
         git(worktree, "add", "calc.py")
         git(worktree, "commit", "-qm", "forbidden Kilo commit")
@@ -1194,7 +1207,7 @@ def test_development_task_rejects_forbidden_kilo_path(tmp_path, monkeypatch):
     repo = repository(tmp_path, passing=False)
     source_head = git(repo, "rev-parse", "HEAD")
 
-    def secret_edit(worktree, goal, tests, max_steps, prompt=None):
+    def secret_edit(worktree, goal, tests, max_steps, prompt=None, allowed_paths=None):
         (worktree / ".env").write_text("TOKEN=forbidden\n", encoding="utf-8")
         return "edited secret"
 
@@ -1219,7 +1232,7 @@ def test_development_task_does_not_commit_when_kilo_tests_fail(tmp_path, monkeyp
     repo = repository(tmp_path, passing=False)
     source_head = git(repo, "rev-parse", "HEAD")
 
-    def wrong_edit(worktree, goal, tests, max_steps, prompt=None):
+    def wrong_edit(worktree, goal, tests, max_steps, prompt=None, allowed_paths=None):
         (worktree / "calc.py").write_text("def answer():\n    return 3\n", encoding="utf-8")
         return "edited"
 
