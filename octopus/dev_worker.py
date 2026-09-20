@@ -146,10 +146,14 @@ _KILO_PROTECTED_PATTERNS = (
 )
 
 
-def _kilo_permissions() -> dict:
+def _kilo_permissions(allowed_paths: list[str] | None = None) -> dict:
     read = {"*": "allow"}
-    edit = {"*": "allow"}
-    write = {"*": "allow"}
+    if allowed_paths:
+        edit = {"*": "deny", **{path: "allow" for path in allowed_paths}}
+        write = {"*": "deny", **{path: "allow" for path in allowed_paths}}
+    else:
+        edit = {"*": "allow"}
+        write = {"*": "allow"}
     for pattern in _KILO_SENSITIVE_PATTERNS:
         read[pattern] = "deny"
         edit[pattern] = "deny"
@@ -258,9 +262,11 @@ def _build_kilo_prompt(
     return " ".join(parts)
 
 
-def _run_kilo(worktree: Path, goal: str, tests: list[list[str]], max_steps: int, prompt: str | None = None) -> str:
+def _run_kilo(
+        worktree: Path, goal: str, tests: list[list[str]], max_steps: int,
+        prompt: str | None = None, allowed_paths: list[str] | None = None) -> str:
     if prompt is None:
-        prompt = _build_kilo_prompt(goal, tests, max_steps)
+        prompt = _build_kilo_prompt(goal, tests, max_steps, allowed_paths=allowed_paths)
     config = {
         "plugin": [],
         "mcp": {},
@@ -271,7 +277,7 @@ def _run_kilo(worktree: Path, goal: str, tests: list[list[str]], max_steps: int,
                 "mode": "primary",
                 "model": KILO_MODEL,
                 "steps": max_steps,
-                "permission": _kilo_permissions(),
+                "permission": _kilo_permissions(allowed_paths),
             },
         },
     }
@@ -635,6 +641,18 @@ def _strict_repository_preflight(worktree: Path) -> None:
     risky = sorted(path for path in tracked.split("\0") if path and _tracked_sensitive_path(path))
     if risky:
         raise DevWorkerError("fichiers sensibles suivis interdits dans clone Kilo: " + ", ".join(risky[:20]))
+    secret_regex = (
+        r"(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|"
+        r"github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})"
+    )
+    scan = _run(["git", "grep", "-I", "-l", "-E", secret_regex, "HEAD", "--"], worktree)
+    if scan.returncode not in {0, 1}:
+        raise DevWorkerError((scan.stderr or scan.stdout or "scan secrets Git échoué")[-2000:])
+    if scan.returncode == 0 and scan.stdout.strip():
+        names = sorted(set(scan.stdout.splitlines()))
+        raise DevWorkerError(
+            "contenu secret à haute confiance détecté dans clone Kilo: " + ", ".join(names[:20])
+        )
     staged = _git(worktree, "ls-files", "-s")
     symlinks = []
     for line in staged.splitlines():
@@ -1315,7 +1333,9 @@ def development_task(ctx):
             repository_context=repository_context,
         )
         try:
-            kilo_output = _run_kilo(worktree, goal, tests, max_steps, prompt=prompt)
+            kilo_output = _run_kilo(
+                worktree, goal, tests, max_steps, prompt=prompt, allowed_paths=allowed_paths,
+            )
             summary = _kilo_output_summary(kilo_output)
             ctx.emit("development.kilo_pass", {
                 "attempt": attempt + 1,
