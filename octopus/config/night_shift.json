@@ -1,30 +1,46 @@
 {
-  "name": "night-canary-docs-v1",
+  "name": "night-canary-docs-v2",
   "policy": "docs_only",
   "tickets": [
     {
-      "goal": "Review docs/CODEX_START.md against the repository as it exists now. Update only stale factual branch, PR, completed-gate, or development-entrypoint references. Preserve the project rules and do not invent status. Modify only docs/CODEX_START.md.",
-      "allowed_paths": ["docs/CODEX_START.md"],
-      "test_targets": ["tests/test_dev_worker.py"],
-      "max_steps": 6
+      "goal": "In docs/CODEX_START.md, make a concrete documentation update that removes the stale current branch 'feat/salad-compute-provider' and stale PR '#2 — Draft'. State instead that main is the protected reference branch and development must happen on dedicated topic/worktree branches through PRs. Also update the 'Mission courante' section so it no longer presents G1/G2 as the current unfinished priority: note that the current development focus is DevWorker/Kilo autonomous-development reliability and bounded night-shift validation. Keep the rest of the document intact and modify only docs/CODEX_START.md.",
+      "allowed_paths": [
+        "docs/CODEX_START.md"
+      ],
+      "test_targets": [
+        "tests/test_dev_worker.py"
+      ],
+      "max_steps": 8
     },
     {
-      "goal": "Review docs/CURRENT_STATE.md against the current repository. Make a focused documentation-only update for capabilities that are demonstrably merged and remove stale current-state claims. Do not speculate and modify only docs/CURRENT_STATE.md.",
-      "allowed_paths": ["docs/CURRENT_STATE.md"],
-      "test_targets": ["tests/test_dev_worker.py"],
-      "max_steps": 6
+      "goal": "In docs/CURRENT_STATE.md, make a concrete documentation-only refresh for 20 September 2026. Replace the stale active branch/PR #2 state with the protected main branch, and record only these merged facts: PR #7 fixed the Kilo repair loop and real free OmniRoute devworker route; PR #8 added night-shift safety gates; PR #9 added the bounded autonomous night-shift canary runner. Mention that the live single development.task canary succeeded with Kilo/Step and a local commit, while the first night-shift docs canary still requires validation. Do not speculate and modify only docs/CURRENT_STATE.md.",
+      "allowed_paths": [
+        "docs/CURRENT_STATE.md"
+      ],
+      "test_targets": [
+        "tests/test_dev_worker.py"
+      ],
+      "max_steps": 8
     },
     {
-      "goal": "Review NEXT_STEPS.md against the current repository and merged implementation. Remove or rewrite only clearly stale completed next steps and make the remaining immediate technical priorities concrete. Do not broaden scope. Modify only NEXT_STEPS.md.",
-      "allowed_paths": ["NEXT_STEPS.md"],
-      "test_targets": ["tests/test_dev_worker.py"],
-      "max_steps": 6
+      "goal": "In NEXT_STEPS.md, make a focused documentation-only update that removes the stale statement that the compute PR is still Draft and adds the current immediate autonomous-development priorities: validate the docs-only night-shift canary end-to-end, then isolate test execution more strongly before allowing unattended Python edits, then wire Capability Manager missing-capability decisions into development.task. Preserve the existing compute/business gates that are still relevant. Modify only NEXT_STEPS.md.",
+      "allowed_paths": [
+        "NEXT_STEPS.md"
+      ],
+      "test_targets": [
+        "tests/test_dev_worker.py"
+      ],
+      "max_steps": 8
     },
     {
-      "goal": "Review README.md for stale setup or architecture statements that conflict with the current repository. Make the smallest documentation-only corrections that improve onboarding accuracy. Do not change product vision or governance. Modify only README.md.",
-      "allowed_paths": ["README.md"],
-      "test_targets": ["tests/test_dev_worker.py"],
-      "max_steps": 6
+      "goal": "In README.md, add a small onboarding section for autonomous development that documents the existing commands 'python -m octopus worker' and 'python -m octopus night-shift --repo . --dry-run', and states that night-shift V1 is documentation-only, free-model, local-commit only, with no automatic push or merge to main. Also remove the stale wording that the compute foundation only exists on an active development branch if present. Modify only README.md.",
+      "allowed_paths": [
+        "README.md"
+      ],
+      "test_targets": [
+        "tests/test_dev_worker.py"
+      ],
+      "max_steps": 8
     }
   ]
 }
