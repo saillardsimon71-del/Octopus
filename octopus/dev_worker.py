@@ -105,10 +105,12 @@ DEV_ACTION_TOOLS = [
 DEV_HISTORY_CHARS = 10_000
 DEV_INSPECTION_LIMIT = 6
 DEV_MIN_LLM_INTERVAL_S = 13.0
-KILO_MODEL = "kilo/nex-agi/nex-n2.5-pro:free"
+KILO_MODEL = "kilo/stepfun/step-3.7-flash:free"
 KILO_AGENT = "octopus-devworker"
 KILO_COMMAND = "kilo.cmd" if os.name == "nt" else "kilo"
 KILO_TIMEOUT_S = 600
+KILO_TEST_FEEDBACK_CHARS = 4000
+KILO_MAX_PASSES = 3
 _RETRY_DELAY_RE = re.compile(r"try again in ([0-9]+(?:\.[0-9]+)?)\s*(?:s|seconds?)\b", re.IGNORECASE)
 
 _KILO_SENSITIVE_PATTERNS = (
@@ -149,7 +151,37 @@ def _kilo_permissions() -> dict:
     return permissions
 
 
-def _run_kilo(worktree: Path, goal: str, tests: list[list[str]], max_steps: int) -> str:
+def _build_kilo_prompt(goal: str, tests: list[list[str]], max_steps: int, last_test_output: str = "", attempt: int = 0) -> str:
+    goal_text = " ".join(goal.split())
+    tests_text = " ; ".join(" ".join(command) for command in tests)
+    prefix = (
+        "Modify this isolated worktree to satisfy the task. "
+        "Use only read, glob, grep, edit, and write. "
+        "Use write only when a required new file must be created. "
+        "Do not run commands or tests, access secrets or .env files, change Kilo configuration, commit, push, "
+        "merge, or modify anything outside this worktree. "
+        "Make the smallest focused change and stop after saving the edits. "
+        "Inspect only files directly relevant to the goal. Prefer grep or glob before reading files. "
+        "Do not survey the entire repository. Avoid reading large unrelated files. "
+        "OCTOPUS will validate the diff and run deterministic tests itself. "
+    )
+    if attempt == 0:
+        prefix += f"GOAL: {goal_text} "
+    else:
+        prefix += (
+            "A previous Kilo attempt failed the external deterministic tests. "
+            "Make the smallest focused correction to satisfy the original goal. "
+            f"GOAL: {goal_text} "
+        )
+    prompt = prefix + f"TESTS THAT OCTOPUS WILL RUN: {tests_text}"
+    if last_test_output:
+        prompt += f" PREVIOUS_TEST_OUTPUT: {last_test_output[-KILO_TEST_FEEDBACK_CHARS:]}"
+    return prompt
+
+
+def _run_kilo(worktree: Path, goal: str, tests: list[list[str]], max_steps: int, prompt: str | None = None) -> str:
+    if prompt is None:
+        prompt = _build_kilo_prompt(goal, tests, max_steps)
     config = {
         "plugin": [],
         "mcp": {},
@@ -669,40 +701,51 @@ def development_task(ctx):
 
     original_head = _git(worktree, "rev-parse", "HEAD")
     original_status = _status_entries(worktree)
-    try:
-        _run_kilo(worktree, goal, tests, max_steps)
-    except (DevWorkerError, OSError, subprocess.SubprocessError) as exc:
-        pristine = (
-            _git(worktree, "rev-parse", "HEAD") == original_head
-            and _git(worktree, "branch", "--show-current") == branch
-            and _status_entries(worktree) == original_status
-        )
-        if pristine:
-            ctx.emit("development.kilo_fallback", {"error": f"{type(exc).__name__}: {exc}"[-2000:]})
-            return _run_declarative_backend(
-                ctx, goal, worktree, branch, tests, max_steps, fallback_from="kilo",
+    last_test_output = ""
+    for attempt in range(KILO_MAX_PASSES):
+        prompt = _build_kilo_prompt(goal, tests, max_steps, last_test_output, attempt)
+        try:
+            _run_kilo(worktree, goal, tests, max_steps, prompt=prompt)
+        except (DevWorkerError, OSError, subprocess.SubprocessError) as exc:
+            pristine = (
+                _git(worktree, "rev-parse", "HEAD") == original_head
+                and _git(worktree, "branch", "--show-current") == branch
+                and _status_entries(worktree) == original_status
             )
-        raise DevWorkerError(f"Kilo a échoué après modification; worktree conservé: {worktree}: {exc}") from exc
+            if pristine:
+                ctx.emit("development.kilo_fallback", {"error": f"{type(exc).__name__}: {exc}"[-2000:]})
+                return _run_declarative_backend(
+                    ctx, goal, worktree, branch, tests, max_steps, fallback_from="kilo",
+                )
+            raise DevWorkerError(f"Kilo a échoué après modification; worktree conservé: {worktree}: {exc}") from exc
 
-    changed_paths = _validate_kilo_result(worktree, original_head, branch)
-    ctx.emit("development.kilo_completed", {"changed_paths": changed_paths})
-    test_output, tests_passed, _ = _tool({"action": "test"}, worktree, tests, False)
-    ctx.emit("development.tool", {"action": "test", "ok": tests_passed})
-    if not tests_passed:
-        raise DevWorkerError(f"tests déterministes en échec; worktree conservé: {worktree}\n{test_output[-4000:]}")
-    changed_paths = _validate_kilo_result(worktree, original_head, branch)
-    commit_message = f"chore: complete development task {ctx.id}"
-    _, _, commit = _tool(
-        {"action": "commit", "message": commit_message}, worktree, tests, tests_passed,
-    )
-    result = {
-        "commit": commit,
-        "branch": branch,
-        "worktree": str(worktree),
-        "tests": tests,
-        "backend": "kilo",
-        "model": KILO_MODEL,
-        "changed_paths": changed_paths,
-    }
-    ctx.emit("development.committed", result)
-    return result
+        changed_paths = _validate_kilo_result(worktree, original_head, branch)
+        ctx.emit("development.kilo_completed", {"changed_paths": changed_paths})
+        test_output, tests_passed, _ = _tool({"action": "test"}, worktree, tests, False)
+        ctx.emit("development.tool", {"action": "test", "ok": tests_passed})
+        if tests_passed:
+            changed_paths = _validate_kilo_result(worktree, original_head, branch)
+            commit_message = f"chore: complete development task {ctx.id}"
+            _, _, commit = _tool(
+                {"action": "commit", "message": commit_message}, worktree, tests, tests_passed,
+            )
+            result = {
+                "commit": commit,
+                "branch": branch,
+                "worktree": str(worktree),
+                "tests": tests,
+                "backend": "kilo",
+                "model": KILO_MODEL,
+                "changed_paths": changed_paths,
+            }
+            ctx.emit("development.committed", result)
+            return result
+
+        last_test_output = test_output
+        if attempt < KILO_MAX_PASSES - 1:
+            ctx.emit("development.kilo_retry", {
+                "attempt": attempt + 1,
+                "max_passes": KILO_MAX_PASSES,
+                "test_output": test_output[-KILO_TEST_FEEDBACK_CHARS:],
+            })
+    raise DevWorkerError(f"tests déterministes en échec après {KILO_MAX_PASSES} passes Kilo; worktree conservé: {worktree}\n{last_test_output[-KILO_TEST_FEEDBACK_CHARS:]}")

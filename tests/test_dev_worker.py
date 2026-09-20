@@ -125,11 +125,11 @@ def test_devworker_subprocess_input_is_utf8(tmp_path):
     result = _run(
         [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"],
         tmp_path,
-        input_text="tiret‑insécable",
+        input_text="tiretâ€‘insÃ©cable",
     )
 
     assert result.returncode == 0
-    assert result.stdout == "tiret‑insécable"
+    assert result.stdout == "tiretâ€‘insÃ©cable"
 
 
 def test_devworker_strict_schema_builds_structured_output_request():
@@ -581,7 +581,7 @@ def test_devworker_kilo_run_is_inline_configured_and_deny_by_default(tmp_path, m
     assert "--auto" in args
     assert "--pure" not in args
     assert args[args.index("--dir") + 1] == str(worktree)
-    assert args[args.index("--model") + 1] == "kilo/nex-agi/nex-n2.5-pro:free"
+    assert args[args.index("--model") + 1] == "kilo/stepfun/step-3.7-flash:free"
     assert args[args.index("--agent") + 1] == "octopus-devworker"
     assert args[args.index("--format") + 1] == "json"
     assert "Change only calc.py." in args[-1]
@@ -649,7 +649,7 @@ def test_development_task_uses_kilo_then_validates_tests_and_commits(tmp_path, m
     source_head = git(repo, "rev-parse", "HEAD")
     seen = {}
 
-    def fake_kilo(worktree, goal, tests, max_steps):
+    def fake_kilo(worktree, goal, tests, max_steps, prompt=None):
         seen.update(worktree=worktree, goal=goal, tests=tests, max_steps=max_steps)
         (worktree / "calc.py").write_text("def answer():\n    return 2\n", encoding="utf-8")
         return "edited"
@@ -725,7 +725,7 @@ def test_development_task_does_not_fallback_after_kilo_modification(tmp_path, mo
     source_head = git(repo, "rev-parse", "HEAD")
     declarative_calls = []
 
-    def dirty_failure(worktree, goal, tests, max_steps):
+    def dirty_failure(worktree, goal, tests, max_steps, prompt=None):
         (worktree / "calc.py").write_text("def answer():\n    return 3\n", encoding="utf-8")
         raise dev_worker.DevWorkerError("Kilo failed after editing")
 
@@ -752,7 +752,7 @@ def test_development_task_rejects_commit_created_by_kilo(tmp_path, monkeypatch):
     repo = repository(tmp_path, passing=False)
     source_head = git(repo, "rev-parse", "HEAD")
 
-    def committing_kilo(worktree, goal, tests, max_steps):
+    def committing_kilo(worktree, goal, tests, max_steps, prompt=None):
         (worktree / "calc.py").write_text("def answer():\n    return 2\n", encoding="utf-8")
         git(worktree, "add", "calc.py")
         git(worktree, "commit", "-qm", "forbidden Kilo commit")
@@ -778,7 +778,7 @@ def test_development_task_rejects_forbidden_kilo_path(tmp_path, monkeypatch):
     repo = repository(tmp_path, passing=False)
     source_head = git(repo, "rev-parse", "HEAD")
 
-    def secret_edit(worktree, goal, tests, max_steps):
+    def secret_edit(worktree, goal, tests, max_steps, prompt=None):
         (worktree / ".env").write_text("TOKEN=forbidden\n", encoding="utf-8")
         return "edited secret"
 
@@ -803,7 +803,7 @@ def test_development_task_does_not_commit_when_kilo_tests_fail(tmp_path, monkeyp
     repo = repository(tmp_path, passing=False)
     source_head = git(repo, "rev-parse", "HEAD")
 
-    def wrong_edit(worktree, goal, tests, max_steps):
+    def wrong_edit(worktree, goal, tests, max_steps, prompt=None):
         (worktree / "calc.py").write_text("def answer():\n    return 3\n", encoding="utf-8")
         return "edited"
 
@@ -820,3 +820,4 @@ def test_development_task_does_not_commit_when_kilo_tests_fail(tmp_path, monkeyp
     worktree = next((Path(os.environ["OCTOPUS_HOME"]) / "data" / "dev-worktrees").glob("*"))
     assert git(worktree, "rev-parse", "HEAD") == source_head
     assert "calc.py" in git(worktree, "status", "--porcelain")
+
