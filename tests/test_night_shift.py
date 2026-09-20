@@ -75,6 +75,8 @@ def test_python_canary_requires_source_only_and_protects_trust_core():
         "tests/test_capabilities.py",
         "octopus/dev_worker.py",
         "octopus/night_shift.py",
+        "octopus/__init__.py",
+        "sitecustomize.py",
         "README.md",
     ):
         with pytest.raises(night_shift.NightShiftError):
@@ -114,16 +116,11 @@ def test_python_canary_runner_passes_docker_and_radius_to_development_task(tmp_p
         lambda repo: {"repository": str(repository), "base_head": "base"},
     )
     monkeypatch.setattr(
-        night_shift.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="[]", stderr=""),
+        night_shift.dev_worker,
+        "_docker_sandbox_probe",
+        lambda *args, **kwargs: ("sha256:probe", "probe green"),
     )
     monkeypatch.setattr(night_shift.worker, "load_handlers", lambda: {})
-    monkeypatch.setattr(
-        night_shift.dev_worker,
-        "_run_tests",
-        lambda *args, **kwargs: ("baseline green", True),
-    )
     monkeypatch.setattr(
         night_shift,
         "_create_night_worktree",
@@ -142,7 +139,13 @@ def test_python_canary_runner_passes_docker_and_radius_to_development_task(tmp_p
         lambda **kwargs: {
             "id": 77,
             "status": "done",
-            "output": {"commit": "abc123", "backend": "kilo", "test_sandbox": "docker"},
+            "output": {
+                "commit": "abc123",
+                "backend": "kilo",
+                "test_sandbox": "docker",
+                "worktree": str(repository),
+                "branch": "codex/devtask-77",
+            },
         },
     )
     monkeypatch.setattr(night_shift, "_fast_forward", lambda *args, **kwargs: None)
@@ -158,10 +161,13 @@ def test_python_canary_runner_passes_docker_and_radius_to_development_task(tmp_p
     assert result["status"] == "backlog_complete"
     task_input = captured["input"]
     assert task_input["test_sandbox"] == "docker"
-    assert task_input["test_sandbox_image"] == "octopus-test-sandbox:py311"
+    assert task_input["test_sandbox_image"] == "sha256:probe"
     assert task_input["max_files_changed"] == 1
     assert task_input["max_lines_added"] == 80
     assert task_input["max_lines_deleted"] == 80
+    assert task_input["strict_repository_preflight"] is True
+    assert task_input["require_baseline_oracle"] is True
+    assert task_input["python_canary_ast"] is True
     assert task_input["allow_declarative_fallback"] is False
 
 
@@ -213,14 +219,20 @@ def test_night_run_forces_kilo_scope_no_fallback_and_fast_forwards(tmp_path, mon
         lambda **kwargs: {
             "id": 42,
             "status": "done",
-            "output": {"commit": "abc123", "backend": "kilo"},
+            "output": {
+                "commit": "abc123",
+                "backend": "kilo",
+                "worktree": str(repository),
+                "branch": "codex/devtask-42",
+            },
         },
     )
     forwarded = []
     monkeypatch.setattr(
         night_shift,
         "_fast_forward",
-        lambda repo, commit: forwarded.append((repo, commit)),
+        lambda repo, commit, source_repo=None, source_branch=None:
+            forwarded.append((repo, commit, source_repo, source_branch)),
     )
     monkeypatch.setattr(
         night_shift,
@@ -247,7 +259,7 @@ def test_night_run_forces_kilo_scope_no_fallback_and_fast_forwards(tmp_path, mon
     assert task_input["noop_allowed"] is False
     assert task_input["tests"][0][0]
     assert task_input["tests"][0][1:] == ["-m", "pytest", "-q", "tests/test_dev_worker.py"]
-    assert forwarded == [(repository, "abc123")]
+    assert forwarded == [(repository, "abc123", repository, "codex/devtask-42")]
 
 
 def test_night_run_accepts_justified_noop_without_fast_forward(tmp_path, monkeypatch):
