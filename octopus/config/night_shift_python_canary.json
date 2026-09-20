@@ -1,0 +1,27 @@
+{
+  "name": "python-canary-v1",
+  "policy": "python_canary",
+  "tickets": [
+    {
+      "goal": "In octopus/capabilities.py, introduce one small private helper that centralizes normalization of enum-like string values (strip, lowercase, hyphen/space to underscore) and use it from _coerce_enum. Preserve every public API, alias, error behavior, ordering rule, and evaluation semantic. Do not modify tests or any other file.",
+      "allowed_paths": [
+        "octopus/capabilities.py"
+      ],
+      "test_targets": [
+        "tests/test_capabilities.py"
+      ],
+      "max_steps": 20,
+      "acceptance_criteria": [
+        "normalization logic is centralized in a small private helper",
+        "_coerce_enum uses the helper",
+        "public capability behavior and aliases remain unchanged",
+        "the existing capability test suite passes unchanged"
+      ],
+      "noop_allowed": false,
+      "test_sandbox_image": "octopus-test-sandbox:py311",
+      "max_files_changed": 1,
+      "max_lines_added": 40,
+      "max_lines_deleted": 40
+    }
+  ]
+}
