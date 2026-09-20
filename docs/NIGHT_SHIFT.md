@@ -9,11 +9,14 @@ Le mode `night-shift` exécute une petite file de tâches de développement sans
 - fallback declarative désactivé ;
 - maximum 5 tickets ;
 - maximum 8 heures ;
+- budget par ticket explicite (20 steps par défaut pour les revues docs, plafond 25 dans le runner) ;
 - arrêt après 2 échecs consécutifs ;
 - une allowlist exacte de fichiers modifiables par ticket ;
 - `AGENTS.md` et `docs/ACCEPTANCE_GATES.md` interdits ;
 - aucun fichier de test modifiable ;
 - tests lancés avec les variables de type clé/token/secret retirées et un HOME temporaire ;
+- `NO_CHANGE_NEEDED` est accepté uniquement si le ticket l'autorise explicitement et que Step le justifie ;
+- kill switch local : créer `data/NIGHT_SHIFT_STOP` pour arrêter avant le ticket suivant ;
 - aucun push ;
 - aucun merge vers `main`.
 
