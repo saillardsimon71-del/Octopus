@@ -185,19 +185,14 @@ def test_devworker_groq_uses_tool_call_with_local_validation(monkeypatch):
     assert request["reasoning_effort"] == "low"
 
 
-def test_devworker_falls_back_from_gemini_429_to_groq_tools(
+def test_devworker_uses_direct_groq_route_with_tools(
         monkeypatch, providers_up, transport):
     from octopus import dev_worker, llm
-
-    class RateLimitError(Exception):
-        pass
 
     monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
     monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
 
     def reply(provider, request):
-        if request["model"] == "octopus-free-devworker-gemini":
-            return RateLimitError("429 quota exhausted")
         assert request["tools"] == dev_worker.DEV_ACTION_TOOLS
         assert request["tool_choice"] == "required"
         return llm.TransportResult(
@@ -220,9 +215,7 @@ def test_devworker_falls_back_from_gemini_429_to_groq_tools(
         validate=dev_worker._parse_action,
     )
 
-    assert transport.models == [
-        "octopus-free-devworker-gemini", "octopus-free-devworker-groq",
-    ]
+    assert transport.models == ["groq/openai/gpt-oss-120b"]
     assert completion.data == {
         "action": "search", "path": None, "query": "needle", "patch": None, "message": None,
     }
@@ -640,6 +633,68 @@ def test_devworker_kilo_failure_includes_bounded_cli_error(tmp_path, monkeypatch
         dev_worker._run_kilo(
             tmp_path, "change", [[sys.executable, "-m", "pytest", "-q", "test_x.py"]], 2,
         )
+
+
+def test_run_kilo_preserves_supplied_retry_prompt(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    seen = {}
+
+    def fake_run(args, **kwargs):
+        seen["args"] = args
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(dev_worker.subprocess, "run", fake_run)
+
+    dev_worker._run_kilo(
+        tmp_path,
+        "change",
+        [[sys.executable, "-m", "pytest", "-q", "test_x.py"]],
+        2,
+        prompt="SENTINEL_RETRY_PROMPT",
+    )
+
+    assert seen["args"][-1] == "SENTINEL_RETRY_PROMPT"
+
+
+def test_development_task_retries_kilo_after_diff_check_failure(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=False)
+    prompts = []
+
+    def repairing_kilo(worktree, goal, tests, max_steps, prompt=None):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            (worktree / "calc.py").write_text(
+                "def answer():  \n    return 2\n",
+                encoding="utf-8",
+            )
+        else:
+            (worktree / "calc.py").write_text(
+                "def answer():\n    return 2\n",
+                encoding="utf-8",
+            )
+        return "edited"
+
+    monkeypatch.setattr(dev_worker, "_run_kilo", repairing_kilo)
+
+    task_id = worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Make the deterministic test pass.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "max_steps": 7,
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "done"
+    assert result["output"]["backend"] == "kilo"
+    assert len(prompts) == 2
+    assert "PREVIOUS_TEST_OUTPUT:" in prompts[1]
+    assert "diff_check:" in prompts[1]
+    assert "trailing whitespace" in prompts[1]
+    assert any(event["type"] == "development.kilo_retry" for event in tasks.events(task_id=task_id))
 
 
 def test_development_task_uses_kilo_then_validates_tests_and_commits(tmp_path, monkeypatch):
