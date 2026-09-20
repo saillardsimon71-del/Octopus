@@ -781,6 +781,117 @@ def test_sanitized_test_env_hides_credentials_and_uses_temp_home(monkeypatch, tm
     assert "-p no:cacheprovider" in env["PYTEST_ADDOPTS"]
 
 
+def test_docker_test_args_are_networkless_read_only_and_secret_free(tmp_path):
+    from octopus import dev_worker
+
+    args = dev_worker._docker_test_args(
+        tmp_path,
+        "octopus-test-sandbox:py311",
+        [sys.executable, "-m", "pytest", "-q", "tests/test_capabilities.py"],
+    )
+
+    assert args[:4] == ["docker", "run", "--rm", "--network"]
+    assert "none" in args
+    assert "--read-only" in args
+    assert ["--cap-drop", "ALL"] == args[args.index("--cap-drop"):args.index("--cap-drop") + 2]
+    assert ["--security-opt", "no-new-privileges"] == args[
+        args.index("--security-opt"):args.index("--security-opt") + 2
+    ]
+    assert any(value.endswith(":/workspace:ro") for value in args)
+    assert "octopus-test-sandbox:py311" in args
+    joined = " ".join(args)
+    assert "OMNIROUTE_API_KEY" not in joined
+    assert "TOKEN" not in joined
+    assert "SECRET" not in joined
+
+
+def test_run_tests_docker_fails_closed_without_image(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    calls = []
+
+    def fake_run(args, cwd, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=1, stdout="", stderr="missing")
+
+    monkeypatch.setattr(dev_worker, "_run", fake_run)
+
+    with pytest.raises(dev_worker.DevWorkerError, match="image sandbox Docker absente"):
+        dev_worker._run_tests(
+            tmp_path,
+            [[sys.executable, "-m", "pytest", "-q", "tests/test_capabilities.py"]],
+            sandbox="docker",
+            sandbox_image="octopus-test-sandbox:py311",
+        )
+
+    assert calls == [["docker", "image", "inspect", "octopus-test-sandbox:py311"]]
+
+
+def test_validate_kilo_result_enforces_diff_radius(tmp_path):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=True)
+    original_head = git(repo, "rev-parse", "HEAD")
+    branch = git(repo, "branch", "--show-current")
+    (repo / "calc.py").write_text(
+        "def answer():\n    value = 1\n    return value\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(dev_worker.DevWorkerError, match="rayon de modification dépassé"):
+        dev_worker._validate_kilo_result(
+            repo,
+            original_head,
+            branch,
+            allowed_paths=["calc.py"],
+            max_files_changed=1,
+            max_lines_added=1,
+            max_lines_deleted=10,
+        )
+
+
+def test_development_task_can_use_docker_test_sandbox(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=False)
+
+    def fake_kilo(worktree, goal, tests, max_steps, prompt=None):
+        (worktree / "calc.py").write_text("def answer():\n    return 2\n", encoding="utf-8")
+        return "edited"
+
+    seen = []
+
+    def fake_run_tests(worktree, tests, *, sandbox="host", sandbox_image=dev_worker.DEFAULT_TEST_SANDBOX_IMAGE):
+        seen.append((sandbox, sandbox_image, tests))
+        return "green", True
+
+    monkeypatch.setattr(dev_worker, "_run_kilo", fake_kilo)
+    monkeypatch.setattr(dev_worker, "_run_tests", fake_run_tests)
+
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Make the deterministic test pass.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "max_steps": 12,
+        "backend": "kilo",
+        "allowed_paths": ["calc.py"],
+        "test_sandbox": "docker",
+        "test_sandbox_image": "octopus-test-sandbox:py311",
+        "max_files_changed": 1,
+        "max_lines_added": 10,
+        "max_lines_deleted": 10,
+        "allow_declarative_fallback": False,
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "done"
+    assert result["output"]["test_sandbox"] == "docker"
+    assert seen
+    assert seen[0][0] == "docker"
+    assert seen[0][1] == "octopus-test-sandbox:py311"
+
+
 def test_kilo_prompt_allows_broad_reading_but_keeps_write_scope():
     from octopus import dev_worker
 
