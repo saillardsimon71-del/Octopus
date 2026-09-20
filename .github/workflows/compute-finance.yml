@@ -5,15 +5,6 @@ on:
     branches:
       - "feat/salad-compute-provider"
   pull_request:
-    paths:
-      - "octopus/compute.py"
-      - "octopus/compute_broker.py"
-      - "octopus/compute_finance.py"
-      - "octopus/gpuai.py"
-      - "octopus/salad.py"
-      - "octopus/journal.py"
-      - "tests/test_compute_*.py"
-      - ".github/workflows/compute-finance.yml"
   workflow_dispatch:
 
 permissions:
