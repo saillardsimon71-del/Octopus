@@ -19,7 +19,7 @@ Version 0.2. Quatre briques, utilisées par Podalux sans changer ses signatures 
 | `quality_first` | meilleur modèle validé d'abord, repli sur un modèle gratuit si le budget bloque |
 | `bench` | réservé au banc |
 
-Coupe-circuit : `OCTOPUS=off` rétablit l'appel direct historique (ni journal, ni passerelle).
+Coupe-circuit : l'appel direct historique exige simultanément `OCTOPUS=off` et `OCTOPUS_ALLOW_LEGACY_DIRECT=1` (ni journal, ni passerelle). `OCTOPUS=off` seul refuse l'appel LLM direct.
 
 ## Budgets
 

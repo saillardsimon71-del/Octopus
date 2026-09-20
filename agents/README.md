@@ -1,6 +1,6 @@
 # Groupe d'agents Podalux
 
-Orchestrateur de 6 agents pilotés par un gateway LLM compatible OpenAI. En configuration normale, les appels passent par OmniRoute en `zero_cost` ; le rendu vidéo lourd est cloud-first.
+Orchestrateur de 6 agents pilotés par un gateway LLM compatible OpenAI. En configuration normale, les appels passent par OmniRoute en `zero_cost` ; RunPod reste un renderer legacy sous opt-in explicite.
 
 ## Roster
 
@@ -19,7 +19,7 @@ Orchestrateur de 6 agents pilotés par un gateway LLM compatible OpenAI. En conf
 SOUT → CONVERT → FORGE → GROWTH → LEDGER → ORBIT
 ```
 
-FORGE conserve le pipeline historique ; `agents/cycle.py` choisit désormais le renderer **cloud par défaut**. Le mode local reste disponible explicitement via `PODALUX_VIDEO_RENDERER=local`.
+FORGE conserve le pipeline historique en mode local par défaut. Le renderer RunPod est legacy et exige `PODALUX_VIDEO_RENDERER=cloud` ainsi que `OCTOPUS_ALLOW_LEGACY_RUNPOD=1`.
 
 ## Architecture LLM
 

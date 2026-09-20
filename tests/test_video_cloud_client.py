@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from octopus.video.client import CloudVideoConfig, CloudVideoError, CloudVideoClient
 from octopus.video.contract import VideoJob, VideoStatus
 from octopus.video.runpod import RunPodConfig, RunPodServerlessClient
@@ -70,7 +72,14 @@ def test_generic_completed_without_video_fails():
         raise AssertionError("COMPLETED sans video_url doit échouer")
 
 
-def test_runpod_wraps_payload_in_input():
+def test_runpod_requires_explicit_legacy_opt_in(monkeypatch):
+    monkeypatch.delenv("OCTOPUS_ALLOW_LEGACY_RUNPOD", raising=False)
+    with pytest.raises(CloudVideoError, match="legacy.*désactivé"):
+        RunPodServerlessClient(RunPodConfig("endpoint-1", "secret-token"))
+
+
+def test_runpod_wraps_payload_in_input(monkeypatch):
+    monkeypatch.setenv("OCTOPUS_ALLOW_LEGACY_RUNPOD", "1")
     opener = FakeOpener([{ "id": "rp-1", "status": "IN_QUEUE" }])
     client = RunPodServerlessClient(RunPodConfig("endpoint-1", "secret-token"), opener=opener)
     client.submit(job())

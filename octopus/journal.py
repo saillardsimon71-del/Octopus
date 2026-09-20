@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from . import enabled, paths
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 9
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -481,18 +481,109 @@ CREATE TABLE IF NOT EXISTS resources (
 CREATE INDEX IF NOT EXISTS idx_resources_state ON resources(state, kind);
 """
 
-_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4), (5, _SCHEMA_V5), (6, _SCHEMA_V6))
+
+_SCHEMA_V7 = """
+CREATE TABLE IF NOT EXISTS compute_reservations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    business TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    operation_id TEXT,
+    resource_id TEXT,
+    stop_operation_id TEXT,
+    job_key TEXT,
+    batch_key TEXT,
+    task_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'reserved',
+    units_planned INTEGER NOT NULL DEFAULT 1,
+    units_completed INTEGER NOT NULL DEFAULT 0,
+    estimated_cost_usd REAL NOT NULL,
+    hard_cap_usd REAL NOT NULL,
+    price_per_hour REAL NOT NULL,
+    max_runtime_s REAL NOT NULL,
+    idle_timeout_s REAL NOT NULL,
+    actual_cost_usd REAL,
+    cost_nature TEXT,
+    reason TEXT,
+    created_at REAL NOT NULL,
+    started_at REAL,
+    last_activity_at REAL NOT NULL,
+    stop_requested_at REAL,
+    closed_at REAL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compute_reservations_status ON compute_reservations(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_compute_reservations_business ON compute_reservations(business, created_at);
+CREATE INDEX IF NOT EXISTS idx_compute_reservations_batch ON compute_reservations(batch_key, created_at);
+CREATE TABLE IF NOT EXISTS compute_cost_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reservation_id INTEGER NOT NULL REFERENCES compute_reservations(id),
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL,
+    amount_usd REAL,
+    data TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_compute_cost_events_reservation ON compute_cost_events(reservation_id, id);
+"""
+
+
+_SCHEMA_V8 = """
+CREATE TABLE IF NOT EXISTS compute_spend_links (
+    reservation_id INTEGER PRIMARY KEY REFERENCES compute_reservations(id),
+    spend_request_id INTEGER NOT NULL UNIQUE REFERENCES spend_requests(id)
+);
+CREATE INDEX IF NOT EXISTS idx_compute_spend_links_request ON compute_spend_links(spend_request_id);
+"""
+
+_SCHEMA_V9_COLUMNS = (
+    ("requested_model", "TEXT"),
+    ("resolved_model", "TEXT"),
+    ("resolved_provider", "TEXT"),
+    ("request_id", "TEXT"),
+    ("provider_cost_usd", "REAL"),
+)
+
+# V9 est appliqu?e par _migrate_v9 : SQLite ne fournit pas
+# ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
+_SCHEMA_V9 = ""
+
+_MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4), (5, _SCHEMA_V5),
+               (6, _SCHEMA_V6), (7, _SCHEMA_V7), (8, _SCHEMA_V8), (9, _SCHEMA_V9))
 
 _LLM_COLUMNS = (
     "ts", "run_id", "root_run_id", "business", "agent", "task", "profile", "model", "provider",
     "cost_class", "attempt", "status", "error", "prompt_tokens", "cache_hit_tokens",
     "cache_miss_tokens", "completion_tokens", "reasoning_tokens", "cost_usd", "peak",
-    "duration_ms", "prompt_sha256", "prompt_chars", "output_preview", "justification",
+    "duration_ms", "prompt_sha256", "prompt_chars", "output_preview", "justification", "requested_model",
+    "resolved_model", "resolved_provider", "request_id", "provider_cost_usd",
 )
 _BENCH_COLUMNS = (
     "ts", "bench_run_id", "suite", "task", "item", "model", "repeat", "prompt_version", "passed",
     "score", "value", "checks", "latency_ms", "cost_usd", "llm_call_id", "error", "output_preview",
 )
+
+
+def _migrate_v9(conn: sqlite3.Connection) -> None:
+    """Reprend V9 m?me si une tentative pr?c?dente a d?j? ajout? des colonnes."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version >= 9:
+            conn.commit()
+            return
+
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(llm_calls)")}
+
+        for name, declaration in _SCHEMA_V9_COLUMNS:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE llm_calls ADD COLUMN {name} {declaration}")
+                existing.add(name)
+
+        conn.execute("PRAGMA user_version=9")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 def connect() -> sqlite3.Connection:
@@ -506,9 +597,13 @@ def connect() -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode=WAL")
         for target, script in _MIGRATIONS:
             if version < target:
-                conn.executescript(script)  # IF NOT EXISTS : rejouable si deux processus migrent ensemble
-                conn.execute(f"PRAGMA user_version={target}")
-                conn.commit()
+                if target == 9:
+                    _migrate_v9(conn)
+                else:
+                    conn.executescript(script)
+                    conn.execute(f"PRAGMA user_version={target}")
+                    conn.commit()
+                version = target
     return conn
 
 

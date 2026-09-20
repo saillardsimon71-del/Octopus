@@ -36,7 +36,10 @@ L'instance doit ensuite afficher/répondre sur l'endpoint local fourni par l'ins
 OMNIROUTE_ENABLED=1
 OMNIROUTE_BASE_URL=http://127.0.0.1:20128/v1
 OMNIROUTE_MODEL=auto/best-free
+OMNIROUTE_ZERO_COST_ATTESTATION=free_only
 ```
+
+Définir `OMNIROUTE_ZERO_COST_ATTESTATION=free_only` uniquement pour une clé ou une instance dont toutes les connexions accessibles sont gratuites. Sans cette attestation explicite, OmniRoute est refusé par le profil `zero_cost` avant l'appel.
 
 La clé ne va jamais dans Git. La définir uniquement dans l'environnement utilisateur Windows :
 
@@ -44,6 +47,7 @@ La clé ne va jamais dans Git. La définir uniquement dans l'environnement utili
 [Environment]::SetEnvironmentVariable("OMNIROUTE_API_KEY", "<CLE_OMNIROUTE>", "User")
 [Environment]::SetEnvironmentVariable("OMNIROUTE_ENABLED", "1", "User")
 [Environment]::SetEnvironmentVariable("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1", "User")
+[Environment]::SetEnvironmentVariable("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only", "User")
 ```
 
 Fermer/réouvrir PowerShell après changement d'environnement.
@@ -65,15 +69,19 @@ Le diagnostic contrôle désormais Playwright/Chromium, la base locale, OmniRout
 
 ## Coût / sécurité
 
-`zero_cost` interdit les modèles `paid`. Une panne OmniRoute ou de tout son pool gratuit doit donc produire un échec explicite plutôt qu'un basculement implicite vers DeepSeek.
+`zero_cost` interdit les modèles marqués `paid` **dans le catalogue OCTOPUS** et empêche donc un fallback explicite d'OCTOPUS vers DeepSeek payant.
+
+Le profil `zero_cost` exige l'attestation explicite d'un pool OmniRoute free-only avant l'appel. Après la réponse, OCTOPUS journalise le modèle, le provider, le request id et le coût annoncés par OmniRoute. Une réponse sans identité résolue ou avec un coût non nul est bloquée et ne déclenche aucun fallback payant.
+
+Voir `audits/LLM_BRAIN_AUDIT_2026-09-19.md`.
 
 OmniRoute est une passerelle locale : le prompt peut néanmoins être transmis au provider final choisi par OmniRoute. Ne pas considérer `OMNIROUTE_BASE_URL=localhost` comme une garantie que les données restent sur la machine.
 
 ## Revenir temporairement au comportement historique
 
 ```text
-OMNIROUTE_ENABLED=0
-OCTOPUS_PROFILE=legacy
+OCTOPUS=off
+OCTOPUS_ALLOW_LEGACY_DIRECT=1
 ```
 
-Ce mode réactive les appels directs historiques et doit rester exceptionnel si le quota DeepSeek est épuisé.
+Les deux variables sont obligatoires. Ce mode réactive les appels directs historiques sans les protections OCTOPUS et doit rester exceptionnel.

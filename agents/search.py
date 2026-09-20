@@ -25,6 +25,19 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 # PODALUX_WIKI_USER_AGENT, ex. "Podalux/0.2 (contact: vous@exemple.fr)".
 WIKI_UA = {"User-Agent": os.environ.get("PODALUX_WIKI_USER_AGENT", "").strip()
            or "Podalux/0.2 (agent de veille personnel; python-requests)"}
+SEARCH_COST_CLASS_ENV = {
+    "brave": "OCTOPUS_SEARCH_BRAVE_COST_CLASS",
+    "tavily": "OCTOPUS_SEARCH_TAVILY_COST_CLASS",
+}
+
+
+def _require_free_quota(provider: str) -> None:
+    env_name = SEARCH_COST_CLASS_ENV[provider]
+    cost_class = os.environ.get(env_name, "").strip().lower()
+    if cost_class == "paid":
+        raise RuntimeError(f"{provider} : cost class paid bloquée sans allowance")
+    if cost_class != "free_quota":
+        raise RuntimeError(f"{provider} : cost class non déclarée ({env_name}=free_quota requis)")
 
 
 def _strip_html(s: str) -> str:
@@ -40,6 +53,7 @@ def _item(provider: str, title: str, url: str = "", source: str = "", date: str 
 
 
 def _brave_items(query: str, max_results: int) -> list[dict]:
+    _require_free_quota("brave")
     r = requests.get("https://api.search.brave.com/res/v1/web/search",
                      params={"q": query, "count": max_results},
                      headers={"X-Subscription-Token": config.BRAVE_API_KEY,
@@ -50,6 +64,7 @@ def _brave_items(query: str, max_results: int) -> list[dict]:
 
 
 def _tavily_items(query: str, max_results: int) -> list[dict]:
+    _require_free_quota("tavily")
     r = requests.post("https://api.tavily.com/search",
                       json={"query": query, "max_results": max_results},
                       headers={"Authorization": f"Bearer {config.TAVILY_API_KEY}"},

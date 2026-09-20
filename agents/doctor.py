@@ -125,7 +125,7 @@ def _voice_check(blocking: bool) -> "Check":
 
 def run_checks() -> list[Check]:
     checks: list[Check] = []
-    video_mode = os.environ.get("PODALUX_VIDEO_RENDERER", "cloud").strip().lower() or "cloud"
+    video_mode = os.environ.get("PODALUX_VIDEO_RENDERER", "local").strip().lower() or "local"
     video_provider = os.environ.get("PODALUX_VIDEO_PROVIDER", "runpod").strip().lower() or "runpod"
     omni_enabled = os.environ.get("OMNIROUTE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 

@@ -27,8 +27,8 @@ from typing import Any, Callable
 from . import catalog, journal, pricing
 from .pricing import Usage
 
-__all__ = ["BudgetExceeded", "Completion", "GatewayError", "InvalidOutput", "NoEligibleModel", "Usage",
-           "complete", "legacy_task", "parse_json"]
+__all__ = ["BudgetExceeded", "Completion", "GatewayError", "InvalidOutput", "NoEligibleModel", "TransportResult",
+           "Usage", "complete", "legacy_task", "parse_json"]
 
 
 class GatewayError(RuntimeError):
@@ -58,8 +58,24 @@ class Completion:
     cost_usd: float
     usage: Usage
     call_id: int
+    requested_model: str | None = None
+    resolved_model: str | None = None
+    resolved_provider: str | None = None
+    request_id: str | None = None
+    provider_cost_usd: float | None = None
     data: Any = None
     justification: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TransportResult:
+    text: str
+    usage: Usage
+    requested_model: str
+    resolved_model: str | None = None
+    resolved_provider: str | None = None
+    request_id: str | None = None
+    provider_cost_usd: float | None = None
 
 
 _JSON_RE = re.compile(r"\{.*\}", re.S)
@@ -119,11 +135,61 @@ def provider_status(name: str, provider: dict) -> tuple[bool, str]:
 
 # --- transport (remplacable dans les tests) ----------------------------------------------
 
-_transport_override: Callable[[dict, dict], tuple[str, Usage]] | None = None
+_transport_override: Callable[[dict, dict], tuple[str, Usage] | TransportResult] | None = None
 _clients: dict[tuple, Any] = {}
 
 
-def _transport(provider: dict, request: dict) -> tuple[str, Usage]:
+def _matches_json_type(value: Any, expected: str | list[str]) -> bool:
+    types = [expected] if isinstance(expected, str) else expected
+    checks = {
+        "null": value is None,
+        "string": isinstance(value, str),
+        "object": isinstance(value, dict),
+        "array": isinstance(value, list),
+        "boolean": isinstance(value, bool),
+        "integer": isinstance(value, int) and not isinstance(value, bool),
+        "number": isinstance(value, (int, float)) and not isinstance(value, bool),
+    }
+    return any(checks.get(kind, False) for kind in types)
+
+
+def _declarative_tool_text(request: dict, message: Any) -> str:
+    declared = {
+        tool["function"]["name"]: tool["function"]
+        for tool in request.get("tools", [])
+        if tool.get("type") == "function" and isinstance(tool.get("function"), dict)
+    }
+    tool_calls = getattr(message, "tool_calls", None) or []
+    if len(tool_calls) != 1:
+        raise ValueError("un appel d'outil structuré est requis")
+    call = tool_calls[0].function
+    if call.name not in declared:
+        raise ValueError(f"outil structuré inconnu: {call.name}")
+    if not isinstance(call.arguments, str) or not call.arguments.strip():
+        raise ValueError(f"arguments absents pour l'outil structuré: {call.name}")
+    try:
+        arguments = json.loads(call.arguments)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"arguments JSON invalides pour l'outil structuré: {call.name}") from exc
+    if not isinstance(arguments, dict):
+        raise ValueError(f"arguments objet attendus pour l'outil structuré: {call.name}")
+
+    parameters = declared[call.name].get("parameters", {})
+    properties = parameters.get("properties", {})
+    unexpected = sorted(set(arguments) - set(properties))
+    if parameters.get("additionalProperties") is False and unexpected:
+        raise ValueError(f"arguments inattendus pour l'outil structuré {call.name}: {unexpected}")
+    missing = sorted(set(parameters.get("required", [])) - set(arguments))
+    if missing:
+        raise ValueError(f"arguments requis absents pour l'outil structuré {call.name}: {missing}")
+    for name, value in arguments.items():
+        expected = properties.get(name, {}).get("type")
+        if expected is not None and not _matches_json_type(value, expected):
+            raise ValueError(f"type invalide pour l'argument {name} de l'outil structuré {call.name}")
+    return json.dumps({"action": call.name, **arguments}, ensure_ascii=False, separators=(",", ":"))
+
+
+def _transport(provider: dict, request: dict) -> tuple[str, Usage] | TransportResult:
     if _transport_override is not None:
         return _transport_override(provider, request)
     from openai import OpenAI
@@ -138,9 +204,64 @@ def _transport(provider: dict, request: dict) -> tuple[str, Usage]:
         if provider.get("max_retries") is not None:
             kwargs["max_retries"] = provider["max_retries"]
         client = _clients[key] = OpenAI(**kwargs)
-    response = client.chat.completions.create(**request)
-    text = (response.choices[0].message.content or "").strip()
-    return text, _usage(getattr(response, "usage", None))
+    raw_response = client.chat.completions.with_raw_response.create(**request)
+    response = raw_response.parse()
+    headers = raw_response.headers
+    message = response.choices[0].message
+    text = (message.content or "").strip()
+    tool_choice = request.get("tool_choice")
+    if tool_choice == "required":
+        text = _declarative_tool_text(request, message)
+    elif isinstance(tool_choice, dict):
+        expected_tool = tool_choice.get("function", {}).get("name")
+        tool_calls = getattr(message, "tool_calls", None) or []
+        if expected_tool and (len(tool_calls) != 1 or tool_calls[0].function.name != expected_tool):
+            raise ValueError(f"appel structuré attendu: {expected_tool}")
+        arguments = tool_calls[0].function.arguments if expected_tool else None
+        if expected_tool and (not isinstance(arguments, str) or not arguments.strip()):
+            raise ValueError(f"arguments absents pour l'appel structuré: {expected_tool}")
+        if expected_tool:
+            text = arguments.strip()
+    provider_cost = headers.get("x-omniroute-response-cost")
+    try:
+        provider_cost_usd = float(provider_cost) if provider_cost is not None else None
+    except ValueError:
+        provider_cost_usd = None
+
+    litellm_model = headers.get("x-litellm-model-name")
+    resolved_model = (
+        headers.get("x-omniroute-model")
+        or litellm_model
+        or getattr(response, "model", None)
+    )
+    resolved_provider = headers.get("x-omniroute-provider")
+    if resolved_provider is None and litellm_model and "/" in litellm_model:
+        resolved_provider = litellm_model.split("/", 1)[0]
+
+    return TransportResult(
+        text=text,
+        usage=_usage(getattr(response, "usage", None)),
+        requested_model=request["model"],
+        resolved_model=resolved_model,
+        resolved_provider=resolved_provider,
+        request_id=raw_response.request_id,
+        provider_cost_usd=provider_cost_usd,
+    )
+
+
+def _transport_result(value: tuple[str, Usage] | TransportResult, requested_model: str,
+                      requested_provider: str) -> TransportResult:
+    if isinstance(value, TransportResult):
+        return value
+    text, usage = value
+    resolved = requested_provider != "omniroute"
+    return TransportResult(
+        text=text,
+        usage=usage,
+        requested_model=requested_model,
+        resolved_model=requested_model if resolved else None,
+        resolved_provider=requested_provider if resolved else None,
+    )
 
 
 def _opt_int(value) -> int | None:
@@ -194,6 +315,9 @@ def _ineligibility(cat, profile_name: str, profile: dict, task: str, task_def: d
     missing = needs - set(model.get("capabilities", []))
     if missing:
         return "capacites manquantes : " + ", ".join(sorted(missing))
+    if (profile_name == "zero_cost" and model["provider"] == "omniroute"
+            and model.get("zero_cost_attestation") != "free_only"):
+        return "pool OmniRoute : attestation free_only absente"
     ok, why = provider_status(model["provider"], cat.provider(model["provider"]))
     if not ok:
         return why
@@ -240,14 +364,33 @@ def _budget_block(ctx, cat: catalog.Catalog, business: str, estimate: float) -> 
 
 
 def _build_request(model: dict, messages: list[dict], max_tokens: int, json_mode: bool,
-                   reasoning: str | None) -> dict:
+                   reasoning: str | None, json_schema: dict | None = None,
+                   tool_schemas: list[dict] | None = None) -> dict:
     request: dict = {"model": model["api_model"], "messages": messages, "max_tokens": max_tokens}
     capabilities = model.get("capabilities", [])
     if reasoning and "reasoning_effort" in capabilities:
         request["reasoning_effort"] = reasoning
     for key, value in copy.deepcopy(model.get("params", {})).items():
         request.setdefault(key, value)
-    if json_mode and "json" in capabilities:
+    if json_schema is not None and "json" in capabilities:
+        schema_mode = model.get("json_schema_mode")
+        if schema_mode == "tool_call":
+            if not tool_schemas:
+                raise ValueError("schémas d'outils déclaratifs requis pour le mode tool_call")
+            request["tools"] = copy.deepcopy(tool_schemas)
+            request["tool_choice"] = "required"
+        elif schema_mode == "json_object":
+            request["response_format"] = {"type": "json_object"}
+        else:
+            request["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "octopus_response",
+                    "strict": True,
+                    "schema": copy.deepcopy(json_schema),
+                },
+            }
+    elif json_mode and "json" in capabilities:
         request["response_format"] = {"type": "json_object"}
     return request
 
@@ -256,6 +399,8 @@ def _justify(profile_name: str, task: str, model_id: str, model: dict, considere
              pinned: bool) -> dict:
     justification = {"profile": profile_name, "task": task, "chosen": model_id,
                      "cost_class": model["cost_class"], "considered": considered}
+    if profile_name == "zero_cost" and model["provider"] == "omniroute":
+        justification["zero_cost_attestation"] = model.get("zero_cost_attestation")
     if model["cost_class"] != "paid":
         return justification
     others = [c for c in considered if c["model"] != model_id]
@@ -274,8 +419,20 @@ def _justify(profile_name: str, task: str, model_id: str, model: dict, considere
     return justification
 
 
+def _zero_cost_violation(profile_name: str, model: dict, result: TransportResult) -> str | None:
+    if profile_name != "zero_cost":
+        return None
+    if result.provider_cost_usd not in {None, 0.0}:
+        return f"route zero_cost bloquée : coût résolu {result.provider_cost_usd:.6f} $"
+    if model["provider"] == "omniroute" and not (result.resolved_model and result.resolved_provider):
+        return "route zero_cost bloquée : identité résolue absente"
+    return None
+
+
 def complete(task: str, messages: list[dict], *, agent: str = "", business: str | None = None,
-             max_tokens: int = 1200, json_mode: bool = False, reasoning: str | None = None,
+             max_tokens: int = 1200, json_mode: bool = False, json_schema: dict | None = None,
+             tool_schemas: list[dict] | None = None,
+             reasoning: str | None = None,
              needs: tuple[str, ...] = (), pin_model: str | None = None, profile: str | None = None,
              validate: Callable[[str], Any] | None = None) -> Completion:
     cat = catalog.load()
@@ -283,7 +440,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
     profile_name = _resolve_profile(cat, profile, ctx)
     prof = cat.profile(profile_name)
     task_def = cat.task(task)
-    need = set(task_def.get("needs", [])) | set(needs) | ({"json"} if json_mode else set())
+    need = set(task_def.get("needs", [])) | set(needs) | ({"json"} if json_mode or json_schema is not None else set())
     business_name = business or (ctx.business if ctx else "")
     pinned = bool(pin_model and prof.get("honor_pins"))
     if pinned:
@@ -312,6 +469,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
             "ts": now, "run_id": ctx.id if ctx else None, "root_run_id": ctx.root_id if ctx else None,
             "business": business_name, "agent": agent, "task": task, "profile": profile_name,
             "model": model_id, "provider": model["provider"], "cost_class": model["cost_class"],
+            "requested_model": model["api_model"],
             "attempt": attempt, "peak": int(peak), "prompt_sha256": digest, "prompt_chars": prompt_chars,
         }
         estimate = pricing.estimate_max_cost(model.get("price"), prompt_chars + images * pricing.IMAGE_CHARS_ESTIMATE,
@@ -326,10 +484,13 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 continue
             raise BudgetExceeded(block)
 
-        request = _build_request(model, messages, max_tokens, json_mode, reasoning)
+        request = _build_request(
+            model, messages, max_tokens, json_mode, reasoning, json_schema, tool_schemas,
+        )
         started = time.perf_counter()
         try:
-            text, usage = _transport(provider, request)
+            result = _transport_result(_transport(provider, request), request["model"], model["provider"])
+            text, usage = result.text, result.usage
         except Exception as exc:
             failure = f"echec : {type(exc).__name__}: {str(exc)[:160]}"
             considered.append({"model": model_id, "eligible": True, "reason": failure})
@@ -342,9 +503,12 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 continue
             raise
         duration_ms = int((time.perf_counter() - started) * 1000)
-        cost = pricing.call_cost(model.get("price"), usage, peak)
-        data, status, error = None, "ok", None
-        if validate is not None:
+        cost = (result.provider_cost_usd if result.provider_cost_usd is not None
+                else pricing.call_cost(model.get("price"), usage, peak))
+        data, status, error = None, "ok", _zero_cost_violation(profile_name, model, result)
+        if error is not None:
+            status = "blocked"
+        elif validate is not None:
             try:
                 data = validate(text)
             except Exception as exc:
@@ -356,8 +520,16 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
             "cache_hit_tokens": usage.cache_hit_tokens, "cache_miss_tokens": usage.cache_miss_tokens,
             "completion_tokens": usage.completion_tokens, "reasoning_tokens": usage.reasoning_tokens,
             "cost_usd": cost, "duration_ms": duration_ms, "output_preview": text[:300],
+            "resolved_model": result.resolved_model, "resolved_provider": result.resolved_provider,
+            "request_id": result.request_id, "provider_cost_usd": result.provider_cost_usd,
             "justification": json.dumps(justification, ensure_ascii=False),
         })
+        if status == "blocked":
+            considered.append({"model": model_id, "eligible": False, "reason": error})
+            last_error = GatewayError(error)
+            if prof.get("fallback") and attempt < len(candidates):
+                continue
+            break
         if status == "invalid":
             considered.append({"model": model_id, "eligible": True, "reason": f"sortie invalide : {error}"})
             last_error = InvalidOutput(f"{model_id} : {error}")
@@ -365,7 +537,10 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 continue
             raise last_error
         return Completion(text=text, model=model_id, provider=model["provider"], cost_usd=cost, usage=usage,
-                          call_id=call_id, data=data, justification=justification)
+                          call_id=call_id, requested_model=result.requested_model,
+                          resolved_model=result.resolved_model, resolved_provider=result.resolved_provider,
+                          request_id=result.request_id, provider_cost_usd=result.provider_cost_usd,
+                          data=data, justification=justification)
 
     if budget_block:
         detail = "; ".join(f"{c['model']} : {c['reason']}" for c in considered)

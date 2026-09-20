@@ -7,7 +7,7 @@ import pytest
 
 from octopus.video.client import CloudVideoError
 from octopus.video.contract import RemoteJob, VideoJob, VideoResult, VideoStatus
-from octopus.video.renderers import CloudVideoRenderer
+from octopus.video.renderers import CloudVideoRenderer, LocalVideoRenderer, get_renderer
 from octopus.video.state import AmbiguousSubmissionError, RenderState, RenderStateStore
 
 
@@ -17,6 +17,19 @@ def job() -> VideoJob:
         duration_seconds=24, script={"segments": [{"role": "hook", "texte": "Bonjour"}]},
         voice={"moteur": "chatterbox", "nom": "vivienne-fr"},
     )
+
+
+def test_renderer_defaults_to_local(monkeypatch):
+    monkeypatch.delenv("PODALUX_VIDEO_RENDERER", raising=False)
+    assert isinstance(get_renderer(), LocalVideoRenderer)
+
+
+def test_runpod_renderer_requires_explicit_legacy_opt_in(monkeypatch):
+    monkeypatch.setenv("PODALUX_RUNPOD_ENDPOINT_ID", "endpoint")
+    monkeypatch.setenv("PODALUX_RUNPOD_API_TOKEN", "secret")
+    monkeypatch.delenv("OCTOPUS_ALLOW_LEGACY_RUNPOD", raising=False)
+    with pytest.raises(CloudVideoError, match="legacy.*désactivé"):
+        get_renderer(mode="cloud", provider="runpod")
 
 
 def test_submitting_without_remote_id_is_ambiguous(tmp_path):

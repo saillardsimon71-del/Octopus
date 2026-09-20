@@ -36,13 +36,53 @@ def test_old_database_migrates_to_the_current_schema_without_losing_data(tmp_pat
 
     conn = journal.connect()
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == journal.SCHEMA_VERSION == 6
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == journal.SCHEMA_VERSION
         assert conn.execute("SELECT business FROM tasks").fetchone()[0] == "podalux"
         names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     finally:
         conn.close()
     assert {"strategy_objectives", "strategy_hypotheses", "strategy_experiments", "strategy_decisions",
             "strategy_reviews", "strategy_evidence", "strategy_links", "resources"} <= names
+
+
+def test_partial_v9_migration_resumes_without_duplicate_columns(tmp_path, monkeypatch):
+    path = tmp_path / "partial-v9.db"
+    conn = sqlite3.connect(path)
+
+    for target, script in journal._MIGRATIONS[:8]:
+        conn.executescript(script)
+        conn.execute(f"PRAGMA user_version={target}")
+
+    conn.execute("ALTER TABLE llm_calls ADD COLUMN requested_model TEXT")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("OCTOPUS_DB", str(path))
+
+    conn = journal.connect()
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == journal.SCHEMA_VERSION
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(llm_calls)")
+        }
+    finally:
+        conn.close()
+
+    assert {
+        "requested_model",
+        "resolved_model",
+        "resolved_provider",
+        "request_id",
+        "provider_cost_usd",
+    } <= columns
+
+    # A second connection must be a no-op, not another migration attempt.
+    conn = journal.connect()
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == journal.SCHEMA_VERSION
+    finally:
+        conn.close()
 
 
 def test_no_metric_columns_are_stored_as_strategy_facts():

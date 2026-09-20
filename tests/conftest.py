@@ -19,7 +19,9 @@ _SESSION_ROOT = Path(tempfile.mkdtemp(prefix="podalux-tests-"))
 os.environ["PODALUX_ROOT"] = str(_SESSION_ROOT)
 os.environ["OCTOPUS_HOME"] = str(_SESSION_ROOT)
 os.environ["OCTOPUS_DB"] = str(_SESSION_ROOT / "octopus-import.db")
-for var in ("OCTOPUS", "OCTOPUS_PROFILE", "OCTOPUS_CATALOG", "OMNIROUTE_ENABLED"):
+for var in ("OCTOPUS", "OCTOPUS_ALLOW_LEGACY_DIRECT", "OCTOPUS_ALLOW_LEGACY_RUNPOD", "OCTOPUS_PROFILE",
+            "OCTOPUS_CATALOG", "OMNIROUTE_ENABLED", "OMNIROUTE_MODEL", "OMNIROUTE_BASE_URL",
+            "OMNIROUTE_API_KEY", "OMNIROUTE_TIMEOUT_S", "OMNIROUTE_ZERO_COST_ATTESTATION"):
     os.environ.pop(var, None)
 # Les tests historiques ciblent le catalogue existant et n'impliquent aucun gateway réseau.
 os.environ["OCTOPUS_PROFILE"] = "legacy"
@@ -78,7 +80,10 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("OCTOPUS_HOME", str(root))
     monkeypatch.setenv("OCTOPUS_DB", str(tmp_path / "octopus.db"))
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
-    for var in ("OCTOPUS", "OCTOPUS_PROFILE", "OCTOPUS_CATALOG", "OMNIROUTE_ENABLED", "GROQ_API_KEY", "GEMINI_API_KEY"):
+    for var in ("OCTOPUS", "OCTOPUS_ALLOW_LEGACY_DIRECT", "OCTOPUS_ALLOW_LEGACY_RUNPOD", "OCTOPUS_PROFILE",
+                "OCTOPUS_CATALOG", "OMNIROUTE_ENABLED", "OMNIROUTE_MODEL", "OMNIROUTE_BASE_URL",
+                "OMNIROUTE_API_KEY", "OMNIROUTE_TIMEOUT_S", "OMNIROUTE_ZERO_COST_ATTESTATION",
+                "GROQ_API_KEY", "GEMINI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OCTOPUS_PROFILE", "legacy")
     monkeypatch.setenv("OMNIROUTE_ENABLED", "0")

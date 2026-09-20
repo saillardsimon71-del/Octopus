@@ -73,6 +73,7 @@ def _overlay_omniroute(raw: dict) -> dict:
     provider_id = "omniroute"
     model_id = "omniroute/auto-free"
     model_name = os.environ.get("OMNIROUTE_MODEL", "auto/best-free").strip() or "auto/best-free"
+    zero_cost_attestation = os.environ.get("OMNIROUTE_ZERO_COST_ATTESTATION", "").strip().lower()
     raw.setdefault("providers", {})[provider_id] = {
         "kind": "cloud",
         "base_url": os.environ.get("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1").rstrip("/"),
@@ -89,9 +90,29 @@ def _overlay_omniroute(raw: dict) -> dict:
         "api_model": model_name,
         "cost_class": "free_quota",
         "capabilities": ["json", "vision", "tools", "reasoning_effort"],
+        "zero_cost_attestation": zero_cost_attestation,
         "notes": "Modèle virtuel OmniRoute : auto/best-free. La disponibilité et le provider réel dépendent des connexions OmniRoute.",
     }
 
+    devworker_models = {
+        "omniroute/devworker-gemini": "octopus-free-devworker-gemini",
+        "omniroute/devworker-groq": "octopus-free-devworker-groq",
+        "omniroute/devworker-cloudflare": "octopus-free-devworker-cloudflare",
+    }
+    for dev_model_id, dev_api_model in devworker_models.items():
+        raw.setdefault("models", {})[dev_model_id] = {
+            "provider": provider_id,
+            "api_model": dev_api_model,
+            "cost_class": "free_quota",
+            "capabilities": ["json", "tools", "reasoning_effort"],
+            "zero_cost_attestation": zero_cost_attestation,
+            "notes": "Route DevWorker dediee via LiteLLM, sans fallback cross-provider interne.",
+        }
+    raw["models"]["omniroute/devworker-groq"].update({
+        "json_schema_mode": "tool_call",
+        "params": {"reasoning_effort": "low"},
+    })
+    raw["models"]["omniroute/devworker-cloudflare"]["json_schema_mode"] = "tool_call"
     free_defaults = {
         "podalux.select_offer": model_id,
         "podalux.write_job": model_id,
@@ -115,13 +136,27 @@ def _overlay_omniroute(raw: dict) -> dict:
             candidates["low_cost"] = [selected_model, *current_low]
         if raw.get("profiles", {}).get("zero_cost", {}).get("fallback"):
             task.setdefault("omniroute_bootstrap_baseline", {})["zero_cost"] = selected_model
+    dev_task = raw.setdefault("tasks", {}).setdefault("development.step", {})
+    dev_candidates = dev_task.setdefault("candidates", {})
+    dedicated = [
+        "omniroute/devworker-gemini",
+        "omniroute/devworker-groq",
+        "omniroute/devworker-cloudflare",
+    ]
+    for profile_name in ("zero_cost", "low_cost"):
+        dev_candidates[profile_name] = list(dedicated)
+
+    if raw.get("profiles", {}).get("zero_cost", {}).get("fallback"):
+        dev_task.setdefault("omniroute_bootstrap_baseline", {})["zero_cost"] = dedicated[0]
     return raw
 
 
 def load(path: Path | None = None) -> Catalog:
     p = Path(path) if path else paths.catalog_path()
     mtime = p.stat().st_mtime
-    cache_key = f"{p}|omni={_omniroute_enabled()}|model={os.environ.get('OMNIROUTE_MODEL','')}|base={os.environ.get('OMNIROUTE_BASE_URL','')}"
+    cache_key = (f"{p}|omni={_omniroute_enabled()}|model={os.environ.get('OMNIROUTE_MODEL','')}|"
+                 f"base={os.environ.get('OMNIROUTE_BASE_URL','')}|"
+                 f"zero_cost={os.environ.get('OMNIROUTE_ZERO_COST_ATTESTATION','')}")
     cached = _cache.get(cache_key)
     if cached and cached[0] == mtime:
         return cached[1]

@@ -3,8 +3,8 @@
 Journal d'execution (SQLite), passerelle LLM (profils de cout, budgets par run,
 justification des appels payants), banc d'evaluation, file de taches et worker.
 
-Coupe-circuit : la variable d'environnement OCTOPUS=off desactive le journal et la
-passerelle ; le code metier retrouve alors son comportement historique.
+Coupe-circuit : OCTOPUS=off desactive le journal et la passerelle. Le client LLM direct
+historique exige en plus OCTOPUS_ALLOW_LEGACY_DIRECT=1.
 """
 from __future__ import annotations
 

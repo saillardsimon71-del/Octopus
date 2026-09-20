@@ -134,6 +134,10 @@ class MiniMaxH3Config:
 
     @classmethod
     def from_env(cls) -> "MiniMaxH3Config":
+        if os.environ.get("OCTOPUS_ALLOW_LEGACY_RUNPOD", "").strip() != "1":
+            raise MiniMaxH3CloudError(
+                "MiniMax H3 RunPod legacy désactivé; définir OCTOPUS_ALLOW_LEGACY_RUNPOD=1 pour l'autoriser explicitement"
+            )
         endpoint = os.environ.get("OCTOPUS_MINIMAX_H3_ENDPOINT_ID", "").strip()
         token = os.environ.get("OCTOPUS_MINIMAX_H3_API_TOKEN", "").strip()
         if not endpoint or not token:
@@ -163,6 +167,10 @@ class H3Result:
 
 class MiniMaxH3RunPodClient:
     def __init__(self, config: MiniMaxH3Config):
+        if os.environ.get("OCTOPUS_ALLOW_LEGACY_RUNPOD", "").strip() != "1":
+            raise MiniMaxH3CloudError(
+                "MiniMax H3 RunPod legacy désactivé; définir OCTOPUS_ALLOW_LEGACY_RUNPOD=1 pour l'autoriser explicitement"
+            )
         self.config = config
         self.base = f"{config.api_base_url}/{config.endpoint_id}"
 

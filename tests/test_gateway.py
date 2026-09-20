@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from agents import agents as ag
 from agents import config, db, deepseek
 from octopus import catalog, journal, llm
 from octopus.pricing import Usage
@@ -64,8 +65,9 @@ def test_zero_cost_without_evidence_never_pays(transport, providers_up, monkeypa
     assert calls() == []
 
 
-def test_zero_cost_routes_to_proven_local_model(transport, providers_up, monkeypatch):
+def test_normal_zero_cost_routes_to_proven_local_model(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
+    monkeypatch.setattr(deepseek, "_client", lambda: pytest.fail("le mode normal ne doit pas appeler DeepSeek directement"))
     prove("podalux.write_job", "ollama/qwen3.5-4b")
     transport.reply('{"titre": "ok"}')
     assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "ok"}
@@ -136,6 +138,33 @@ def test_invalid_output_falls_back(transport, providers_up):
     assert [r["status"] for r in calls()] == ["invalid", "ok"]
 
 
+def test_call_json_invalid_output_falls_back_between_free_models(transport, providers_up, monkeypatch):
+    monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
+    prove("podalux.write_job", "ollama/qwen3.5-4b")
+    prove("podalux.write_job", "gemini/3.5-flash")
+    transport.handler = by_model({"qwen3.5:4b": "pas du json", "gemini-3.5-flash": '{"titre": "g"}'})
+
+    assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "g"}
+    assert transport.models == ["qwen3.5:4b", "gemini-3.5-flash"]
+    assert [r["status"] for r in calls()] == ["invalid", "ok"]
+
+
+def test_vision_invalid_verdict_falls_back_between_free_models(transport, providers_up, monkeypatch):
+    monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
+    prove("podalux.qc_vision", "ollama/qwen3.5-4b")
+    prove("podalux.qc_vision", "gemini/3.5-flash")
+    valid = {axis: 1 for axis in ag.AXES}
+    transport.handler = by_model({
+        "qwen3.5:4b": json.dumps({**valid, "hook": 40}),
+        "gemini-3.5-flash": json.dumps(valid),
+    })
+
+    result = deepseek.vision("GROWTH", "qc_vision", [], "narration", "prompt", validate=ag.validate_verdict)
+    assert result["hook"] == 1
+    assert transport.models == ["qwen3.5:4b", "gemini-3.5-flash"]
+    assert [r["status"] for r in calls()] == ["invalid", "ok"]
+
+
 def test_invalid_output_without_fallback_raises(transport):
     transport.reply("texte libre")
     with pytest.raises(llm.InvalidOutput):
@@ -173,6 +202,22 @@ def test_explicit_legacy_still_overrides_omniroute_default(monkeypatch):
     monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
     monkeypatch.setenv("OCTOPUS_PROFILE", "legacy")
     assert catalog.load().default_profile == "legacy"
+
+
+def test_legacy_wrapper_uses_catalog_default_profile(transport, providers_up, monkeypatch, tmp_path):
+    raw = copy.deepcopy(catalog.load().raw)
+    raw["default_profile"] = "zero_cost"
+    path = tmp_path / "catalog.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setenv("OCTOPUS_CATALOG", str(path))
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "0")
+    monkeypatch.delenv("OCTOPUS_PROFILE", raising=False)
+    prove("podalux.write_job", "ollama/qwen3.5-4b")
+    transport.reply('{"titre": "local"}')
+
+    assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "local"}
+    assert transport.models == ["qwen3.5:4b"]
+    assert calls()[0]["profile"] == "zero_cost"
 
 
 def test_orbit_mission_tasks_keep_their_gateway_contract(monkeypatch):
@@ -255,8 +300,32 @@ class _FakeClient:
         self.chat = type("Chat", (), {"completions": Completions()})()
 
 
-def test_kill_switch_restores_direct_calls(transport, monkeypatch, tmp_path):
+def test_octopus_off_alone_refuses_direct_legacy(transport, monkeypatch):
     monkeypatch.setenv("OCTOPUS", "off")
+    monkeypatch.delenv("OCTOPUS_ALLOW_LEGACY_DIRECT", raising=False)
+    client = _FakeClient()
+    monkeypatch.setattr(deepseek, "_client", lambda: client)
+
+    with pytest.raises(RuntimeError, match="OCTOPUS_ALLOW_LEGACY_DIRECT=1"):
+        deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG)
+
+    assert client.kwargs == [] and transport.calls == []
+
+
+def test_legacy_opt_in_alone_does_not_bypass_gateway(transport, providers_up, monkeypatch):
+    monkeypatch.setenv("OCTOPUS_ALLOW_LEGACY_DIRECT", "1")
+    monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
+    prove("podalux.write_job", "ollama/qwen3.5-4b")
+    transport.reply('{"titre": "local"}')
+    monkeypatch.setattr(deepseek, "_client", lambda: pytest.fail("opt-in seul ne doit pas appeler DeepSeek"))
+
+    assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "local"}
+    assert transport.models == ["qwen3.5:4b"]
+
+
+def test_double_opt_in_restores_direct_legacy_calls(transport, monkeypatch, tmp_path):
+    monkeypatch.setenv("OCTOPUS", "off")
+    monkeypatch.setenv("OCTOPUS_ALLOW_LEGACY_DIRECT", "1")
     monkeypatch.setenv("OCTOPUS_DB", str(tmp_path / "must-not-exist.db"))
     client = _FakeClient()
     monkeypatch.setattr(deepseek, "_client", lambda: client)

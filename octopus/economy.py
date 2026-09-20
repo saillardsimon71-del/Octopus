@@ -12,6 +12,7 @@ Aucune fonction ici ne déplace d'argent : elles décident, mesurent et tracent.
 from __future__ import annotations
 
 import json
+import math
 import time
 
 from . import journal, strategy, tasks
@@ -187,6 +188,51 @@ def cash_summary(business: str, *, experiment_id: int | None = None, since: floa
     for cur in out.values():
         cur["net_observed"] = round(cur["in_observed"] - cur["out_observed"], 6)  # calculé
     return out
+
+
+def daily_spend_summary(business: str, *, since: float | None = None,
+                        until: float | None = None) -> list[dict]:
+    """Coût engagé et coût enregistré, groupés par catégorie pour la journée UTC."""
+    business = strategy._business(business)
+    if until is None:
+        now = time.time()
+        since = now - (now % 86400) if since is None else float(since)
+        until = math.nextafter(now, math.inf)
+    else:
+        until = float(until)
+        since = until - (until % 86400) if since is None else float(since)
+    buckets: dict[tuple[str, str], dict] = {}
+
+    engaged = journal.query(
+        "SELECT CASE WHEN l.reservation_id IS NULL THEN 'unclassified' ELSE 'gpu_compute' END AS category, "
+        "s.currency, SUM(s.amount) AS total FROM spend_requests s "
+        "LEFT JOIN compute_spend_links l ON l.spend_request_id=s.id "
+        "WHERE s.business=? AND s.status='authorized' AND s.created_at>=? AND s.created_at<? "
+        "GROUP BY category, s.currency",
+        (business, since, until),
+    )
+    for row in engaged:
+        key = (row["category"], row["currency"])
+        buckets[key] = {
+            "business": business, "category": row["category"], "currency": row["currency"],
+            "engaged": round(float(row["total"]), 6), "actual_observed": 0.0, "actual_unverified": 0.0,
+        }
+
+    actual = journal.query(
+        "SELECT category, currency, nature, SUM(amount) AS total FROM ledger_entries "
+        "WHERE business=? AND direction='out' AND occurred_at>=? AND occurred_at<? "
+        "GROUP BY category, currency, nature",
+        (business, since, until),
+    )
+    for row in actual:
+        key = (row["category"], row["currency"])
+        bucket = buckets.setdefault(key, {
+            "business": business, "category": row["category"], "currency": row["currency"],
+            "engaged": 0.0, "actual_observed": 0.0, "actual_unverified": 0.0,
+        })
+        field = "actual_observed" if row["nature"] == "observed" else "actual_unverified"
+        bucket[field] = round(float(row["total"]), 6)
+    return [buckets[key] for key in sorted(buckets)]
 
 
 _CSV_COLUMNS = {

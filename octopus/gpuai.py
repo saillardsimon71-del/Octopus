@@ -13,7 +13,9 @@ from .compute import ComputeInstance, ComputeOffer, ComputeOperation, ComputeReq
 
 
 class GPUAIError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -62,7 +64,7 @@ class GPUAIClient:
                 response_headers = getattr(response, "headers", {})
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:1000]
-            raise GPUAIError(f"GPU.ai HTTP {exc.code} sur {method} {path}: {detail}") from exc
+            raise GPUAIError(f"GPU.ai HTTP {exc.code} sur {method} {path}: {detail}", status=exc.code) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise GPUAIError(f"GPU.ai réseau sur {method} {path}: {exc}") from exc
         try:
@@ -163,3 +165,60 @@ class GPUAIClient:
                                 str(data["resource_id"]) if data.get("resource_id") else None,
                                 raw=data)
 
+
+
+    def get_operation(self, operation_id: str) -> ComputeOperation:
+        operation_id = str(operation_id or "").strip()
+        if not operation_id:
+            raise GPUAIError("operation_id GPU.ai requis")
+        data, _, _ = self._request("GET", f"/operations/{urllib.parse.quote(operation_id, safe='')}",
+                                    authenticated=True)
+        error = data.get("error")
+        if isinstance(error, dict):
+            error = error.get("detail") or error.get("message") or json.dumps(error, ensure_ascii=False)
+        return ComputeOperation(
+            self.provider,
+            str(data.get("operation_id") or operation_id),
+            str(data.get("state") or "pending"),
+            str(data["resource_id"]) if data.get("resource_id") else None,
+            str(error) if error else None,
+            raw=data,
+        )
+
+    def get_instance(self, instance_id: str) -> ComputeInstance:
+        instance_id = str(instance_id or "").strip()
+        if not instance_id:
+            raise GPUAIError("instance_id GPU.ai requis")
+        data, _, _ = self._request("GET", f"/instances/{urllib.parse.quote(instance_id, safe='')}",
+                                    authenticated=True)
+        return ComputeInstance(
+            provider=self.provider,
+            instance_id=str(data.get("instance_id") or data.get("id") or instance_id),
+            state=str(data.get("status") or data.get("state") or "unknown"),
+            accelerator=str(data.get("gpu_type") or data.get("accelerator") or ""),
+            gpu_count=int(data.get("gpu_count") or 1),
+            price_per_hour=float(data.get("price_per_hour") or 0),
+            connection=dict(data.get("connection") or {}),
+            ready_at=str(data["ready_at"]) if data.get("ready_at") else None,
+            auto_terminate_at=str(data["auto_terminate_at"]) if data.get("auto_terminate_at") else None,
+            raw=data,
+        )
+
+    def stop(self, instance_id: str) -> ComputeOperation:
+        instance_id = str(instance_id or "").strip()
+        if not instance_id:
+            raise GPUAIError("instance_id GPU.ai requis")
+        path = f"/instances/{urllib.parse.quote(instance_id, safe='')}"
+        try:
+            data, headers, status = self._request("DELETE", path, authenticated=True)
+        except GPUAIError as exc:
+            if exc.status == 404:
+                return ComputeOperation(self.provider, f"gone:{instance_id}", "succeeded", instance_id, raw={"gone": True})
+            raise
+        operation_id = data.get("operation_id") or headers.get("Operation-Id") or headers.get("operation-id")
+        if operation_id:
+            return ComputeOperation(self.provider, str(operation_id), str(data.get("state") or "pending"),
+                                    instance_id, raw=data)
+        if status in (200, 204):
+            return ComputeOperation(self.provider, f"delete:{instance_id}", "succeeded", instance_id, raw=data)
+        raise GPUAIError("GPU.ai terminaison acceptée sans operation_id")

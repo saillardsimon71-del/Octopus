@@ -17,11 +17,13 @@ from . import economy, journal, strategy, tasks
 from .strategy import StrategyError
 
 # executor(channel: dict, payload: dict) -> {"observation": str, "source_ref": str, "metric"?, "value"?, "unit"?}
-_EXECUTORS: dict[tuple[str, str], Callable[[dict, dict], dict]] = {}
+_EXECUTORS: dict[tuple[str, str], tuple[Callable[[dict, dict], dict], str]] = {}
 
 
-def register_executor(channel_kind: str, action: str, fn: Callable[[dict, dict], dict]) -> None:
-    _EXECUTORS[(channel_kind.strip().lower(), action.strip().lower())] = fn
+def register_executor(channel_kind: str, action: str, fn: Callable[[dict, dict], dict], *, cost_class: str) -> None:
+    if cost_class not in {"local", "free_quota", "paid"}:
+        raise ValueError("cost_class doit être local, free_quota ou paid")
+    _EXECUTORS[(channel_kind.strip().lower(), action.strip().lower())] = (fn, cost_class)
 
 
 def executors() -> list[tuple[str, str]]:
@@ -67,6 +69,8 @@ def propose(business: str, channel_id: int, action: str, payload: dict | None = 
             reason = "accès 'act' non accordé par l'humain sur ce canal"
         elif (channel["kind"], action) not in _EXECUTORS:
             reason = f"aucun exécuteur pour {channel['kind']}:{action} (intégration à construire)"
+        elif _EXECUTORS[(channel["kind"], action)][1] == "paid" and not spend_amount:
+            reason = "exécuteur de cost class paid sans coût déclaré"
         if reason:
             _set(conn, action_id, business, "blocked", reason=reason, decided_by="policy:actions")
             return {"action_id": action_id, "status": "blocked", "reason": reason}
@@ -81,7 +85,7 @@ def propose(business: str, channel_id: int, action: str, payload: dict | None = 
             return {"action_id": action_id, "status": "blocked", "reason": f"dépense : {decision['reason']}"}
         spend_request_id = decision["request_id"]
     try:
-        result = _EXECUTORS[(channel["kind"], action)](channel, payload or {})
+        result = _EXECUTORS[(channel["kind"], action)][0](channel, payload or {})
         source = str(result.get("source_ref") or "").strip()
         if not source:
             raise StrategyError("l'exécuteur n'a pas renvoyé de source vérifiable")

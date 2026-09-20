@@ -13,6 +13,13 @@ from .client import CloudVideoClient, CloudVideoConfig, CloudVideoError
 from .contract import RemoteJob, VideoJob
 
 
+def _require_legacy_opt_in() -> None:
+    if os.environ.get("OCTOPUS_ALLOW_LEGACY_RUNPOD", "").strip() != "1":
+        raise CloudVideoError(
+            "RunPod legacy désactivé; définir OCTOPUS_ALLOW_LEGACY_RUNPOD=1 pour l'autoriser explicitement"
+        )
+
+
 @dataclass(frozen=True)
 class RunPodConfig:
     endpoint_id: str
@@ -21,6 +28,7 @@ class RunPodConfig:
 
     @classmethod
     def from_env(cls) -> "RunPodConfig":
+        _require_legacy_opt_in()
         endpoint_id = os.environ.get("PODALUX_RUNPOD_ENDPOINT_ID", "").strip()
         token = os.environ.get("PODALUX_RUNPOD_API_TOKEN", "").strip()
         if not endpoint_id or not token:
@@ -39,6 +47,7 @@ class RunPodServerlessClient(CloudVideoClient):
     """Client RunPod Serverless basé sur l'API queue `/run` + `/status/{id}`."""
 
     def __init__(self, config: RunPodConfig, **kwargs: Any):
+        _require_legacy_opt_in()
         base = f"{config.api_base_url}/{config.endpoint_id}"
         super().__init__(
             CloudVideoConfig(

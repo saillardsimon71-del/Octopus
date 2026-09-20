@@ -131,7 +131,7 @@ def economy_spend_gate(job: VideoJob, attempt: int) -> None:
 
 def get_renderer(*, mode: str | None = None, provider: str | None = None) -> VideoRenderer:
     # Cloud-first : le contrôle-plane doit nécessiter une sélection explicite du local.
-    selected = (mode or os.environ.get("PODALUX_VIDEO_RENDERER", "cloud")).strip().lower()
+    selected = (mode or os.environ.get("PODALUX_VIDEO_RENDERER", "local")).strip().lower()
     if selected == "local":
         return LocalVideoRenderer()
     if selected != "cloud":

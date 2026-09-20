@@ -45,8 +45,8 @@ def already_produced() -> list[str]:
 
 
 def _render_video(offer_id: str, job: dict) -> dict:
-    """FORGE reste le contrat métier ; le renderer lourd est cloud par défaut."""
-    mode = os.environ.get("PODALUX_VIDEO_RENDERER", "cloud").strip().lower()
+    """FORGE reste le contrat métier ; le renderer RunPod historique exige un opt-in."""
+    mode = os.environ.get("PODALUX_VIDEO_RENDERER", "local").strip().lower()
     if mode == "local":
         return FORGE.run(offer_id, job)
     service = VideoService(mode="cloud", cloud_renderer=get_renderer(mode="cloud"))
