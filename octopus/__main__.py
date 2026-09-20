@@ -5,6 +5,7 @@
   python -m octopus models
   python -m octopus doctor
   python -m octopus worker [--once] [--max-tasks N]
+  python -m octopus night-shift [--repo .] [--hours 8] [--max-tasks 4] [--dry-run]
   python -m octopus enqueue podalux podalux.video_cycle --input '{"offer_id": "cash_devis_cgv01"}'
   python -m octopus tasks [--status queued] | cancel ID | ask | answer REQUEST_ID "texte"
   python -m octopus schedule octopus octopus.cost_report --every 86400 [--disable]
@@ -20,6 +21,7 @@ import platform
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 from . import __version__, catalog, enabled, journal, llm, paths, report
 
@@ -127,6 +129,26 @@ def cmd_worker(args) -> int:
         print(_dump(result) if result else "aucune tâche prête")
         return 0
     worker.loop(poll_s=args.poll, max_tasks=args.max_tasks)
+    return 0
+
+
+def cmd_night_shift(args) -> int:
+    from . import night_shift
+
+    try:
+        plan = night_shift.load_plan(Path(args.plan).resolve() if args.plan else None)
+        result = night_shift.run(
+            Path(args.repo),
+            plan,
+            max_tasks=args.max_tasks,
+            max_hours=args.hours,
+            max_failures=args.max_failures,
+            dry_run=args.dry_run,
+        )
+    except night_shift.NightShiftError as exc:
+        print(f"night-shift refusé: {exc}")
+        return 2
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     return 0
 
 
@@ -268,6 +290,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--once", action="store_true", help="une seule tache puis sortie")
     p.add_argument("--max-tasks", type=int, default=None)
     p.add_argument("--poll", type=float, default=2.0)
+    p = sub.add_parser("night-shift", help="canary autonome borné, sans push ni merge vers main")
+    p.add_argument("--repo", default=".", help="racine Git propre à utiliser comme base")
+    p.add_argument("--plan", default=None, help="plan JSON; défaut: octopus/config/night_shift.json")
+    p.add_argument("--hours", type=float, default=8.0)
+    p.add_argument("--max-tasks", type=int, default=4)
+    p.add_argument("--max-failures", type=int, default=2)
+    p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("enqueue", help="ajoute une tache")
     p.add_argument("business")
     p.add_argument("kind")
@@ -324,7 +353,8 @@ def main(argv: list[str] | None = None) -> int:
     strategy_cli.add_parser(sub)
     args = parser.parse_args(argv)
     commands = {"report": cmd_report, "bench": cmd_bench, "models": cmd_models, "doctor": cmd_doctor,
-                "worker": cmd_worker, "enqueue": cmd_enqueue, "tasks": cmd_tasks, "cancel": cmd_cancel,
+                "worker": cmd_worker, "night-shift": cmd_night_shift, "enqueue": cmd_enqueue,
+                "tasks": cmd_tasks, "cancel": cmd_cancel,
                 "ask": cmd_ask, "answer": cmd_answer, "schedule": cmd_schedule, "events": cmd_events,
                 "video": media_cli.run, "businesses": cmd_businesses, "strategy": strategy_cli.run,
                 "economy": strategy_cli.run_economy, "resources": cmd_resources}

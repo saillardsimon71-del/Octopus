@@ -1,0 +1,30 @@
+{
+  "name": "night-canary-docs-v1",
+  "policy": "docs_only",
+  "tickets": [
+    {
+      "goal": "Review docs/CODEX_START.md against the repository as it exists now. Update only stale factual branch, PR, completed-gate, or development-entrypoint references. Preserve the project rules and do not invent status. Modify only docs/CODEX_START.md.",
+      "allowed_paths": ["docs/CODEX_START.md"],
+      "test_targets": ["tests/test_dev_worker.py"],
+      "max_steps": 6
+    },
+    {
+      "goal": "Review docs/CURRENT_STATE.md against the current repository. Make a focused documentation-only update for capabilities that are demonstrably merged and remove stale current-state claims. Do not speculate and modify only docs/CURRENT_STATE.md.",
+      "allowed_paths": ["docs/CURRENT_STATE.md"],
+      "test_targets": ["tests/test_dev_worker.py"],
+      "max_steps": 6
+    },
+    {
+      "goal": "Review NEXT_STEPS.md against the current repository and merged implementation. Remove or rewrite only clearly stale completed next steps and make the remaining immediate technical priorities concrete. Do not broaden scope. Modify only NEXT_STEPS.md.",
+      "allowed_paths": ["NEXT_STEPS.md"],
+      "test_targets": ["tests/test_dev_worker.py"],
+      "max_steps": 6
+    },
+    {
+      "goal": "Review README.md for stale setup or architecture statements that conflict with the current repository. Make the smallest documentation-only corrections that improve onboarding accuracy. Do not change product vision or governance. Modify only README.md.",
+      "allowed_paths": ["README.md"],
+      "test_targets": ["tests/test_dev_worker.py"],
+      "max_steps": 6
+    }
+  ]
+}
