@@ -201,6 +201,15 @@ def test_capability_gap_detection_with_evaluations():
     assert gaps == ["b", "c"]
 
 
+def test_enum_normalization_preserves_historical_separator_semantics():
+    cap = Capability(identifier="free-quota", cost_class="  FREE-QUOTA  ")
+    assert cap.cost_class == CostClass.FREE_QUOTA
+
+    for value in ("free  quota", "free\tquota", "free\u00a0quota", "free--quota"):
+        with pytest.raises(CapabilityError, match="cost_class invalide"):
+            Capability(identifier="bad-normalization", cost_class=value)
+
+
 def test_invalid_enum_values_raise():
     with pytest.raises(CapabilityError, match="kind invalide"):
         Capability(identifier="bad", kind="invalid_kind")
