@@ -103,6 +103,7 @@ DEV_ACTION_TOOLS = [
 ]
 DEV_HISTORY_CHARS = 10_000
 DEV_INSPECTION_LIMIT = 6
+DEV_MIN_LLM_INTERVAL_S = 13.0
 _RETRY_DELAY_RE = re.compile(r"try again in ([0-9]+(?:\.[0-9]+)?)\s*(?:s|seconds?)\b", re.IGNORECASE)
 
 
@@ -190,6 +191,17 @@ def _rate_limit_delay(exc: Exception) -> float | None:
 
 def _malformed_tool_call(exc: Exception) -> bool:
     return type(exc).__name__ == "BadRequestError" and "Failed to parse tool call arguments as JSON" in str(exc)
+
+
+def _wait_for_llm_slot(previous_started: float) -> float:
+    now = time.monotonic()
+    if os.environ.get("OMNIROUTE_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return now
+    delay = previous_started + DEV_MIN_LLM_INTERVAL_S - now
+    if delay > 0:
+        time.sleep(delay)
+        now += delay
+    return now
 
 
 def _check_patch_paths(worktree: Path, patch: str) -> None:
@@ -387,6 +399,7 @@ def development_task(ctx):
     tests_passed = False
     inspection_actions = 0
     patch_applied = False
+    last_llm_started = 0.0
     schema_json = json.dumps(DEV_ACTION_SCHEMA, separators=(",", ":"))
     system = (
         "You are DevWorker. Choose the next useful action through the structured response mechanism provided. "
@@ -430,6 +443,7 @@ def development_task(ctx):
         structured_retried = False
         while True:
             try:
+                last_llm_started = _wait_for_llm_slot(last_llm_started)
                 completion = llm.complete(
                     "development.step", completion_messages, agent="DEVWORKER", business=ctx.business,
                     profile="zero_cost", json_schema=DEV_ACTION_SCHEMA, tool_schemas=DEV_ACTION_TOOLS,

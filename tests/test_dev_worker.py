@@ -352,6 +352,24 @@ def test_devworker_extracts_observed_groq_retry_delay():
     assert dev_worker._rate_limit_delay(RuntimeError("Please try again in 1s.")) is None
 
 
+def test_devworker_paces_omniroute_step_starts(monkeypatch):
+    from octopus import dev_worker
+
+    sleeps = []
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    monkeypatch.setattr(dev_worker.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(dev_worker.time, "sleep", sleeps.append)
+
+    started = dev_worker._wait_for_llm_slot(95.0)
+
+    assert sleeps == [8.0]
+    assert started == 108.0
+
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "0")
+    assert dev_worker._wait_for_llm_slot(95.0) == 100.0
+    assert sleeps == [8.0]
+
+
 def test_devworker_retries_one_malformed_provider_tool_call(tmp_path, monkeypatch):
     from octopus import dev_worker
 
