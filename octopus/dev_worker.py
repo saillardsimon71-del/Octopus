@@ -120,6 +120,7 @@ KILO_COMMAND = "kilo.cmd" if os.name == "nt" else "kilo"
 KILO_TIMEOUT_S = 600
 KILO_TEST_FEEDBACK_CHARS = 4000
 KILO_MAX_PASSES = 3
+DEFAULT_TEST_SANDBOX_IMAGE = "octopus-test-sandbox:py311"
 _RETRY_DELAY_RE = re.compile(r"try again in ([0-9]+(?:\.[0-9]+)?)\s*(?:s|seconds?)\b", re.IGNORECASE)
 
 _KILO_SENSITIVE_PATTERNS = (
@@ -554,6 +555,68 @@ def _enforce_allowed_paths(changed_paths: list[str], allowed_paths: list[str] | 
         )
 
 
+def _validate_positive_limit(raw, name: str, *, maximum: int) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise DevWorkerError(f"{name} invalide")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise DevWorkerError(f"{name} invalide") from exc
+    if not 1 <= value <= maximum:
+        raise DevWorkerError(f"{name} doit être compris entre 1 et {maximum}")
+    return value
+
+
+def _diff_radius(worktree: Path) -> dict[str, int]:
+    result = _run(["git", "diff", "--numstat", "HEAD", "--"], worktree)
+    if result.returncode:
+        raise DevWorkerError((result.stderr or result.stdout or "git diff --numstat failed")[-2000:])
+    files = 0
+    added = 0
+    deleted = 0
+    tracked_paths = set()
+    for line in result.stdout.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        raw_add, raw_del, path = parts
+        files += 1
+        tracked_paths.add(path)
+        if raw_add.isdigit():
+            added += int(raw_add)
+        if raw_del.isdigit():
+            deleted += int(raw_del)
+
+    for status, path in _status_entries(worktree):
+        if status != "??" or path in tracked_paths:
+            continue
+        files += 1
+        candidate = resolve_path(worktree, path)
+        if candidate.is_file():
+            try:
+                added += len(candidate.read_text(encoding="utf-8").splitlines())
+            except (UnicodeDecodeError, OSError):
+                added += 1
+    return {"files": files, "added": added, "deleted": deleted}
+
+
+def _enforce_diff_radius(
+        worktree: Path, *, max_files_changed: int | None = None,
+        max_lines_added: int | None = None, max_lines_deleted: int | None = None) -> None:
+    radius = _diff_radius(worktree)
+    failures = []
+    if max_files_changed is not None and radius["files"] > max_files_changed:
+        failures.append(f"files={radius['files']}>{max_files_changed}")
+    if max_lines_added is not None and radius["added"] > max_lines_added:
+        failures.append(f"added={radius['added']}>{max_lines_added}")
+    if max_lines_deleted is not None and radius["deleted"] > max_lines_deleted:
+        failures.append(f"deleted={radius['deleted']}>{max_lines_deleted}")
+    if failures:
+        raise DevWorkerError("rayon de modification dépassé: " + ", ".join(failures))
+
+
 _TEST_ENV_SECRET_MARKERS = (
     "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "COOKIE", "SESSION", "AUTH",
 )
@@ -574,7 +637,68 @@ def _sanitized_test_env(home: str) -> dict[str, str]:
     return env
 
 
-def _tool(action: dict, worktree: Path, tests: list[list[str]], tests_passed: bool) -> tuple[str, bool, str | None]:
+def _validate_test_sandbox(raw) -> str:
+    value = str(raw or "host").strip().lower()
+    if value not in {"host", "docker"}:
+        raise DevWorkerError("test_sandbox attendu: host ou docker")
+    return value
+
+
+def _docker_test_args(worktree: Path, image: str, command: list[str]) -> list[str]:
+    inner = ["python", *command[1:]]
+    return [
+        "docker", "run", "--rm",
+        "--network", "none",
+        "--read-only",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        "--pids-limit", "128",
+        "--memory", "768m",
+        "--cpus", "1.0",
+        "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m",
+        "-e", "HOME=/tmp/home",
+        "-e", "USERPROFILE=/tmp/home",
+        "-e", "XDG_CONFIG_HOME=/tmp/home",
+        "-e", "PYTHONDONTWRITEBYTECODE=1",
+        "-e", "PYTEST_ADDOPTS=-p no:cacheprovider",
+        "-v", f"{worktree.resolve()}:/workspace:ro",
+        "-w", "/workspace",
+        image,
+        *inner,
+    ]
+
+
+def _run_tests(
+        worktree: Path, tests: list[list[str]], *, sandbox: str = "host",
+        sandbox_image: str = DEFAULT_TEST_SANDBOX_IMAGE) -> tuple[str, bool]:
+    outputs = []
+    if sandbox == "docker":
+        inspect = _run(["docker", "image", "inspect", sandbox_image], worktree, timeout=30)
+        if inspect.returncode:
+            raise DevWorkerError(
+                f"image sandbox Docker absente: {sandbox_image}; construire l'image avant ce ticket"
+            )
+        for command in tests:
+            result = _run(_docker_test_args(worktree, sandbox_image, command), worktree, timeout=300)
+            outputs.append(f"$ docker sandbox :: {' '.join(command)}\n{result.stdout}{result.stderr}"[-12000:])
+            if result.returncode:
+                return "\n".join(outputs), False
+        return "\n".join(outputs), True
+
+    with tempfile.TemporaryDirectory(prefix="octopus-test-home-") as test_home:
+        test_env = _sanitized_test_env(test_home)
+        for command in tests:
+            result = _run(command, worktree, env=test_env)
+            outputs.append(f"$ {' '.join(command)}\n{result.stdout}{result.stderr}"[-12000:])
+            if result.returncode:
+                return "\n".join(outputs), False
+    return "\n".join(outputs), True
+
+
+def _tool(
+        action: dict, worktree: Path, tests: list[list[str]], tests_passed: bool, *,
+        test_sandbox: str = "host", test_sandbox_image: str = DEFAULT_TEST_SANDBOX_IMAGE,
+) -> tuple[str, bool, str | None]:
     name = action["action"]
     if name == "read":
         path = resolve_path(worktree, action["path"])
@@ -599,17 +723,10 @@ def _tool(action: dict, worktree: Path, tests: list[list[str]], tests_passed: bo
                 raise DevWorkerError((applied.stderr or applied.stdout)[-2000:])
         return _git(worktree, "diff", "--")[-12000:], False, None
     if name == "test":
-        outputs = []
-        passed = True
-        with tempfile.TemporaryDirectory(prefix="octopus-test-home-") as test_home:
-            test_env = _sanitized_test_env(test_home)
-            for command in tests:
-                result = _run(command, worktree, env=test_env)
-                outputs.append(f"$ {' '.join(command)}\n{result.stdout}{result.stderr}"[-12000:])
-                if result.returncode:
-                    passed = False
-                    break
-        return "\n".join(outputs), passed, None
+        output, passed = _run_tests(
+            worktree, tests, sandbox=test_sandbox, sandbox_image=test_sandbox_image,
+        )
+        return output, passed, None
     if not tests_passed:
         return "commit refusé: les tests déterministes ne sont pas verts depuis le dernier patch", False, None
     message = action["message"].strip()
@@ -658,8 +775,12 @@ def _forbidden_kilo_path(relative: str) -> bool:
     )
 
 
-def _validate_kilo_result(worktree: Path, original_head: str, original_branch: str,
-                          allowed_paths: list[str] | None = None) -> list[str]:
+def _validate_kilo_result(
+        worktree: Path, original_head: str, original_branch: str,
+        allowed_paths: list[str] | None = None, *,
+        max_files_changed: int | None = None,
+        max_lines_added: int | None = None,
+        max_lines_deleted: int | None = None) -> list[str]:
     if _git(worktree, "rev-parse", "HEAD") != original_head:
         raise DevWorkerError(f"Kilo a créé un commit; worktree conservé: {worktree}")
     if _git(worktree, "branch", "--show-current") != original_branch:
@@ -675,6 +796,12 @@ def _validate_kilo_result(worktree: Path, original_head: str, original_branch: s
             f"Kilo n'a produit aucune modification; worktree conservé: {worktree}",
         )
     _enforce_allowed_paths(changed, allowed_paths)
+    _enforce_diff_radius(
+        worktree,
+        max_files_changed=max_files_changed,
+        max_lines_added=max_lines_added,
+        max_lines_deleted=max_lines_deleted,
+    )
     check = _run(["git", "diff", "--check", "HEAD", "--"], worktree)
     if check.returncode:
         raise KiloRepairableError(
@@ -816,6 +943,21 @@ def development_task(ctx):
     allowed_paths = _validate_allowed_paths(ctx.input.get("allowed_paths"))
     acceptance_criteria = _validate_acceptance_criteria(ctx.input.get("acceptance_criteria"))
     noop_allowed = bool(ctx.input.get("noop_allowed", False))
+    test_sandbox = _validate_test_sandbox(ctx.input.get("test_sandbox"))
+    test_sandbox_image = str(
+        ctx.input.get("test_sandbox_image") or DEFAULT_TEST_SANDBOX_IMAGE
+    ).strip()
+    if not test_sandbox_image or len(test_sandbox_image) > 200:
+        raise DevWorkerError("test_sandbox_image invalide")
+    max_files_changed = _validate_positive_limit(
+        ctx.input.get("max_files_changed"), "max_files_changed", maximum=20,
+    )
+    max_lines_added = _validate_positive_limit(
+        ctx.input.get("max_lines_added"), "max_lines_added", maximum=5000,
+    )
+    max_lines_deleted = _validate_positive_limit(
+        ctx.input.get("max_lines_deleted"), "max_lines_deleted", maximum=5000,
+    )
     allow_declarative_fallback = bool(ctx.input.get("allow_declarative_fallback", True))
     if backend == "declarative" and allowed_paths is not None:
         raise DevWorkerError("allowed_paths exige backend=kilo")
@@ -864,10 +1006,18 @@ def development_task(ctx):
             raise DevWorkerError(f"Kilo a échoué après modification; worktree conservé: {worktree}: {exc}") from exc
 
         try:
-            changed_paths = _validate_kilo_result(worktree, original_head, branch, allowed_paths=allowed_paths)
+            changed_paths = _validate_kilo_result(
+                worktree, original_head, branch, allowed_paths=allowed_paths,
+                max_files_changed=max_files_changed,
+                max_lines_added=max_lines_added,
+                max_lines_deleted=max_lines_deleted,
+            )
         except KiloRepairableError as exc:
             if exc.kind == "no_changes" and noop_allowed and _kilo_declares_noop(kilo_output):
-                test_output, tests_passed, _ = _tool({"action": "test"}, worktree, tests, False)
+                test_output, tests_passed, _ = _tool(
+                    {"action": "test"}, worktree, tests, False,
+                    test_sandbox=test_sandbox, test_sandbox_image=test_sandbox_image,
+                )
                 ctx.emit("development.tool", {"action": "test", "ok": tests_passed, "noop": True})
                 if tests_passed:
                     result = {
@@ -908,13 +1058,22 @@ def development_task(ctx):
                 f"{last_test_output[-KILO_TEST_FEEDBACK_CHARS:]}"
             ) from exc
         ctx.emit("development.kilo_completed", {"changed_paths": changed_paths})
-        test_output, tests_passed, _ = _tool({"action": "test"}, worktree, tests, False)
+        test_output, tests_passed, _ = _tool(
+            {"action": "test"}, worktree, tests, False,
+            test_sandbox=test_sandbox, test_sandbox_image=test_sandbox_image,
+        )
         ctx.emit("development.tool", {"action": "test", "ok": tests_passed})
         if tests_passed:
-            changed_paths = _validate_kilo_result(worktree, original_head, branch, allowed_paths=allowed_paths)
+            changed_paths = _validate_kilo_result(
+                worktree, original_head, branch, allowed_paths=allowed_paths,
+                max_files_changed=max_files_changed,
+                max_lines_added=max_lines_added,
+                max_lines_deleted=max_lines_deleted,
+            )
             commit_message = f"chore: complete development task {ctx.id}"
             _, _, commit = _tool(
                 {"action": "commit", "message": commit_message}, worktree, tests, tests_passed,
+                test_sandbox=test_sandbox, test_sandbox_image=test_sandbox_image,
             )
             result = {
                 "commit": commit,
@@ -924,6 +1083,7 @@ def development_task(ctx):
                 "backend": "kilo",
                 "model": KILO_MODEL,
                 "changed_paths": changed_paths,
+                "test_sandbox": test_sandbox,
             }
             ctx.emit("development.committed", result)
             return result
