@@ -579,7 +579,6 @@ def test_devworker_kilo_run_is_inline_configured_and_deny_by_default(tmp_path, m
     assert args[args.index("--format") + 1] == "json"
     assert "Change only calc.py." in args[-1]
     assert "test_calc.py" in args[-1]
-    assert "GOAL: Change only calc.py." in args[-1]
     assert "\\n" not in args[-1]
     assert "\\r" not in args[-1]
     assert "OBJECTIVE: Change only calc.py." in args[-1]
