@@ -311,6 +311,7 @@ def test_devworker_extracts_observed_groq_retry_delay():
     RateLimitError = type("RateLimitError", (Exception,), {})
 
     assert dev_worker._rate_limit_delay(RateLimitError("Please try again in 26.5425s.")) == 26.5425
+    assert dev_worker._rate_limit_delay(RateLimitError("Try again in 15 seconds.")) == 15
     assert dev_worker._rate_limit_delay(RateLimitError("Please try again in 61s.")) is None
     assert dev_worker._rate_limit_delay(RuntimeError("Please try again in 1s.")) is None
 
