@@ -866,19 +866,30 @@ def development_task(ctx):
             changed_paths = _validate_kilo_result(worktree, original_head, branch, allowed_paths=allowed_paths)
         except KiloRepairableError as exc:
             if exc.kind == "no_changes" and noop_allowed and _kilo_declares_noop(kilo_output):
-                result = {
-                    "commit": None,
-                    "branch": branch,
-                    "worktree": str(worktree),
-                    "tests": tests,
-                    "backend": "kilo",
-                    "model": KILO_MODEL,
-                    "changed_paths": [],
-                    "noop": True,
-                    "final_text": _kilo_output_summary(kilo_output)["final_text"],
-                }
-                ctx.emit("development.noop", result)
-                return result
+                test_output, tests_passed, _ = _tool({"action": "test"}, worktree, tests, False)
+                ctx.emit("development.tool", {"action": "test", "ok": tests_passed, "noop": True})
+                if tests_passed:
+                    result = {
+                        "commit": None,
+                        "branch": branch,
+                        "worktree": str(worktree),
+                        "tests": tests,
+                        "backend": "kilo",
+                        "model": KILO_MODEL,
+                        "changed_paths": [],
+                        "noop": True,
+                        "final_text": _kilo_output_summary(kilo_output)["final_text"],
+                    }
+                    ctx.emit("development.noop", result)
+                    return result
+                last_test_output = "NOOP_BASELINE_TEST_FAILURE: " + test_output[-KILO_TEST_FEEDBACK_CHARS:]
+                if attempt < KILO_MAX_PASSES - 1:
+                    ctx.emit("development.kilo_retry", {
+                        "attempt": attempt + 1,
+                        "max_passes": KILO_MAX_PASSES,
+                        "test_output": last_test_output,
+                    })
+                    continue
             final_text = _kilo_output_summary(kilo_output)["final_text"]
             last_test_output = f"{exc.kind}: {exc.feedback}"
             if final_text:
