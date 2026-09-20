@@ -1,6 +1,7 @@
 """DevTask minimal: worktree isolé, outils bornés, tests déterministes, commit local."""
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -9,6 +10,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections import Counter
 from pathlib import Path
 
 from . import llm, paths
@@ -124,8 +126,13 @@ DEFAULT_TEST_SANDBOX_IMAGE = "octopus-test-sandbox:py311"
 _RETRY_DELAY_RE = re.compile(r"try again in ([0-9]+(?:\.[0-9]+)?)\s*(?:s|seconds?)\b", re.IGNORECASE)
 
 _KILO_SENSITIVE_PATTERNS = (
-    ".env", ".env.*", "**/.env", "**/.env.*", "**/*.pem", "**/*.key",
-    "**/credentials*", "**/*credential*", "**/secrets*", "**/*secret*",
+    ".env", ".env.*", "**/.env", "**/.env.*",
+    "*.pem", "**/*.pem", "*.key", "**/*.key", "*.p12", "**/*.p12", "*.pfx", "**/*.pfx",
+    "*.kdbx", "**/*.kdbx", "*.tfstate", "**/*.tfstate", "*.tfvars", "**/*.tfvars",
+    "id_rsa*", "**/id_rsa*", "credentials*", "**/credentials*", "*credential*", "**/*credential*",
+    "secrets*", "**/secrets*", "*secret*", "**/*secret*", "service-account*.json", "**/service-account*.json",
+    ".aws/**", "**/.aws/**", ".ssh/**", "**/.ssh/**", ".docker/**", "**/.docker/**",
+    ".git-credentials", "**/.git-credentials",
     ".netrc", "**/.netrc", ".npmrc", "**/.npmrc", ".pypirc", "**/.pypirc",
     ".git", ".git/**", "**/.git", "**/.git/**",
     ".kilo/**", "**/.kilo/**", ".kilocode/**", "**/.kilocode/**",
@@ -503,18 +510,44 @@ def _apply_context_patch(worktree: Path, patch: str) -> None:
         path.write_bytes(text.encode("utf-8"))
 
 
+def _task_clone_root() -> Path:
+    configured = os.environ.get("OCTOPUS_DEV_WORKTREE_ROOT", "").strip()
+    if configured:
+        return Path(configured).resolve()
+    return (Path(tempfile.gettempdir()) / "octopus-dev-clones").resolve()
+
+
 def _create_worktree(repository: Path, task_id: int) -> tuple[Path, str]:
+    """Create an independent clone outside the source repository.
+
+    Kilo never receives a linked Git worktree, so resolving the common Git dir
+    cannot widen its filesystem boundary back to the parent checkout.
+    """
     root_text = _git(repository, "rev-parse", "--show-toplevel")
     source = Path(root_text).resolve()
+    source_head = _git(source, "rev-parse", "HEAD")
     suffix = uuid.uuid4().hex[:8]
     branch = f"codex/devtask-{task_id}-{suffix}"
-    worktree_root = Path(os.environ.get("OCTOPUS_DEV_WORKTREE_ROOT", "").strip() or
-                         paths.data_dir() / "dev-worktrees")
-    worktree_root.mkdir(parents=True, exist_ok=True)
-    target = (worktree_root / f"task-{task_id}-{suffix}").resolve()
-    result = _run(["git", "worktree", "add", "-b", branch, str(target), "HEAD"], source)
+    clone_root = _task_clone_root()
+    clone_root.mkdir(parents=True, exist_ok=True)
+    target = (clone_root / f"task-{task_id}-{suffix}").resolve()
+    if source == target or source in target.parents:
+        raise DevWorkerError("clone de tâche doit être hors du dépôt source")
+    result = _run(
+        ["git", "clone", "--no-local", "--no-hardlinks", "--no-checkout", "--", str(source), str(target)],
+        source.parent,
+        timeout=300,
+    )
     if result.returncode:
-        raise DevWorkerError((result.stderr or result.stdout)[-2000:])
+        raise DevWorkerError((result.stderr or result.stdout or "git clone failed")[-2000:])
+    _git(target, "checkout", "-b", branch, source_head)
+    _git(target, "remote", "remove", "origin")
+    _git(target, "config", "core.longpaths", "true")
+    empty_hooks = (target / ".git" / "octopus-empty-hooks").resolve()
+    empty_hooks.mkdir(parents=True, exist_ok=True)
+    _git(target, "config", "core.hooksPath", str(empty_hooks))
+    if _status_entries(target):
+        raise DevWorkerError(f"clone de tâche non propre: {target}")
     return target, branch
 
 
