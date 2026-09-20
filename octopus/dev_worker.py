@@ -532,6 +532,14 @@ def _create_worktree(repository: Path, task_id: int) -> tuple[Path, str]:
     root_text = _git(repository, "rev-parse", "--show-toplevel")
     source = Path(root_text).resolve()
     source_head = _git(source, "rev-parse", "HEAD")
+    common_git_raw = _git(source, "rev-parse", "--git-common-dir")
+    common_git = Path(common_git_raw)
+    if not common_git.is_absolute():
+        common_git = (source / common_git).resolve()
+    else:
+        common_git = common_git.resolve()
+    if not common_git.is_dir():
+        raise DevWorkerError(f"git-common-dir introuvable: {common_git}")
     suffix = uuid.uuid4().hex[:8]
     branch = f"codex/devtask-{task_id}-{suffix}"
     clone_root = _task_clone_root()
@@ -540,7 +548,7 @@ def _create_worktree(repository: Path, task_id: int) -> tuple[Path, str]:
     if source == target or source in target.parents:
         raise DevWorkerError("clone de tâche doit être hors du dépôt source")
     result = _run(
-        ["git", "clone", "--no-local", "--no-hardlinks", "--no-checkout", "--", str(source), str(target)],
+        ["git", "clone", "--no-local", "--no-hardlinks", "--no-checkout", str(common_git), str(target)],
         source.parent,
         timeout=300,
     )
