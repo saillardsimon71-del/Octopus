@@ -125,17 +125,21 @@ _KILO_PROTECTED_PATTERNS = (
 def _kilo_permissions() -> dict:
     read = {"*": "allow"}
     edit = {"*": "allow"}
+    write = {"*": "allow"}
     for pattern in _KILO_SENSITIVE_PATTERNS:
         read[pattern] = "deny"
         edit[pattern] = "deny"
+        write[pattern] = "deny"
     for pattern in _KILO_PROTECTED_PATTERNS:
         edit[pattern] = "deny"
+        write[pattern] = "deny"
     permissions = {
         "*": "deny",
         "read": read,
         "glob": "allow",
         "grep": "allow",
         "edit": edit,
+        "write": write,
     }
     for name in (
         "bash", "task", "agent_manager", "skill", "websearch", "webfetch", "external_directory",
@@ -161,7 +165,7 @@ def _run_kilo(worktree: Path, goal: str, tests: list[list[str]], max_steps: int)
         },
     }
     prompt = (
-        "Modify this isolated worktree to satisfy the goal below. Use only read, glob, grep, and edit. "
+        "Modify this isolated worktree to satisfy the goal below. Use only read, glob, grep, edit, and write. Use write only when a required new file must be created. "
         "Do not run commands or tests, access secrets or .env files, change Kilo configuration, commit, push, "
         "merge, or modify anything outside this worktree. Make the smallest focused change and stop after saving "
         "the edits. Inspect only files directly relevant to the goal. Prefer grep or glob before reading files. "
