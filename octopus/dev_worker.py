@@ -160,7 +160,8 @@ def _kilo_permissions() -> dict:
     return permissions
 
 
-def _build_kilo_prompt(goal: str, tests: list[list[str]], max_steps: int, last_test_output: str = "", attempt: int = 0) -> str:
+def _build_kilo_prompt(goal: str, tests: list[list[str]], max_steps: int, last_test_output: str = "", attempt: int = 0,
+                       allowed_paths: list[str] | None = None) -> str:
     goal_text = " ".join(goal.split())
     tests_text = " ; ".join(" ".join(command) for command in tests)
     prefix = (
@@ -183,6 +184,8 @@ def _build_kilo_prompt(goal: str, tests: list[list[str]], max_steps: int, last_t
             f"GOAL: {goal_text} "
         )
     prompt = prefix + f"TESTS THAT OCTOPUS WILL RUN: {tests_text}"
+    if allowed_paths is not None:
+        prompt += " HARD_ALLOWED_PATHS: " + ", ".join(allowed_paths) + ". Do not modify any other path."
     if last_test_output:
         prompt += f" PREVIOUS_TEST_OUTPUT: {last_test_output[-KILO_TEST_FEEDBACK_CHARS:]}"
     return prompt
@@ -455,6 +458,63 @@ def _create_worktree(repository: Path, task_id: int) -> tuple[Path, str]:
     return target, branch
 
 
+def _validate_allowed_paths(raw) -> list[str] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or not raw:
+        raise DevWorkerError("allowed_paths doit être une liste non vide de chemins relatifs")
+    out = []
+    for value in raw:
+        if not isinstance(value, str) or not value.strip():
+            raise DevWorkerError("allowed_paths contient un chemin invalide")
+        normalized = value.replace("\\", "/").strip()
+        if normalized.startswith("/") or re.match(r"^[A-Za-z]:/", normalized):
+            raise DevWorkerError(f"allowed_path absolu interdit: {value}")
+        parts = normalized.split("/")
+        if any(part in {"", ".", ".."} for part in parts):
+            raise DevWorkerError(f"allowed_path invalide: {value}")
+        if _forbidden_kilo_path(normalized):
+            raise DevWorkerError(f"allowed_path interdit: {value}")
+        if normalized not in out:
+            out.append(normalized)
+    return out
+
+
+def _enforce_allowed_paths(changed_paths: list[str], allowed_paths: list[str] | None) -> None:
+    if allowed_paths is None:
+        return
+    allowed = set(allowed_paths)
+    outside = sorted(
+        path for path in changed_paths
+        if path.replace("\\", "/") not in allowed
+    )
+    if outside:
+        raise DevWorkerError(
+            "Kilo a modifié un chemin hors périmètre autorisé: "
+            + ", ".join(outside)
+        )
+
+
+_TEST_ENV_SECRET_MARKERS = (
+    "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "COOKIE", "SESSION", "AUTH",
+)
+
+
+def _sanitized_test_env(home: str) -> dict[str, str]:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not any(marker in key.upper() for marker in _TEST_ENV_SECRET_MARKERS)
+    }
+    env["HOME"] = home
+    env["USERPROFILE"] = home
+    env["XDG_CONFIG_HOME"] = home
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    pytest_addopts = env.get("PYTEST_ADDOPTS", "").strip()
+    env["PYTEST_ADDOPTS"] = f"{pytest_addopts} -p no:cacheprovider".strip()
+    return env
+
+
 def _tool(action: dict, worktree: Path, tests: list[list[str]], tests_passed: bool) -> tuple[str, bool, str | None]:
     name = action["action"]
     if name == "read":
@@ -482,16 +542,14 @@ def _tool(action: dict, worktree: Path, tests: list[list[str]], tests_passed: bo
     if name == "test":
         outputs = []
         passed = True
-        test_env = dict(os.environ)
-        test_env["PYTHONDONTWRITEBYTECODE"] = "1"
-        pytest_addopts = test_env.get("PYTEST_ADDOPTS", "").strip()
-        test_env["PYTEST_ADDOPTS"] = f"{pytest_addopts} -p no:cacheprovider".strip()
-        for command in tests:
-            result = _run(command, worktree, env=test_env)
-            outputs.append(f"$ {' '.join(command)}\n{result.stdout}{result.stderr}"[-12000:])
-            if result.returncode:
-                passed = False
-                break
+        with tempfile.TemporaryDirectory(prefix="octopus-test-home-") as test_home:
+            test_env = _sanitized_test_env(test_home)
+            for command in tests:
+                result = _run(command, worktree, env=test_env)
+                outputs.append(f"$ {' '.join(command)}\n{result.stdout}{result.stderr}"[-12000:])
+                if result.returncode:
+                    passed = False
+                    break
         return "\n".join(outputs), passed, None
     if not tests_passed:
         return "commit refusé: les tests déterministes ne sont pas verts depuis le dernier patch", False, None
@@ -541,7 +599,8 @@ def _forbidden_kilo_path(relative: str) -> bool:
     )
 
 
-def _validate_kilo_result(worktree: Path, original_head: str, original_branch: str) -> list[str]:
+def _validate_kilo_result(worktree: Path, original_head: str, original_branch: str,
+                          allowed_paths: list[str] | None = None) -> list[str]:
     if _git(worktree, "rev-parse", "HEAD") != original_head:
         raise DevWorkerError(f"Kilo a créé un commit; worktree conservé: {worktree}")
     if _git(worktree, "branch", "--show-current") != original_branch:
@@ -556,6 +615,7 @@ def _validate_kilo_result(worktree: Path, original_head: str, original_branch: s
             "no_changes",
             f"Kilo n'a produit aucune modification; worktree conservé: {worktree}",
         )
+    _enforce_allowed_paths(changed, allowed_paths)
     check = _run(["git", "diff", "--check", "HEAD", "--"], worktree)
     if check.returncode:
         raise KiloRepairableError(
@@ -694,6 +754,10 @@ def development_task(ctx):
     backend = str(ctx.input.get("backend") or "kilo").strip().lower()
     if backend not in {"kilo", "declarative"}:
         raise DevWorkerError("backend attendu: kilo ou declarative")
+    allowed_paths = _validate_allowed_paths(ctx.input.get("allowed_paths"))
+    allow_declarative_fallback = bool(ctx.input.get("allow_declarative_fallback", True))
+    if backend == "declarative" and allowed_paths is not None:
+        raise DevWorkerError("allowed_paths exige backend=kilo")
 
     worktree, branch = _create_worktree(repository, ctx.id)
     if backend == "declarative":
@@ -703,7 +767,9 @@ def development_task(ctx):
     original_status = _status_entries(worktree)
     last_test_output = ""
     for attempt in range(KILO_MAX_PASSES):
-        prompt = _build_kilo_prompt(goal, tests, max_steps, last_test_output, attempt)
+        prompt = _build_kilo_prompt(
+            goal, tests, max_steps, last_test_output, attempt, allowed_paths=allowed_paths,
+        )
         try:
             _run_kilo(worktree, goal, tests, max_steps, prompt=prompt)
         except (DevWorkerError, OSError, subprocess.SubprocessError) as exc:
@@ -712,15 +778,19 @@ def development_task(ctx):
                 and _git(worktree, "branch", "--show-current") == branch
                 and _status_entries(worktree) == original_status
             )
-            if pristine:
+            if pristine and allow_declarative_fallback:
                 ctx.emit("development.kilo_fallback", {"error": f"{type(exc).__name__}: {exc}"[-2000:]})
                 return _run_declarative_backend(
                     ctx, goal, worktree, branch, tests, max_steps, fallback_from="kilo",
                 )
+            if pristine:
+                raise DevWorkerError(
+                    f"Kilo a échoué sur worktree propre et fallback declarative désactivé: {exc}"
+                ) from exc
             raise DevWorkerError(f"Kilo a échoué après modification; worktree conservé: {worktree}: {exc}") from exc
 
         try:
-            changed_paths = _validate_kilo_result(worktree, original_head, branch)
+            changed_paths = _validate_kilo_result(worktree, original_head, branch, allowed_paths=allowed_paths)
         except KiloRepairableError as exc:
             last_test_output = f"{exc.kind}: {exc.feedback}"
             if attempt < KILO_MAX_PASSES - 1:
@@ -739,7 +809,7 @@ def development_task(ctx):
         test_output, tests_passed, _ = _tool({"action": "test"}, worktree, tests, False)
         ctx.emit("development.tool", {"action": "test", "ok": tests_passed})
         if tests_passed:
-            changed_paths = _validate_kilo_result(worktree, original_head, branch)
+            changed_paths = _validate_kilo_result(worktree, original_head, branch, allowed_paths=allowed_paths)
             commit_message = f"chore: complete development task {ctx.id}"
             _, _, commit = _tool(
                 {"action": "commit", "message": commit_message}, worktree, tests, tests_passed,
