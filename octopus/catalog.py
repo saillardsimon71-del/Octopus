@@ -97,6 +97,7 @@ def _overlay_omniroute(raw: dict) -> dict:
     devworker_models = {
         "omniroute/devworker-gemini": "octopus-free-devworker-gemini",
         "omniroute/devworker-groq": "octopus-free-devworker-groq",
+        "omniroute/devworker-cloudflare": "octopus-free-devworker-cloudflare",
     }
     for dev_model_id, dev_api_model in devworker_models.items():
         raw.setdefault("models", {})[dev_model_id] = {
@@ -111,6 +112,7 @@ def _overlay_omniroute(raw: dict) -> dict:
         "json_schema_mode": "tool_call",
         "params": {"reasoning_effort": "low"},
     })
+    raw["models"]["omniroute/devworker-cloudflare"]["json_schema_mode"] = "tool_call"
     free_defaults = {
         "podalux.select_offer": model_id,
         "podalux.write_job": model_id,
@@ -139,6 +141,7 @@ def _overlay_omniroute(raw: dict) -> dict:
     dedicated = [
         "omniroute/devworker-gemini",
         "omniroute/devworker-groq",
+        "omniroute/devworker-cloudflare",
     ]
     for profile_name in ("zero_cost", "low_cost"):
         dev_candidates[profile_name] = list(dedicated)
