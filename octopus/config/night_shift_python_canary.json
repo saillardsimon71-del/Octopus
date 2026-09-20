@@ -14,14 +14,15 @@
       "acceptance_criteria": [
         "normalization logic is centralized in a small private helper",
         "_coerce_enum uses the helper",
+        "no new import or module-level side effect is introduced",
         "public capability behavior and aliases remain unchanged",
-        "the existing capability test suite passes unchanged"
+        "the existing capability oracle passes with the same PASSED node set as the baseline"
       ],
       "noop_allowed": false,
       "test_sandbox_image": "octopus-test-sandbox:py311",
       "max_files_changed": 1,
-      "max_lines_added": 40,
-      "max_lines_deleted": 40
+      "max_lines_added": 20,
+      "max_lines_deleted": 20
     }
   ]
 }
