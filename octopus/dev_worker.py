@@ -19,6 +19,15 @@ class DevWorkerError(RuntimeError):
     retryable = False
 
 
+class KiloRepairableError(DevWorkerError):
+    """Failure that a later Kilo pass may safely repair inside the same worktree."""
+
+    def __init__(self, kind: str, feedback: str):
+        self.kind = kind
+        self.feedback = feedback
+        super().__init__(feedback)
+
+
 DEV_ACTION_SCHEMA = {
     "type": "object",
     "properties": {
@@ -169,7 +178,7 @@ def _build_kilo_prompt(goal: str, tests: list[list[str]], max_steps: int, last_t
         prefix += f"GOAL: {goal_text} "
     else:
         prefix += (
-            "A previous Kilo attempt failed the external deterministic tests. "
+            "A previous Kilo attempt failed external validation or deterministic tests. "
             "Make the smallest focused correction to satisfy the original goal. "
             f"GOAL: {goal_text} "
         )
@@ -196,21 +205,6 @@ def _run_kilo(worktree: Path, goal: str, tests: list[list[str]], max_steps: int,
             },
         },
     }
-    goal_text = " ".join(goal.split())
-    tests_text = " ; ".join(" ".join(command) for command in tests)
-    prompt = (
-        "Modify this isolated worktree to satisfy the task. "
-        "Use only read, glob, grep, edit, and write. "
-        "Use write only when a required new file must be created. "
-        "Do not run commands or tests, access secrets or .env files, change Kilo configuration, commit, push, "
-        "merge, or modify anything outside this worktree. "
-        "Make the smallest focused change and stop after saving the edits. "
-        "Inspect only files directly relevant to the goal. Prefer grep or glob before reading files. "
-        "Do not survey the entire repository. Avoid reading large unrelated files. "
-        "OCTOPUS will validate the diff and run deterministic tests itself. "
-        f"GOAL: {goal_text} "
-        f"TESTS THAT OCTOPUS WILL RUN: {tests_text}"
-    )
     with tempfile.TemporaryDirectory(prefix="octopus-kilo-config-") as config_root:
         env = dict(os.environ)
         env.pop("KILO_CONFIG", None)
@@ -558,10 +552,16 @@ def _validate_kilo_result(worktree: Path, original_head: str, original_branch: s
         raise DevWorkerError(f"chemin Kilo interdit: {', '.join(forbidden)}; worktree conservé: {worktree}")
     changed = sorted({path for status, path in entries if status != "!!"})
     if not changed:
-        raise DevWorkerError(f"Kilo n'a produit aucune modification; worktree conservé: {worktree}")
+        raise KiloRepairableError(
+            "no_changes",
+            f"Kilo n'a produit aucune modification; worktree conservé: {worktree}",
+        )
     check = _run(["git", "diff", "--check", "HEAD", "--"], worktree)
     if check.returncode:
-        raise DevWorkerError((check.stderr or check.stdout or "diff Kilo invalide")[-2000:])
+        raise KiloRepairableError(
+            "diff_check",
+            (check.stderr or check.stdout or "diff Kilo invalide")[-2000:],
+        )
     return changed
 
 
@@ -719,7 +719,22 @@ def development_task(ctx):
                 )
             raise DevWorkerError(f"Kilo a échoué après modification; worktree conservé: {worktree}: {exc}") from exc
 
-        changed_paths = _validate_kilo_result(worktree, original_head, branch)
+        try:
+            changed_paths = _validate_kilo_result(worktree, original_head, branch)
+        except KiloRepairableError as exc:
+            last_test_output = f"{exc.kind}: {exc.feedback}"
+            if attempt < KILO_MAX_PASSES - 1:
+                ctx.emit("development.kilo_retry", {
+                    "attempt": attempt + 1,
+                    "max_passes": KILO_MAX_PASSES,
+                    "test_output": last_test_output[-KILO_TEST_FEEDBACK_CHARS:],
+                })
+                continue
+            raise DevWorkerError(
+                f"validation Kilo toujours invalide après {KILO_MAX_PASSES} passes; "
+                f"worktree conservé: {worktree}\n"
+                f"{last_test_output[-KILO_TEST_FEEDBACK_CHARS:]}"
+            ) from exc
         ctx.emit("development.kilo_completed", {"changed_paths": changed_paths})
         test_output, tests_passed, _ = _tool({"action": "test"}, worktree, tests, False)
         ctx.emit("development.tool", {"action": "test", "ok": tests_passed})
