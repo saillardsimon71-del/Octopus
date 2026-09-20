@@ -693,7 +693,7 @@ def test_development_task_retries_kilo_after_diff_check_failure(tmp_path, monkey
     assert result["status"] == "done"
     assert result["output"]["backend"] == "kilo"
     assert len(prompts) == 2
-    assert "PREVIOUS_TEST_OUTPUT:" in prompts[1]
+    assert "PREVIOUS_FEEDBACK:" in prompts[1]
     assert "diff_check:" in prompts[1]
     assert "trailing whitespace" in prompts[1]
     assert any(event["type"] == "development.kilo_retry" for event in tasks.events(task_id=task_id))
@@ -812,7 +812,7 @@ def test_development_task_accepts_justified_noop_when_allowed(tmp_path, monkeypa
         dev_worker,
         "_run_kilo",
         lambda *args, **kwargs: (
-            '{"type":"text","text":"Verified the requested state from the repository.\\nNO_CHANGE_NEEDED"}\\n'
+            '{"type":"text","text":"Verified the requested state from the repository.\\nNO_CHANGE_NEEDED"}\n'
         ),
     )
     worker.enqueue("octopus", "development.task", {
@@ -842,7 +842,7 @@ def test_no_changes_without_explicit_noop_remains_repairable(tmp_path, monkeypat
 
     def no_edit(*args, **kwargs):
         calls.append(kwargs.get("prompt"))
-        return '{"type":"text","text":"I did not edit anything."}\\n'
+        return '{"type":"text","text":"I did not edit anything."}\n'
 
     monkeypatch.setattr(dev_worker, "_run_kilo", no_edit)
     worker.enqueue("octopus", "development.task", {
