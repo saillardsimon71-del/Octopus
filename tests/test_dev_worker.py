@@ -606,12 +606,12 @@ def test_devworker_kilo_run_is_inline_configured_and_deny_by_default(tmp_path, m
     permissions = agent["permission"]
     assert permissions["*"] == "deny"
     assert set(permissions) >= {
-        "*", "read", "glob", "grep", "edit", "write", "bash", "task", "agent_manager",
+        "*", "read", "glob", "grep", "list", "edit", "write", "bash", "task", "agent_manager",
         "skill", "websearch", "webfetch", "external_directory",
     }
     for name in ("bash", "task", "agent_manager", "skill", "websearch", "webfetch", "external_directory"):
         assert permissions[name] == "deny"
-    for name in ("read", "glob", "grep", "edit", "write"):
+    for name in ("read", "glob", "grep", "list", "edit", "write"):
         assert permissions[name] != "deny"
     for name in ("read", "edit", "write"):
         assert permissions[name]["*"] == "allow"
