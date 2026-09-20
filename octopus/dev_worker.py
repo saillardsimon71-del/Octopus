@@ -187,6 +187,10 @@ def _rate_limit_delay(exc: Exception) -> float | None:
     return delay if 0 < delay <= 60 else None
 
 
+def _malformed_tool_call(exc: Exception) -> bool:
+    return type(exc).__name__ == "BadRequestError" and "Failed to parse tool call arguments as JSON" in str(exc)
+
+
 def _check_patch_paths(worktree: Path, patch: str) -> None:
     targets = []
     for line in patch.splitlines():
@@ -410,20 +414,34 @@ def development_task(ctx):
                 "goal": goal, "worktree_status": state, "tests": tests, "history": history,
             }, ensure_ascii=False)},
         ]
-        for rate_limit_attempt in range(2):
+        completion_messages = messages
+        rate_limit_retried = False
+        structured_retried = False
+        while True:
             try:
                 completion = llm.complete(
-                    "development.step", messages, agent="DEVWORKER", business=ctx.business,
+                    "development.step", completion_messages, agent="DEVWORKER", business=ctx.business,
                     profile="zero_cost", json_schema=DEV_ACTION_SCHEMA, tool_schemas=DEV_ACTION_TOOLS,
                     max_tokens=1600, validate=_parse_action,
                 )
                 break
             except Exception as exc:
                 delay = _rate_limit_delay(exc)
-                if rate_limit_attempt or delay is None:
-                    raise
-                ctx.emit("development.rate_limited", {"retry_after_s": delay})
-                time.sleep(delay)
+                if not rate_limit_retried and delay is not None:
+                    rate_limit_retried = True
+                    ctx.emit("development.rate_limited", {"retry_after_s": delay})
+                    time.sleep(delay)
+                    continue
+                if not structured_retried and _malformed_tool_call(exc):
+                    structured_retried = True
+                    ctx.emit("development.structured_retry", {})
+                    completion_messages = [*messages, {
+                        "role": "user",
+                        "content": "The previous tool arguments were rejected. Return exactly one declarative "
+                                   "tool call with valid JSON; escape every newline and quote inside strings.",
+                    }]
+                    continue
+                raise
         action = completion.data if completion.data is not None else _parse_action(completion.text)
         tool_failed = False
         try:

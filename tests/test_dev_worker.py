@@ -315,6 +315,43 @@ def test_devworker_extracts_observed_groq_retry_delay():
     assert dev_worker._rate_limit_delay(RuntimeError("Please try again in 1s.")) is None
 
 
+def test_devworker_retries_one_malformed_provider_tool_call(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    BadRequestError = type("BadRequestError", (Exception,), {})
+    repo = repository(tmp_path)
+    calls = []
+
+    def complete(task, messages, **kwargs):
+        calls.append((task, messages, kwargs))
+        if len(calls) == 1:
+            raise BadRequestError("Failed to parse tool call arguments as JSON")
+        action = {"action": "commit", "message": "fix: retry malformed tool call"}
+        return SimpleNamespace(data=action, text=json.dumps(action))
+
+    monkeypatch.setattr(dev_worker.llm, "complete", complete)
+    monkeypatch.setattr(
+        dev_worker, "_tool",
+        lambda action, worktree, tests, tests_passed: ("fake-commit", True, "fake-commit"),
+    )
+    task_id = worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Retry one malformed declarative tool call.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "max_steps": 1,
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "done"
+    assert len(calls) == 2
+    assert "valid JSON" in calls[1][1][-1]["content"]
+    assert any(event["type"] == "development.structured_retry" for event in tasks.events(task_id=task_id))
+    assert dev_worker._malformed_tool_call(
+        BadRequestError("attempted to call tool 'search' which was not in request.tools"),
+    ) is False
+
+
 @pytest.mark.parametrize("payload", [
     {"action": "read", "query": None, "patch": None, "message": None},
     {"action": "test", "path": 7, "query": None, "patch": None, "message": None},
