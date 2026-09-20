@@ -49,6 +49,122 @@ def test_night_plan_rejects_unsafe_edit_scope(allowed_paths):
         night_shift.validate_plan(raw)
 
 
+def test_python_canary_requires_source_only_and_protects_trust_core():
+    from octopus import night_shift
+
+    safe = night_shift.validate_plan({
+        "name": "python-safe",
+        "policy": "python_canary",
+        "tickets": [{
+            "goal": "Refactor capability normalization without changing behavior.",
+            "allowed_paths": ["octopus/capabilities.py"],
+            "test_targets": ["tests/test_capabilities.py"],
+            "max_steps": 20,
+            "acceptance_criteria": ["existing capability tests remain green"],
+            "max_lines_added": 80,
+            "max_lines_deleted": 80,
+        }],
+    })
+
+    ticket = safe["tickets"][0]
+    assert ticket["test_sandbox"] == "docker"
+    assert ticket["test_sandbox_image"] == "octopus-test-sandbox:py311"
+    assert ticket["max_files_changed"] == 1
+
+    for path in (
+        "tests/test_capabilities.py",
+        "octopus/dev_worker.py",
+        "octopus/night_shift.py",
+        "README.md",
+    ):
+        with pytest.raises(night_shift.NightShiftError):
+            night_shift.validate_plan({
+                "policy": "python_canary",
+                "tickets": [{
+                    "goal": "unsafe",
+                    "allowed_paths": [path],
+                    "test_targets": ["tests/test_capabilities.py"],
+                }],
+            })
+
+
+def test_python_canary_runner_passes_docker_and_radius_to_development_task(tmp_path, monkeypatch):
+    from octopus import night_shift
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    plan = {
+        "name": "python-canary",
+        "policy": "python_canary",
+        "tickets": [{
+            "goal": "Refactor capability normalization without changing behavior.",
+            "allowed_paths": ["octopus/capabilities.py"],
+            "test_targets": ["tests/test_capabilities.py"],
+            "max_steps": 20,
+            "acceptance_criteria": ["existing capability tests remain green"],
+            "max_files_changed": 1,
+            "max_lines_added": 80,
+            "max_lines_deleted": 80,
+        }],
+    }
+
+    monkeypatch.setattr(
+        night_shift,
+        "preflight",
+        lambda repo: {"repository": str(repository), "base_head": "base"},
+    )
+    monkeypatch.setattr(
+        night_shift.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="[]", stderr=""),
+    )
+    monkeypatch.setattr(night_shift.worker, "load_handlers", lambda: {})
+    monkeypatch.setattr(
+        night_shift.dev_worker,
+        "_run_tests",
+        lambda *args, **kwargs: ("baseline green", True),
+    )
+    monkeypatch.setattr(
+        night_shift,
+        "_create_night_worktree",
+        lambda repo, run_id: (repository, f"octopus/night-{run_id}"),
+    )
+    captured = {}
+
+    def fake_enqueue(business, kind, input, **kwargs):
+        captured.update(input=input, kwargs=kwargs)
+        return 77
+
+    monkeypatch.setattr(night_shift.worker, "enqueue", fake_enqueue)
+    monkeypatch.setattr(
+        night_shift.worker,
+        "run_one",
+        lambda **kwargs: {
+            "id": 77,
+            "status": "done",
+            "output": {"commit": "abc123", "backend": "kilo", "test_sandbox": "docker"},
+        },
+    )
+    monkeypatch.setattr(night_shift, "_fast_forward", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        night_shift,
+        "_git",
+        lambda repo, *args, **kwargs: "abc123" if args[:2] == ("rev-parse", "HEAD") else "",
+    )
+    monkeypatch.setattr(night_shift, "_write_report", lambda report: tmp_path / "report.json")
+
+    result = night_shift.run(repository, plan, max_tasks=1, max_hours=1, max_failures=1)
+
+    assert result["status"] == "backlog_complete"
+    task_input = captured["input"]
+    assert task_input["test_sandbox"] == "docker"
+    assert task_input["test_sandbox_image"] == "octopus-test-sandbox:py311"
+    assert task_input["max_files_changed"] == 1
+    assert task_input["max_lines_added"] == 80
+    assert task_input["max_lines_deleted"] == 80
+    assert task_input["allow_declarative_fallback"] is False
+
+
 def test_night_run_forces_kilo_scope_no_fallback_and_fast_forwards(tmp_path, monkeypatch):
     from octopus import night_shift
 
@@ -73,6 +189,11 @@ def test_night_run_forces_kilo_scope_no_fallback_and_fast_forwards(tmp_path, mon
         lambda repo: {"repository": str(repository), "base_head": "base"},
     )
     monkeypatch.setattr(night_shift.worker, "load_handlers", lambda: {})
+    monkeypatch.setattr(
+        night_shift.dev_worker,
+        "_run_tests",
+        lambda *args, **kwargs: ("baseline green", True),
+    )
     monkeypatch.setattr(
         night_shift,
         "_create_night_worktree",
@@ -154,6 +275,11 @@ def test_night_run_accepts_justified_noop_without_fast_forward(tmp_path, monkeyp
     )
     monkeypatch.setattr(night_shift.worker, "load_handlers", lambda: {})
     monkeypatch.setattr(
+        night_shift.dev_worker,
+        "_run_tests",
+        lambda *args, **kwargs: ("baseline green", True),
+    )
+    monkeypatch.setattr(
         night_shift,
         "_create_night_worktree",
         lambda repo, run_id: (repository, f"octopus/night-{run_id}"),
@@ -213,6 +339,11 @@ def test_night_run_stops_after_consecutive_failures(tmp_path, monkeypatch):
         lambda repo: {"repository": str(repository), "base_head": "base"},
     )
     monkeypatch.setattr(night_shift.worker, "load_handlers", lambda: {})
+    monkeypatch.setattr(
+        night_shift.dev_worker,
+        "_run_tests",
+        lambda *args, **kwargs: ("baseline green", True),
+    )
     monkeypatch.setattr(
         night_shift,
         "_create_night_worktree",

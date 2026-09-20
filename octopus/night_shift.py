@@ -1,9 +1,9 @@
-"""Bounded unattended development canary for OCTOPUS.
+"""Bounded unattended development canaries for OCTOPUS.
 
-The first version is deliberately documentation-only. Each ticket is executed by
-`development.task` with Kilo, an exact path allowlist, no declarative fallback,
-and a hard zero-cost model requirement. Successful task commits are fast-forwarded
-onto one local night branch. Nothing is pushed or merged into main.
+The default policy remains documentation-only. A separate python_canary policy is
+available only with Docker-isolated oracle tests, an exact source-file allowlist,
+tight diff-radius limits, no declarative fallback, and local commits only.
+Nothing is pushed or merged into main.
 """
 from __future__ import annotations
 
@@ -28,10 +28,20 @@ MAX_HOURS = 8.0
 MAX_CONSECUTIVE_FAILURES = 2
 DEFAULT_MAX_STEPS = 20
 NIGHT_POLICY = "docs_only"
+NIGHT_POLICIES = frozenset({"docs_only", "python_canary"})
 PROTECTED_DOCS = {
     "AGENTS.md",
     "docs/ACCEPTANCE_GATES.md",
 }
+PYTHON_CANARY_PROTECTED = frozenset({
+    "octopus/dev_worker.py",
+    "octopus/night_shift.py",
+    "octopus/worker.py",
+    "octopus/tasks.py",
+    "octopus/paths.py",
+    "octopus/__main__.py",
+    "conftest.py",
+})
 
 
 def default_plan_path() -> Path:
@@ -62,7 +72,7 @@ def _normalize_relative_path(value: str) -> str:
     return normalized
 
 
-def _validate_ticket(raw: dict, index: int) -> dict:
+def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
     if not isinstance(raw, dict):
         raise NightShiftError(f"ticket #{index}: objet JSON attendu")
     goal = str(raw.get("goal") or "").strip()
@@ -77,14 +87,24 @@ def _validate_ticket(raw: dict, index: int) -> dict:
         if not isinstance(value, str):
             raise NightShiftError(f"ticket #{index}: allowed_paths doit contenir des chaînes")
         path = _normalize_relative_path(value)
-        if not path.lower().endswith(".md"):
-            raise NightShiftError(
-                f"ticket #{index}: night canary v1 est documentation-only; chemin refusé: {path}"
-            )
-        if path in PROTECTED_DOCS:
-            raise NightShiftError(f"ticket #{index}: document de gouvernance protégé: {path}")
+        if policy == "docs_only":
+            if not path.lower().endswith(".md"):
+                raise NightShiftError(
+                    f"ticket #{index}: policy docs_only refuse le chemin: {path}"
+                )
+            if path in PROTECTED_DOCS:
+                raise NightShiftError(f"ticket #{index}: document de gouvernance protégé: {path}")
+        elif policy == "python_canary":
+            if not path.lower().endswith(".py"):
+                raise NightShiftError(f"ticket #{index}: python_canary exige des fichiers .py: {path}")
+            if path.startswith("tests/") or path.endswith("/conftest.py") or path == "conftest.py":
+                raise NightShiftError(f"ticket #{index}: tests existants non modifiables: {path}")
+            if path in PYTHON_CANARY_PROTECTED:
+                raise NightShiftError(f"ticket #{index}: noyau de confiance protégé: {path}")
         if path not in allowed_paths:
             allowed_paths.append(path)
+    if policy == "python_canary" and len(allowed_paths) > 3:
+        raise NightShiftError(f"ticket #{index}: python_canary autorise au plus 3 fichiers source")
 
     targets_raw = raw.get("test_targets") or ["tests/test_dev_worker.py"]
     if not isinstance(targets_raw, list) or not targets_raw:
@@ -99,8 +119,9 @@ def _validate_ticket(raw: dict, index: int) -> dict:
         test_targets.append(value)
 
     max_steps = int(raw.get("max_steps", DEFAULT_MAX_STEPS))
-    if not 1 <= max_steps <= 25:
-        raise NightShiftError(f"ticket #{index}: max_steps doit être compris entre 1 et 25")
+    step_cap = 25 if policy == "docs_only" else 30
+    if not 1 <= max_steps <= step_cap:
+        raise NightShiftError(f"ticket #{index}: max_steps doit être compris entre 1 et {step_cap}")
     acceptance_raw = raw.get("acceptance_criteria") or []
     if not isinstance(acceptance_raw, list):
         raise NightShiftError(f"ticket #{index}: acceptance_criteria doit être une liste")
@@ -110,6 +131,25 @@ def _validate_ticket(raw: dict, index: int) -> dict:
             raise NightShiftError(f"ticket #{index}: acceptance_criteria invalide")
         acceptance_criteria.append(" ".join(value.split()))
 
+    if policy == "python_canary":
+        test_sandbox = "docker"
+        sandbox_image = str(
+            raw.get("test_sandbox_image") or dev_worker.DEFAULT_TEST_SANDBOX_IMAGE
+        ).strip()
+        max_files_changed = int(raw.get("max_files_changed", len(allowed_paths)))
+        max_lines_added = int(raw.get("max_lines_added", 160))
+        max_lines_deleted = int(raw.get("max_lines_deleted", 120))
+        if not 1 <= max_files_changed <= 3:
+            raise NightShiftError(f"ticket #{index}: max_files_changed doit être compris entre 1 et 3")
+        if not 1 <= max_lines_added <= 300 or not 1 <= max_lines_deleted <= 300:
+            raise NightShiftError(f"ticket #{index}: rayon de lignes python_canary trop large")
+    else:
+        test_sandbox = "host"
+        sandbox_image = dev_worker.DEFAULT_TEST_SANDBOX_IMAGE
+        max_files_changed = len(allowed_paths)
+        max_lines_added = int(raw.get("max_lines_added", 500))
+        max_lines_deleted = int(raw.get("max_lines_deleted", 500))
+
     return {
         "goal": goal,
         "allowed_paths": allowed_paths,
@@ -117,6 +157,11 @@ def _validate_ticket(raw: dict, index: int) -> dict:
         "max_steps": max_steps,
         "acceptance_criteria": acceptance_criteria,
         "noop_allowed": bool(raw.get("noop_allowed", False)),
+        "test_sandbox": test_sandbox,
+        "test_sandbox_image": sandbox_image,
+        "max_files_changed": max_files_changed,
+        "max_lines_added": max_lines_added,
+        "max_lines_deleted": max_lines_deleted,
     }
 
 
@@ -124,14 +169,14 @@ def validate_plan(raw: dict) -> dict:
     if not isinstance(raw, dict):
         raise NightShiftError("plan JSON attendu")
     policy = str(raw.get("policy") or NIGHT_POLICY)
-    if policy != NIGHT_POLICY:
+    if policy not in NIGHT_POLICIES:
         raise NightShiftError(f"politique night-shift non supportée: {policy}")
     tickets_raw = raw.get("tickets")
     if not isinstance(tickets_raw, list) or not tickets_raw:
         raise NightShiftError("tickets non vide requis")
     if len(tickets_raw) > MAX_TICKETS:
         raise NightShiftError(f"maximum {MAX_TICKETS} tickets par night shift")
-    tickets = [_validate_ticket(item, index + 1) for index, item in enumerate(tickets_raw)]
+    tickets = [_validate_ticket(item, index + 1, policy) for index, item in enumerate(tickets_raw)]
     return {
         "name": str(raw.get("name") or "night-canary-v1"),
         "policy": policy,
@@ -253,6 +298,21 @@ def run(
 
     plan = validate_plan(plan)
     ready = preflight(repository)
+    if plan["policy"] == "python_canary":
+        for image in sorted({ticket["test_sandbox_image"] for ticket in plan["tickets"][:max_tasks]}):
+            probe = subprocess.run(
+                ["docker", "image", "inspect", image],
+                cwd=ready["repository"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+            if probe.returncode:
+                raise NightShiftError(
+                    f"python_canary refuse de démarrer: image Docker absente: {image}"
+                )
     run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     report = {
         "run_id": run_id,
@@ -296,6 +356,22 @@ def run(
             [sys.executable, "-m", "pytest", "-q", target]
             for target in ticket["test_targets"]
         ]
+        baseline_output, baseline_green = dev_worker._run_tests(
+            night_worktree,
+            tests,
+            sandbox=ticket["test_sandbox"],
+            sandbox_image=ticket["test_sandbox_image"],
+        )
+        if not baseline_green:
+            report["tickets"].append({
+                "index": index,
+                "status": "baseline_tests_failed",
+                "goal": ticket["goal"],
+                "allowed_paths": ticket["allowed_paths"],
+                "baseline_output": baseline_output[-4000:],
+            })
+            stop_reason = "baseline_tests_failed"
+            break
         task_id = worker.enqueue(
             "octopus",
             "development.task",
@@ -308,6 +384,11 @@ def run(
                 "allowed_paths": ticket["allowed_paths"],
                 "acceptance_criteria": ticket["acceptance_criteria"],
                 "noop_allowed": ticket["noop_allowed"],
+                "test_sandbox": ticket["test_sandbox"],
+                "test_sandbox_image": ticket["test_sandbox_image"],
+                "max_files_changed": ticket["max_files_changed"],
+                "max_lines_added": ticket["max_lines_added"],
+                "max_lines_deleted": ticket["max_lines_deleted"],
                 "allow_declarative_fallback": False,
             },
             priority=10_000,
