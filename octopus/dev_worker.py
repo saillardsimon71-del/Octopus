@@ -154,12 +154,13 @@ def _kilo_permissions() -> dict:
         "read": read,
         "glob": "allow",
         "grep": "allow",
+        "list": "allow",
         "edit": edit,
         "write": write,
     }
     for name in (
         "bash", "task", "agent_manager", "skill", "websearch", "webfetch", "external_directory",
-        "lsp", "list", "question", "todowrite", "todoread", "doom_loop", "mcp",
+        "lsp", "question", "todowrite", "todoread", "doom_loop", "mcp",
     ):
         permissions[name] = "deny"
     return permissions
