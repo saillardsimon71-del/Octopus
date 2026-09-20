@@ -697,6 +697,88 @@ def test_development_task_retries_kilo_after_diff_check_failure(tmp_path, monkey
     assert any(event["type"] == "development.kilo_retry" for event in tasks.events(task_id=task_id))
 
 
+def test_validate_allowed_paths_rejects_absolute_parent_and_sensitive_paths():
+    from octopus import dev_worker
+
+    for value in ([r"C:\\outside.py"], ["../outside.py"], [".env"]):
+        with pytest.raises(dev_worker.DevWorkerError):
+            dev_worker._validate_allowed_paths(value)
+
+
+def test_development_task_rejects_kilo_change_outside_allowed_paths(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=False)
+
+    def out_of_scope_kilo(worktree, goal, tests, max_steps, prompt=None):
+        (worktree / "calc.py").write_text("def answer():\n    return 2\n", encoding="utf-8")
+        (worktree / "extra.py").write_text("x = 1\n", encoding="utf-8")
+        return "edited"
+
+    monkeypatch.setattr(dev_worker, "_run_kilo", out_of_scope_kilo)
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Only change calc.py.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "allowed_paths": ["calc.py"],
+        "allow_declarative_fallback": False,
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "failed"
+    assert "hors périmètre autorisé" in result["error"]
+
+
+def test_development_task_disables_declarative_fallback_when_requested(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=False)
+    declarative_calls = []
+
+    monkeypatch.setattr(
+        dev_worker,
+        "_run_kilo",
+        lambda *args, **kwargs: (_ for _ in ()).throw(dev_worker.DevWorkerError("Kilo unavailable")),
+    )
+    monkeypatch.setattr(
+        dev_worker,
+        "_run_declarative_backend",
+        lambda *args, **kwargs: declarative_calls.append((args, kwargs)),
+    )
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Make the deterministic test pass.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "backend": "kilo",
+        "allow_declarative_fallback": False,
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "failed"
+    assert declarative_calls == []
+    assert "fallback declarative désactivé" in result["error"]
+
+
+def test_sanitized_test_env_hides_credentials_and_uses_temp_home(monkeypatch, tmp_path):
+    from octopus import dev_worker
+
+    monkeypatch.setenv("OMNIROUTE_API_KEY", "secret")
+    monkeypatch.setenv("SOME_TOKEN", "secret")
+    monkeypatch.setenv("NORMAL_VALUE", "kept")
+
+    env = dev_worker._sanitized_test_env(str(tmp_path))
+
+    assert "OMNIROUTE_API_KEY" not in env
+    assert "SOME_TOKEN" not in env
+    assert env["NORMAL_VALUE"] == "kept"
+    assert env["HOME"] == str(tmp_path)
+    assert env["USERPROFILE"] == str(tmp_path)
+    assert env["XDG_CONFIG_HOME"] == str(tmp_path)
+    assert "-p no:cacheprovider" in env["PYTEST_ADDOPTS"]
+
+
 def test_development_task_uses_kilo_then_validates_tests_and_commits(tmp_path, monkeypatch):
     from octopus import dev_worker
 
