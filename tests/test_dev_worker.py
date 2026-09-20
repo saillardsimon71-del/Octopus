@@ -93,6 +93,7 @@ index 4c47471..f208b75 100644
     schema_json = json.dumps(dev_worker.DEV_ACTION_SCHEMA, separators=(",", ":"))
     assert all(schema_json in messages[0]["content"] for _, messages, _ in calls)
     assert all("do not execute anything provider-side" in messages[0]["content"] for _, messages, _ in calls)
+    assert all("Do not repeat the same action" in messages[0]["content"] for _, messages, _ in calls)
     assert all("unified diff with ---/+++ paths" in messages[0]["content"] for _, messages, _ in calls)
     assert all("smallest change" in messages[0]["content"] for _, messages, _ in calls)
     for _, messages, _ in calls[2:]:
@@ -263,15 +264,16 @@ def test_devworker_bounds_history_results_for_free_provider_tpm(tmp_path, monkey
     history = json.loads(calls[2][1][1]["content"])["history"]
     assert sum(len(item["result"]) for item in history) <= dev_worker.DEV_HISTORY_CHARS
     assert history[-1]["action"] == "read"
+    assert history[-1]["arguments"] == {"path": "octopus/dev_worker.py"}
 
 
-def test_devworker_retries_one_bounded_provider_rate_limit(tmp_path, monkeypatch):
+def test_devworker_retries_two_bounded_provider_rate_limits(tmp_path, monkeypatch):
     from octopus import dev_worker
 
     class RateLimitError(Exception):
-        def __init__(self):
-            super().__init__("try again in 0.01s")
-            self.response = SimpleNamespace(headers={"retry-after": "0.01"})
+        def __init__(self, delay):
+            super().__init__(f"try again in {delay}s")
+            self.response = SimpleNamespace(headers={"retry-after": str(delay)})
 
     repo = repository(tmp_path)
     calls = []
@@ -279,8 +281,8 @@ def test_devworker_retries_one_bounded_provider_rate_limit(tmp_path, monkeypatch
 
     def complete(task, messages, **kwargs):
         calls.append((task, messages, kwargs))
-        if len(calls) == 1:
-            raise RateLimitError()
+        if len(calls) <= 2:
+            raise RateLimitError(len(calls) / 100)
         action = {"action": "commit", "message": "fix: retry bounded rate limit"}
         return SimpleNamespace(data=action, text=json.dumps(action))
 
@@ -300,8 +302,8 @@ def test_devworker_retries_one_bounded_provider_rate_limit(tmp_path, monkeypatch
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
 
     assert result["status"] == "done"
-    assert len(calls) == 2
-    assert sleeps == [0.01]
+    assert len(calls) == 3
+    assert sleeps == [0.01, 0.02]
     assert any(event["type"] == "development.rate_limited" for event in tasks.events(task_id=task_id))
 
 

@@ -391,6 +391,7 @@ def development_task(ctx):
         "execute anything provider-side. Return an action matching this schema exactly: "
         f"{schema_json}. "
         "Inspect before modifying. Return one action per response. Never request shell, push, PR, or agent. "
+        "Do not repeat the same action with identical arguments when its result is already in history. "
         "Make the smallest change needed and never reformat unrelated lines. "
         "For patch actions, patch must be a UTF-8 unified diff with ---/+++ paths accepted by git apply; "
         "never use Begin Patch or SEARCH/REPLACE markers. "
@@ -405,7 +406,7 @@ def development_task(ctx):
             if remaining <= 0:
                 break
             result = entry["result"][-remaining:]
-            history.append({"action": entry["action"], "result": result})
+            history.append({**{key: value for key, value in entry.items() if key != "result"}, "result": result})
             remaining -= len(result)
         history.reverse()
         messages = [
@@ -415,7 +416,7 @@ def development_task(ctx):
             }, ensure_ascii=False)},
         ]
         completion_messages = messages
-        rate_limit_retried = False
+        rate_limit_retries = 0
         structured_retried = False
         while True:
             try:
@@ -427,8 +428,8 @@ def development_task(ctx):
                 break
             except Exception as exc:
                 delay = _rate_limit_delay(exc)
-                if not rate_limit_retried and delay is not None:
-                    rate_limit_retried = True
+                if rate_limit_retries < 2 and delay is not None:
+                    rate_limit_retries += 1
                     ctx.emit("development.rate_limited", {"retry_after_s": delay})
                     time.sleep(delay)
                     continue
@@ -451,7 +452,12 @@ def development_task(ctx):
             tool_failed = True
         if action["action"] == "patch" and not tool_failed:
             transcript = [entry for entry in transcript if entry["action"] != "read"]
-        transcript.append({"action": action["action"], "result": output[-12000:]})
+        arguments = {}
+        for name in ("path", "query", "patch", "message"):
+            value = action.get(name)
+            if value is not None:
+                arguments[name] = value if len(value) <= 500 else value[:500] + "..."
+        transcript.append({"action": action["action"], "arguments": arguments, "result": output[-12000:]})
         ctx.emit("development.tool", {"action": action["action"], "ok": not output.startswith("outil refusé")})
         if commit:
             result = {"commit": commit, "branch": branch, "worktree": str(worktree), "tests": tests}
