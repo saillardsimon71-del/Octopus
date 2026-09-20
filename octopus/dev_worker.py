@@ -588,6 +588,75 @@ def _enforce_allowed_paths(changed_paths: list[str], allowed_paths: list[str] | 
         )
 
 
+def _tracked_sensitive_path(relative: str) -> bool:
+    parts = relative.replace("\\", "/").split("/")
+    lowered = [part.lower() for part in parts]
+    name = lowered[-1]
+    if any(part in {".aws", ".ssh", ".docker"} for part in lowered):
+        return True
+    if name in {".git-credentials", ".netrc", ".npmrc", ".pypirc"}:
+        return True
+    if name == ".env" or name.startswith(".env."):
+        return True
+    if name.startswith("id_rsa"):
+        return True
+    if name.endswith((".pem", ".key", ".p12", ".pfx", ".kdbx", ".tfstate", ".tfvars")):
+        return True
+    if name.startswith(("credentials", "secrets", "service-account")):
+        return True
+    return False
+
+
+def _assert_safe_allowed_paths(worktree: Path, allowed_paths: list[str] | None) -> None:
+    if not allowed_paths:
+        return
+    root = worktree.resolve()
+    for relative in allowed_paths:
+        candidate = (root / relative).resolve(strict=False)
+        if candidate != root and root not in candidate.parents:
+            raise DevWorkerError(f"allowed_path résout hors clone isolé: {relative}")
+        current = root
+        for part in Path(relative).parts[:-1]:
+            current = current / part
+            if current.exists() and current.is_symlink():
+                raise DevWorkerError(f"parent symlink interdit dans allowed_path: {relative}")
+        tracked = _git(worktree, "ls-files", "-s", "--", relative, check=False)
+        if tracked:
+            mode = tracked.split(None, 1)[0]
+            if mode == "120000":
+                raise DevWorkerError(f"symlink Git interdit dans allowed_path: {relative}")
+
+
+def _strict_repository_preflight(worktree: Path) -> None:
+    entries = _status_entries(worktree)
+    if entries:
+        raise DevWorkerError(f"clone isolé non propre au pré-vol: {entries[:8]}")
+    tracked = _git(worktree, "ls-files", "-z")
+    risky = sorted(path for path in tracked.split("\0") if path and _tracked_sensitive_path(path))
+    if risky:
+        raise DevWorkerError("fichiers sensibles suivis interdits dans clone Kilo: " + ", ".join(risky[:20]))
+    staged = _git(worktree, "ls-files", "-s")
+    symlinks = []
+    for line in staged.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) == 4 and parts[0] == "120000":
+            symlinks.append(parts[3])
+    if symlinks:
+        raise DevWorkerError("symlinks Git interdits en python_canary: " + ", ".join(symlinks[:20]))
+    flags = _git(worktree, "ls-files", "-v")
+    suspicious_flags = []
+    for line in flags.splitlines():
+        if not line:
+            continue
+        tag = line[0]
+        if tag == "S" or tag.islower():
+            suspicious_flags.append(line[2:])
+    if suspicious_flags:
+        raise DevWorkerError(
+            "index Git avec skip-worktree/assume-unchanged interdit: " + ", ".join(suspicious_flags[:20])
+        )
+
+
 def _validate_positive_limit(raw, name: str, *, maximum: int) -> int | None:
     if raw is None:
         return None
@@ -617,10 +686,12 @@ def _diff_radius(worktree: Path) -> dict[str, int]:
         raw_add, raw_del, path = parts
         files += 1
         tracked_paths.add(path)
-        if raw_add.isdigit():
-            added += int(raw_add)
-        if raw_del.isdigit():
-            deleted += int(raw_del)
+        if raw_add == "-" or raw_del == "-":
+            raise DevWorkerError(f"diff binaire interdit dans rayon de modification: {path}")
+        if not raw_add.isdigit() or not raw_del.isdigit():
+            raise DevWorkerError(f"numstat Git invalide: {line}")
+        added += int(raw_add)
+        deleted += int(raw_del)
 
     for status, path in _status_entries(worktree):
         if status != "??" or path in tracked_paths:
@@ -628,10 +699,15 @@ def _diff_radius(worktree: Path) -> dict[str, int]:
         files += 1
         candidate = resolve_path(worktree, path)
         if candidate.is_file():
+            if candidate.stat().st_size > 1_000_000:
+                raise DevWorkerError(f"fichier untracked trop volumineux: {path}")
             try:
-                added += len(candidate.read_text(encoding="utf-8").splitlines())
-            except (UnicodeDecodeError, OSError):
-                added += 1
+                text = candidate.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError) as exc:
+                raise DevWorkerError(f"fichier untracked non UTF-8/refusé: {path}") from exc
+            if any(len(line.encode("utf-8")) > 16_384 for line in text.splitlines()):
+                raise DevWorkerError(f"ligne untracked trop volumineuse: {path}")
+            added += len(text.splitlines())
     return {"files": files, "added": added, "deleted": deleted}
 
 
@@ -677,28 +753,73 @@ def _validate_test_sandbox(raw) -> str:
     return value
 
 
-def _docker_test_args(worktree: Path, image: str, command: list[str]) -> list[str]:
+def _docker_image_id(worktree: Path, image: str) -> str:
+    info = _run(["docker", "info", "--format", "{{.OSType}}"], worktree, timeout=30)
+    if info.returncode or info.stdout.strip().lower() != "linux":
+        detail = (info.stderr or info.stdout or "Docker indisponible / mode non-Linux")[-1000:]
+        raise DevWorkerError(f"sandbox Docker exige Docker Linux: {detail}")
+    inspect = _run(["docker", "image", "inspect", "--format", "{{.Id}}", image], worktree, timeout=30)
+    image_id = inspect.stdout.strip()
+    if inspect.returncode or not image_id.startswith("sha256:"):
+        raise DevWorkerError(
+            f"image sandbox Docker absente/invalide: {image}; construire l'image avant ce ticket"
+        )
+    return image_id
+
+
+def _docker_mount_source(worktree: Path) -> str:
+    source = worktree.resolve()
+    if not source.is_dir():
+        raise DevWorkerError(f"source Docker inexistante: {source}")
+    raw = str(source)
+    if any(ch in raw for ch in (",", "\n", "\r", '"')):
+        raise DevWorkerError(f"chemin source Docker non sûr: {raw!r}")
+    return raw
+
+
+def _docker_test_args(
+        worktree: Path, image: str, command: list[str], *, container_name: str | None = None) -> list[str]:
     inner = ["python", *command[1:]]
+    if "-rA" not in inner:
+        inner.append("-rA")
+    name = container_name or f"octopus-t-{uuid.uuid4().hex[:12]}"
+    mount = f"type=bind,source={_docker_mount_source(worktree)},target=/workspace,readonly"
     return [
         "docker", "run", "--rm",
+        "--name", name,
+        "--label", "octopus.test=1",
+        "--pull", "never",
+        "--init",
         "--network", "none",
         "--read-only",
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
+        "--user", "10001:10001",
         "--pids-limit", "128",
         "--memory", "768m",
+        "--memory-swap", "768m",
         "--cpus", "1.0",
-        "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m",
+        "--ulimit", "nofile=1024:1024",
+        "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=256m",
         "-e", "HOME=/tmp/home",
         "-e", "USERPROFILE=/tmp/home",
         "-e", "XDG_CONFIG_HOME=/tmp/home",
+        "-e", "PYTHONUTF8=1",
         "-e", "PYTHONDONTWRITEBYTECODE=1",
+        "-e", "TZ=UTC",
         "-e", "PYTEST_ADDOPTS=-p no:cacheprovider",
-        "-v", f"{worktree.resolve()}:/workspace:ro",
+        "--mount", mount,
         "-w", "/workspace",
         image,
         *inner,
     ]
+
+
+def _cleanup_docker_container(worktree: Path, container_name: str) -> None:
+    try:
+        _run(["docker", "rm", "-f", container_name], worktree, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _run_tests(
@@ -706,14 +827,27 @@ def _run_tests(
         sandbox_image: str = DEFAULT_TEST_SANDBOX_IMAGE) -> tuple[str, bool]:
     outputs = []
     if sandbox == "docker":
-        inspect = _run(["docker", "image", "inspect", sandbox_image], worktree, timeout=30)
-        if inspect.returncode:
-            raise DevWorkerError(
-                f"image sandbox Docker absente: {sandbox_image}; construire l'image avant ce ticket"
-            )
+        image_id = _docker_image_id(worktree, sandbox_image)
         for command in tests:
-            result = _run(_docker_test_args(worktree, sandbox_image, command), worktree, timeout=300)
-            outputs.append(f"$ docker sandbox :: {' '.join(command)}\n{result.stdout}{result.stderr}"[-12000:])
+            container_name = f"octopus-t-{uuid.uuid4().hex[:12]}"
+            args = _docker_test_args(worktree, image_id, command, container_name=container_name)
+            try:
+                result = _run(args, worktree, timeout=300)
+            except subprocess.TimeoutExpired as exc:
+                _cleanup_docker_container(worktree, container_name)
+                raise DevWorkerError("sandbox Docker timeout; conteneur forcé à l'arrêt") from exc
+            finally:
+                _cleanup_docker_container(worktree, container_name)
+            combined = (result.stdout or "") + (result.stderr or "")
+            if len(combined.encode("utf-8", errors="replace")) > 2_000_000:
+                raise DevWorkerError("sortie sandbox Docker trop volumineuse")
+            outputs.append(f"$ docker sandbox :: {' '.join(command)}\n{combined}"[-12000:])
+            if result.returncode in {125, 126, 127, 137}:
+                raise DevWorkerError(
+                    f"échec infrastructure Docker code={result.returncode}: {combined[-2000:]}"
+                )
+            if result.returncode == 5:
+                raise DevWorkerError("pytest n'a collecté aucun test (code 5)")
             if result.returncode:
                 return "\n".join(outputs), False
         return "\n".join(outputs), True
@@ -726,6 +860,62 @@ def _run_tests(
             if result.returncode:
                 return "\n".join(outputs), False
     return "\n".join(outputs), True
+
+
+_ORACLE_LINE_RE = re.compile(r"^(PASSED|FAILED|SKIPPED|XFAIL|XPASS|ERROR)\s+([^\s]+)")
+
+
+def _pytest_oracle_signature(output: str) -> tuple[tuple[str, str], ...]:
+    signature = []
+    for line in output.splitlines():
+        match = _ORACLE_LINE_RE.match(line.strip())
+        if match:
+            signature.append((match.group(1), match.group(2)))
+    return tuple(sorted(signature))
+
+
+def _docker_sandbox_probe(base_dir: Path, image: str) -> tuple[str, str]:
+    image_id = _docker_image_id(base_dir, image)
+    probe_root = paths.data_dir()
+    probe_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="octopus-docker-probe-", dir=str(probe_root)) as tmp:
+        probe = Path(tmp)
+        (probe / "test_probe.py").write_text(
+            "import os, socket\n"
+            "from pathlib import Path\n\n"
+            "def test_sandbox_invariants():\n"
+            "    assert os.environ.get('OCTOPUS_TEST_SECRET') is None\n"
+            "    assert not Path('/var/run/docker.sock').exists()\n"
+            "    if hasattr(os, 'getuid'):\n"
+            "        assert os.getuid() != 0\n"
+            "    status = Path('/proc/self/status').read_text(encoding='utf-8')\n"
+            "    assert 'NoNewPrivs:\\t1' in status\n"
+            "    try:\n"
+            "        Path('/workspace/SHOULD_NOT_WRITE').write_text('x', encoding='utf-8')\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "    else:\n"
+            "        raise AssertionError('workspace unexpectedly writable')\n"
+            "    sock = socket.socket()\n"
+            "    sock.settimeout(0.2)\n"
+            "    try:\n"
+            "        sock.connect(('1.1.1.1', 53))\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "    else:\n"
+            "        raise AssertionError('network unexpectedly reachable')\n",
+            encoding="utf-8",
+        )
+        output, green = _run_tests(
+            probe,
+            [[sys.executable, "-m", "pytest", "-q", "test_probe.py"]],
+            sandbox="docker",
+            sandbox_image=image_id,
+        )
+        signature = _pytest_oracle_signature(output)
+        if not green or not any(status == "PASSED" for status, _ in signature):
+            raise DevWorkerError("probe Docker réel non concluant: " + output[-2000:])
+        return image_id, output[-2000:]
 
 
 def _tool(
@@ -799,13 +989,87 @@ def _forbidden_kilo_path(relative: str) -> bool:
     lowered = [part.lower() for part in parts]
     name = lowered[-1]
     return (
-        any(part in {".git", ".kilo", ".kilocode"} for part in lowered)
+        any(part in {".git", ".kilo", ".kilocode", ".aws", ".ssh", ".docker"} for part in lowered)
         or name == ".env"
         or name.startswith(".env.")
-        or name.endswith((".pem", ".key"))
-        or name.startswith(("credentials", "secrets"))
-        or name in {"kilo.json", "kilo.jsonc", "opencode.json", "opencode.jsonc", "agents.md"}
+        or name.endswith((".pem", ".key", ".p12", ".pfx", ".kdbx", ".tfstate", ".tfvars"))
+        or name.startswith(("credentials", "secrets", "id_rsa", "service-account"))
+        or name in {
+            ".git-credentials", ".netrc", ".npmrc", ".pypirc",
+            "kilo.json", "kilo.jsonc", "opencode.json", "opencode.jsonc", "agents.md",
+        }
     )
+
+
+def _call_name(node: ast.Call) -> str:
+    func = node.func
+    parts = []
+    while isinstance(func, ast.Attribute):
+        parts.append(func.attr)
+        func = func.value
+    if isinstance(func, ast.Name):
+        parts.append(func.id)
+    return ".".join(reversed(parts))
+
+
+def _validate_python_canary_ast(worktree: Path, original_head: str, changed_paths: list[str]) -> None:
+    forbidden_prefixes = (
+        "os._exit", "subprocess.", "ctypes.", "importlib.", "socket.",
+    )
+    forbidden_exact = {"exec", "eval", "compile", "__import__"}
+    for relative in changed_paths:
+        if not relative.endswith(".py"):
+            continue
+        try:
+            before = ast.parse(_git(worktree, "show", f"{original_head}:{relative}"), filename=relative)
+            after = ast.parse((worktree / relative).read_text(encoding="utf-8"), filename=relative)
+        except (SyntaxError, UnicodeDecodeError, OSError) as exc:
+            raise KiloRepairableError("python_policy", f"AST Python invalide: {relative}: {exc}") from exc
+
+        old_imports = Counter(
+            ast.dump(node, include_attributes=False)
+            for node in ast.walk(before)
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+        )
+        new_imports = Counter(
+            ast.dump(node, include_attributes=False)
+            for node in ast.walk(after)
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+        )
+        if new_imports - old_imports:
+            raise KiloRepairableError("python_policy", f"nouvel import interdit en python_canary: {relative}")
+
+        old_forbidden = Counter(
+            _call_name(node) for node in ast.walk(before)
+            if isinstance(node, ast.Call)
+            and (_call_name(node) in forbidden_exact or _call_name(node).startswith(forbidden_prefixes))
+        )
+        new_forbidden = Counter(
+            _call_name(node) for node in ast.walk(after)
+            if isinstance(node, ast.Call)
+            and (_call_name(node) in forbidden_exact or _call_name(node).startswith(forbidden_prefixes))
+        )
+        if new_forbidden - old_forbidden:
+            raise KiloRepairableError(
+                "python_policy", f"nouvel appel dangereux interdit en python_canary: {relative}"
+            )
+
+        def top_level_effects(module: ast.Module) -> Counter:
+            effects = Counter()
+            for node in module.body:
+                value = None
+                if isinstance(node, ast.Expr):
+                    value = node.value
+                elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    value = node.value
+                if value is not None and any(isinstance(child, ast.Call) for child in ast.walk(value)):
+                    effects[ast.dump(node, include_attributes=False)] += 1
+            return effects
+
+        if top_level_effects(after) - top_level_effects(before):
+            raise KiloRepairableError(
+                "python_policy", f"nouvel effet de bord niveau module interdit: {relative}"
+            )
 
 
 def _validate_kilo_result(
@@ -819,6 +1083,12 @@ def _validate_kilo_result(
     if _git(worktree, "branch", "--show-current") != original_branch:
         raise DevWorkerError(f"Kilo a changé de branche; worktree conservé: {worktree}")
     entries = _status_entries(worktree)
+    ignored = sorted({path for status, path in entries if status == "!!"})
+    if ignored:
+        raise DevWorkerError(
+            "fichier ignoré créé/modifié par Kilo interdit: " + ", ".join(ignored[:20])
+            + f"; clone conservé: {worktree}"
+        )
     forbidden = sorted({path for _, path in entries if _forbidden_kilo_path(path)})
     if forbidden:
         raise DevWorkerError(f"chemin Kilo interdit: {', '.join(forbidden)}; worktree conservé: {worktree}")
