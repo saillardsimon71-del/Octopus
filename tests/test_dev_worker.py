@@ -13,8 +13,10 @@ from octopus import tasks, worker
 
 
 @pytest.fixture(autouse=True)
-def load_dev_handler():
+def load_dev_handler(tmp_path, monkeypatch):
     worker.load_handlers(["octopus.dev_worker"])
+    clone_root = tmp_path / "isolated-dev-clones"
+    monkeypatch.setenv("OCTOPUS_DEV_WORKTREE_ROOT", str(clone_root))
 
 
 def git(repo: Path, *args: str) -> str:
@@ -545,7 +547,7 @@ def test_devworker_cannot_commit_after_failed_tests(tmp_path, monkeypatch):
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
 
     assert result["status"] == "failed"
-    worktrees = list((Path(os.environ["OCTOPUS_HOME"]) / "data" / "dev-worktrees").glob("*"))
+    worktrees = list((Path(os.environ["OCTOPUS_DEV_WORKTREE_ROOT"])).glob("*"))
     assert len(worktrees) == 1
     assert git(worktrees[0], "rev-parse", "HEAD") == source_head
 
@@ -790,15 +792,24 @@ def test_docker_test_args_are_networkless_read_only_and_secret_free(tmp_path):
         [sys.executable, "-m", "pytest", "-q", "tests/test_capabilities.py"],
     )
 
-    assert args[:4] == ["docker", "run", "--rm", "--network"]
-    assert "none" in args
+    assert args[:3] == ["docker", "run", "--rm"]
+    assert ["--network", "none"] == args[args.index("--network"):args.index("--network") + 2]
     assert "--read-only" in args
+    assert "--pull" in args and "never" in args
+    assert "--init" in args
     assert ["--cap-drop", "ALL"] == args[args.index("--cap-drop"):args.index("--cap-drop") + 2]
     assert ["--security-opt", "no-new-privileges"] == args[
         args.index("--security-opt"):args.index("--security-opt") + 2
     ]
-    assert any(value.endswith(":/workspace:ro") for value in args)
+    assert ["--user", "10001:10001"] == args[args.index("--user"):args.index("--user") + 2]
+    assert ["--memory-swap", "768m"] == args[
+        args.index("--memory-swap"):args.index("--memory-swap") + 2
+    ]
+    mount = args[args.index("--mount") + 1]
+    assert mount.startswith("type=bind,source=")
+    assert mount.endswith(",target=/workspace,readonly")
     assert "octopus-test-sandbox:py311" in args
+    assert "-rA" in args
     joined = " ".join(args)
     assert "OMNIROUTE_API_KEY" not in joined
     assert "TOKEN" not in joined
@@ -812,6 +823,8 @@ def test_run_tests_docker_fails_closed_without_image(tmp_path, monkeypatch):
 
     def fake_run(args, cwd, **kwargs):
         calls.append(args)
+        if args[:3] == ["docker", "info", "--format"]:
+            return SimpleNamespace(returncode=0, stdout="linux\n", stderr="")
         return SimpleNamespace(returncode=1, stdout="", stderr="missing")
 
     monkeypatch.setattr(dev_worker, "_run", fake_run)
@@ -824,7 +837,8 @@ def test_run_tests_docker_fails_closed_without_image(tmp_path, monkeypatch):
             sandbox_image="octopus-test-sandbox:py311",
         )
 
-    assert calls == [["docker", "image", "inspect", "octopus-test-sandbox:py311"]]
+    assert calls[0][:2] == ["docker", "info"]
+    assert calls[1][:3] == ["docker", "image", "inspect"]
 
 
 def test_validate_kilo_result_enforces_diff_radius(tmp_path):
@@ -867,6 +881,7 @@ def test_development_task_can_use_docker_test_sandbox(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dev_worker, "_run_kilo", fake_kilo)
     monkeypatch.setattr(dev_worker, "_run_tests", fake_run_tests)
+    monkeypatch.setattr(dev_worker, "_docker_image_id", lambda *args, **kwargs: "sha256:fixed")
 
     worker.enqueue("octopus", "development.task", {
         "repository": str(repo),
@@ -889,7 +904,76 @@ def test_development_task_can_use_docker_test_sandbox(tmp_path, monkeypatch):
     assert result["output"]["test_sandbox"] == "docker"
     assert seen
     assert seen[0][0] == "docker"
-    assert seen[0][1] == "octopus-test-sandbox:py311"
+    assert seen[0][1] == "sha256:fixed"
+    assert result["output"]["test_sandbox_image"] == "sha256:fixed"
+
+
+def test_task_clone_is_independent_and_outside_source_repo(tmp_path):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=True)
+    clone, branch = dev_worker._create_worktree(repo, 999)
+
+    assert clone.is_dir()
+    assert repo.resolve() not in clone.resolve().parents
+    assert git(clone, "rev-parse", "HEAD") == git(repo, "rev-parse", "HEAD")
+    assert git(clone, "branch", "--show-current") == branch
+    assert git(clone, "remote") == ""
+
+
+def test_validate_kilo_result_rejects_ignored_file(tmp_path):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=True)
+    (repo / ".gitignore").write_text("ignored.tmp\n", encoding="utf-8")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-qm", "ignore")
+    original_head = git(repo, "rev-parse", "HEAD")
+    branch = git(repo, "branch", "--show-current")
+    (repo / "ignored.tmp").write_text("hidden\n", encoding="utf-8")
+
+    with pytest.raises(dev_worker.DevWorkerError, match="fichier ignoré"):
+        dev_worker._validate_kilo_result(
+            repo, original_head, branch, allowed_paths=["calc.py"],
+        )
+
+
+def test_strict_repository_preflight_rejects_tracked_secret_like_file(tmp_path):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=True)
+    (repo / "server.pem").write_text("fake\n", encoding="utf-8")
+    git(repo, "add", "server.pem")
+    git(repo, "commit", "-qm", "tracked secret")
+
+    with pytest.raises(dev_worker.DevWorkerError, match="fichiers sensibles suivis"):
+        dev_worker._strict_repository_preflight(repo)
+
+
+def test_python_canary_ast_rejects_new_import_and_module_side_effect(tmp_path):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=True)
+    original_head = git(repo, "rev-parse", "HEAD")
+    (repo / "calc.py").write_text(
+        "import os\n\nos._exit(0)\n\ndef answer():\n    return 1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(dev_worker.KiloRepairableError, match="nouvel import"):
+        dev_worker._validate_python_canary_ast(repo, original_head, ["calc.py"])
+
+
+def test_oracle_signature_requires_real_report_lines():
+    from octopus import dev_worker
+
+    assert dev_worker._pytest_oracle_signature("all good\n1 passed in 0.01s\n") == ()
+    assert dev_worker._pytest_oracle_signature(
+        "PASSED tests/test_x.py::test_a\nPASSED tests/test_x.py::test_b\n"
+    ) == (
+        ("PASSED", "tests/test_x.py::test_a"),
+        ("PASSED", "tests/test_x.py::test_b"),
+    )
 
 
 def test_kilo_prompt_allows_broad_reading_but_keeps_write_scope():
@@ -1073,7 +1157,7 @@ def test_development_task_does_not_fallback_after_kilo_modification(tmp_path, mo
 
     assert result["status"] == "failed"
     assert declarative_calls == []
-    worktree = next((Path(os.environ["OCTOPUS_HOME"]) / "data" / "dev-worktrees").glob("*"))
+    worktree = next((Path(os.environ["OCTOPUS_DEV_WORKTREE_ROOT"])).glob("*"))
     assert git(worktree, "rev-parse", "HEAD") == source_head
     assert "calc.py" in git(worktree, "status", "--porcelain")
 
@@ -1100,7 +1184,7 @@ def test_development_task_rejects_commit_created_by_kilo(tmp_path, monkeypatch):
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
 
     assert result["status"] == "failed"
-    worktree = next((Path(os.environ["OCTOPUS_HOME"]) / "data" / "dev-worktrees").glob("*"))
+    worktree = next((Path(os.environ["OCTOPUS_DEV_WORKTREE_ROOT"])).glob("*"))
     assert git(worktree, "rev-parse", "HEAD") != source_head
 
 
@@ -1124,7 +1208,7 @@ def test_development_task_rejects_forbidden_kilo_path(tmp_path, monkeypatch):
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
 
     assert result["status"] == "failed"
-    worktree = next((Path(os.environ["OCTOPUS_HOME"]) / "data" / "dev-worktrees").glob("*"))
+    worktree = next((Path(os.environ["OCTOPUS_DEV_WORKTREE_ROOT"])).glob("*"))
     assert git(worktree, "rev-parse", "HEAD") == source_head
     assert (worktree / ".env").is_file()
 
@@ -1149,7 +1233,7 @@ def test_development_task_does_not_commit_when_kilo_tests_fail(tmp_path, monkeyp
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
 
     assert result["status"] == "failed"
-    worktree = next((Path(os.environ["OCTOPUS_HOME"]) / "data" / "dev-worktrees").glob("*"))
+    worktree = next((Path(os.environ["OCTOPUS_DEV_WORKTREE_ROOT"])).glob("*"))
     assert git(worktree, "rev-parse", "HEAD") == source_head
     assert "calc.py" in git(worktree, "status", "--porcelain")
 
