@@ -582,10 +582,10 @@ def test_devworker_kilo_run_is_inline_configured_and_deny_by_default(tmp_path, m
     assert "GOAL: Change only calc.py." in args[-1]
     assert "\\n" not in args[-1]
     assert "\\r" not in args[-1]
-    assert "Inspect only files directly relevant to the goal." in args[-1]
-    assert "Prefer grep or glob before reading files." in args[-1]
-    assert "Do not survey the entire repository." in args[-1]
-    assert "Avoid reading large unrelated files." in args[-1]
+    assert "OBJECTIVE: Change only calc.py." in args[-1]
+    assert "Explore enough repository context" in args[-1]
+    assert "Do not survey the entire repository." not in args[-1]
+    assert "Prefer grep or glob before reading files." not in args[-1]
     assert captured["cwd"] == str(worktree)
     assert captured["kwargs"]["timeout"] == dev_worker.KILO_TIMEOUT_S
     assert output.endswith("done\"}\n")
@@ -618,6 +618,9 @@ def test_devworker_kilo_run_is_inline_configured_and_deny_by_default(tmp_path, m
         assert permissions[name]["*"] == "allow"
         assert permissions[name]["**/.env"] == "deny"
         assert permissions[name]["**/.env.*"] == "deny"
+        assert permissions[name]["**/.git/**"] == "deny"
+        assert permissions[name]["**/*credential*"] == "deny"
+        assert permissions[name]["**/*secret*"] == "deny"
 
 
 def test_devworker_kilo_failure_includes_bounded_cli_error(tmp_path, monkeypatch):
@@ -777,6 +780,88 @@ def test_sanitized_test_env_hides_credentials_and_uses_temp_home(monkeypatch, tm
     assert env["USERPROFILE"] == str(tmp_path)
     assert env["XDG_CONFIG_HOME"] == str(tmp_path)
     assert "-p no:cacheprovider" in env["PYTEST_ADDOPTS"]
+
+
+def test_kilo_prompt_allows_broad_reading_but_keeps_write_scope():
+    from octopus import dev_worker
+
+    prompt = dev_worker._build_kilo_prompt(
+        "Update the documented state.",
+        [[sys.executable, "-m", "pytest", "-q", "tests/test_dev_worker.py"]],
+        20,
+        allowed_paths=["docs/CURRENT_STATE.md"],
+        acceptance_criteria=["remove stale branch reference", "preserve project rules"],
+        noop_allowed=True,
+        repository_context="branch=topic; head=abc; recent_commits=abc latest",
+    )
+
+    assert "All other tracked repository files may be read as needed" in prompt
+    assert "MODIFIABLE: docs/CURRENT_STATE.md" in prompt
+    assert "SUCCESS_CRITERIA: remove stale branch reference ; preserve project rules." in prompt
+    assert "BUDGET: 20 steps" in prompt
+    assert "REPOSITORY_FACTS: branch=topic; head=abc" in prompt
+    assert "NO_CHANGE_NEEDED" in prompt
+    assert "Do not survey the entire repository" not in prompt
+
+
+def test_development_task_accepts_justified_noop_when_allowed(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=True)
+
+    monkeypatch.setattr(
+        dev_worker,
+        "_run_kilo",
+        lambda *args, **kwargs: (
+            '{"type":"text","text":"Verified the requested state from the repository.\\nNO_CHANGE_NEEDED"}\\n'
+        ),
+    )
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Review the current documentation.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "max_steps": 12,
+        "backend": "kilo",
+        "allowed_paths": ["calc.py"],
+        "noop_allowed": True,
+        "allow_declarative_fallback": False,
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "done"
+    assert result["output"]["noop"] is True
+    assert result["output"]["commit"] is None
+    assert result["output"]["changed_paths"] == []
+
+
+def test_no_changes_without_explicit_noop_remains_repairable(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=True)
+    calls = []
+
+    def no_edit(*args, **kwargs):
+        calls.append(kwargs.get("prompt"))
+        return '{"type":"text","text":"I did not edit anything."}\\n'
+
+    monkeypatch.setattr(dev_worker, "_run_kilo", no_edit)
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Make a required edit.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "max_steps": 12,
+        "backend": "kilo",
+        "allowed_paths": ["calc.py"],
+        "noop_allowed": True,
+        "allow_declarative_fallback": False,
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "failed"
+    assert len(calls) == dev_worker.KILO_MAX_PASSES
+    assert "PREVIOUS_FINAL:" in calls[1]
 
 
 def test_development_task_uses_kilo_then_validates_tests_and_commits(tmp_path, monkeypatch):
