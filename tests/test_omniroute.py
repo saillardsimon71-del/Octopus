@@ -27,16 +27,12 @@ def test_devworker_uses_only_dedicated_omniroute_routes(monkeypatch):
     cat = catalog.load()
     candidates = cat.task("development.step")["candidates"]
 
-    expected = [
-        "omniroute/devworker-gemini",
-        "omniroute/devworker-groq",
-        "omniroute/devworker-cloudflare",
-    ]
+    expected = ["omniroute/devworker-groq"]
     assert candidates["zero_cost"] == expected
     assert candidates["low_cost"] == expected
-    cloudflare = cat.model("omniroute/devworker-cloudflare")
-    assert cloudflare["api_model"] == "octopus-free-devworker-cloudflare"
-    assert cloudflare["json_schema_mode"] == "tool_call"
+    groq = cat.model("omniroute/devworker-groq")
+    assert groq["api_model"] == "groq/openai/gpt-oss-120b"
+    assert groq["json_schema_mode"] == "tool_call"
 
 
 def test_zero_cost_llm_uses_omniroute_without_paid_fallback(monkeypatch, providers_up):
