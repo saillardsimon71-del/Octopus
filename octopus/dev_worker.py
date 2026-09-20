@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -100,6 +102,7 @@ DEV_ACTION_TOOLS = [
     },
 ]
 DEV_HISTORY_CHARS = 10_000
+_RETRY_DELAY_RE = re.compile(r"try again in ([0-9]+(?:\.[0-9]+)?)s", re.IGNORECASE)
 
 
 def _run(args: list[str], cwd: Path, *, input_text: str | None = None, timeout: int = 300) -> subprocess.CompletedProcess:
@@ -166,6 +169,22 @@ def _parse_action(text: str) -> dict:
     if field and not isinstance(value.get(field), str):
         raise ValueError(f"champ {field} requis")
     return value
+
+
+def _rate_limit_delay(exc: Exception) -> float | None:
+    if type(exc).__name__ != "RateLimitError":
+        return None
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", {}) if response is not None else {}
+    raw = headers.get("retry-after") if headers is not None else None
+    if raw is None:
+        match = _RETRY_DELAY_RE.search(str(exc))
+        raw = match.group(1) if match else None
+    try:
+        delay = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return delay if 0 < delay <= 60 else None
 
 
 def _check_patch_paths(worktree: Path, patch: str) -> None:
@@ -391,11 +410,20 @@ def development_task(ctx):
                 "goal": goal, "worktree_status": state, "tests": tests, "history": history,
             }, ensure_ascii=False)},
         ]
-        completion = llm.complete(
-            "development.step", messages, agent="DEVWORKER", business=ctx.business,
-            profile="zero_cost", json_schema=DEV_ACTION_SCHEMA, tool_schemas=DEV_ACTION_TOOLS,
-            max_tokens=1600, validate=_parse_action,
-        )
+        for rate_limit_attempt in range(2):
+            try:
+                completion = llm.complete(
+                    "development.step", messages, agent="DEVWORKER", business=ctx.business,
+                    profile="zero_cost", json_schema=DEV_ACTION_SCHEMA, tool_schemas=DEV_ACTION_TOOLS,
+                    max_tokens=1600, validate=_parse_action,
+                )
+                break
+            except Exception as exc:
+                delay = _rate_limit_delay(exc)
+                if rate_limit_attempt or delay is None:
+                    raise
+                ctx.emit("development.rate_limited", {"retry_after_s": delay})
+                time.sleep(delay)
         action = completion.data if completion.data is not None else _parse_action(completion.text)
         tool_failed = False
         try:

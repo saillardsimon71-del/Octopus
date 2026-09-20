@@ -265,6 +265,56 @@ def test_devworker_bounds_history_results_for_free_provider_tpm(tmp_path, monkey
     assert history[-1]["action"] == "read"
 
 
+def test_devworker_retries_one_bounded_provider_rate_limit(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    class RateLimitError(Exception):
+        def __init__(self):
+            super().__init__("try again in 0.01s")
+            self.response = SimpleNamespace(headers={"retry-after": "0.01"})
+
+    repo = repository(tmp_path)
+    calls = []
+    sleeps = []
+
+    def complete(task, messages, **kwargs):
+        calls.append((task, messages, kwargs))
+        if len(calls) == 1:
+            raise RateLimitError()
+        action = {"action": "commit", "message": "fix: retry bounded rate limit"}
+        return SimpleNamespace(data=action, text=json.dumps(action))
+
+    monkeypatch.setattr(dev_worker.llm, "complete", complete)
+    monkeypatch.setattr(dev_worker.time, "sleep", sleeps.append)
+    monkeypatch.setattr(
+        dev_worker, "_tool",
+        lambda action, worktree, tests, tests_passed: ("fake-commit", True, "fake-commit"),
+    )
+    task_id = worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Retry one bounded transient provider limit.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "max_steps": 1,
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "done"
+    assert len(calls) == 2
+    assert sleeps == [0.01]
+    assert any(event["type"] == "development.rate_limited" for event in tasks.events(task_id=task_id))
+
+
+def test_devworker_extracts_observed_groq_retry_delay():
+    from octopus import dev_worker
+
+    RateLimitError = type("RateLimitError", (Exception,), {})
+
+    assert dev_worker._rate_limit_delay(RateLimitError("Please try again in 26.5425s.")) == 26.5425
+    assert dev_worker._rate_limit_delay(RateLimitError("Please try again in 61s.")) is None
+    assert dev_worker._rate_limit_delay(RuntimeError("Please try again in 1s.")) is None
+
+
 @pytest.mark.parametrize("payload", [
     {"action": "read", "query": None, "patch": None, "message": None},
     {"action": "test", "path": 7, "query": None, "patch": None, "message": None},
