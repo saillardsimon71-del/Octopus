@@ -26,7 +26,7 @@ class NightShiftError(RuntimeError):
 MAX_TICKETS = 5
 MAX_HOURS = 8.0
 MAX_CONSECUTIVE_FAILURES = 2
-DEFAULT_MAX_STEPS = 6
+DEFAULT_MAX_STEPS = 20
 NIGHT_POLICY = "docs_only"
 PROTECTED_DOCS = {
     "AGENTS.md",
@@ -99,14 +99,24 @@ def _validate_ticket(raw: dict, index: int) -> dict:
         test_targets.append(value)
 
     max_steps = int(raw.get("max_steps", DEFAULT_MAX_STEPS))
-    if not 1 <= max_steps <= 8:
-        raise NightShiftError(f"ticket #{index}: max_steps doit être compris entre 1 et 8")
+    if not 1 <= max_steps <= 25:
+        raise NightShiftError(f"ticket #{index}: max_steps doit être compris entre 1 et 25")
+    acceptance_raw = raw.get("acceptance_criteria") or []
+    if not isinstance(acceptance_raw, list):
+        raise NightShiftError(f"ticket #{index}: acceptance_criteria doit être une liste")
+    acceptance_criteria = []
+    for value in acceptance_raw:
+        if not isinstance(value, str) or not value.strip():
+            raise NightShiftError(f"ticket #{index}: acceptance_criteria invalide")
+        acceptance_criteria.append(" ".join(value.split()))
 
     return {
         "goal": goal,
         "allowed_paths": allowed_paths,
         "test_targets": test_targets,
         "max_steps": max_steps,
+        "acceptance_criteria": acceptance_criteria,
+        "noop_allowed": bool(raw.get("noop_allowed", False)),
     }
 
 
@@ -277,6 +287,9 @@ def run(
         if time.monotonic() - started >= max_hours * 3600:
             stop_reason = "time_limit"
             break
+        if (paths.data_dir() / "NIGHT_SHIFT_STOP").exists():
+            stop_reason = "kill_switch"
+            break
 
         log(f"[night] ticket {index}/{min(len(plan['tickets']), max_tasks)}")
         tests = [
@@ -293,6 +306,8 @@ def run(
                 "max_steps": ticket["max_steps"],
                 "backend": "kilo",
                 "allowed_paths": ticket["allowed_paths"],
+                "acceptance_criteria": ticket["acceptance_criteria"],
+                "noop_allowed": ticket["noop_allowed"],
                 "allow_declarative_fallback": False,
             },
             priority=10_000,
@@ -321,6 +336,11 @@ def run(
         report["tickets"].append(entry)
         if result["status"] == "done":
             output = result.get("output") or {}
+            if output.get("noop"):
+                entry["noop"] = True
+                entry["night_head"] = _git(night_worktree, "rev-parse", "HEAD")
+                consecutive_failures = 0
+                continue
             commit = str(output.get("commit") or "")
             if not commit:
                 stop_reason = "missing_commit"
