@@ -663,12 +663,19 @@ def _strict_repository_preflight(worktree: Path) -> None:
         )
     staged = _git(worktree, "ls-files", "-s")
     symlinks = []
+    submodules = []
     for line in staged.splitlines():
         parts = line.split(None, 3)
-        if len(parts) == 4 and parts[0] == "120000":
+        if len(parts) != 4:
+            continue
+        if parts[0] == "120000":
             symlinks.append(parts[3])
+        elif parts[0] == "160000":
+            submodules.append(parts[3])
     if symlinks:
         raise DevWorkerError("symlinks Git interdits en python_canary: " + ", ".join(symlinks[:20]))
+    if submodules:
+        raise DevWorkerError("submodules Git interdits en python_canary: " + ", ".join(submodules[:20]))
     flags = _git(worktree, "ls-files", "-v")
     suspicious_flags = []
     for line in flags.splitlines():
