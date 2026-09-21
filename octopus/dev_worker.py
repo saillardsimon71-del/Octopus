@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import re
@@ -1331,14 +1332,33 @@ def _run_acceptance_probe(
     return payload
 
 
+def _artifact_fingerprint(worktree: Path, changed_paths: list[str]) -> str:
+    digest = hashlib.sha256()
+    for relative in sorted(set(changed_paths)):
+        digest.update(relative.replace("\\", "/").encode("utf-8"))
+        digest.update(b"\0")
+        path = resolve_path(worktree, relative)
+        if path.is_file():
+            digest.update(b"file\0")
+            digest.update(path.read_bytes())
+        elif path.exists():
+            digest.update(b"other\0")
+        else:
+            digest.update(b"deleted\0")
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _run_acceptance_gate(
         worktree: Path, contract: dict, *, task_id: int, attempt: int,
         tests_passed: bool, changed_paths: list[str], sandbox_image: str,
         expected_image_id: str | None, persist: bool = True) -> dict:
     """Collect evidence outside the builder and let the protected deterministic gate decide."""
+    artifact_fingerprint = _artifact_fingerprint(worktree, changed_paths)
     facts = {
         "tests": {"passed": bool(tests_passed)},
         "git": {"changed_paths": list(changed_paths)},
+        "artifact": {"fingerprint_sha256": artifact_fingerprint},
     }
     probe_facts = _run_acceptance_probe(
         worktree,
@@ -1364,6 +1384,7 @@ def _run_acceptance_gate(
         "decision": decision,
         "evidence_path": None,
         "evidence_sha256": None,
+        "artifact_fingerprint_sha256": artifact_fingerprint,
     }
     if persist:
         evidence_path, evidence_sha = acceptance.persist_evidence(paths.data_dir(), bundle)
@@ -2097,6 +2118,8 @@ def development_task(ctx):
                             gate_status=gate_result["decision"]["status"],
                             evidence_path=gate_result["evidence_path"],
                             evidence_sha256=gate_result["evidence_sha256"],
+                    artifact_fingerprint_sha256=gate_result["artifact_fingerprint_sha256"],
+                            artifact_fingerprint_sha256=gate_result["artifact_fingerprint_sha256"],
                         )
                     ctx.emit("development.noop", result)
                     return result
@@ -2222,6 +2245,7 @@ def development_task(ctx):
                     gate_status=gate_result["decision"]["status"],
                     evidence_path=gate_result["evidence_path"],
                     evidence_sha256=gate_result["evidence_sha256"],
+                    artifact_fingerprint_sha256=gate_result["artifact_fingerprint_sha256"],
                 )
             ctx.emit("development.committed", result)
             return result
