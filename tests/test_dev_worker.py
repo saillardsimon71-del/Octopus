@@ -135,6 +135,23 @@ def test_devworker_rejects_unsupported_patch_headers(tmp_path, header):
         _check_patch_paths(root, patch)
 
 
+def test_sanitized_test_env_is_allowlist_based(monkeypatch, tmp_path):
+    from octopus import dev_worker
+
+    monkeypatch.setenv("PATH", "safe-path")
+    monkeypatch.setenv("AZURE_SPEECH_KEY", "secret")
+    monkeypatch.setenv("UNRELATED_VALUE", "do-not-pass")
+    env = dev_worker._sanitized_test_env(str(tmp_path))
+
+    assert env["PATH"] == "safe-path"
+    assert "AZURE_SPEECH_KEY" not in env
+    assert "UNRELATED_VALUE" not in env
+    assert env["HOME"] == str(tmp_path)
+    assert env["USERPROFILE"] == str(tmp_path)
+    assert env["XDG_CONFIG_HOME"] == str(tmp_path)
+    assert env["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
+
+
 def test_devworker_rejects_unapproved_test_commands():
     from octopus.dev_worker import DevWorkerError, validate_test_commands
 
