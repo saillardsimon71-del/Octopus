@@ -35,6 +35,7 @@ PROTECTED_DOCS = {
 }
 PYTHON_CANARY_ALLOWED = frozenset({
     "octopus/capabilities.py",
+    "octopus/connectors.py",
     "octopus/resources.py",
 })
 
