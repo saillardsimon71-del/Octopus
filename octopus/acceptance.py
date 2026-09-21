@@ -365,7 +365,7 @@ def persist_evidence(root: Path, bundle: dict) -> tuple[Path, str]:
     payload = evidence_bytes(bundle)
     payload_sha = hashlib.sha256(payload).hexdigest()
     target = directory / (
-        f"attempt-{attempt}-{contract_sha[:12]}-{payload_sha[:16]}.json"
+        f"attempt-{attempt}-{contract_sha[:12]}-{payload_sha}.json"
     )
     try:
         with target.open("xb") as handle:
