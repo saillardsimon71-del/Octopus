@@ -280,6 +280,9 @@ def product_report_for_repo(base_repo, repo, base, final):
         facts={
             "tests": {"passed": True},
             "git": {"changed_paths": ["octopus/resources.py"]},
+            "artifact": {
+                "fingerprint_sha256": result["output"]["artifact_fingerprint_sha256"],
+            },
         },
     )
     bundle["gate_decision"] = acceptance.evaluate_contract(
