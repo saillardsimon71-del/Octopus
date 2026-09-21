@@ -23,6 +23,21 @@ def test_night_plan_is_docs_only_and_bounded():
         assert isinstance(ticket["noop_allowed"], bool)
 
 
+def test_night_stop_file_can_be_requested_and_cleared(tmp_path, monkeypatch):
+    from octopus import night_shift
+
+    monkeypatch.setattr(night_shift.paths, "data_dir", lambda: tmp_path)
+
+    assert night_shift.stop_requested() is False
+    target = night_shift.request_stop()
+    assert target == tmp_path / "NIGHT_SHIFT_STOP"
+    assert target.read_text(encoding="utf-8") == "stop\n"
+    assert night_shift.stop_requested() is True
+    assert night_shift.clear_stop() is True
+    assert night_shift.stop_requested() is False
+    assert night_shift.clear_stop() is False
+
+
 @pytest.mark.parametrize(
     "allowed_paths",
     [
