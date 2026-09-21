@@ -1,0 +1,94 @@
+{
+  "name": "python-canary-multimodule-v3",
+  "policy": "python_canary",
+  "tickets": [
+    {
+      "goal": "In octopus/capabilities.py, introduce one small private helper named _normalize_enum_value that performs exactly value.strip().lower().replace(\"-\", \"_\").replace(\" \", \"_\") for string enum inputs, and use it only from _coerce_enum. Preserve every public API, alias, error message, ordering rule, and evaluation semantic. Do not modify tests or any other file.",
+      "allowed_paths": [
+        "octopus/capabilities.py"
+      ],
+      "test_targets": [
+        "tests/test_capabilities.py"
+      ],
+      "max_steps": 18,
+      "acceptance_criteria": [
+        "_normalize_enum_value contains exactly the existing enum string normalization",
+        "_coerce_enum uses the helper instead of duplicating the expression",
+        "no new import or module-level side effect is introduced",
+        "public capability behavior and aliases remain unchanged",
+        "the capability oracle passes with the same PASSED node set as the baseline"
+      ],
+      "noop_allowed": false,
+      "test_sandbox_image": "octopus-test-sandbox:py311",
+      "max_files_changed": 1,
+      "max_lines_added": 20,
+      "max_lines_deleted": 20
+    },
+    {
+      "goal": "In octopus/resources.py, introduce one small private helper named _normalize_resource_text that performs exactly str(value).strip().lower(). Use it only for the existing resource-kind normalization in declarations() and declare(), preserving declare()'s existing `or \"autre\"` fallback exactly where it is. Preserve every public API, error message, database query, ordering rule, state transition, and resource semantic. Do not modify tests or any other file.",
+      "allowed_paths": [
+        "octopus/resources.py"
+      ],
+      "test_targets": [
+        "tests/test_resources.py"
+      ],
+      "max_steps": 18,
+      "acceptance_criteria": [
+        "_normalize_resource_text performs exactly str(value).strip().lower()",
+        "only existing kind normalization in declarations() and declare() is routed through the helper",
+        "declare() keeps its existing `or \"autre\"` fallback",
+        "no new import or module-level side effect is introduced",
+        "the resource oracle passes with the same PASSED node set as the baseline"
+      ],
+      "noop_allowed": false,
+      "test_sandbox_image": "octopus-test-sandbox:py311",
+      "max_files_changed": 1,
+      "max_lines_added": 20,
+      "max_lines_deleted": 20
+    },
+    {
+      "goal": "In octopus/capabilities.py, introduce one small private helper named _enum_expected_values that returns exactly \", \".join(item.value for item in enum_type). Use it only for the two existing expected-value strings in _coerce_enum error paths. Preserve every public API, alias, error message, ordering rule, and evaluation semantic. Do not modify tests or any other file.",
+      "allowed_paths": [
+        "octopus/capabilities.py"
+      ],
+      "test_targets": [
+        "tests/test_capabilities.py"
+      ],
+      "max_steps": 18,
+      "acceptance_criteria": [
+        "_enum_expected_values returns exactly the same comma-separated enum values as before",
+        "both _coerce_enum error paths use the helper",
+        "error text remains byte-for-byte equivalent for the same inputs",
+        "no new import or module-level side effect is introduced",
+        "the capability oracle passes with the same PASSED node set as the baseline"
+      ],
+      "noop_allowed": false,
+      "test_sandbox_image": "octopus-test-sandbox:py311",
+      "max_files_changed": 1,
+      "max_lines_added": 20,
+      "max_lines_deleted": 20
+    },
+    {
+      "goal": "In octopus/resources.py, reuse the existing _normalize_resource_text helper only for the existing human-boundary `needs` value normalization in declarations() and declare(). Preserve the current filtering behavior, list ordering, duplicates, validation behavior, JSON shape, public APIs, errors, database queries, state transitions, and every other resource semantic. Do not modify tests or any other file.",
+      "allowed_paths": [
+        "octopus/resources.py"
+      ],
+      "test_targets": [
+        "tests/test_resources.py"
+      ],
+      "max_steps": 18,
+      "acceptance_criteria": [
+        "existing needs normalization in declarations() and declare() reuses _normalize_resource_text",
+        "the declarations() non-empty filter remains behaviorally unchanged",
+        "ordering and duplicates in needs remain unchanged",
+        "no new import or module-level side effect is introduced",
+        "the resource oracle passes with the same PASSED node set as the baseline"
+      ],
+      "noop_allowed": false,
+      "test_sandbox_image": "octopus-test-sandbox:py311",
+      "max_files_changed": 1,
+      "max_lines_added": 20,
+      "max_lines_deleted": 20
+    }
+  ]
+}
