@@ -1,102 +1,70 @@
-# Handoff — sortie de la plomberie et retour au business
+# Handoff — Phase 2 : première boucle économique réelle
 
 **Mise à jour : 21 septembre 2026**
 
 ## État de départ
 
-Référence Git attendue :
-
 ~~~text
-main = 951d398272ee9e13c1c3c1bf7775de97a5f41fb0
+main = cd8a3b315d6d000580b1674013880030b11ec206
 ~~~
 
-Les PR #37 et #38 sont mergées.
+La plomberie générale est terminée.
 
-Trois modules Python ont déjà passé un canari réel :
+Les quatre canaris Python supervisés ont été exécutés et promus. Le legacy `core/` + `businesses/short_video/` a été supprimé.
 
-- capabilities.py
-- resources.py
-- connectors.py
+## Mission
 
-Une quatrième surface est enregistrée mais pas encore exécutée en réel :
-
-- businesses.py
-- oracle : tests/test_businesses.py
-- plan : octopus/config/night_shift_python_businesses_canary_v1.json
-
-## Mission immédiate
-
-**Faire uniquement le dernier canari businesses.**
-
-Ne pas élargir d'abord vers d'autres modules.
-
-### Procédure
-
-1. synchroniser le worktree local sur origin/main ;
-2. vérifier git status --short vide ;
-3. reprendre/assainir les anciens night runs avec python -m octopus night-resume ;
-4. vérifier l'image Docker canary ;
-5. exécuter tests/test_night_shift.py, tests/test_dev_worker.py et tests/test_businesses.py ;
-6. lancer night_shift_python_businesses_canary_v1.json avec 1 task / 1 failure max ;
-7. exécuter le promotion gate ;
-8. vérifier que seul octopus/businesses.py a changé ;
-9. pousser une branche de promotion ;
-10. merger uniquement après les checks GitHub requis verts.
-
-## Critère de sortie
-
-Si le run businesses :
-
-- termine backlog_complete ;
-- utilise python_canary ;
-- utilise Docker ;
-- garde max_files_changed=1 ;
-- passe l'oracle businesses avec le même node set ;
-- n'utilise aucun fallback ;
-- produit une promotion git_verified: true ;
-- ne modifie que octopus/businesses.py ;
-
-alors **arrêter la plomberie générale**.
-
-Ne pas transformer actions.py, economy.py, strategy.py ou compute_finance.py en nouveaux canaris sans besoin produit concret.
-
-## Mission suivante
-
-Après cette preuve, la priorité devient une **boucle économique réelle**.
-
-Ordre recommandé :
+Fermer une première boucle économique réelle, pas construire un nouveau framework.
 
 ~~~text
-1. choisir une activité réelle unique
-2. enregistrer un canal réel
-3. construire l'executor minimal nécessaire
-4. créer une expérience mesurable
-5. agir dans le monde réel
-6. récupérer une métrique/source observée
-7. fermer evaluate_experiment
-8. prendre la décision suivante
-9. viser le premier cash-in observé
+objectif
+→ hypothèse
+→ expérience
+→ canal réel
+→ action réelle
+→ source observée
+→ métrique / cash
+→ evaluate_experiment
+→ décision
+→ prochaine action
 ~~~
 
-Le premier jalon commercial doit être un revenu réellement encaissé et traçable, pas une nouvelle couche d'infrastructure.
+## Ordre de travail
 
-## Contraintes inchangées
+1. auditer ce qui existe déjà dans `actions.py`, `economy.py`, `strategy.py` et les agents ;
+2. choisir **une seule activité réelle** et **un seul canal** ;
+3. construire uniquement l'executor minimal manquant ;
+4. enregistrer le canal et l'accès requis ;
+5. créer une expérience mesurable ;
+6. réaliser une action réelle ;
+7. récupérer une source externe vérifiable ;
+8. enregistrer métrique/coûts/cash ;
+9. fermer l'expérience et persister la décision suivante.
 
-- aucun secret dans Git ;
-- aucun paid call implicite ;
-- aucune dépense sans allowance ;
-- aucune donnée business inventée ;
-- aucune preuve observed sans source ;
-- pas de modification directe de main ;
-- changements petits, testés et réversibles ;
-- les frontières financières existantes restent fail-closed.
+## Critère de réussite
 
-## Documents à lire
+Le premier jalon n'est pas une nouvelle couche d'infrastructure.
 
-1. AGENTS.md
-2. docs/VISION.md
-3. docs/CURRENT_STATE.md
-4. docs/ACCEPTANCE_GATES.md
-5. ce fichier
+Le jalon est :
 
-Les anciens handoffs sont historiques.
+~~~text
+une vraie action externe + une vraie observation
+~~~
+
+Puis :
+
+~~~text
+premier euro encaissé et enregistré comme observed
+~~~
+
+## Non-objectifs
+
+- pas de nouvelle surface python_canary par défaut ;
+- pas de multiplication des business/canaux ;
+- pas de paid call implicite ;
+- pas de réécriture de l'orchestrateur sans blocker concret ;
+- pas de métriques inventées.
+
+## Issue de référence
+
+GitHub issue **#40 — Phase 2: close the first real economic loop**.
