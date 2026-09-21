@@ -9,6 +9,20 @@ from agents import browser, db, deepseek, runtime, web_guard
 from agents.web_guard import ACCOUNT, PUBLIC, BrowseRefused, BrowseState
 
 
+@pytest.fixture(autouse=True)
+def deterministic_dns(monkeypatch):
+    def fake_getaddrinfo(host, *args, **kwargs):
+        private = {
+            "localtest.me": "127.0.0.1",
+            "127-0-0-1.nip.io": "127.0.0.1",
+            "metadata.google.internal": "169.254.169.254",
+        }
+        ip = private.get(host, "93.184.216.34")
+        return [(2, 1, 6, "", (ip, 0))]
+
+    monkeypatch.setattr(web_guard.socket, "getaddrinfo", fake_getaddrinfo)
+
+
 @pytest.mark.parametrize("url, kind", [
     ("https://dashboard.stripe.com/balance", ACCOUNT),
     ("https://studio.youtube.com/channel", ACCOUNT),
@@ -30,6 +44,13 @@ def test_classify(url, kind):
     ("http://192.168.1.1/admin", "locale ou privée"),
     ("http://[::1]:8080/", "locale ou privée"),
     ("http://169.254.169.254/latest/meta-data", "locale ou privée"),
+    ("http://127.1/", "locale ou privée"),
+    ("http://2130706433/", "locale ou privée"),
+    ("http://0x7f.0.0.1/", "locale ou privée"),
+    ("http://0/", "locale ou privée"),
+    ("http://localtest.me/", "locale ou privée"),
+    ("http://127-0-0-1.nip.io/", "locale ou privée"),
+    ("http://metadata.google.internal/", "locale ou privée"),
     ("https:///chemin", "sans hôte"),
 ])
 def test_refused_urls(url, message):

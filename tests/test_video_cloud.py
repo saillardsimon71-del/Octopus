@@ -33,8 +33,8 @@ def test_stable_job_id_is_deterministic():
 
 def test_cloud_service_materializes_compatibility_artifacts(isolated, monkeypatch, tmp_path):
     monkeypatch.setenv("PODALUX_ROOT", str(isolated))
-    source = tmp_path / "source"
-    source.mkdir()
+    source = isolated / "incoming" / "source"
+    source.mkdir(parents=True)
     (source / "final.mp4").write_bytes(b"real-mp4-placeholder")
     (source / "mix.wav").write_bytes(b"real-wav-placeholder")
     (source / "captions.ts").write_text("export const DURATION_S = 24;", encoding="utf-8")

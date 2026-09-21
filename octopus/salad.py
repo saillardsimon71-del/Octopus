@@ -252,7 +252,10 @@ class SaladClient:
             raw=group,
         )
 
-    def create(self, offer: ComputeOffer, request: ComputeRequest, *, idempotency_key: str) -> ComputeOperation:
+    def create(
+        self, offer: ComputeOffer, request: ComputeRequest, *,
+        idempotency_key: str, reservation_id: int | None = None,
+    ) -> ComputeOperation:
         self._require_scope(project=True)
         if offer.provider != self.provider:
             raise SaladError(f"offre d'un autre fournisseur: {offer.provider}")
@@ -264,6 +267,13 @@ class SaladClient:
             raise SaladError("le tier de l'offre ne correspond pas à la requête")
         if request.ssh_key_ids or request.ports or request.environment:
             raise SaladError("ssh_key_ids, ports et environment ne sont pas encore mappés vers SaladCloud")
+        from .compute_finance import require_active_provider_reservation
+        require_active_provider_reservation(
+            reservation_id,
+            provider=self.provider,
+            idempotency_key=idempotency_key,
+            price_per_hour=offer.price_per_hour,
+        )
         image = (request.image or self.config.default_image or "").strip()
         if not image:
             raise SaladError("une image OCI SaladCloud est obligatoire via ComputeRequest.image ou SALAD_CONTAINER_IMAGE")

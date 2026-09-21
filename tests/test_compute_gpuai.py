@@ -4,8 +4,22 @@ import json
 
 import pytest
 
+from octopus import economy
 from octopus.compute import ComputeRequest
+from octopus.compute_finance import BudgetLimits, FinancialCircuitBreaker, FinancialCircuitOpen
 from octopus.gpuai import GPUAIClient, GPUAIConfig, GPUAIError
+
+
+
+
+def reservation_id(key: str, price_per_hour: float) -> int:
+    economy.grant_allowance("compute-test", 1.0, "USD", granted_by="human", rationale="provider unit test")
+    breaker = FinancialCircuitBreaker(BudgetLimits(require_allowance=True))
+    saved = breaker.reserve(
+        business="compute-test", provider="gpuai", idempotency_key=key,
+        estimated_cost_usd=0.005, price_per_hour=price_per_hour,
+    )
+    return int(saved["id"])
 
 
 class Response:
@@ -77,7 +91,10 @@ def test_create_is_bounded_idempotent_and_uses_exact_quote():
         "capacity_class": "community", "vram_gb": 32,
     })
 
-    operation = client.create(offer, request, idempotency_key="task-42-attempt-1")
+    operation = client.create(
+        offer, request, idempotency_key="task-42-attempt-1",
+        reservation_id=reservation_id("task-42-attempt-1", offer.price_per_hour),
+    )
 
     sent = json.loads(seen[0].data)
     assert operation.operation_id == "op-1"
@@ -110,4 +127,19 @@ def test_mutating_gpuai_calls_require_credentials():
         "capacity_class": "community", "vram_gb": 32,
     })
     with pytest.raises(GPUAIError, match="GPUAI_API_KEY"):
-        client.create(offer, request, idempotency_key="one")
+        client.create(
+            offer, request, idempotency_key="one",
+            reservation_id=reservation_id("one", offer.price_per_hour),
+        )
+
+
+def test_create_rejects_direct_billable_call_without_reservation():
+    client = GPUAIClient(GPUAIConfig(api_key="secret"), opener=lambda *_: pytest.fail("aucun HTTP"))
+    request = ComputeRequest(max_price_per_hour=1, auto_terminate_hours=1)
+    offer = client.offer_from_dict({
+        "offering_id": "offer-1", "gpu_type": "rtx_5090", "gpu_count": 1, "region": "eu-east",
+        "tier": "on_demand", "price_per_hour": 0.54, "available": 1, "instant_boot": True,
+        "capacity_class": "community", "vram_gb": 32,
+    })
+    with pytest.raises(FinancialCircuitOpen, match="réservation financière active"):
+        client.create(offer, request, idempotency_key="bypass")

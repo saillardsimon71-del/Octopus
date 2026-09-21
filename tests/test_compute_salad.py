@@ -6,7 +6,9 @@ import urllib.error
 
 import pytest
 
+from octopus import economy
 from octopus.compute import ComputeOffer, ComputeRequest
+from octopus.compute_finance import BudgetLimits, FinancialCircuitBreaker, FinancialCircuitOpen
 from octopus.salad import SaladClient, SaladConfig, SaladError
 
 
@@ -34,6 +36,16 @@ def http_404(request):
 
 def config(**kwargs):
     return SaladConfig(api_key="secret", organization="octopus", project="video", **kwargs)
+
+
+def reservation_id(key: str, price_per_hour: float) -> int:
+    economy.grant_allowance("compute-test", 1.0, "USD", granted_by="human", rationale="provider unit test")
+    breaker = FinancialCircuitBreaker(BudgetLimits(require_allowance=True))
+    saved = breaker.reserve(
+        business="compute-test", provider="salad", idempotency_key=key,
+        estimated_cost_usd=0.005, price_per_hour=price_per_hour,
+    )
+    return int(saved["id"])
 
 
 def test_quote_uses_live_prices_and_skips_unavailable_cheapest_gpu():
@@ -113,7 +125,10 @@ def test_create_is_deterministic_idempotent_and_verified():
                              auto_terminate_hours=1)
     offer = ComputeOffer("salad", "5090", "rtx_5090", 1, 32, "global", "batch", 0.25, 4, False, "community")
 
-    operation = client.create(offer, request, idempotency_key="task-42-attempt-1")
+    operation = client.create(
+        offer, request, idempotency_key="task-42-attempt-1",
+        reservation_id=reservation_id("task-42-attempt-1", offer.price_per_hour),
+    )
 
     assert operation.state == "running"
     assert operation.resource_id == SaladClient.group_name_for("task-42-attempt-1")
@@ -145,8 +160,10 @@ def test_create_reuses_existing_group_without_second_billable_submission():
 
     client = SaladClient(config(), opener=opener)
     offer = ComputeOffer("salad", "5090", "rtx_5090", 1, 32, "global", "batch", 0.25, 2, False, "community")
-    operation = client.create(offer, ComputeRequest(image="wan:1", max_price_per_hour=0.3, auto_terminate_hours=1),
-                              idempotency_key="same")
+    operation = client.create(
+        offer, ComputeRequest(image="wan:1", max_price_per_hour=0.3, auto_terminate_hours=1),
+        idempotency_key="same", reservation_id=reservation_id("same", offer.price_per_hour),
+    )
     assert operation.state == "running"
     assert posts == []
 
@@ -165,8 +182,10 @@ def test_create_returns_ambiguous_state_if_post_succeeds_but_verification_fails(
 
     client = SaladClient(config(), opener=opener)
     offer = ComputeOffer("salad", "5090", "rtx_5090", 1, 32, "global", "batch", 0.25, 2, False, "community")
-    operation = client.create(offer, ComputeRequest(image="wan:1", max_price_per_hour=0.3, auto_terminate_hours=1),
-                              idempotency_key="ambiguous")
+    operation = client.create(
+        offer, ComputeRequest(image="wan:1", max_price_per_hour=0.3, auto_terminate_hours=1),
+        idempotency_key="ambiguous", reservation_id=reservation_id("ambiguous", offer.price_per_hour),
+    )
     assert operation.state == "submitted_unverified"
     assert gets == 2
 
@@ -199,3 +218,11 @@ def test_quote_requires_credentials_and_rejects_multi_gpu():
     client = SaladClient(config(), opener=lambda *_: pytest.fail("aucun HTTP"))
     with pytest.raises(SaladError, match="un seul GPU"):
         client.quote(ComputeRequest(gpu_count=2, max_price_per_hour=1, auto_terminate_hours=1))
+
+
+def test_create_rejects_direct_billable_call_without_reservation():
+    client = SaladClient(config(), opener=lambda *_: pytest.fail("aucun HTTP"))
+    request = ComputeRequest(image="wan:1", max_price_per_hour=0.3, auto_terminate_hours=1)
+    offer = ComputeOffer("salad", "5090", "rtx_5090", 1, 32, "global", "batch", 0.25, 1, False, "community")
+    with pytest.raises(FinancialCircuitOpen, match="réservation financière active"):
+        client.create(offer, request, idempotency_key="bypass")

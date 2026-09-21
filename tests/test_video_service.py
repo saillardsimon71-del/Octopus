@@ -86,7 +86,9 @@ def test_cloud_service_rejects_mismatched_offer_before_renderer():
 
 def test_cloud_service_materializes_and_verifies_sha256(tmp_path, monkeypatch):
     payload = b"fake-mp4-payload"
-    source = tmp_path / "source.mp4"
+    root = tmp_path / "root"
+    source = root / "incoming" / "source.mp4"
+    source.parent.mkdir(parents=True)
     source.write_bytes(payload)
     expected = hashlib.sha256(payload).hexdigest()
 
@@ -99,7 +101,6 @@ def test_cloud_service_materializes_and_verifies_sha256(tmp_path, monkeypatch):
                 artifacts=(Artifact("final.mp4", source.as_uri(), "video", "video/mp4", expected),),
             )
 
-    root = tmp_path / "root"
     monkeypatch.setenv("PODALUX_ROOT", str(root))
     result = VideoService(mode="cloud", cloud_renderer=FakeRenderer()).render(JOB["offer_id"], JOB)
     target = root / "out" / JOB["offer_id"] / "final.mp4"
@@ -109,10 +110,11 @@ def test_cloud_service_materializes_and_verifies_sha256(tmp_path, monkeypatch):
 
 def test_cloud_service_rejects_bad_sha256_without_replacing_target(tmp_path, monkeypatch):
     old = b"known-good"
-    source = tmp_path / "source.mp4"
+    root = tmp_path / "root"
+    source = root / "incoming" / "source.mp4"
+    source.parent.mkdir(parents=True)
     source.write_bytes(b"tampered")
     expected = hashlib.sha256(old).hexdigest()
-    root = tmp_path / "root"
     target = root / "out" / JOB["offer_id"] / "final.mp4"
     target.parent.mkdir(parents=True)
     target.write_bytes(old)
@@ -130,3 +132,22 @@ def test_cloud_service_rejects_bad_sha256_without_replacing_target(tmp_path, mon
     with pytest.raises(VideoServiceError, match="checksum sha256 invalide"):
         VideoService(mode="cloud", cloud_renderer=FakeRenderer()).render(JOB["offer_id"], JOB)
     assert target.read_bytes() == old
+
+
+def test_download_artifact_rejects_file_outside_storage_root(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir(exist_ok=True)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"secret")
+    monkeypatch.setenv("PODALUX_ROOT", str(root))
+
+    with pytest.raises(VideoServiceError, match="hors racine de stockage"):
+        VideoService._download_artifact(outside.as_uri(), root / "out.bin", 1024)
+
+
+def test_download_artifact_rejects_http_and_unverified_https(tmp_path, monkeypatch):
+    monkeypatch.setenv("PODALUX_ROOT", str(tmp_path))
+    with pytest.raises(VideoServiceError, match="schéma d'URL artefact refusé"):
+        VideoService._download_artifact("http://example.invalid/a.bin", tmp_path / "a.bin", 1024)
+    with pytest.raises(VideoServiceError, match="sha256 artefact distant requis"):
+        VideoService._download_artifact("https://example.invalid/a.bin", tmp_path / "b.bin", 1024)

@@ -401,8 +401,15 @@ def _wait_for_llm_slot(previous_started: float) -> float:
 
 
 def _check_patch_paths(worktree: Path, patch: str) -> None:
+    unsupported = (
+        "rename from ", "rename to ", "copy from ", "copy to ",
+        "old mode ", "new mode ", "new file mode 120000", "deleted file mode 120000",
+        "GIT binary patch",
+    )
     targets = []
     for line in patch.splitlines():
+        if line.startswith(unsupported):
+            raise DevWorkerError(f"en-tête de patch interdit: {line}")
         if line.startswith(("--- ", "+++ ")):
             raw = line[4:].split("\t", 1)[0]
             if raw == "/dev/null":
