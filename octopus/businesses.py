@@ -85,6 +85,10 @@ def handler_modules() -> list[str]:
     return modules
 
 
+def _display_name(business: Business | None, business_id: str) -> str:
+    return business.name if business else business_id
+
+
 def overview(days: int = 7) -> list[dict]:
     """Tableau de bord par activité : tâches, coûts LLM, vidéos, demandes humaines, planifications."""
     since = time.time() - days * 86400
@@ -113,7 +117,7 @@ def overview(days: int = 7) -> list[dict]:
                                 (business_id,))[0]["n"]
         schedules = journal.query("SELECT kind, interval_s, enabled FROM schedules WHERE business=?", (business_id,))
         out.append({
-            "id": business_id, "name": business.name if business else business_id, "declared": business is not None,
+            "id": business_id, "name": _display_name(business, business_id), "declared": business is not None,
             "tasks": statuses, "llm_calls": cost["n"], "llm_cost_usd": round(cost["c"], 6),
             "llm_cost_today_usd": round(today, 6),
             "budget_daily_usd": business.budget_daily_usd if business else None,
