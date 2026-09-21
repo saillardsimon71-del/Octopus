@@ -259,6 +259,8 @@ def _verify_repo(path_value: Any, expected_head: str, label: str) -> Path:
 
 
 def verify_git(report: dict, manifest: dict) -> dict:
+    if manifest.get("requires_human_review") is not True or manifest.get("auto_merge") is not False:
+        raise PromotionError("promotion exige revue humaine et auto_merge=false")
     base_repository = _verify_repo(report.get("base_repository"), manifest["base_head"], "base_repository")
     worktree = _verify_repo(report.get("night_worktree"), manifest["final_head"], "night_worktree")
     if base_repository == worktree:
@@ -310,61 +312,61 @@ def verify_git(report: dict, manifest: dict) -> dict:
         for index, entry in enumerate(report["tickets"], start=1):
             result = entry["result"]
             output = result["output"]
-            if output.get("noop"):
-                continue
-            commit = _sha(output.get("commit"), f"ticket #{index} commit")
             task_input = result.get("input") or {}
-            allowed = set(entry["allowed_paths"])
-            commit_paths = sorted({
-                line.strip()
-                for line in _git(
-                    worktree, "diff", "--name-only", f"{commit}^", commit, "--"
-                ).stdout.splitlines()
-                if line.strip()
-            })
-            reported_paths = sorted(output.get("changed_paths") or [])
-            if commit_paths != reported_paths:
-                raise PromotionError(
-                    f"ticket #{index}: changed_paths différent du commit: "
-                    f"attendu {reported_paths}, obtenu {commit_paths}"
-                )
-            outside = sorted(set(commit_paths) - allowed)
-            if outside:
-                raise PromotionError(f"ticket #{index}: commit hors allowed_paths: {outside}")
-            protected_commit = sorted(set(commit_paths) & dev_worker.OCTOPUS_PRODUCT_PROTECTED_PATHS)
-            if protected_commit:
-                raise PromotionError(f"ticket #{index}: commit touche le noyau protégé: {protected_commit}")
-            if any(path.startswith("tests/") or path.endswith("/conftest.py") or path == "conftest.py"
-                   for path in commit_paths):
-                raise PromotionError(f"ticket #{index}: commit modifie un test")
 
-            numstat = _git(
-                worktree, "diff", "--numstat", f"{commit}^", commit, "--"
-            ).stdout.splitlines()
-            added = deleted = 0
-            files = 0
-            for line in numstat:
-                parts = line.split("\t", 2)
-                if len(parts) != 3:
-                    continue
-                files += 1
-                try:
-                    added += int(parts[0])
-                    deleted += int(parts[1])
-                except ValueError:
-                    raise PromotionError(f"ticket #{index}: diff binaire/non comptabilisable interdit") from None
-            if files > task_input["max_files_changed"]:
-                raise PromotionError(
-                    f"ticket #{index}: rayon fichiers réel {files}>{task_input['max_files_changed']}"
-                )
-            if added > task_input["max_lines_added"]:
-                raise PromotionError(
-                    f"ticket #{index}: lignes ajoutées réelles {added}>{task_input['max_lines_added']}"
-                )
-            if deleted > task_input["max_lines_deleted"]:
-                raise PromotionError(
-                    f"ticket #{index}: lignes supprimées réelles {deleted}>{task_input['max_lines_deleted']}"
-                )
+            if not output.get("noop"):
+                commit = _sha(output.get("commit"), f"ticket #{index} commit")
+                allowed = set(entry["allowed_paths"])
+                commit_paths = sorted({
+                    line.strip()
+                    for line in _git(
+                        worktree, "diff", "--name-only", f"{commit}^", commit, "--"
+                    ).stdout.splitlines()
+                    if line.strip()
+                })
+                reported_paths = sorted(output.get("changed_paths") or [])
+                if commit_paths != reported_paths:
+                    raise PromotionError(
+                        f"ticket #{index}: changed_paths différent du commit: "
+                        f"attendu {reported_paths}, obtenu {commit_paths}"
+                    )
+                outside = sorted(set(commit_paths) - allowed)
+                if outside:
+                    raise PromotionError(f"ticket #{index}: commit hors allowed_paths: {outside}")
+                protected_commit = sorted(set(commit_paths) & dev_worker.OCTOPUS_PRODUCT_PROTECTED_PATHS)
+                if protected_commit:
+                    raise PromotionError(f"ticket #{index}: commit touche le noyau protégé: {protected_commit}")
+                if any(path.startswith("tests/") or path.endswith("/conftest.py") or path == "conftest.py"
+                       for path in commit_paths):
+                    raise PromotionError(f"ticket #{index}: commit modifie un test")
+
+                numstat = _git(
+                    worktree, "diff", "--numstat", f"{commit}^", commit, "--"
+                ).stdout.splitlines()
+                added = deleted = 0
+                files = 0
+                for line in numstat:
+                    parts = line.split("\t", 2)
+                    if len(parts) != 3:
+                        continue
+                    files += 1
+                    try:
+                        added += int(parts[0])
+                        deleted += int(parts[1])
+                    except ValueError:
+                        raise PromotionError(f"ticket #{index}: diff binaire/non comptabilisable interdit") from None
+                if files > task_input["max_files_changed"]:
+                    raise PromotionError(
+                        f"ticket #{index}: rayon fichiers réel {files}>{task_input['max_files_changed']}"
+                    )
+                if added > task_input["max_lines_added"]:
+                    raise PromotionError(
+                        f"ticket #{index}: lignes ajoutées réelles {added}>{task_input['max_lines_added']}"
+                    )
+                if deleted > task_input["max_lines_deleted"]:
+                    raise PromotionError(
+                        f"ticket #{index}: lignes supprimées réelles {deleted}>{task_input['max_lines_deleted']}"
+                    )
 
             commands = task_input["tests"]
             try:
