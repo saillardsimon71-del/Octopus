@@ -1698,6 +1698,12 @@ def development_task(ctx):
                         "model": KILO_MODEL,
                         "changed_paths": [],
                         "noop": True,
+                        "tests_passed": True,
+                        "baseline_oracle_runs": 2 if baseline_signature is not None else 0,
+                        "oracle_tests": len(baseline_signature or ()),
+                        "post_oracle_tests": len(noop_signature if baseline_signature is not None else ()),
+                        "test_sandbox": test_sandbox,
+                        "test_sandbox_image": effective_test_image if test_sandbox == "docker" else None,
                         "final_text": _kilo_output_summary(kilo_output)["final_text"],
                         "self_policy": "product_ticket" if product_ticket else ("python_canary" if octopus_python_canary else "scoped_kilo"),
                     }
@@ -1762,7 +1768,10 @@ def development_task(ctx):
                 "changed_paths": changed_paths,
                 "test_sandbox": test_sandbox,
                 "test_sandbox_image": effective_test_image if test_sandbox == "docker" else None,
+                "tests_passed": True,
+                "baseline_oracle_runs": 2 if baseline_signature is not None else 0,
                 "oracle_tests": len(baseline_signature or ()),
+                "post_oracle_tests": len(post_signature if baseline_signature is not None else ()),
                 "self_policy": "product_ticket" if product_ticket else ("python_canary" if octopus_python_canary else "scoped_kilo"),
             }
             ctx.emit("development.committed", result)
