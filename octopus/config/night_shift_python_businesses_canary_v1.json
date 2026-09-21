@@ -1,0 +1,28 @@
+{
+  "name": "python-canary-businesses-v1",
+  "policy": "python_canary",
+  "tickets": [
+    {
+      "goal": "In octopus/businesses.py, introduce one small private helper named _display_name that returns business.name when a declared business object is present and otherwise returns the business_id. Use it only in overview() where the output row currently selects between business.name and business_id. Preserve discovery behavior, cache behavior, handler ordering, budget semantics, overview ordering, rendered text, database queries, and every public API. Do not modify tests or any other file.",
+      "allowed_paths": [
+        "octopus/businesses.py"
+      ],
+      "test_targets": [
+        "tests/test_businesses.py"
+      ],
+      "max_steps": 16,
+      "acceptance_criteria": [
+        "_display_name returns business.name for a declared business and business_id otherwise",
+        "overview uses the helper only for the existing row name selection",
+        "discovery, cache invalidation, handler ordering, budgets, overview ordering, and rendered output remain unchanged",
+        "no database query, import, public API, or module-level side effect changes",
+        "the businesses oracle passes with the same PASSED node set as the baseline"
+      ],
+      "noop_allowed": false,
+      "test_sandbox_image": "octopus-test-sandbox:py311",
+      "max_files_changed": 1,
+      "max_lines_added": 16,
+      "max_lines_deleted": 16
+    }
+  ]
+}
