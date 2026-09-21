@@ -67,6 +67,23 @@ def test_contract_rejects_unknown_probe_and_duplicate_must_ids():
         acceptance.validate_contract(contract)
 
 
+def test_contract_rejects_unknown_fields_instead_of_silently_ignoring_them():
+    contract = gui_contract()
+    contract["visual_reference"] = "this field is not supported in schema v1"
+    with pytest.raises(acceptance.AcceptanceError, match="champs inconnus"):
+        acceptance.validate_contract(contract)
+
+    contract = gui_contract()
+    contract["probe"]["timeout"] = 12
+    with pytest.raises(acceptance.AcceptanceError, match="champs inconnus"):
+        acceptance.validate_contract(contract)
+
+    contract = gui_contract()
+    contract["must"][0]["expectd"] = True
+    with pytest.raises(acceptance.AcceptanceError, match="champs inconnus"):
+        acceptance.validate_contract(contract)
+
+
 def test_gate_rejects_the_gui_failure_we_observed():
     contract = gui_contract()
     bundle = acceptance.build_evidence_bundle(
