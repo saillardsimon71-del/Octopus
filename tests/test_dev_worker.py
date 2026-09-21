@@ -1511,6 +1511,21 @@ def test_acceptance_probe_rejects_multiple_marked_payloads(tmp_path, monkeypatch
         )
 
 
+@pytest.mark.parametrize("namespace,value", [
+    ("tests", {"passed": True}), ("git", {"changed_paths": []}),
+    ("artifact", {"fingerprint_sha256": "forged"}), ("unknown", {}),
+])
+def test_probe_cannot_overwrite_controller_facts(tmp_path, monkeypatch, namespace, value):
+    from octopus import dev_worker
+
+    monkeypatch.setattr(dev_worker, "_run_acceptance_probe", lambda *a, **kw: {namespace: value})
+    contract = {"version": 1, "id": "controller-facts", "artifact_type": "code", "probe": {"kind": "none"},
+                "must": [{"id": "tests", "fact": "tests.passed", "op": "equals", "expected": True}]}
+    with pytest.raises(dev_worker.DevWorkerError, match="namespace de probe non autorisé"):
+        dev_worker._run_acceptance_gate(tmp_path, contract, task_id=1, attempt=1, tests_passed=False,
+                                        changed_paths=[], sandbox_image="unused", expected_image_id=None, persist=False)
+
+
 def test_docker_probe_args_keep_evidence_isolated(tmp_path):
     from octopus import dev_worker
 

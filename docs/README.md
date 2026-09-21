@@ -11,7 +11,7 @@ La documentation est organisée pour distinguer **état courant**, **runbooks te
 | `CURRENT_STATE.md` | source de vérité de l'état actuel |
 | `CODEX_START.md` | point d'entrée court pour une session Codex |
 | `HANDOFF_WORK.md` | protocole exact pour reprendre dans Work/Codex |
-| `COMPUTE_GPU.md` | architecture GPU, coûts, breaker et watchdog |
+| `EVIDENCE_ACCEPTANCE.md` | frontière gouvernée, gate technique et limites de preuve |
 | `ACCEPTANCE_GATES.md` | critères binaires de progression et définition de la V1 |
 | `../NEXT_STEPS.md` | prochaines actions priorisées |
 | `../CLAUDE.md` | compatibilité / règles pour agents historiques |
@@ -27,12 +27,15 @@ La documentation est organisée pour distinguer **état courant**, **runbooks te
 - `GUI.md` — Workbench ;
 - `ORCA_INTEGRATION.md` — pont de développement optionnel.
 
-## Audits / design actifs
+## Audits / designs techniques — conditionnels, pas roadmap active
 
 - `audits/LLM_BRAIN_AUDIT_2026-09-19.md` — cerveau LLM / OmniRoute ;
 - `audits/PAID_PATHS_AUDIT_2026-09-19.md` — chemins payants et gaps de settlement ;
 - `design/SALAD_WAN_WORKER_V1.md` — worker Wan Salad cible ;
 - `benchmarks/GPU_COST_BENCHMARK_PLAN.md` — protocole $/vidéo.
+
+`COMPUTE_GPU.md` est un runbook technique conservé. Aucun canary GPU n'est requis pour le pilote
+manuel. `NIGHT_SHIFT.md` et `PYTHON_CANARY.md` documentent l'atelier latéral, pas le chemin économique.
 
 ## Conception / plans spécialisés
 

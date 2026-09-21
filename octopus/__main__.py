@@ -303,7 +303,7 @@ def cmd_resources(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     _safe_console()
-    parser = argparse.ArgumentParser(prog="octopus", description="OCTOPUS : journal, passerelle LLM, banc d'evaluation")
+    parser = argparse.ArgumentParser(prog="octopus", description="OCTOPUS : expériences économiques supervisées, travail et preuves")
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("report", help="couts et appels LLM")
     p.add_argument("--days", type=int, default=7)

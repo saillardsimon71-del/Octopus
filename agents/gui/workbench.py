@@ -771,7 +771,7 @@ class PodaluxWorkbench(ctk.CTk):
 
     def _finish_doctor(self, snapshot: list[dict]) -> None:
         self._system_busy = False
-        if hasattr(self, "system_checks"):
+        if hasattr(self, "system_checks") and self.system_checks.winfo_exists():
             self._paint_system_checks(snapshot)
         blocking = sum(1 for item in snapshot if not item["ok"] and item["blocking"])
         self._set_status("Diagnostic OK" if not blocking else f"{blocking} blocage(s)", COLORS["good"] if not blocking else COLORS["bad"])
@@ -798,7 +798,7 @@ class PodaluxWorkbench(ctk.CTk):
 
     def _finish_orca(self, text: str, color: str) -> None:
         self._orca_busy = False
-        if hasattr(self, "orca_result"):
+        if hasattr(self, "orca_result") and self.orca_result.winfo_exists():
             self.orca_result.configure(text=text, text_color=color)
 
     def _new_business_dialog(self) -> None:

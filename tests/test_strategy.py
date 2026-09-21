@@ -316,6 +316,24 @@ def test_evidence_nature_is_explicit_and_validated():
         _evidence(confidence="certaine")
 
 
+@pytest.mark.parametrize("metric,value", [
+    ("delivery", 2), ("customer_acceptance", -1), ("customer_use", None),
+    ("human_minutes:research", -2), ("human_minutes:", 5),
+    ("human_minutes:research", float("nan")), ("anything", float("inf")),
+])
+def test_outcome_measurements_reject_invalid_values(metric, value):
+    _, _, experiment = _chain()
+    with pytest.raises(StrategyError):
+        strategy.create("evidence", "podalux", "invalid", created_by="human", nature="unverified",
+                        source_type="manual", observation="test", experiment_id=experiment, metric=metric, value=value)
+
+
+def test_outcome_measurement_needs_an_experiment():
+    with pytest.raises(StrategyError, match="experiment_id"):
+        strategy.create("evidence", "podalux", "invalid", created_by="human", nature="unverified",
+                        source_type="manual", observation="test", metric="delivery", value=1)
+
+
 def test_evidence_is_immutable_but_retractable_and_linkable():
     objective, hypothesis, experiment = _chain()
     evidence = _evidence()

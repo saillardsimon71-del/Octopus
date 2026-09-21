@@ -76,6 +76,14 @@ def test_env_overrides_declared_handlers(isolated, monkeypatch):
     worker.load_handlers()  # le module déclaré n'est pas importé : pas d'ImportError
 
 
+def test_development_workshop_requires_explicit_loading(isolated, monkeypatch):
+    monkeypatch.delenv("OCTOPUS_HANDLERS", raising=False)
+    monkeypatch.setattr(worker, "HANDLERS", {})
+    assert "octopus.dev_worker" not in businesses.handler_modules()
+    assert "development.task" not in worker.load_handlers()
+    assert "development.task" in worker.load_handlers(["octopus.dev_worker"])
+
+
 def test_business_daily_cap_blocks_only_that_business(isolated, transport):
     declare(isolated, "podalux", "budget_daily_usd = 0.0005\n")
     transport.reply('{"a": 1}', prompt_tokens=10, completion_tokens=100)

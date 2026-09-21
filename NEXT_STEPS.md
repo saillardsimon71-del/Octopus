@@ -1,75 +1,33 @@
 # Prochaines étapes
 
-**Mis à jour : 19/09/2026 après audit pré-Work.**  
-État : `docs/CURRENT_STATE.md`  
-Critères de sortie : `docs/ACCEPTANCE_GATES.md`
+État vérifié : `docs/CURRENT_STATE.md`. Protocole : `docs/HANDOFF_WORK.md`.
 
-## P0 — G1 cerveau LLM
+## P0 — Une expérience économique supervisée
 
-- [x] G1.1 Faire passer parsing/validation JSON et vision dans `octopus.llm.complete(validate=...)` afin que les sorties invalides déclenchent réellement le fallback.
-- [x] G1.2 Capturer et journaliser la route réellement résolue derrière OmniRoute.
-- [x] G1.3 Rendre `zero_cost` fail-closed : attestation explicite du pool free-only, jamais simple confiance dans le nom `auto/best-free`.
-- [x] G1.4 Éliminer la duplication de résolution de profil entre `agents/deepseek.py` et le catalogue.
-- [x] G1.5 Verrouiller le bypass legacy direct derrière `OCTOPUS=off` et `OCTOPUS_ALLOW_LEGACY_DIRECT=1`.
+1. Vérifier l'offre sur quelques références réellement incomplètes et une source fabricant accessible.
+2. Créer une expérience bornée : au plus cinq contacts revus, sept jours, plafond de temps humain
+   de quatre heures ; aucun coût externe sans décision humaine explicite.
+3. Contacter manuellement ou via le canal existant explicitement autorisé ; respecter refus et opt-out.
+4. Si commande : exécuter un lot de 20 références, vérifier et livrer le CSV sourcé.
+5. Enregistrer séparément livraison, encaissement, acceptation/utilisation, coûts et minutes humaines.
+6. Lire `python -m octopus economy outcome BUSINESS EXPERIMENT`, puis enregistrer une décision.
 
-Preuve live encore requise : vérifier sur l'instance OmniRoute free-only que les headers de modèle, provider, coût et request id sont présents et cohérents. Ne lancer aucun appel tant que le pool n'est pas configuré free-only.
+Le dépôt ne prouve encore **aucun paiement commercial**. Ne pas inventer un client pour remplir le rapport.
 
-Audit : `docs/audits/LLM_BRAIN_AUDIT_2026-09-19.md`.
+## P1 — Seulement après cette observation
 
-## P0 — G2 frontière financière
+- Répéter le travail si intérêt réel et économie soutenable, sans généraliser.
+- Sinon changer l'offre ou arrêter ; absence de données = améliorer la mesure, pas déclarer l'échec marché.
+- Identifier la phase qui consomme le plus de minutes ou produit le plus de corrections.
+- Une seule amélioration ciblée, reliée à la preuve existante ; mesurer avant/après sur le même périmètre.
 
-- [x] Interdire par AST les créations Salad/GPU.ai directes depuis les modules métier.
-- [x] Imposer `GuardedComputeManager` au compute provisionné.
-- [x] Désactiver RunPod renderer et MiniMax H3 du fonctionnement normal ; opt-in legacy explicite plus allowance obligatoire.
-- [x] Rendre TTS/search fail-closed sans déclaration `free_quota` et imposer une cost class aux connecteurs.
-- [x] Exposer engagé/réel du jour par business et catégorie.
-- [x] Prouver hors réseau la reprise persistée du watchdog indépendant.
+## P2 — Gelé jusqu'à besoin démontré
 
-Audit : `docs/audits/PAID_PATHS_AUDIT_2026-09-19.md`.
+- nouvelles surfaces canary, Model Lab, capability acquisition, MCP discovery ;
+- refonte GUI / Web Control Plane ;
+- benchmarks GPU, nouveaux providers et moteurs vidéo ;
+- campagnes automatisées, CRM et connecteurs e-commerce ;
+- extension des probes sans scénario de régression réel à couvrir.
 
-## P0 — G3 canary Salad
-
-Seulement après G1/G2 :
-
-- petit solde ;
-- pas d'auto-recharge ;
-- allowance minuscule ;
-- un worker ;
-- un job canonique ;
-- watchdog indépendant ;
-- stop explicite immédiat après résultat ;
-- crash test.
-
-Design : `docs/design/SALAD_WAN_WORKER_V1.md`.
-
-## P1 — G4 benchmark économique
-
-Exécuter `docs/benchmarks/GPU_COST_BENCHMARK_PLAN.md` sur les GPU réellement disponibles.
-
-Décision = **$/vidéo réussie**, pas $/h. Le résultat doit alimenter `ComputeBroker`.
-
-## P1 — G5 coût GPU < 1 centime
-
-Prouver sur 10 vidéos finales consécutives :
-
-- moyenne <= $0.008 ;
-- maximum normal <= $0.010 ;
-- échecs/préemptions inclus ;
-- 0 double génération facturable ;
-- 0 GPU orphelin.
-
-## P2 — G6/G7 monde réel
-
-Après stabilisation du compute :
-
-- executor de publication réel ;
-- analytics observées ;
-- expérience réelle ;
-- revenu/coût dans ledger ;
-- décision et learning au cycle suivant.
-
-## Condition de merge de la PR compute
-
-La PR reste Draft tant que G2/G3 ne sont pas prouvées live.
-
-CI verte est nécessaire mais pas suffisante.
+Les protections existantes continuent d'être testées. G1 live et G3–G5 ne sont requis que si
+l'expérience utilise effectivement un LLM ou du compute ; ils ne bloquent pas un pilote manuel.

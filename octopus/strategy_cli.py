@@ -71,6 +71,9 @@ def add_parser(sub) -> None:
     es = e.add_subparsers(dest="economy_cmd", required=True)
     x = es.add_parser("status", help="état économique (JSON)")
     x.add_argument("business")
+    x = es.add_parser("outcome", help="livraison, client, cash, coûts et temps humain ; aucun verdict global")
+    x.add_argument("business")
+    x.add_argument("experiment", type=int)
     x = es.add_parser("cash", help="enregistre un mouvement d'argent réel")
     x.add_argument("business")
     x.add_argument("direction", choices=["in", "out"])
@@ -157,6 +160,8 @@ def run_economy(args) -> int:
     try:
         if cmd == "status":
             print(json.dumps(economy.status(b), ensure_ascii=False, indent=1, default=str))
+        elif cmd == "outcome":
+            print(json.dumps(economy.experiment_outcomes(b, args.experiment), ensure_ascii=False, indent=1))
         elif cmd == "cash":
             entry = economy.record_cash(b, args.direction, args.amount, args.currency, args.category, created_by=args.by,
                                         nature="observed" if args.source else "unverified", source_ref=args.source,

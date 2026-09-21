@@ -16,7 +16,9 @@ except ModuleNotFoundError:  # Python 3.10
 
 from . import journal, paths
 
-ENGINE_HANDLERS = ("octopus.builtin_handlers", "octopus.media.handlers", "octopus.dev_worker")
+# L'atelier de développement reste disponible par import explicite/night-shift,
+# pas dans un worker ordinaire. Les handlers média ont encore des consommateurs.
+ENGINE_HANDLERS = ("octopus.builtin_handlers", "octopus.media.handlers")
 _cache: dict[str, tuple[tuple, dict]] = {}
 _problems: dict[str, list[str]] = {}
 

@@ -25,6 +25,8 @@ __pycache__/
 cycle_gui.log
 cycle_gui.err
 jobs/*.bak
+test_reports/*.log
+test_reports/pytest/
 
 # Secrets
 .env
@@ -43,3 +45,8 @@ remotion/public/img/*/
 
 # Rushes telecharges par offre (regeneres par tools/fetch_broll.py)
 remotion/public/video/*/
+*.env
+credentials.json
+*.pem
+*.key
+.credentials

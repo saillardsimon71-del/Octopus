@@ -1378,10 +1378,11 @@ def _run_acceptance_gate(
         expected_image_id=expected_image_id,
     )
     for key, value in probe_facts.items():
-        if key in facts and isinstance(facts[key], dict) and isinstance(value, dict):
-            facts[key].update(value)
-        else:
-            facts[key] = value
+        # Le candidat importé partage le processus du probe : il ne doit jamais
+        # écraser les faits établis par le contrôleur (tests, Git, empreinte).
+        if key not in {"runtime", "ui"}:
+            raise DevWorkerError(f"namespace de probe non autorisé: {key}")
+        facts[key] = value
     bundle = acceptance.build_evidence_bundle(
         task_id=task_id,
         attempt=attempt,

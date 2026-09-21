@@ -26,8 +26,8 @@ CASH_METRIC = "cash_net"  # métrique d'expérience calculée depuis le grand li
 
 
 def _amount(value, name: str = "amount") -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-        raise StrategyError(f"{name} doit être un nombre strictement positif")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise StrategyError(f"{name} doit être un nombre fini strictement positif")
     return float(value)
 
 
@@ -55,6 +55,8 @@ def add_channel(business: str, kind: str, name: str, *, created_by: str, locator
     business = strategy._business(business)
     if access not in CHANNEL_ACCESS:
         raise StrategyError(f"access invalide : {access!r} (attendu : {CHANNEL_ACCESS})")
+    if access == "act" and created_by != "human":
+        raise StrategyError("seul un humain accorde le droit d'agir sur un canal")
     if nature not in ("observed", "unverified", "hypothesis"):
         raise StrategyError("nature d'un canal : observed, unverified ou hypothesis")
     if nature == "observed" and not str(source_ref or "").strip():
@@ -438,24 +440,105 @@ def allowances(business: str) -> list[dict]:
 
 # --- expériences : mesure, verdict, apprentissage --------------------------------------------------
 
+def experiment_outcomes(business: str, experiment_id: int) -> dict:
+    """Rapport sans effet de bord : tâche, livraison, client et argent ne sont pas synonymes.
+
+    Réutilise strategy_evidence/strategy_links/ledger_entries. Les booléens sont des constats
+    datés, le temps est additif ; une preuve retirée ne compte plus. Aucune lecture de source
+    externe n'est faite ici : la provenance enregistrée reste à vérifier par l'humain.
+    """
+    business = strategy._business(business)
+    experiment = strategy.get("experiment", experiment_id, business)
+    if experiment is None:
+        raise StrategyError(f"experiment #{experiment_id} introuvable pour {business!r}")
+    evidence = [dict(r) for r in journal.query(
+        "SELECT * FROM strategy_evidence WHERE business=? AND experiment_id=? AND status='active' "
+        "ORDER BY COALESCE(captured_at, created_at), id", (business, experiment_id))]
+    observed = [e for e in evidence if e["nature"] == "observed"]
+
+    def state(metric, yes, no):
+        rows = [e for e in observed if e["metric"] == metric and e["value"] in (0, 1)]
+        if not rows:
+            return {"status": "unknown", "evidence_id": None}
+        latest = rows[-1]
+        return {"status": yes if latest["value"] == 1 else no,
+                **{k: latest[k] for k in ("source_ref", "captured_at", "observation")}, "evidence_id": latest["id"]}
+
+    work = [dict(r) for r in journal.query(
+        "SELECT DISTINCT t.id, t.kind, t.status FROM strategy_links l JOIN tasks t ON t.id=l.to_id "
+        "WHERE l.business=? AND t.business=? AND l.from_type='experiment' AND l.from_id=? "
+        "AND l.to_type='task' AND l.relation='executed_by' ORDER BY t.id", (business, business, experiment_id))]
+    minutes = {}
+    for e in observed:
+        if (e["metric"] or "").startswith("human_minutes:") and e["value"] is not None:
+            phase = e["metric"].partition(":")[2]
+            minutes[phase] = round(minutes.get(phase, 0) + e["value"], 6)
+    # Un apport de capital ou un solde bancaire ne devient jamais du revenu client.
+    money = {}
+    for r in journal.query(
+        "SELECT currency, category, SUM(CASE direction WHEN 'in' THEN amount ELSE -amount END) AS net "
+        "FROM ledger_entries WHERE business=? AND experiment_id=? AND nature='observed' "
+        "AND category IN ('customer_payment', 'customer_refund', 'variable_cost') GROUP BY currency, category",
+        (business, experiment_id),
+    ):
+        money.setdefault(r["currency"], {})[r["category"]] = round(r["net"], 6)
+    contribution = {}
+    for currency, amounts in money.items():
+        received = amounts.get("customer_payment")
+        refunded = -amounts.get("customer_refund", 0)
+        costs = -amounts["variable_cost"] if "variable_cost" in amounts else None
+        contribution[currency] = {
+            "customer_receipts_observed": received, "customer_refunds_observed": refunded,
+            "variable_cost_observed": costs,
+            "recorded_contribution": round(received - refunded - costs, 6)
+            if received is not None and costs is not None else None,
+            "scope": "cash_basis_recorded_only_excludes_human_time_not_full_margin",
+        }
+    return {
+        "experiment_id": experiment_id, "experiment_status": experiment["status"],
+        "metric_outcome": experiment["outcome"],
+        "technical_completion": {"status": "unknown" if not work else
+                                 ("done" if all(t["status"] == "done" for t in work) else "not_done"), "tasks": work},
+        "delivery": state("delivery", "delivered", "not_delivered"),
+        "customer_acceptance": state("customer_acceptance", "accepted", "rejected"),
+        "customer_use": state("customer_use", "used", "not_used"),
+        "cash_by_currency": cash_summary(business, experiment_id=experiment_id),
+        "cash_evidence": [dict(r) for r in journal.query(
+            "SELECT id, direction, amount, currency, category, nature, source_ref, occurred_at "
+            "FROM ledger_entries WHERE business=? AND experiment_id=? ORDER BY id", (business, experiment_id))],
+        "contribution_by_currency": contribution,
+        "human_minutes": {"observed_total": round(sum(minutes.values()), 6) if minutes else None, "by_phase": minutes},
+        "cost_estimates": [e for e in evidence if (e["metric"] or "").startswith("cost_estimate:")],
+        "evidence_ids": [e["id"] for e in evidence],
+        "limitations": ["Absence de preuve = inconnu, pas zéro ni échec.",
+                        "Encaissement partiel possible : aucun statut payé intégralement n'est inféré.",
+                        "Contribution sur écritures classées seulement ; coûts manquants et temps humain à revoir.",
+                        "Une source déclarée n'est pas une vérification indépendante du fait."],
+    }
+
+
 def metric_value(business: str, experiment: dict) -> tuple[float | None, str]:
-    """(valeur, statut) : cash_net:<DEVISE> calculé depuis le grand livre, sinon somme des valeurs observées."""
+    """Cash du ledger ; dernier constat booléen ; somme pour les autres métriques observées."""
     metric = experiment["metric"] or ""
     if metric.startswith(CASH_METRIC + ":"):
         currency = _currency(metric.split(":", 1)[1])
         summary = cash_summary(business, experiment_id=experiment["id"]).get(currency)
-        return (summary["net_observed"], "computed") if summary else (None, "computed")
+        has_observed = summary and (summary["in_observed"] or summary["out_observed"])
+        return (summary["net_observed"], "computed") if has_observed else (None, "computed")
     rows = journal.query("SELECT value FROM strategy_evidence WHERE business=? AND experiment_id=? AND metric=? "
-                         "AND nature='observed' AND status='active' AND value IS NOT NULL",
+                         "AND nature='observed' AND status='active' AND value IS NOT NULL ORDER BY captured_at, id",
                          (business, experiment["id"], metric))
+    if metric in ("delivery", "customer_acceptance", "customer_use"):
+        return (rows[-1]["value"] if rows else None), "computed"
     return (round(sum(r["value"] for r in rows), 6) if rows else None), "computed"
 
 
 def evaluate_experiment(business: str, experiment_id: int, *, apply: bool = True, now: float | None = None) -> dict:
     """Verdict calculé en code. Avec `apply`, conclut une expérience tranchée et propose la décision suivante.
 
-    supports : valeur >= cible ; refutes : à l'échéance valeur <= seuil d'arrêt ou aucune mesure, ou limite de
-    budget consommée sans succès ; inconclusive : échéance passée entre les deux ; pending sinon.
+    supports : valeur >= cible ; refutes : à l'échéance valeur <= seuil d'arrêt, ou budget
+    effectivement consommé sans succès ; inconclusive : mesure absente/insuffisante à l'échéance.
+    Ce verdict porte uniquement sur la métrique configurée, jamais sur le succès économique global.
     """
     business = strategy._business(business)
     now = now or time.time()
@@ -476,16 +559,17 @@ def evaluate_experiment(business: str, experiment_id: int, *, apply: bool = True
         verdict, why = "supports", f"{experiment['metric']} = {value} >= cible {target}"
     elif value is not None and stop is not None and value <= stop and expired:
         verdict, why = "refutes", f"{experiment['metric']} = {value} <= seuil d'arrêt {stop}"
-    elif spent is not None and spent >= experiment["budget_limit"]:
+    elif spent is not None and spent > 0 and spent >= experiment["budget_limit"]:
         verdict, why = "refutes", f"budget consommé ({spent} {experiment['budget_currency']}) sans atteindre la cible"
     elif expired and value is None:
-        verdict, why = "refutes" if experiment["metric"] else "inconclusive", "échéance passée sans mesure observée"
+        verdict, why = "inconclusive", "échéance passée sans mesure observée"
     elif expired:
         verdict, why = "inconclusive", f"échéance passée : {experiment['metric']} = {value}"
     else:
         verdict, why = "pending", "en cours"
     result = {"experiment_id": experiment_id, "verdict": verdict, "reason": why, "metric": experiment["metric"],
-              "value": value, "cash": cash, "llm_cost_usd": llm, "spent_in_budget_currency": spent, "nature": "computed"}
+              "value": value, "cash": cash, "llm_cost_usd": llm, "spent_in_budget_currency": spent, "nature": "computed",
+              "verdict_scope": "configured_metric_only", "outcomes": experiment_outcomes(business, experiment_id)}
     if not apply or verdict == "pending" or experiment["status"] != "running":
         return result
     evidence_id = strategy.create(
@@ -495,7 +579,7 @@ def evaluate_experiment(business: str, experiment_id: int, *, apply: bool = True
         metric=experiment["metric"], value=value)
     strategy.transition("experiment", experiment_id, business, "completed", actor="policy:evaluate", outcome=verdict,
                         actual_result=why, note=f"evidence#{evidence_id}")
-    next_step = {"supports": "Étendre ou reproduire l'expérience dans une enveloppe de dépense autorisée",
+    next_step = {"supports": "Revoir livraison, encaissement, résultat client, coûts et temps humain avant de reproduire",
                  "refutes": "Arrêter cette voie et réallouer l'effort vers une autre hypothèse",
                  "inconclusive": "Relancer avec une mesure plus directe ou abandonner"}[verdict]
     decision_id = strategy.create("decision", business, f"Suite de l'expérience #{experiment_id}", created_by="policy:evaluate",
@@ -565,6 +649,7 @@ def status(business: str) -> dict:
         "learnings": [{"experiment_id": e["id"], "summary": e["summary"], "action": e["action"], "metric": e["metric"],
                        "outcome": e["outcome"], "result": e["actual_result"],
                        "cash": cash_summary(business, experiment_id=e["id"]),
+                       "outcomes": experiment_outcomes(business, e["id"]),
                        "llm_cost_usd": llm_cost_usd(business, experiment_id=e["id"])}
                       for e in strategy.list_items("experiment", business, status="completed", limit=15)],
         "action_executors": [f"{kind}:{action}" for kind, action in _actions().executors()],
@@ -575,7 +660,7 @@ def status(business: str) -> dict:
                               for d in strategy.list_items("decision", business, status="proposed", limit=20)],
         "running_experiments": [{"id": e["id"], "summary": e["summary"], "metric": e["metric"],
                                  **{k: v for k, v in evaluate_experiment(business, e["id"], apply=False).items()
-                                    if k in ("verdict", "value", "reason")}} for e in running],
+                                    if k in ("verdict", "value", "reason", "verdict_scope", "outcomes")}} for e in running],
     }
 
 

@@ -1,5 +1,11 @@
 # Night shift autonome — canary V1
 
+> **Atelier de maintenance optionnel, expansion gelée.** Les plans canary historiques ne sont
+> pas la roadmap active. Utiliser seulement pour une modification motivée par une observation
+> réelle ; conserver les limites et la promotion humaine. Le worker ordinaire ne charge plus
+> `octopus.dev_worker` par défaut ; `night-shift` l'importe explicitement. Protocole économique
+> et provenance par liens existants : `HANDOFF_WORK.md`.
+
 Le mode `night-shift` exécute une petite file de tâches de développement sans surveillance, mais la V1 est volontairement **documentation-only**.
 
 ## Garanties de la V1

@@ -6,7 +6,8 @@ Ces instructions complètent le `AGENTS.md` racine pour tout travail dans `octop
 
 Le package `octopus` est le moteur partagé.
 
-Il ne doit pas contenir de logique spécifique à un business sauf sous forme de contrat générique ou adapter explicitement isolé.
+Ne pas introduire de logique spécifique à un nouveau business. Réutiliser les fonctions et objets
+existants avant d'envisager un contrat générique ou un adapter supplémentaire.
 
 Préserver les frontières :
 
@@ -100,7 +101,8 @@ Aucun handler métier ne doit créer directement une instance Salad/GPU.ai.
 
 Ils ont un lifecycle différent du compute persistant.
 
-Créer/maintenir une abstraction commune du type :
+Conserver les mécanismes existants. Seulement si une mission exige un chemin metered manquant,
+son lifecycle doit couvrir :
 
 ```text
 reserve

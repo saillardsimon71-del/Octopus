@@ -103,7 +103,8 @@ def test_status_exposes_learnings_from_concluded_experiments():
     strategy.transition("experiment", e, B, "running", actor="orbit")
     economy.cycle(B)
     learning = economy.status(B)["learnings"][0]
-    assert learning["experiment_id"] == e and learning["outcome"] == "refutes" and learning["action"] == "annonce"
+    # Sans mesure, aucune réfutation du marché ne doit entrer dans les apprentissages.
+    assert learning["experiment_id"] == e and learning["outcome"] == "inconclusive" and learning["action"] == "annonce"
 
 
 def test_agent_opens_a_new_business_that_the_portfolio_cycle_then_manages(transport):

@@ -1,12 +1,10 @@
 """python -m octopus video ... : diagnostic, génération, historique, réutilisation."""
 from __future__ import annotations
 
-import argparse
 import json
 import time
 
 from .. import tasks, worker
-from . import handlers, library, perf, presets, wangp
 
 
 def add_parser(sub) -> None:
@@ -64,6 +62,8 @@ def _enqueue(inp: dict) -> int:
 
 
 def _wait(task_id: int) -> int:
+    from . import library
+
     worker.load_handlers()
     last = ""
     while True:
@@ -83,6 +83,8 @@ def _wait(task_id: int) -> int:
 
 
 def run(args) -> int:
+    from . import handlers, library, perf, presets, wangp
+
     cmd = args.video_cmd
     if cmd == "doctor":
         install = wangp.discover()
