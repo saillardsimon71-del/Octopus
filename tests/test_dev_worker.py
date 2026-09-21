@@ -875,6 +875,7 @@ def _self_policy_kwargs(repo):
         "require_baseline_oracle": True,
         "python_canary_ast": True,
         "allow_declarative_fallback": False,
+        "product_ticket": False,
     }
 
 
@@ -905,6 +906,84 @@ def test_octopus_self_policy_rejects_python_bypasses(tmp_path, change, message):
     from octopus import dev_worker
 
     values = _self_policy_kwargs(_octopus_self_repo(tmp_path))
+    values.update(change)
+
+    with pytest.raises(dev_worker.DevWorkerError, match=message):
+        dev_worker._validate_octopus_self_modification_policy(**values)
+
+
+def test_octopus_self_policy_accepts_scoped_product_ticket(tmp_path):
+    from octopus import dev_worker
+
+    values = _self_policy_kwargs(_octopus_self_repo(tmp_path))
+    values.update(
+        allowed_paths=["agents/gui/intelligence.py", "agents/gui/workbench.py"],
+        tests=[
+            [sys.executable, "-m", "pytest", "-q", "tests/test_gui.py"],
+            [sys.executable, "-m", "pytest", "-q", "tests/test_gui_intelligence.py"],
+        ],
+        test_sandbox="docker",
+        max_files_changed=2,
+        max_lines_added=1200,
+        max_lines_deleted=1200,
+        strict_repository_preflight=True,
+        require_baseline_oracle=True,
+        python_canary_ast=False,
+        product_ticket=True,
+    )
+
+    assert dev_worker._validate_octopus_self_modification_policy(**values) is False
+
+
+def test_octopus_product_ticket_allows_scoped_non_python_product_files(tmp_path):
+    from octopus import dev_worker
+
+    values = _self_policy_kwargs(_octopus_self_repo(tmp_path))
+    values.update(
+        allowed_paths=["octopus/config/catalog.json"],
+        tests=[[sys.executable, "-m", "pytest", "-q", "tests/test_pricing_catalog.py"]],
+        test_sandbox="docker",
+        max_files_changed=1,
+        max_lines_added=500,
+        max_lines_deleted=500,
+        strict_repository_preflight=True,
+        require_baseline_oracle=True,
+        python_canary_ast=False,
+        product_ticket=True,
+    )
+
+    assert dev_worker._validate_octopus_self_modification_policy(**values) is False
+
+
+@pytest.mark.parametrize("change, message", [
+    ({"allowed_paths": ["octopus/dev_worker.py"]}, "frontière de sécurité"),
+    ({"allowed_paths": ["agents/web_guard.py"]}, "frontière de sécurité"),
+    ({"allowed_paths": ["agents/browser.py"]}, "frontière de sécurité"),
+    ({"allowed_paths": ["agents/publish.py"]}, "frontière de sécurité"),
+    ({"allowed_paths": ["docker/dev-sandbox.Dockerfile"]}, "frontière de sécurité"),
+    ({"allowed_paths": ["tests/test_gui.py"]}, "oracles de test"),
+    ({"test_sandbox": "host"}, "test_sandbox=docker"),
+    ({"require_baseline_oracle": False}, "require_baseline_oracle"),
+    ({"max_files_changed": 21}, "max_files_changed"),
+    ({"max_lines_added": 5001}, "max_lines_added"),
+    ({"python_canary_ast": True}, "n'utilise pas python_canary_ast"),
+])
+def test_octopus_product_ticket_rejects_boundary_bypasses(tmp_path, change, message):
+    from octopus import dev_worker
+
+    values = _self_policy_kwargs(_octopus_self_repo(tmp_path))
+    values.update(
+        allowed_paths=["agents/gui/intelligence.py", "agents/gui/workbench.py"],
+        tests=[[sys.executable, "-m", "pytest", "-q", "tests/test_gui.py"]],
+        test_sandbox="docker",
+        max_files_changed=2,
+        max_lines_added=1200,
+        max_lines_deleted=1200,
+        strict_repository_preflight=True,
+        require_baseline_oracle=True,
+        python_canary_ast=False,
+        product_ticket=True,
+    )
     values.update(change)
 
     with pytest.raises(dev_worker.DevWorkerError, match=message):

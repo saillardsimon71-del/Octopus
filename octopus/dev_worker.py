@@ -149,6 +149,29 @@ OCTOPUS_SELF_PROTECTED_PATHS = frozenset({
     "octopus/AGENTS.md",
     "docs/ACCEPTANCE_GATES.md",
 })
+# Product tickets may change application code, but never the self-development, cost,
+# outbound-action, or web-safety boundaries that supervise those tickets.
+OCTOPUS_PRODUCT_PROTECTED_PATHS = OCTOPUS_SELF_PROTECTED_PATHS | frozenset({
+    "octopus/dev_worker.py",
+    "octopus/night_shift.py",
+    "octopus/promotion.py",
+    "octopus/worker.py",
+    "octopus/tasks.py",
+    "octopus/compute_finance.py",
+    "octopus/economy.py",
+    "octopus/actions.py",
+    "octopus/browser_actions.py",
+    "octopus/smtp_executor.py",
+    "agents/web_guard.py",
+    "agents/browser.py",
+    "agents/publish.py",
+    "docker/dev-sandbox.Dockerfile",
+})
+# Product tickets use the generic development-task radius. The concrete ticket still
+# has to declare a smaller explicit radius; raising these hard caps is a human-reviewed
+# policy change, not something a product ticket can do itself.
+PRODUCT_TICKET_MAX_FILES = 20
+PRODUCT_TICKET_MAX_LINES = 5000
 _RETRY_DELAY_RE = re.compile(r"try again in ([0-9]+(?:\.[0-9]+)?)\s*(?:s|seconds?)\b", re.IGNORECASE)
 
 _KILO_SENSITIVE_PATTERNS = (
@@ -717,7 +740,8 @@ def _validate_octopus_self_modification_policy(
         test_sandbox: str, test_sandbox_image: str, max_files_changed: int | None,
         max_lines_added: int | None, max_lines_deleted: int | None,
         strict_repository_preflight: bool, require_baseline_oracle: bool,
-        python_canary_ast: bool, allow_declarative_fallback: bool) -> bool:
+        python_canary_ast: bool, allow_declarative_fallback: bool,
+        product_ticket: bool = False) -> bool:
     """Fail closed for OCTOPUS modifying its own repository.
 
     Returns True only for the tightly bounded Python-canary path.
@@ -734,6 +758,55 @@ def _validate_octopus_self_modification_policy(
     protected = sorted(set(allowed_paths) & OCTOPUS_SELF_PROTECTED_PATHS)
     if protected:
         raise DevWorkerError("chemin de gouvernance protégé: " + ", ".join(protected))
+
+    if product_ticket:
+        product_protected = sorted(set(allowed_paths) & OCTOPUS_PRODUCT_PROTECTED_PATHS)
+        if product_protected:
+            raise DevWorkerError(
+                "product_ticket refuse une frontière de sécurité: " + ", ".join(product_protected)
+            )
+        if any(path.startswith("tests/") or path.endswith("/conftest.py") or path == "conftest.py"
+               for path in allowed_paths):
+            raise DevWorkerError("product_ticket OCTOPUS ne peut pas modifier ses oracles de test")
+        if len(allowed_paths) > PRODUCT_TICKET_MAX_FILES:
+            raise DevWorkerError(
+                f"product_ticket OCTOPUS limité à {PRODUCT_TICKET_MAX_FILES} chemins autorisés"
+            )
+        actual_targets = _pytest_targets(tests)
+        if not actual_targets or any(
+            not target.startswith("tests/") or not target.endswith(".py")
+            for target in actual_targets
+        ):
+            raise DevWorkerError("product_ticket OCTOPUS exige uniquement des cibles pytest sous tests/")
+        if test_sandbox != "docker":
+            raise DevWorkerError("product_ticket OCTOPUS exige test_sandbox=docker")
+        if (
+            test_sandbox_image != DEFAULT_TEST_SANDBOX_IMAGE
+            and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", test_sandbox_image) is None
+        ):
+            raise DevWorkerError("image sandbox product_ticket OCTOPUS non approuvée")
+        if (
+            max_files_changed is None
+            or not 1 <= max_files_changed <= min(PRODUCT_TICKET_MAX_FILES, len(allowed_paths))
+        ):
+            raise DevWorkerError(
+                "product_ticket OCTOPUS exige max_files_changed entre 1 et la taille de allowed_paths"
+            )
+        for name, value in (
+            ("max_lines_added", max_lines_added),
+            ("max_lines_deleted", max_lines_deleted),
+        ):
+            if value is None or not 1 <= value <= PRODUCT_TICKET_MAX_LINES:
+                raise DevWorkerError(
+                    f"product_ticket OCTOPUS exige {name} entre 1 et {PRODUCT_TICKET_MAX_LINES}"
+                )
+        if not strict_repository_preflight:
+            raise DevWorkerError("product_ticket OCTOPUS exige strict_repository_preflight")
+        if not require_baseline_oracle:
+            raise DevWorkerError("product_ticket OCTOPUS exige require_baseline_oracle")
+        if python_canary_ast:
+            raise DevWorkerError("product_ticket OCTOPUS n'utilise pas python_canary_ast")
+        return False
 
     python_paths = [path for path in allowed_paths if path.endswith(".py")]
     unsupported = [
@@ -1497,6 +1570,12 @@ def development_task(ctx):
     require_baseline_oracle = bool(ctx.input.get("require_baseline_oracle", False))
     python_canary_ast = bool(ctx.input.get("python_canary_ast", False))
     allow_declarative_fallback = bool(ctx.input.get("allow_declarative_fallback", False))
+    self_modification_policy = str(
+        ctx.input.get("self_modification_policy") or "python_canary"
+    ).strip().lower()
+    if self_modification_policy not in {"python_canary", "product_ticket"}:
+        raise DevWorkerError("self_modification_policy attendu: python_canary ou product_ticket")
+    product_ticket = self_modification_policy == "product_ticket"
     if backend == "kilo" and allowed_paths is None:
         raise DevWorkerError("backend=kilo exige allowed_paths explicite")
     if backend == "declarative" and allowed_paths is not None:
@@ -1506,6 +1585,7 @@ def development_task(ctx):
         max_files_changed, max_lines_added, max_lines_deleted,
         strict_repository_preflight, require_baseline_oracle,
         python_canary_ast, allow_declarative_fallback,
+        product_ticket,
     )
 
     worktree, branch = _create_worktree(repository, ctx.id)
@@ -1619,8 +1699,14 @@ def development_task(ctx):
                         "model": KILO_MODEL,
                         "changed_paths": [],
                         "noop": True,
+                        "tests_passed": True,
+                        "baseline_oracle_runs": 2 if baseline_signature is not None else 0,
+                        "oracle_tests": len(baseline_signature or ()),
+                        "post_oracle_tests": len(noop_signature if baseline_signature is not None else ()),
+                        "test_sandbox": test_sandbox,
+                        "test_sandbox_image": effective_test_image if test_sandbox == "docker" else None,
                         "final_text": _kilo_output_summary(kilo_output)["final_text"],
-                        "self_policy": "python_canary" if octopus_python_canary else "scoped_kilo",
+                        "self_policy": "product_ticket" if product_ticket else ("python_canary" if octopus_python_canary else "scoped_kilo"),
                     }
                     ctx.emit("development.noop", result)
                     return result
@@ -1683,8 +1769,11 @@ def development_task(ctx):
                 "changed_paths": changed_paths,
                 "test_sandbox": test_sandbox,
                 "test_sandbox_image": effective_test_image if test_sandbox == "docker" else None,
+                "tests_passed": True,
+                "baseline_oracle_runs": 2 if baseline_signature is not None else 0,
                 "oracle_tests": len(baseline_signature or ()),
-                "self_policy": "python_canary" if octopus_python_canary else "scoped_kilo",
+                "post_oracle_tests": len(post_signature if baseline_signature is not None else ()),
+                "self_policy": "product_ticket" if product_ticket else ("python_canary" if octopus_python_canary else "scoped_kilo"),
             }
             ctx.emit("development.committed", result)
             return result

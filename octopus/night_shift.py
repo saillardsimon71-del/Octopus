@@ -1,8 +1,9 @@
 """Bounded unattended development canaries for OCTOPUS.
 
-The default policy remains documentation-only. A separate python_canary policy is
-available only with Docker-isolated oracle tests, an exact source-file allowlist,
-tight diff-radius limits, no declarative fallback, and local commits only.
+The default policy remains documentation-only. python_canary keeps the tightly
+bounded single-file path. product_ticket is an explicit supervised path for real
+multi-file product work: Docker-isolated deterministic oracles, exact write scope,
+strict preflight, bounded diff radius, no declarative fallback, and local commits only.
 Nothing is pushed or merged into main.
 """
 from __future__ import annotations
@@ -28,7 +29,7 @@ MAX_HOURS = 8.0
 MAX_CONSECUTIVE_FAILURES = 2
 DEFAULT_MAX_STEPS = 20
 NIGHT_POLICY = "docs_only"
-NIGHT_POLICIES = frozenset({"docs_only", "python_canary"})
+NIGHT_POLICIES = frozenset({"docs_only", "python_canary", "product_ticket"})
 PROTECTED_DOCS = {
     "AGENTS.md",
     "docs/ACCEPTANCE_GATES.md",
@@ -120,12 +121,24 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
                 raise NightShiftError(f"ticket #{index}: __init__.py protégé en python_canary: {path}")
             if path not in PYTHON_CANARY_ALLOWED:
                 raise NightShiftError(f"ticket #{index}: fichier hors allowlist python_canary: {path}")
+        elif policy == "product_ticket":
+            if path in dev_worker.OCTOPUS_PRODUCT_PROTECTED_PATHS:
+                raise NightShiftError(f"ticket #{index}: noyau product_ticket protégé: {path}")
+            if path.startswith("tests/") or path.endswith("/conftest.py") or path == "conftest.py":
+                raise NightShiftError(f"ticket #{index}: oracles de test non modifiables: {path}")
+            try:
+                dev_worker._validate_allowed_paths([path])
+            except dev_worker.DevWorkerError as exc:
+                raise NightShiftError(f"ticket #{index}: périmètre product_ticket refusé: {exc}") from exc
         if path not in allowed_paths:
             allowed_paths.append(path)
     if policy == "python_canary" and len(allowed_paths) != 1:
         raise NightShiftError(f"ticket #{index}: python_canary exige exactement un fichier source")
 
-    targets_raw = raw.get("test_targets") or ["tests/test_dev_worker.py"]
+    targets_raw = raw.get("test_targets")
+    if policy == "product_ticket" and not targets_raw:
+        raise NightShiftError(f"ticket #{index}: product_ticket exige test_targets explicite")
+    targets_raw = targets_raw or ["tests/test_dev_worker.py"]
     if not isinstance(targets_raw, list) or not targets_raw:
         raise NightShiftError(f"ticket #{index}: test_targets non vide requis")
     test_targets = []
@@ -161,23 +174,43 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
             raise NightShiftError(f"ticket #{index}: acceptance_criteria invalide")
         acceptance_criteria.append(" ".join(value.split()))
 
-    if policy == "python_canary":
+    if policy in {"python_canary", "product_ticket"}:
         test_sandbox = "docker"
         requested_image = str(
             raw.get("test_sandbox_image") or dev_worker.DEFAULT_TEST_SANDBOX_IMAGE
         ).strip()
         if requested_image != dev_worker.DEFAULT_TEST_SANDBOX_IMAGE:
             raise NightShiftError(
-                f"ticket #{index}: image sandbox python_canary imposée: {dev_worker.DEFAULT_TEST_SANDBOX_IMAGE}"
+                f"ticket #{index}: image sandbox {policy} imposée: {dev_worker.DEFAULT_TEST_SANDBOX_IMAGE}"
             )
         sandbox_image = dev_worker.DEFAULT_TEST_SANDBOX_IMAGE
-        max_files_changed = int(raw.get("max_files_changed", 1))
-        max_lines_added = int(raw.get("max_lines_added", 80))
-        max_lines_deleted = int(raw.get("max_lines_deleted", 80))
-        if max_files_changed != 1:
-            raise NightShiftError(f"ticket #{index}: python_canary exige max_files_changed=1")
-        if not 1 <= max_lines_added <= 80 or not 1 <= max_lines_deleted <= 80:
-            raise NightShiftError(f"ticket #{index}: rayon de lignes python_canary trop large (maximum 80)")
+        if policy == "python_canary":
+            max_files_changed = int(raw.get("max_files_changed", 1))
+            max_lines_added = int(raw.get("max_lines_added", 80))
+            max_lines_deleted = int(raw.get("max_lines_deleted", 80))
+            if max_files_changed != 1:
+                raise NightShiftError(f"ticket #{index}: python_canary exige max_files_changed=1")
+            if not 1 <= max_lines_added <= 80 or not 1 <= max_lines_deleted <= 80:
+                raise NightShiftError(f"ticket #{index}: rayon de lignes python_canary trop large (maximum 80)")
+        else:
+            max_files_changed = int(raw.get("max_files_changed", len(allowed_paths)))
+            max_lines_added = int(raw.get("max_lines_added", 2500))
+            max_lines_deleted = int(raw.get("max_lines_deleted", 2500))
+            if not 1 <= max_files_changed <= min(dev_worker.PRODUCT_TICKET_MAX_FILES, len(allowed_paths)):
+                raise NightShiftError(
+                    f"ticket #{index}: max_files_changed product_ticket doit être entre 1 et "
+                    f"{min(dev_worker.PRODUCT_TICKET_MAX_FILES, len(allowed_paths))}"
+                )
+            if not 1 <= max_lines_added <= dev_worker.PRODUCT_TICKET_MAX_LINES:
+                raise NightShiftError(
+                    f"ticket #{index}: max_lines_added product_ticket maximum "
+                    f"{dev_worker.PRODUCT_TICKET_MAX_LINES}"
+                )
+            if not 1 <= max_lines_deleted <= dev_worker.PRODUCT_TICKET_MAX_LINES:
+                raise NightShiftError(
+                    f"ticket #{index}: max_lines_deleted product_ticket maximum "
+                    f"{dev_worker.PRODUCT_TICKET_MAX_LINES}"
+                )
     else:
         test_sandbox = "host"
         sandbox_image = dev_worker.DEFAULT_TEST_SANDBOX_IMAGE
@@ -345,13 +378,15 @@ def run(
     plan = validate_plan(plan)
     ready = preflight(repository)
     resolved_images = {}
-    if plan["policy"] == "python_canary":
+    if plan["policy"] in {"python_canary", "product_ticket"}:
         try:
             for image in sorted({ticket["test_sandbox_image"] for ticket in plan["tickets"][:max_tasks]}):
                 image_id, _ = dev_worker._docker_sandbox_probe(Path(ready["repository"]), image)
                 resolved_images[image] = image_id
         except (dev_worker.DevWorkerError, OSError, subprocess.SubprocessError) as exc:
-            raise NightShiftError(f"python_canary refuse de démarrer: probe Docker réel échoué: {exc}") from exc
+            raise NightShiftError(
+                f"{plan['policy']} refuse de démarrer: probe Docker réel échoué: {exc}"
+            ) from exc
         for ticket in plan["tickets"][:max_tasks]:
             ticket["test_sandbox_image"] = resolved_images[ticket["test_sandbox_image"]]
     run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
@@ -416,10 +451,13 @@ def run(
                     "max_files_changed": ticket["max_files_changed"],
                     "max_lines_added": ticket["max_lines_added"],
                     "max_lines_deleted": ticket["max_lines_deleted"],
-                    "strict_repository_preflight": plan["policy"] == "python_canary",
-                    "require_baseline_oracle": plan["policy"] == "python_canary",
+                    "strict_repository_preflight": plan["policy"] in {"python_canary", "product_ticket"},
+                    "require_baseline_oracle": plan["policy"] in {"python_canary", "product_ticket"},
                     "python_canary_ast": plan["policy"] == "python_canary",
                     "allow_declarative_fallback": False,
+                    "self_modification_policy": (
+                        "product_ticket" if plan["policy"] == "product_ticket" else "python_canary"
+                    ),
                 },
                 priority=10_000,
                 idempotency_key=f"night:{run_id}:{index}",

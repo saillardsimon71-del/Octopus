@@ -49,6 +49,88 @@ def good_report() -> dict:
     }
 
 
+def good_product_report() -> dict:
+    return {
+        "run_id": "20260921-product-001",
+        "policy": "product_ticket",
+        "status": "backlog_complete",
+        "base_head": BASE,
+        "final_head": COMMIT,
+        "tickets": [{
+            "index": 1,
+            "status": "done",
+            "allowed_paths": ["octopus/resources.py", "octopus/config/catalog.json"],
+            "night_head": COMMIT,
+            "result": {
+                "status": "done",
+                "input": {
+                    "strict_repository_preflight": True,
+                    "require_baseline_oracle": True,
+                    "python_canary_ast": False,
+                    "allow_declarative_fallback": False,
+                    "self_modification_policy": "product_ticket",
+                    "allowed_paths": ["octopus/resources.py", "octopus/config/catalog.json"],
+                    "tests": [["python", "-m", "pytest", "-q", "tests/test_resources.py"]],
+                    "max_files_changed": 2,
+                    "max_lines_added": 1200,
+                    "max_lines_deleted": 900,
+                },
+                "output": {
+                    "backend": "kilo",
+                    "self_policy": "product_ticket",
+                    "commit": COMMIT,
+                    "changed_paths": ["octopus/resources.py"],
+                    "test_sandbox": "docker",
+                    "test_sandbox_image": "sha256:" + "a" * 64,
+                    "tests_passed": True,
+                    "baseline_oracle_runs": 2,
+                    "oracle_tests": 17,
+                    "post_oracle_tests": 17,
+                },
+            },
+        }],
+    }
+
+
+def test_build_manifest_accepts_product_ticket_with_human_review():
+    manifest = promotion.build_manifest(good_product_report())
+
+    assert manifest["policy"] == "product_ticket"
+    assert manifest["commits"] == [COMMIT]
+    assert manifest["changed_paths"] == ["octopus/resources.py"]
+    assert manifest["requires_human_review"] is True
+    assert manifest["auto_merge"] is False
+
+
+@pytest.mark.parametrize("mutate, message", [
+    (lambda r: r["tickets"][0]["result"]["output"].update(self_policy="scoped_kilo"), "self_policy"),
+    (lambda r: r["tickets"][0]["result"]["input"].update(self_modification_policy="python_canary"),
+     "self_modification_policy"),
+    (lambda r: r["tickets"][0]["result"]["output"].update(test_sandbox_image="octopus-test-sandbox:py311"),
+     "image sandbox résolue"),
+    (lambda r: r["tickets"][0]["result"]["output"].update(tests_passed=False), "tests verts"),
+    (lambda r: r["tickets"][0]["result"]["output"].update(baseline_oracle_runs=1), "baseline oracle"),
+    (lambda r: r["tickets"][0]["result"]["output"].update(post_oracle_tests=16), "oracle final"),
+    (lambda r: (
+        r["tickets"][0].update(allowed_paths=["agents/browser.py"]),
+        r["tickets"][0]["result"]["output"].update(changed_paths=["agents/browser.py"]),
+    ), "noyau product_ticket"),
+    (lambda r: (
+        r["tickets"][0].update(allowed_paths=["tests/test_resources.py"]),
+        r["tickets"][0]["result"]["output"].update(changed_paths=["tests/test_resources.py"]),
+    ), "modification des tests"),
+    (lambda r: r["tickets"][0]["result"]["input"].update(max_files_changed=21), "max_files_changed"),
+    (lambda r: r["tickets"][0]["result"]["input"].update(max_lines_added=5001), "max_lines_added"),
+])
+def test_build_manifest_rejects_invalid_product_ticket_proof(mutate, message):
+    report = good_product_report()
+    mutate(report)
+    report["tickets"][0]["result"]["input"]["allowed_paths"] = report["tickets"][0]["allowed_paths"]
+
+    with pytest.raises(promotion.PromotionError, match=message):
+        promotion.build_manifest(report)
+
+
 def test_build_manifest_accepts_strict_python_canary():
     manifest = promotion.build_manifest(good_report())
 
@@ -143,6 +225,93 @@ def test_verify_git_accepts_exact_night_history(tmp_path):
     assert verified["night_worktree"] == str(repo.resolve())
     assert verified["commits"] == [final]
     assert verified["changed_paths"] == ["octopus/resources.py"]
+
+
+def product_report_for_repo(base_repo, repo, base, final):
+    report = good_product_report()
+    report["base_head"] = base
+    report["final_head"] = final
+    report["base_repository"] = str(base_repo)
+    report["night_worktree"] = str(repo)
+    report["tickets"][0]["night_head"] = final
+    report["tickets"][0]["allowed_paths"] = ["octopus/resources.py"]
+    report["tickets"][0]["result"]["input"]["allowed_paths"] = ["octopus/resources.py"]
+    report["tickets"][0]["result"]["input"]["max_files_changed"] = 1
+    report["tickets"][0]["result"]["output"]["commit"] = final
+    report["tickets"][0]["result"]["output"]["changed_paths"] = ["octopus/resources.py"]
+    return report
+
+
+def test_verify_git_requires_human_review_contract(tmp_path):
+    base_repo, repo, base, final = _night_repo(tmp_path)
+    report = report_for_repo(base_repo, repo, base, final)
+    manifest = promotion.build_manifest(report)
+    manifest["requires_human_review"] = False
+
+    with pytest.raises(promotion.PromotionError, match="revue humaine"):
+        promotion.verify_git(report, manifest)
+
+
+def test_verify_git_product_ticket_rechecks_exact_commit_and_tests(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    base_repo, repo, base, final = _night_repo(tmp_path)
+    report = product_report_for_repo(base_repo, repo, base, final)
+    manifest = promotion.build_manifest(report)
+    seen = {}
+
+    def green(worktree, commands, *, sandbox, sandbox_image):
+        seen.update(
+            worktree=worktree,
+            commands=commands,
+            sandbox=sandbox,
+            sandbox_image=sandbox_image,
+        )
+        return ("1 passed", True)
+
+    monkeypatch.setattr(dev_worker, "_run_tests", green)
+
+    verified = promotion.verify_git(report, manifest)
+
+    assert verified["git_verified"] is True
+    assert seen["sandbox"] == "docker"
+    assert seen["commands"] == [["python", "-m", "pytest", "-q", "tests/test_resources.py"]]
+    assert seen["sandbox_image"].startswith("sha256:")
+
+
+def test_verify_git_product_ticket_fails_if_promotion_tests_are_red(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    base_repo, repo, base, final = _night_repo(tmp_path)
+    report = product_report_for_repo(base_repo, repo, base, final)
+    manifest = promotion.build_manifest(report)
+    monkeypatch.setattr(
+        dev_worker, "_run_tests",
+        lambda *args, **kwargs: ("FAILED tests/test_resources.py::test_x", False),
+    )
+
+    with pytest.raises(promotion.PromotionError, match="tests de promotion en échec"):
+        promotion.verify_git(report, manifest)
+
+
+def test_verify_git_product_ticket_enforces_real_diff_radius(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    base_repo, repo, base, _ = _night_repo(tmp_path)
+    subprocess.run(["git", "reset", "--hard", base], cwd=repo, check=True, capture_output=True)
+    path = repo / "octopus" / "resources.py"
+    path.write_text("VALUE = 3\nEXTRA = 1\nMORE = 2\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-qam", "wider"], cwd=repo, check=True)
+    wider = _git(repo, "rev-parse", "HEAD")
+
+    report = product_report_for_repo(base_repo, repo, base, wider)
+    report["tickets"][0]["result"]["input"]["max_lines_added"] = 1
+    report["tickets"][0]["result"]["input"]["max_lines_deleted"] = 1
+    manifest = promotion.build_manifest(report)
+    monkeypatch.setattr(dev_worker, "_run_tests", lambda *args, **kwargs: ("green", True))
+
+    with pytest.raises(promotion.PromotionError, match="lignes ajoutées réelles"):
+        promotion.verify_git(report, manifest)
 
 
 def test_verify_git_rejects_reported_paths_that_do_not_match_diff(tmp_path):
