@@ -935,19 +935,6 @@ def test_octopus_self_policy_accepts_scoped_product_ticket(tmp_path):
     assert dev_worker._validate_octopus_self_modification_policy(**values) is False
 
 
-@pytest.mark.parametrize("change, message", [
-    ({"allowed_paths": ["octopus/dev_worker.py"]}, "frontière de sécurité"),
-    ({"allowed_paths": ["agents/web_guard.py"]}, "frontière de sécurité"),
-    ({"allowed_paths": ["agents/browser.py"]}, "frontière de sécurité"),
-    ({"allowed_paths": ["agents/publish.py"]}, "frontière de sécurité"),
-    ({"allowed_paths": ["docker/dev-sandbox.Dockerfile"]}, "frontière de sécurité"),
-    ({"allowed_paths": ["tests/test_gui.py"]}, "oracles de test"),
-    ({"test_sandbox": "host"}, "test_sandbox=docker"),
-    ({"require_baseline_oracle": False}, "require_baseline_oracle"),
-    ({"max_files_changed": 21}, "max_files_changed"),
-    ({"max_lines_added": 5001}, "max_lines_added"),
-    ({"python_canary_ast": True}, "n'utilise pas python_canary_ast"),
-])
 def test_octopus_product_ticket_allows_scoped_non_python_product_files(tmp_path):
     from octopus import dev_worker
 
@@ -968,6 +955,19 @@ def test_octopus_product_ticket_allows_scoped_non_python_product_files(tmp_path)
     assert dev_worker._validate_octopus_self_modification_policy(**values) is False
 
 
+@pytest.mark.parametrize("change, message", [
+    ({"allowed_paths": ["octopus/dev_worker.py"]}, "frontière de sécurité"),
+    ({"allowed_paths": ["agents/web_guard.py"]}, "frontière de sécurité"),
+    ({"allowed_paths": ["agents/browser.py"]}, "frontière de sécurité"),
+    ({"allowed_paths": ["agents/publish.py"]}, "frontière de sécurité"),
+    ({"allowed_paths": ["docker/dev-sandbox.Dockerfile"]}, "frontière de sécurité"),
+    ({"allowed_paths": ["tests/test_gui.py"]}, "oracles de test"),
+    ({"test_sandbox": "host"}, "test_sandbox=docker"),
+    ({"require_baseline_oracle": False}, "require_baseline_oracle"),
+    ({"max_files_changed": 21}, "max_files_changed"),
+    ({"max_lines_added": 5001}, "max_lines_added"),
+    ({"python_canary_ast": True}, "n'utilise pas python_canary_ast"),
+])
 def test_octopus_product_ticket_rejects_boundary_bypasses(tmp_path, change, message):
     from octopus import dev_worker
 
