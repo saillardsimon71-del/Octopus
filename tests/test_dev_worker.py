@@ -1057,6 +1057,7 @@ def test_octopus_product_ticket_allows_scoped_non_python_product_files(tmp_path)
     ({"allowed_paths": ["agents/browser.py"]}, "frontière de sécurité"),
     ({"allowed_paths": ["agents/publish.py"]}, "frontière de sécurité"),
     ({"allowed_paths": ["docker/dev-sandbox.Dockerfile"]}, "frontière de sécurité"),
+    ({"allowed_paths": [".github/workflows/video-foundation.yml"]}, "frontière de sécurité"),
     ({"allowed_paths": ["tests/test_gui.py"]}, "oracles de test"),
     ({"test_sandbox": "host"}, "test_sandbox=docker"),
     ({"require_baseline_oracle": False}, "require_baseline_oracle"),
