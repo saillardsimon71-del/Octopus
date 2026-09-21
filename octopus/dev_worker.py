@@ -162,10 +162,14 @@ OCTOPUS_PRODUCT_PROTECTED_PATHS = OCTOPUS_SELF_PROTECTED_PATHS | frozenset({
     "octopus/actions.py",
     "octopus/browser_actions.py",
     "octopus/smtp_executor.py",
-    "octopus/web_guard.py",
+    "agents/web_guard.py",
+    "agents/browser.py",
 })
-PRODUCT_TICKET_MAX_FILES = 12
-PRODUCT_TICKET_MAX_LINES = 2500
+# Product tickets use the generic development-task radius. The concrete ticket still
+# has to declare a smaller explicit radius; raising these hard caps is a human-reviewed
+# policy change, not something a product ticket can do itself.
+PRODUCT_TICKET_MAX_FILES = 20
+PRODUCT_TICKET_MAX_LINES = 5000
 _RETRY_DELAY_RE = re.compile(r"try again in ([0-9]+(?:\.[0-9]+)?)\s*(?:s|seconds?)\b", re.IGNORECASE)
 
 _KILO_SENSITIVE_PATTERNS = (
@@ -753,33 +757,19 @@ def _validate_octopus_self_modification_policy(
     if protected:
         raise DevWorkerError("chemin de gouvernance protégé: " + ", ".join(protected))
 
-    python_paths = [path for path in allowed_paths if path.endswith(".py")]
-    unsupported = [
-        path for path in allowed_paths
-        if not path.endswith(".py") and not path.lower().endswith(".md")
-    ]
-    if unsupported:
-        raise DevWorkerError(
-            "auto-modification OCTOPUS limitée aux docs Markdown et surfaces Python approuvées: "
-            + ", ".join(unsupported)
-        )
-    if not python_paths:
-        if product_ticket:
-            raise DevWorkerError("product_ticket OCTOPUS exige au moins un fichier Python")
-        return False
-
     if product_ticket:
         product_protected = sorted(set(allowed_paths) & OCTOPUS_PRODUCT_PROTECTED_PATHS)
         if product_protected:
             raise DevWorkerError(
                 "product_ticket refuse une frontière de sécurité: " + ", ".join(product_protected)
             )
+        if any(path.startswith("tests/") or path.endswith("/conftest.py") or path == "conftest.py"
+               for path in allowed_paths):
+            raise DevWorkerError("product_ticket OCTOPUS ne peut pas modifier ses oracles de test")
         if len(allowed_paths) > PRODUCT_TICKET_MAX_FILES:
             raise DevWorkerError(
                 f"product_ticket OCTOPUS limité à {PRODUCT_TICKET_MAX_FILES} chemins autorisés"
             )
-        if any(path.startswith("tests/") for path in allowed_paths):
-            raise DevWorkerError("product_ticket OCTOPUS ne peut pas modifier ses oracles de test")
         actual_targets = _pytest_targets(tests)
         if not actual_targets or any(
             not target.startswith("tests/") or not target.endswith(".py")
@@ -814,6 +804,19 @@ def _validate_octopus_self_modification_policy(
             raise DevWorkerError("product_ticket OCTOPUS exige require_baseline_oracle")
         if python_canary_ast:
             raise DevWorkerError("product_ticket OCTOPUS n'utilise pas python_canary_ast")
+        return False
+
+    python_paths = [path for path in allowed_paths if path.endswith(".py")]
+    unsupported = [
+        path for path in allowed_paths
+        if not path.endswith(".py") and not path.lower().endswith(".md")
+    ]
+    if unsupported:
+        raise DevWorkerError(
+            "auto-modification OCTOPUS limitée aux docs Markdown et surfaces Python approuvées: "
+            + ", ".join(unsupported)
+        )
+    if not python_paths:
         return False
 
     if len(allowed_paths) != 1 or len(python_paths) != 1:
