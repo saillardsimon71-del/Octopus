@@ -114,9 +114,11 @@ class FakeProvider:
     def quote(self, request):
         return ComputeOffer("salad", "gpu", "rtx_5090", 1, 32, "global", "batch", 0.25, 1, False, "community")
 
-    def create(self, offer, request, *, idempotency_key):
+    def create(self, offer, request, *, idempotency_key, reservation_id=None):
         if self.breaker is not None:
-            assert self.breaker.by_key(idempotency_key)["status"] == "reserved"
+            saved = self.breaker.by_key(idempotency_key)
+            assert saved["status"] == "reserved"
+            assert reservation_id == saved["id"]
         if self.create_error:
             raise self.create_error
         return ComputeOperation("salad", "op-1", "running", "group-1")
