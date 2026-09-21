@@ -149,6 +149,10 @@ def test_verify_git_rejects_reported_paths_that_do_not_match_diff(tmp_path):
     base_repo, repo, base, final = _night_repo(tmp_path)
     report = report_for_repo(base_repo, repo, base, final)
     report["tickets"][0]["allowed_paths"] = ["octopus/capabilities.py"]
+    report["tickets"][0]["result"]["input"]["allowed_paths"] = ["octopus/capabilities.py"]
+    report["tickets"][0]["result"]["input"]["tests"] = [
+        ["python", "-m", "pytest", "-q", "tests/test_capabilities.py"]
+    ]
     report["tickets"][0]["result"]["output"]["changed_paths"] = ["octopus/capabilities.py"]
     manifest = promotion.build_manifest(report)
 
