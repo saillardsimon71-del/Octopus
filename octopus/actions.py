@@ -17,16 +17,27 @@ from . import economy, journal, strategy, tasks
 from .strategy import StrategyError
 
 # executor(channel: dict, payload: dict) -> {"observation": str, "source_ref": str, "metric"?, "value"?, "unit"?}
-_EXECUTORS: dict[tuple[str, str], tuple[Callable[[dict, dict], dict], str]] = {}
+_EXECUTORS: dict[tuple[str, str], tuple[Callable[[dict, dict], dict], str, bool]] = {}
 
 
-def register_executor(channel_kind: str, action: str, fn: Callable[[dict, dict], dict], *, cost_class: str) -> None:
+def register_executor(channel_kind: str, action: str, fn: Callable[[dict, dict], dict], *, cost_class: str,
+                      requires_idempotency: bool = False) -> None:
     if cost_class not in {"local", "free_quota", "paid"}:
         raise ValueError("cost_class doit être local, free_quota ou paid")
-    _EXECUTORS[(channel_kind.strip().lower(), action.strip().lower())] = (fn, cost_class)
+    _EXECUTORS[(channel_kind.strip().lower(), action.strip().lower())] = (
+        fn, cost_class, bool(requires_idempotency)
+    )
+
+
+def _load_configured_executors() -> None:
+    """Charge uniquement les executors externes explicitement configurés."""
+    from . import smtp_executor
+    if ("email", "send") not in _EXECUTORS and smtp_executor.configured():
+        smtp_executor.register()
 
 
 def executors() -> list[tuple[str, str]]:
+    _load_configured_executors()
     return sorted(_EXECUTORS)
 
 
@@ -43,6 +54,7 @@ def propose(business: str, channel_id: int, action: str, payload: dict | None = 
     """Enregistre puis tente l'action. Renvoie son état final (executed, blocked, failed)."""
     business = strategy._business(business)
     action = strategy._text(action, "action").lower()
+    _load_configured_executors()
     now = time.time()
     with tasks._tx() as conn:
         if idempotency_key:
@@ -69,6 +81,8 @@ def propose(business: str, channel_id: int, action: str, payload: dict | None = 
             reason = "accès 'act' non accordé par l'humain sur ce canal"
         elif (channel["kind"], action) not in _EXECUTORS:
             reason = f"aucun exécuteur pour {channel['kind']}:{action} (intégration à construire)"
+        elif _EXECUTORS[(channel["kind"], action)][2] and not idempotency_key:
+            reason = "idempotency_key requis pour cet exécuteur"
         elif _EXECUTORS[(channel["kind"], action)][1] == "paid" and not spend_amount:
             reason = "exécuteur de cost class paid sans coût déclaré"
         if reason:
@@ -121,4 +135,4 @@ def list_actions(business: str, *, status: str | None = None, limit: int = 50) -
 # restent des adapters séparés et ne doivent pas contourner cette frontière.
 from . import browser_actions as _browser_actions
 
-register_executor("browser_form", "submit", _browser_actions.submit_form, cost_class="local")
+register_executor("browser_form", "submit", _browser_actions.submit_form, cost_class="local", requires_idempotency=True)
