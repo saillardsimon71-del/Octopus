@@ -1488,8 +1488,10 @@ def test_docker_probe_args_keep_evidence_isolated(tmp_path):
     assert "--read-only" in args
     assert ["--cap-drop", "ALL"] == args[args.index("--cap-drop"):args.index("--cap-drop") + 2]
     assert "type=bind,source=" in args[args.index("--mount") + 1]
-    assert "/workspace/data:rw,nosuid,nodev,size=64m" in args
-    assert "/workspace/agents/data:rw,nosuid,nodev,size=64m" in args
+    assert "OCTOPUS_HOME=/tmp/octopus-state" in args
+    assert "PODALUX_ROOT=/tmp/podalux-state" in args
+    mount = args[args.index("--mount") + 1]
+    assert mount.endswith(",target=/workspace,readonly")
 
 
 def test_task_clone_is_independent_and_outside_source_repo(tmp_path):
