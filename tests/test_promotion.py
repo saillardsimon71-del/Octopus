@@ -31,6 +31,11 @@ def good_report() -> dict:
                     "require_baseline_oracle": True,
                     "python_canary_ast": True,
                     "allow_declarative_fallback": False,
+                    "allowed_paths": ["octopus/resources.py"],
+                    "tests": [["python", "-m", "pytest", "-q", "tests/test_resources.py"]],
+                    "max_files_changed": 1,
+                    "max_lines_added": 20,
+                    "max_lines_deleted": 20,
                 },
                 "output": {
                     "backend": "kilo",
@@ -67,6 +72,9 @@ def test_build_manifest_accepts_strict_python_canary():
     (lambda r: r["tickets"][0]["result"]["output"].update(test_sandbox="host"), "sandbox Docker requis"),
     (lambda r: r["tickets"][0]["result"]["output"].update(oracle_tests=0), "oracle_tests positif"),
     (lambda r: r["tickets"][0]["result"]["input"].update(require_baseline_oracle=False), "require_baseline_oracle"),
+    (lambda r: r["tickets"][0]["result"]["input"].update(tests=[["python", "-m", "pytest", "-q", "tests/test_capabilities.py"]]), "oracle worker attendu"),
+    (lambda r: r["tickets"][0]["result"]["input"].update(max_files_changed=2), "max_files_changed invalide"),
+    (lambda r: r["tickets"][0]["result"]["input"].update(max_lines_added=81), "max_lines_added hors politique"),
     (lambda r: r.update(final_head="3" * 40), "dernier night_head"),
 ])
 def test_build_manifest_rejects_unsafe_reports(mutate, message):
