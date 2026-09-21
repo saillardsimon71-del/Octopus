@@ -140,7 +140,7 @@ def build_manifest(report: dict) -> dict:
                     raise PromotionError(f"ticket #{index}: {field} hors politique actuelle")
 
         if policy == "product_ticket":
-            from . import dev_worker
+            from . import acceptance, dev_worker
 
             task_input = result.get("input") or {}
             required_flags = {
@@ -156,6 +156,24 @@ def build_manifest(report: dict) -> dict:
                 raise PromotionError(f"ticket #{index}: self_modification_policy invalide")
             if output.get("self_policy") != "product_ticket":
                 raise PromotionError(f"ticket #{index}: self_policy non product_ticket")
+            raw_contract = task_input.get("acceptance_contract")
+            try:
+                contract = acceptance.validate_contract(raw_contract)
+            except acceptance.AcceptanceError as exc:
+                raise PromotionError(
+                    f"ticket #{index}: acceptance_contract invalide: {exc}"
+                ) from exc
+            expected_contract_hash = acceptance.contract_hash(contract)
+            if output.get("acceptance_contract_hash") != expected_contract_hash:
+                raise PromotionError(f"ticket #{index}: acceptance_contract_hash incohérent")
+            if output.get("gate_status") != "ACCEPTED":
+                raise PromotionError(f"ticket #{index}: gate_status doit être ACCEPTED")
+            evidence_path = str(output.get("evidence_path") or "").strip()
+            evidence_sha = str(output.get("evidence_sha256") or "").strip().lower()
+            if not evidence_path:
+                raise PromotionError(f"ticket #{index}: evidence_path requis")
+            if re.fullmatch(r"[0-9a-f]{64}", evidence_sha) is None:
+                raise PromotionError(f"ticket #{index}: evidence_sha256 invalide")
             if output.get("test_sandbox") != "docker":
                 raise PromotionError(f"ticket #{index}: sandbox Docker requis")
             sandbox_image = str(output.get("test_sandbox_image") or "")
@@ -389,6 +407,39 @@ def verify_git(report: dict, manifest: dict) -> dict:
             if not green:
                 raise PromotionError(
                     f"ticket #{index}: tests de promotion en échec: {test_output[-2000:]}"
+                )
+
+            raw_contract = task_input.get("acceptance_contract")
+            try:
+                contract = acceptance.validate_contract(raw_contract)
+                expected_contract_hash = acceptance.contract_hash(contract)
+                acceptance.verify_evidence_file(
+                    Path(str(output.get("evidence_path") or "")),
+                    expected_sha256=str(output.get("evidence_sha256") or ""),
+                    expected_contract_hash=expected_contract_hash,
+                    expected_task_id=int(result.get("id") or 0),
+                )
+                rerun_gate = dev_worker._run_acceptance_gate(
+                    worktree,
+                    contract,
+                    task_id=int(result.get("id") or 0),
+                    attempt=0,
+                    tests_passed=True,
+                    changed_paths=list(output.get("changed_paths") or []),
+                    sandbox_image=str(output.get("test_sandbox_image_ref") or ""),
+                    expected_image_id=str(output.get("test_sandbox_image") or ""),
+                    persist=False,
+                )
+            except (acceptance.AcceptanceError, dev_worker.DevWorkerError, OSError, subprocess.SubprocessError) as exc:
+                raise PromotionError(
+                    f"ticket #{index}: preuve acceptance impossible à vérifier: {type(exc).__name__}: {exc}"
+                ) from exc
+            if rerun_gate["contract_hash"] != expected_contract_hash:
+                raise PromotionError(f"ticket #{index}: contract_hash gate rerun incohérent")
+            if rerun_gate["decision"]["status"] != "ACCEPTED":
+                raise PromotionError(
+                    f"ticket #{index}: acceptance gate de promotion non ACCEPTED: "
+                    f"{rerun_gate['decision']['status']}"
                 )
 
     return {
