@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 from typing import Callable
 
-from . import dev_worker, paths, tasks, worker
+from . import acceptance, dev_worker, paths, tasks, worker
 
 
 class NightShiftError(RuntimeError):
@@ -33,6 +33,7 @@ NIGHT_POLICIES = frozenset({"docs_only", "python_canary", "product_ticket"})
 PROTECTED_DOCS = {
     "AGENTS.md",
     "docs/ACCEPTANCE_GATES.md",
+    "docs/EVIDENCE_ACCEPTANCE.md",
 }
 PYTHON_CANARY_ORACLES = dev_worker.PYTHON_CANARY_ORACLES
 PYTHON_CANARY_ALLOWED = frozenset(PYTHON_CANARY_ORACLES)
@@ -174,6 +175,20 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
             raise NightShiftError(f"ticket #{index}: acceptance_criteria invalide")
         acceptance_criteria.append(" ".join(value.split()))
 
+    acceptance_contract = None
+    if policy == "product_ticket":
+        raw_contract = raw.get("acceptance_contract")
+        if raw_contract is None:
+            raise NightShiftError(
+                f"ticket #{index}: product_ticket exige acceptance_contract explicite"
+            )
+        try:
+            acceptance_contract = acceptance.validate_contract(raw_contract)
+        except acceptance.AcceptanceError as exc:
+            raise NightShiftError(
+                f"ticket #{index}: acceptance_contract invalide: {exc}"
+            ) from exc
+
     if policy in {"python_canary", "product_ticket"}:
         test_sandbox = "docker"
         requested_image = str(
@@ -224,6 +239,7 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
         "test_targets": test_targets,
         "max_steps": max_steps,
         "acceptance_criteria": acceptance_criteria,
+        "acceptance_contract": acceptance_contract,
         "noop_allowed": bool(raw.get("noop_allowed", False)),
         "test_sandbox": test_sandbox,
         "test_sandbox_image": sandbox_image,
@@ -445,6 +461,7 @@ def run(
                     "backend": "kilo",
                     "allowed_paths": ticket["allowed_paths"],
                     "acceptance_criteria": ticket["acceptance_criteria"],
+                    "acceptance_contract": ticket.get("acceptance_contract"),
                     "noop_allowed": ticket["noop_allowed"],
                     "test_sandbox": ticket["test_sandbox"],
                     "test_sandbox_image": ticket["test_sandbox_image"],
