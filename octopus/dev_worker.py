@@ -14,7 +14,7 @@ import uuid
 from collections import Counter
 from pathlib import Path
 
-from . import llm, paths
+from . import acceptance, llm, paths
 from .worker import handler
 
 
@@ -163,6 +163,8 @@ OCTOPUS_PRODUCT_PROTECTED_PATHS = OCTOPUS_SELF_PROTECTED_PATHS | frozenset({
     "octopus/dev_worker.py",
     "octopus/night_shift.py",
     "octopus/promotion.py",
+    "octopus/acceptance.py",
+    "octopus/acceptance_probe.py",
     "octopus/worker.py",
     "octopus/tasks.py",
     "octopus/compute_finance.py",
@@ -174,6 +176,7 @@ OCTOPUS_PRODUCT_PROTECTED_PATHS = OCTOPUS_SELF_PROTECTED_PATHS | frozenset({
     "agents/browser.py",
     "agents/publish.py",
     "docker/dev-sandbox.Dockerfile",
+    "docs/EVIDENCE_ACCEPTANCE.md",
 })
 # Product tickets use the generic development-task radius. The concrete ticket still
 # has to declare a smaller explicit radius; raising these hard caps is a human-reviewed
@@ -200,7 +203,8 @@ _KILO_PROTECTED_PATTERNS = (
     ".git/**", "**/.git/**", ".kilo/**", "**/.kilo/**", ".kilocode/**", "**/.kilocode/**",
     "kilo.json", "kilo.jsonc", "opencode.json", "opencode.jsonc", "**/kilo.json", "**/kilo.jsonc",
     "**/opencode.json", "**/opencode.jsonc", "AGENTS.md", "**/AGENTS.md",
-    "docs/ACCEPTANCE_GATES.md",
+    "docs/ACCEPTANCE_GATES.md", "docs/EVIDENCE_ACCEPTANCE.md",
+    "octopus/acceptance.py", "octopus/acceptance_probe.py",
 )
 
 
@@ -1128,6 +1132,41 @@ def _docker_test_args(
     ]
 
 
+def _docker_probe_args(
+        worktree: Path, image: str, inner: list[str], *, container_name: str | None = None) -> list[str]:
+    """Run a trusted evidence probe with the same fail-closed sandbox as tests."""
+    name = container_name or f"octopus-e-{uuid.uuid4().hex[:12]}"
+    mount = f"type=bind,source={_docker_mount_source(worktree)},target=/workspace,readonly"
+    return [
+        "docker", "run", "--rm",
+        "--name", name,
+        "--label", "octopus.evidence=1",
+        "--pull", "never",
+        "--init",
+        "--network", "none",
+        "--read-only",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        "--user", "10001:10001",
+        "--pids-limit", "128",
+        "--memory", "768m",
+        "--memory-swap", "768m",
+        "--cpus", "1.0",
+        "--ulimit", "nofile=1024:1024",
+        "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
+        "-e", "HOME=/tmp",
+        "-e", "USERPROFILE=/tmp",
+        "-e", "XDG_CONFIG_HOME=/tmp",
+        "-e", "PYTHONUTF8=1",
+        "-e", "PYTHONDONTWRITEBYTECODE=1",
+        "-e", "TZ=UTC",
+        "--mount", mount,
+        "-w", "/workspace",
+        image,
+        *inner,
+    ]
+
+
 def _cleanup_docker_container(worktree: Path, container_name: str) -> None:
     try:
         _run(["docker", "rm", "-f", container_name], worktree, timeout=30)
@@ -1239,6 +1278,96 @@ def _docker_sandbox_probe(base_dir: Path, image: str) -> tuple[str, str]:
         if not green or not any(status == "PASSED" for status, _ in signature):
             raise DevWorkerError("probe Docker réel non concluant: " + output[-2000:])
         return image_id, output[-2000:]
+
+
+def _run_acceptance_probe(
+        worktree: Path, contract: dict, *, sandbox_image: str,
+        expected_image_id: str | None) -> dict:
+    command = acceptance.probe_command(contract)
+    if command is None:
+        return {}
+    image_id = _docker_image_id(worktree, sandbox_image)
+    if expected_image_id is not None and image_id.lower() != expected_image_id.lower():
+        raise DevWorkerError(
+            f"image evidence Docker modifiée depuis le pré-vol: attendu {expected_image_id}, obtenu {image_id}"
+        )
+    container_name = f"octopus-e-{uuid.uuid4().hex[:12]}"
+    args = _docker_probe_args(worktree, sandbox_image, command, container_name=container_name)
+    try:
+        result = _run(args, worktree, timeout=90)
+    except subprocess.TimeoutExpired as exc:
+        _cleanup_docker_container(worktree, container_name)
+        raise DevWorkerError("probe evidence Docker timeout; conteneur forcé à l'arrêt") from exc
+    finally:
+        _cleanup_docker_container(worktree, container_name)
+    after_image_id = _docker_image_id(worktree, sandbox_image)
+    if expected_image_id is not None and after_image_id.lower() != expected_image_id.lower():
+        raise DevWorkerError(
+            f"image evidence Docker modifiée pendant le probe: attendu {expected_image_id}, obtenu {after_image_id}"
+        )
+    combined = (result.stdout or "") + (result.stderr or "")
+    if len(combined.encode("utf-8", errors="replace")) > 1_000_000:
+        raise DevWorkerError("sortie probe evidence Docker trop volumineuse")
+    if result.returncode in {125, 126, 127, 137}:
+        raise DevWorkerError(
+            f"échec infrastructure evidence Docker code={result.returncode}: {combined[-2000:]}"
+        )
+    if result.returncode:
+        raise DevWorkerError(
+            f"probe evidence en échec code={result.returncode}: {combined[-2000:]}"
+        )
+    marker = "OCTOPUS_EVIDENCE_JSON="
+    line = next((line for line in reversed((result.stdout or "").splitlines()) if line.startswith(marker)), None)
+    if line is None:
+        raise DevWorkerError("probe evidence sans payload JSON signé par marqueur")
+    try:
+        payload = json.loads(line[len(marker):])
+    except json.JSONDecodeError as exc:
+        raise DevWorkerError("payload JSON du probe evidence invalide") from exc
+    if not isinstance(payload, dict):
+        raise DevWorkerError("payload du probe evidence doit être un objet")
+    return payload
+
+
+def _run_acceptance_gate(
+        worktree: Path, contract: dict, *, task_id: int, attempt: int,
+        tests_passed: bool, changed_paths: list[str], sandbox_image: str,
+        expected_image_id: str | None, persist: bool = True) -> dict:
+    """Collect evidence outside the builder and let the protected deterministic gate decide."""
+    facts = {
+        "tests": {"passed": bool(tests_passed)},
+        "git": {"changed_paths": list(changed_paths)},
+    }
+    probe_facts = _run_acceptance_probe(
+        worktree,
+        contract,
+        sandbox_image=sandbox_image,
+        expected_image_id=expected_image_id,
+    )
+    for key, value in probe_facts.items():
+        if key in facts and isinstance(facts[key], dict) and isinstance(value, dict):
+            facts[key].update(value)
+        else:
+            facts[key] = value
+    bundle = acceptance.build_evidence_bundle(
+        task_id=task_id,
+        attempt=attempt,
+        contract=contract,
+        facts=facts,
+    )
+    decision = acceptance.evaluate_contract(contract, bundle)
+    bundle["gate_decision"] = decision
+    result = {
+        "contract_hash": acceptance.contract_hash(contract),
+        "decision": decision,
+        "evidence_path": None,
+        "evidence_sha256": None,
+    }
+    if persist:
+        evidence_path, evidence_sha = acceptance.persist_evidence(paths.data_dir(), bundle)
+        result["evidence_path"] = str(evidence_path)
+        result["evidence_sha256"] = evidence_sha
+    return result
 
 
 def _tool(
@@ -1735,6 +1864,24 @@ def development_task(ctx):
     if self_modification_policy not in {"python_canary", "product_ticket"}:
         raise DevWorkerError("self_modification_policy attendu: python_canary ou product_ticket")
     product_ticket = self_modification_policy == "product_ticket"
+    acceptance_contract_raw = ctx.input.get("acceptance_contract")
+    if product_ticket and acceptance_contract_raw is None:
+        raise DevWorkerError("product_ticket exige acceptance_contract explicite")
+    try:
+        acceptance_contract = (
+            acceptance.validate_contract(acceptance_contract_raw)
+            if acceptance_contract_raw is not None else None
+        )
+    except acceptance.AcceptanceError as exc:
+        raise DevWorkerError(f"acceptance_contract invalide: {exc}") from exc
+    acceptance_contract_hash = (
+        acceptance.contract_hash(acceptance_contract) if acceptance_contract is not None else None
+    )
+    if acceptance_contract is not None:
+        acceptance_criteria = [
+            *acceptance_criteria,
+            *acceptance.contract_prompt_requirements(acceptance_contract),
+        ]
     if backend == "kilo" and allowed_paths is None:
         raise DevWorkerError("backend=kilo exige allowed_paths explicite")
     if backend == "declarative" and allowed_paths is not None:
@@ -1876,6 +2023,52 @@ def development_task(ctx):
                         test_output += "\nORACLE_SIGNATURE_MISMATCH"
                 ctx.emit("development.tool", {"action": "test", "ok": tests_passed, "noop": True})
                 if tests_passed:
+                    gate_result = None
+                    if acceptance_contract is not None:
+                        ctx.emit("development.ready_for_evaluation", {
+                            "attempt": attempt + 1,
+                            "contract_hash": acceptance_contract_hash,
+                            "changed_paths": [],
+                            "noop": True,
+                        })
+                        gate_result = _run_acceptance_gate(
+                            worktree,
+                            acceptance_contract,
+                            task_id=ctx.id,
+                            attempt=attempt + 1,
+                            tests_passed=True,
+                            changed_paths=[],
+                            sandbox_image=effective_test_image,
+                            expected_image_id=effective_test_image_id,
+                        )
+                        ctx.emit("development.gate_decision", {
+                            "attempt": attempt + 1,
+                            "contract_hash": gate_result["contract_hash"],
+                            "status": gate_result["decision"]["status"],
+                            "reason": gate_result["decision"]["reason"],
+                            "evidence_path": gate_result["evidence_path"],
+                        })
+                        if gate_result["decision"]["status"] == "REJECTED":
+                            last_test_output = (
+                                "ACCEPTANCE_GATE_REJECTED: "
+                                + acceptance.gate_feedback(gate_result["decision"])
+                            )
+                            if attempt < KILO_MAX_PASSES - 1:
+                                ctx.emit("development.kilo_retry", {
+                                    "attempt": attempt + 1,
+                                    "max_passes": KILO_MAX_PASSES,
+                                    "test_output": last_test_output[-KILO_TEST_FEEDBACK_CHARS:],
+                                })
+                                continue
+                            raise DevWorkerError(
+                                f"acceptance gate rejeté après {KILO_MAX_PASSES} passes; "
+                                f"worktree conservé: {worktree}\n{last_test_output}"
+                            )
+                        if gate_result["decision"]["status"] != "ACCEPTED":
+                            raise DevWorkerError(
+                                "acceptance gate fail-closed: "
+                                + acceptance.gate_feedback(gate_result["decision"])
+                            )
                     result = {
                         "commit": None,
                         "branch": branch,
@@ -1896,6 +2089,13 @@ def development_task(ctx):
                         "self_policy": "product_ticket" if product_ticket else ("python_canary" if octopus_python_canary else "scoped_kilo"),
                         "deterministic_fixes": deterministic_fixes,
                     }
+                    if gate_result is not None:
+                        result.update(
+                            acceptance_contract_hash=gate_result["contract_hash"],
+                            gate_status=gate_result["decision"]["status"],
+                            evidence_path=gate_result["evidence_path"],
+                            evidence_sha256=gate_result["evidence_sha256"],
+                        )
                     ctx.emit("development.noop", result)
                     return result
                 last_test_output = "NOOP_BASELINE_TEST_FAILURE: " + test_output[-KILO_TEST_FEEDBACK_CHARS:]
@@ -1944,6 +2144,52 @@ def development_task(ctx):
             )
             if python_canary_ast:
                 _validate_python_canary_ast(worktree, original_head, changed_paths)
+            gate_result = None
+            if acceptance_contract is not None:
+                ctx.emit("development.ready_for_evaluation", {
+                    "attempt": attempt + 1,
+                    "contract_hash": acceptance_contract_hash,
+                    "changed_paths": changed_paths,
+                    "noop": False,
+                })
+                gate_result = _run_acceptance_gate(
+                    worktree,
+                    acceptance_contract,
+                    task_id=ctx.id,
+                    attempt=attempt + 1,
+                    tests_passed=True,
+                    changed_paths=changed_paths,
+                    sandbox_image=effective_test_image,
+                    expected_image_id=effective_test_image_id,
+                )
+                ctx.emit("development.gate_decision", {
+                    "attempt": attempt + 1,
+                    "contract_hash": gate_result["contract_hash"],
+                    "status": gate_result["decision"]["status"],
+                    "reason": gate_result["decision"]["reason"],
+                    "evidence_path": gate_result["evidence_path"],
+                })
+                if gate_result["decision"]["status"] == "REJECTED":
+                    last_test_output = (
+                        "ACCEPTANCE_GATE_REJECTED: "
+                        + acceptance.gate_feedback(gate_result["decision"])
+                    )
+                    if attempt < KILO_MAX_PASSES - 1:
+                        ctx.emit("development.kilo_retry", {
+                            "attempt": attempt + 1,
+                            "max_passes": KILO_MAX_PASSES,
+                            "test_output": last_test_output[-KILO_TEST_FEEDBACK_CHARS:],
+                        })
+                        continue
+                    raise DevWorkerError(
+                        f"acceptance gate rejeté après {KILO_MAX_PASSES} passes; "
+                        f"worktree conservé: {worktree}\n{last_test_output}"
+                    )
+                if gate_result["decision"]["status"] != "ACCEPTED":
+                    raise DevWorkerError(
+                        "acceptance gate fail-closed: "
+                        + acceptance.gate_feedback(gate_result["decision"])
+                    )
             commit_message = f"chore: complete development task {ctx.id}"
             _, _, commit = _tool(
                 {"action": "commit", "message": commit_message}, worktree, tests, tests_passed,
@@ -1968,6 +2214,13 @@ def development_task(ctx):
                 "self_policy": "product_ticket" if product_ticket else ("python_canary" if octopus_python_canary else "scoped_kilo"),
                 "deterministic_fixes": deterministic_fixes,
             }
+            if gate_result is not None:
+                result.update(
+                    acceptance_contract_hash=gate_result["contract_hash"],
+                    gate_status=gate_result["decision"]["status"],
+                    evidence_path=gate_result["evidence_path"],
+                    evidence_sha256=gate_result["evidence_sha256"],
+                )
             ctx.emit("development.committed", result)
             return result
 
