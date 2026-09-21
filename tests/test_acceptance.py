@@ -84,6 +84,23 @@ def test_contract_rejects_unknown_fields_instead_of_silently_ignoring_them():
         acceptance.validate_contract(contract)
 
 
+def test_contract_requires_explicit_probe_and_unambiguous_truthy_rules():
+    contract = gui_contract()
+    contract.pop("probe")
+    with pytest.raises(acceptance.AcceptanceError, match="probe explicite requis"):
+        acceptance.validate_contract(contract)
+
+    contract = gui_contract()
+    contract["must"][0] = {
+        "id": "runtime_launches",
+        "fact": "runtime.launched",
+        "op": "truthy",
+        "expected": True,
+    }
+    with pytest.raises(acceptance.AcceptanceError, match="expected interdit"):
+        acceptance.validate_contract(contract)
+
+
 def test_gate_rejects_the_gui_failure_we_observed():
     contract = gui_contract()
     bundle = acceptance.build_evidence_bundle(
