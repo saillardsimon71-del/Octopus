@@ -17,7 +17,7 @@ from . import economy, journal, strategy, tasks
 from .strategy import StrategyError
 
 # executor(channel: dict, payload: dict) -> {"observation": str, "source_ref": str, "metric"?, "value"?, "unit"?}
-_EXECUTORS: dict[tuple[str, str], tuple[Callable[[dict, dict], dict], str]] = {}
+_EXECUTORS: dict[tuple[str, str], tuple[Callable[[dict, dict], dict], str, bool]] = {}
 
 
 def register_executor(channel_kind: str, action: str, fn: Callable[[dict, dict], dict], *, cost_class: str) -> None:
@@ -121,4 +121,4 @@ def list_actions(business: str, *, status: str | None = None, limit: int = 50) -
 # restent des adapters séparés et ne doivent pas contourner cette frontière.
 from . import browser_actions as _browser_actions
 
-register_executor("browser_form", "submit", _browser_actions.submit_form, cost_class="local")
+register_executor("browser_form", "submit", _browser_actions.submit_form, cost_class="local", requires_idempotency=True)
