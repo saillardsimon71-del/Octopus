@@ -19,6 +19,10 @@ DOMAINS = {
 }
 
 
+def _domain_description(domain: str) -> str:
+    return DOMAINS[domain]
+
+
 @dataclass(frozen=True)
 class SourceStatus:
     domain: str
@@ -60,8 +64,8 @@ def status(business: str) -> list[SourceStatus]:
 def summary_line(business: str) -> str:
     """Une ligne lisible : domaines connectés et domaines absents, sans aucune valeur métier."""
     states = status(business)
-    missing = [DOMAINS[s.domain] for s in states if not s.available]
-    present = [f"{DOMAINS[s.domain]} ({s.provider or 'source'})" for s in states if s.available]
+    missing = [_domain_description(s.domain) for s in states if not s.available]
+    present = [f"{_domain_description(s.domain)} ({s.provider or 'source'})" for s in states if s.available]
     parts = []
     if present:
         parts.append("connectées : " + ", ".join(present))
