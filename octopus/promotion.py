@@ -170,10 +170,13 @@ def build_manifest(report: dict) -> dict:
                 raise PromotionError(f"ticket #{index}: gate_status doit être ACCEPTED")
             evidence_path = str(output.get("evidence_path") or "").strip()
             evidence_sha = str(output.get("evidence_sha256") or "").strip().lower()
+            artifact_fingerprint = str(output.get("artifact_fingerprint_sha256") or "").strip().lower()
             if not evidence_path:
                 raise PromotionError(f"ticket #{index}: evidence_path requis")
             if re.fullmatch(r"[0-9a-f]{64}", evidence_sha) is None:
                 raise PromotionError(f"ticket #{index}: evidence_sha256 invalide")
+            if re.fullmatch(r"[0-9a-f]{64}", artifact_fingerprint) is None:
+                raise PromotionError(f"ticket #{index}: artifact_fingerprint_sha256 invalide")
             if output.get("test_sandbox") != "docker":
                 raise PromotionError(f"ticket #{index}: sandbox Docker requis")
             sandbox_image = str(output.get("test_sandbox_image") or "")
@@ -436,6 +439,10 @@ def verify_git(report: dict, manifest: dict) -> dict:
                 ) from exc
             if rerun_gate["contract_hash"] != expected_contract_hash:
                 raise PromotionError(f"ticket #{index}: contract_hash gate rerun incohérent")
+            if rerun_gate["artifact_fingerprint_sha256"] != str(
+                output.get("artifact_fingerprint_sha256") or ""
+            ):
+                raise PromotionError(f"ticket #{index}: empreinte artefact différente lors de la promotion")
             if rerun_gate["decision"]["status"] != "ACCEPTED":
                 raise PromotionError(
                     f"ticket #{index}: acceptance gate de promotion non ACCEPTED: "
