@@ -557,6 +557,8 @@ def _create_worktree(repository: Path, task_id: int) -> tuple[Path, str]:
     _git(target, "checkout", "-b", branch, source_head)
     _git(target, "remote", "remove", "origin")
     _git(target, "config", "core.longpaths", "true")
+    _git(target, "config", "user.name", "OCTOPUS DevWorker")
+    _git(target, "config", "user.email", "octopus-devworker@localhost.invalid")
     empty_hooks = (target / ".git" / "octopus-empty-hooks").resolve()
     empty_hooks.mkdir(parents=True, exist_ok=True)
     _git(target, "config", "core.hooksPath", str(empty_hooks))
