@@ -1,215 +1,102 @@
-# Handoff — reprise propre dans Work
+# Handoff — sortie de la plomberie et retour au business
 
-Ce document est conçu pour reprendre OCTOPUS sans repartir de zéro ni suivre un ancien état périmé.
+**Mise à jour : 21 septembre 2026**
 
-## Contexte
+## État de départ
 
-Branche active de référence :
+Référence Git attendue :
 
-```text
-feat/salad-compute-provider
-```
+~~~text
+main = 951d398272ee9e13c1c3c1bf7775de97a5f41fb0
+~~~
 
-PR : **#2**, encore en Draft.
+Les PR #37 et #38 sont mergées.
 
-Lire d'abord :
+Trois modules Python ont déjà passé un canari réel :
 
-1. `AGENTS.md`
-2. `docs/VISION.md`
-3. `docs/CURRENT_STATE.md`
-4. `docs/ACCEPTANCE_GATES.md`
-5. `docs/audits/LLM_BRAIN_AUDIT_2026-09-19.md`
-6. `docs/audits/PAID_PATHS_AUDIT_2026-09-19.md`
-7. `docs/design/SALAD_WAN_WORKER_V1.md`
-8. `docs/benchmarks/GPU_COST_BENCHMARK_PLAN.md`
-9. `docs/COMPUTE_GPU.md`
-10. `NEXT_STEPS.md`
-11. seulement ensuite les runbooks techniques utiles.
+- capabilities.py
+- resources.py
+- connectors.py
 
-Les documents sous `docs/archive/` sont historiques.
+Une quatrième surface est enregistrée mais pas encore exécutée en réel :
+
+- businesses.py
+- oracle : tests/test_businesses.py
+- plan : octopus/config/night_shift_python_businesses_canary_v1.json
 
 ## Mission immédiate
 
-La prochaine session vise **G1 + G2** de `docs/ACCEPTANCE_GATES.md` avant tout canary réel.
+**Faire uniquement le dernier canari businesses.**
 
-Deux P0 ont été identifiés pendant l'audit pré-Work :
+Ne pas élargir d'abord vers d'autres modules.
 
-1. rendre le compute GPU **impossible à contourner** ;
-2. rendre le profil LLM `zero_cost` **attestable de bout en bout**, et faire passer les validateurs JSON/vision dans `octopus.llm` afin que le fallback fonctionne réellement.
+### Procédure
 
-Le canary Salad vient seulement après ces deux frontières.
+1. synchroniser le worktree local sur origin/main ;
+2. vérifier git status --short vide ;
+3. reprendre/assainir les anciens night runs avec python -m octopus night-resume ;
+4. vérifier l'image Docker canary ;
+5. exécuter tests/test_night_shift.py, tests/test_dev_worker.py et tests/test_businesses.py ;
+6. lancer night_shift_python_businesses_canary_v1.json avec 1 task / 1 failure max ;
+7. exécuter le promotion gate ;
+8. vérifier que seul octopus/businesses.py a changé ;
+9. pousser une branche de promotion ;
+10. merger uniquement après les checks GitHub requis verts.
 
-### Étape A — vérifier l'état réel
+## Critère de sortie
 
-Avant toute modification :
+Si le run businesses :
 
-```text
-git status
-git branch --show-current
-git log -10 --oneline
-git diff
-```
+- termine backlog_complete ;
+- utilise python_canary ;
+- utilise Docker ;
+- garde max_files_changed=1 ;
+- passe l'oracle businesses avec le même node set ;
+- n'utilise aucun fallback ;
+- produit une promotion git_verified: true ;
+- ne modifie que octopus/businesses.py ;
 
-Vérifier que la branche attendue est active et que l'arbre local n'a pas de travail utilisateur non intégré.
+alors **arrêter la plomberie générale**.
 
-Comparer avec GitHub si nécessaire. Ne jamais écraser un worktree local inconnu.
+Ne pas transformer actions.py, economy.py, strategy.py ou compute_finance.py en nouveaux canaris sans besoin produit concret.
 
-### Étape B — cartographier les bypasses
+## Mission suivante
 
-Chercher tous les chemins capables de créer/lancer une ressource payante :
+Après cette preuve, la priorité devient une **boucle économique réelle**.
 
-```text
-provider.create(
-SaladClient(
-GPUAIClient(
-RunPod
-cloud renderer
-subprocess / worker GPU
-media.video_generate
-WanGP / Wan2GP
-```
+Ordre recommandé :
 
-Classer chaque chemin :
+~~~text
+1. choisir une activité réelle unique
+2. enregistrer un canal réel
+3. construire l'executor minimal nécessaire
+4. créer une expérience mesurable
+5. agir dans le monde réel
+6. récupérer une métrique/source observée
+7. fermer evaluate_experiment
+8. prendre la décision suivante
+9. viser le premier cash-in observé
+~~~
 
-- gratuit/local ;
-- payant mais déjà gardé ;
-- payant et contournant le breaker ;
-- inconnu.
+Le premier jalon commercial doit être un revenu réellement encaissé et traçable, pas une nouvelle couche d'infrastructure.
 
-**Critère de done : aucun nouveau compute GPU payant ne peut démarrer sans réservation persistante et allowance.**
+## Contraintes inchangées
 
-### Étape C — imposer le chemin unique
+- aucun secret dans Git ;
+- aucun paid call implicite ;
+- aucune dépense sans allowance ;
+- aucune donnée business inventée ;
+- aucune preuve observed sans source ;
+- pas de modification directe de main ;
+- changements petits, testés et réversibles ;
+- les frontières financières existantes restent fail-closed.
 
-Le chemin cible est :
+## Documents à lire
 
-```text
-caller
-  → ComputeBroker.select()
-  → FinancialCircuitBreaker.reserve()
-  → GuardedComputeManager.provision()
-  → provider.create()
-```
+1. AGENTS.md
+2. docs/VISION.md
+3. docs/CURRENT_STATE.md
+4. docs/ACCEPTANCE_GATES.md
+5. ce fichier
 
-Ne pas dupliquer la logique de budget dans les callers.
-
-Les providers restent des adaptateurs techniques ; la politique financière vit au-dessus.
-
-### Étape D — watchdog indépendant
-
-`ops/compute_watchdog.py` existe.
-
-À vérifier / compléter :
-
-- lancement séparé du worker vidéo ;
-- redémarrage automatique du watchdog lui-même ;
-- accès au même SQLite ;
-- credentials provider ;
-- sweep toutes les 5 s par défaut ;
-- réconciliation après reboot ;
-- arrêt idempotent ;
-- logs exploitables.
-
-Le watchdog ne doit pas dépendre du processus qui produit la vidéo.
-
-### Étape E — tests avant argent réel
-
-Minimum :
-
-```bash
-python -m pytest -q \
-  tests/test_compute_finance.py \
-  tests/test_compute_salad.py \
-  tests/test_compute_broker.py \
-  tests/test_compute_gpuai.py
-```
-
-Puis la suite `video-foundation` / suites touchées par le changement.
-
-Ajouter des tests si un nouveau chemin payant est branché.
-
-### Étape F — canary Salad
-
-Seulement après les étapes précédentes.
-
-Conditions :
-
-- auto-recharge désactivée côté compte si disponible ;
-- allowance OCTOPUS minuscule ;
-- un seul job ;
-- workload court et déterministe ;
-- GPU économique ;
-- watchdog réellement actif ;
-- observer création → running → génération → stop → rapprochement coût.
-
-Le premier canary sert à tester la **facturation et l'arrêt**, pas la qualité finale.
-
-### Étape G — benchmark coût/vidéo
-
-Comparer le même workload, mêmes paramètres, mêmes poids.
-
-Enregistrer au minimum :
-
-- provider ;
-- GPU ;
-- prix/h ;
-- temps de provisionnement ;
-- temps de téléchargement/cache ;
-- temps d'inférence ;
-- temps total facturé ;
-- vidéos terminées ;
-- coût réel ;
-- coût réel/vidéo ;
-- erreurs/interruption.
-
-Le broker devra ensuite optimiser le **coût par vidéo**, pas le prix horaire.
-
-## Contraintes à préserver
-
-- pas de modification directe de `main` ;
-- pas de secret versionné ;
-- pas de dépense sans allowance ;
-- pas de retry de création payante ambiguë ;
-- pas de nouveau ledger financier ;
-- pas de données business inventées ;
-- pas de suppression de fonctionnalités historiques sans migration/test ;
-- garder les changements petits et testables.
-
-## Fin de session attendue
-
-Avant d'arrêter Work :
-
-1. tests exécutés ;
-2. état Git propre ou explicitement documenté ;
-3. `docs/CURRENT_STATE.md` mis à jour si l'état a changé ;
-4. `NEXT_STEPS.md` réduit aux vraies prochaines actions ;
-5. aucun ancien fichier d'état créé à la racine ;
-6. PR mise à jour avec ce qui est réellement vérifié.
-
-
-## Pack d'analyse préparé avant Work
-
-Les cinq travaux préparatoires demandés sont terminés et versionnés :
-
-- audit cerveau LLM : `docs/audits/LLM_BRAIN_AUDIT_2026-09-19.md` ;
-- audit dépenses : `docs/audits/PAID_PATHS_AUDIT_2026-09-19.md` ;
-- design worker Salad : `docs/design/SALAD_WAN_WORKER_V1.md` ;
-- protocole benchmark : `docs/benchmarks/GPU_COST_BENCHMARK_PLAN.md` ;
-- critères binaires : `docs/ACCEPTANCE_GATES.md`.
-
-Ne refaire ces audits que si le code a changé matériellement. Utiliser les findings pour coder directement.
-
-
-## Répartition Work / Codex
-
-Cette session Work doit profiter du contexte conversationnel et des capacités d'audit/multi-étapes.
-
-Le développement lourd suivant peut basculer vers Codex parce que le contexte durable est désormais versionné dans le dépôt :
-
-- `AGENTS.md` — constitution ;
-- `octopus/AGENTS.md` — règles du noyau ;
-- `docs/VISION.md` — ligne directrice ;
-- `docs/CODEX_START.md` — point d'entrée ;
-- `docs/CURRENT_STATE.md` — état ;
-- `docs/ACCEPTANCE_GATES.md` — définition de DONE.
-
-Le but est qu'une session Codex n'ait plus besoin de l'historique complet des conversations pour comprendre OCTOPUS.
+Les anciens handoffs sont historiques.
