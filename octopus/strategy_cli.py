@@ -104,6 +104,15 @@ def add_parser(sub) -> None:
     x = es.add_parser("actions", help="actions proposées, bloquées ou exécutées")
     x.add_argument("business")
     x.add_argument("--status", default=None)
+    x = es.add_parser("act", help="exécute une action réelle supervisée sur un canal")
+    x.add_argument("business")
+    x.add_argument("channel", type=int)
+    x.add_argument("action")
+    x.add_argument("--payload", default="{}", help="objet JSON transmis à l'exécuteur")
+    x.add_argument("--experiment", type=int, default=None)
+    x.add_argument("--idempotency-key", required=True)
+    x.add_argument("--spend-amount", type=float, default=None)
+    x.add_argument("--spend-currency", default=None)
     x = es.add_parser("allow", help="accorde une enveloppe de dépense (humain)")
     x.add_argument("business")
     x.add_argument("amount", type=float)
@@ -168,6 +177,15 @@ def run_economy(args) -> int:
             from . import actions
             for a in actions.list_actions(b, status=args.status):
                 print(f"#{a['id']:<5} {a['status']:9} canal #{a['channel_id']} {a['action']}  {a['reason'] or ''}")
+        elif cmd == "act":
+            from . import actions
+            payload = json.loads(args.payload)
+            result = actions.propose(
+                b, args.channel, args.action, payload, requested_by="human:cli",
+                experiment_id=args.experiment, spend_amount=args.spend_amount,
+                spend_currency=args.spend_currency, idempotency_key=args.idempotency_key,
+            )
+            print(json.dumps(result, ensure_ascii=False, indent=1, default=str))
         elif cmd == "allow":
             expires = time.time() + args.days * 86400 if args.days else None
             allowance = economy.grant_allowance(b, args.amount, args.currency, granted_by="human", rationale=args.rationale,
@@ -179,7 +197,7 @@ def run_economy(args) -> int:
             print("politique enregistrée")
         elif cmd == "cycle":
             print(json.dumps(economy.cycle(b), ensure_ascii=False, indent=1, default=str))
-    except (strategy.StrategyError, OSError) as exc:
+    except (strategy.StrategyError, OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"refusé : {exc}")
         return 2
     return 0
