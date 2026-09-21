@@ -271,7 +271,8 @@ def _act_on_channel(args):
                            requested_by=f"agent:{_ROLE.get()}",
                            experiment_id=int(args["experiment_id"]) if args.get("experiment_id") else None,
                            spend_amount=float(args["spend_amount"]) if args.get("spend_amount") else None,
-                           spend_currency=args.get("spend_currency"))
+                           spend_currency=args.get("spend_currency"),
+                           idempotency_key=args.get("idempotency_key"))
 
 
 def _request_spend(args):
@@ -297,7 +298,7 @@ TOOLS = {
     "propose_experiment": {"desc": "propose une expérience mesurable (objectif/hypothèse créés si absents) ; metric peut être cash_net:DEVISE", "params": {"objective": "str|objective_id", "hypothesis": "str|hypothesis_id", "action": "str", "metric": "str", "target_value": "float", "stop_value": "float?", "deadline_days": "float?", "budget_limit": "float?", "budget_currency": "str?", "channel_id": "int?"}, "fn": _propose_experiment},
     "start_experiment": {"desc": "passe une expérience planned en running", "params": {"experiment_id": "int"}, "fn": _start_experiment},
     "register_channel": {"desc": "enregistre un canal économique découvert (site, marketplace, réseau, email, API, publicité...)", "params": {"kind": "str", "name": "str", "locator": "str?", "capabilities": "list", "source_ref": "str?", "notes": "str?"}, "fn": _register_channel},
-    "act_on_channel": {"desc": "agit réellement sur un canal (publier, vendre, écrire...) ; bloqué et tracé si l'accès, l'exécuteur ou la dépense manquent", "params": {"channel_id": "int", "action": "str", "payload": "dict", "experiment_id": "int?", "spend_amount": "float?", "spend_currency": "str?"}, "fn": _act_on_channel},
+    "act_on_channel": {"desc": "agit réellement sur un canal (publier, vendre, écrire...) ; bloqué et tracé si l'accès, l'exécuteur, l'idempotence ou la dépense manquent", "params": {"channel_id": "int", "action": "str", "payload": "dict", "experiment_id": "int?", "idempotency_key": "str?", "spend_amount": "float?", "spend_currency": "str?"}, "fn": _act_on_channel},
     "open_business": {"desc": "ouvre une nouvelle activité économique distincte (objectif initial en brouillon)", "params": {"business_id": "str", "name": "str", "thesis": "str"}, "fn": _open_business},
     "resources_status": {"desc": "inventaire des ressources reelles disponibles (comptes, argent, audiences, machines) avec leur etat constate, leur acces et ce qui manque", "params": {"capability": "str?", "state": "str?"}, "fn": _resources_status},
     "request_resource": {"desc": "demande a l'humain de creer, connecter ou autoriser une ressource manquante (login, oauth, 2fa, kyc, signature, validation bancaire) ; l'operation reprend seule apres la reponse", "params": {"key": "str", "need": "str", "question": "str", "label": "str?", "kind": "str?"}, "fn": _request_resource},
