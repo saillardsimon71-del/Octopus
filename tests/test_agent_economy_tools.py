@@ -92,6 +92,7 @@ def test_economy_cli_round_trip(capsys, tmp_path):
     assert '"granted"' in capsys.readouterr().out
     assert main(["economy", "access", B, "1", "--status", "active", "--access", "act"]) == 0
     assert economy.channels(B)[0]["access"] == "act"
+    capsys.readouterr()
     actions.register_executor(
         "website", "ping",
         lambda channel, payload: {"observation": "ping réel", "source_ref": "https://example.test/ping"},
