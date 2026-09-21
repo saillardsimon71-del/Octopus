@@ -447,7 +447,8 @@ def test_python_canary_runner_passes_docker_and_radius_to_development_task(tmp_p
     assert result["status"] == "backlog_complete"
     task_input = captured["input"]
     assert task_input["test_sandbox"] == "docker"
-    assert task_input["test_sandbox_image"] == "sha256:probe"
+    assert task_input["test_sandbox_image"] == "octopus-test-sandbox:py311"
+    assert task_input["test_sandbox_image_id"] == "sha256:probe"
     assert task_input["max_files_changed"] == 1
     assert task_input["max_lines_added"] == 80
     assert task_input["max_lines_deleted"] == 80
@@ -534,7 +535,8 @@ def test_product_ticket_runner_passes_supervised_policy_to_development_task(tmp_
     assert task_input["python_canary_ast"] is False
     assert task_input["allow_declarative_fallback"] is False
     assert task_input["test_sandbox"] == "docker"
-    assert task_input["test_sandbox_image"] == "sha256:probe"
+    assert task_input["test_sandbox_image"] == "octopus-test-sandbox:py311"
+    assert task_input["test_sandbox_image_id"] == "sha256:probe"
     assert task_input["max_files_changed"] == 2
 
 
