@@ -421,6 +421,10 @@ def verify_git(report: dict, manifest: dict) -> dict:
                     expected_sha256=str(output.get("evidence_sha256") or ""),
                     expected_contract_hash=expected_contract_hash,
                     expected_task_id=int(result.get("id") or 0),
+                    expected_gate_status="ACCEPTED",
+                    expected_artifact_fingerprint=str(
+                        output.get("artifact_fingerprint_sha256") or ""
+                    ),
                 )
                 rerun_gate = dev_worker._run_acceptance_gate(
                     worktree,
