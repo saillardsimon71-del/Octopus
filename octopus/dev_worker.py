@@ -1320,9 +1320,15 @@ def _run_acceptance_probe(
             f"probe evidence en échec code={result.returncode}: {combined[-2000:]}"
         )
     marker = "OCTOPUS_EVIDENCE_JSON="
-    line = next((line for line in reversed((result.stdout or "").splitlines()) if line.startswith(marker)), None)
-    if line is None:
+    marker_lines = [
+        line for line in (result.stdout or "").splitlines()
+        if line.startswith(marker)
+    ]
+    if not marker_lines:
         raise DevWorkerError("probe evidence sans payload JSON signé par marqueur")
+    if len(marker_lines) != 1:
+        raise DevWorkerError("probe evidence ambigu: plusieurs payloads marqués")
+    line = marker_lines[0]
     try:
         payload = json.loads(line[len(marker):])
     except json.JSONDecodeError as exc:
