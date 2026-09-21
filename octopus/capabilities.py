@@ -69,12 +69,24 @@ def _error(field_name: str, value: Any, expected: str) -> CapabilityError:
     return CapabilityError(f"{field_name} invalide : {value!r} (attendu : {expected})")
 
 
+def _normalize_lower_text(value: str) -> str:
+    return value.strip().lower()
+
+
+def _normalize_enum_value(value: str) -> str:
+    return _normalize_lower_text(value).replace("-", "_").replace(" ", "_")
+
+
+def _enum_expected_values(enum_type: type[StrEnum]) -> str:
+    return ", ".join(item.value for item in enum_type)
+
+
 def _coerce_enum(value: Any, enum_type: type[StrEnum], field_name: str) -> StrEnum:
     if isinstance(value, enum_type):
         return value
     if not isinstance(value, str):
-        raise _error(field_name, value, ", ".join(item.value for item in enum_type))
-    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+        raise _error(field_name, value, _enum_expected_values(enum_type))
+    normalized = _normalize_enum_value(value)
     aliases = {
         CapabilityKind: {
             "mcp_server": CapabilityKind.MCP,
@@ -107,7 +119,7 @@ def _coerce_enum(value: Any, enum_type: type[StrEnum], field_name: str) -> StrEn
     try:
         return enum_type(normalized)
     except ValueError:
-        raise _error(field_name, value, ", ".join(item.value for item in enum_type)) from None
+        raise _error(field_name, value, _enum_expected_values(enum_type)) from None
 
 
 def _coerce_bool(value: Any, field_name: str) -> bool:
@@ -120,7 +132,7 @@ def _coerce_availability(value: Any, field_name: str) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        normalized = value.strip().lower()
+        normalized = _normalize_lower_text(value)
         if normalized in {"available", "true", "yes", "on", "enabled"}:
             return True
         if normalized in {"unavailable", "false", "no", "off", "disabled"}:
