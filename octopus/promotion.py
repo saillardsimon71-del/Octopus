@@ -161,6 +161,11 @@ def build_manifest(report: dict) -> dict:
             sandbox_image = str(output.get("test_sandbox_image") or "")
             if re.fullmatch(r"sha256:[0-9a-fA-F]{64}", sandbox_image) is None:
                 raise PromotionError(f"ticket #{index}: image sandbox résolue SHA256 requise")
+            sandbox_ref = str(output.get("test_sandbox_image_ref") or "")
+            if not sandbox_ref or sandbox_ref != str(task_input.get("test_sandbox_image") or ""):
+                raise PromotionError(f"ticket #{index}: référence sandbox incohérente")
+            if str(task_input.get("test_sandbox_image_id") or "") != sandbox_image:
+                raise PromotionError(f"ticket #{index}: identité sandbox incohérente")
             if output.get("tests_passed") is not True:
                 raise PromotionError(f"ticket #{index}: preuve tests verts manquante")
             if output.get("baseline_oracle_runs") != 2:
@@ -374,7 +379,8 @@ def verify_git(report: dict, manifest: dict) -> dict:
                     worktree,
                     commands,
                     sandbox="docker",
-                    sandbox_image=str(output.get("test_sandbox_image") or ""),
+                    sandbox_image=str(output.get("test_sandbox_image_ref") or ""),
+                    expected_image_id=str(output.get("test_sandbox_image") or ""),
                 )
             except (dev_worker.DevWorkerError, OSError, subprocess.SubprocessError) as exc:
                 raise PromotionError(
