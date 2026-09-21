@@ -939,6 +939,7 @@ def test_octopus_self_policy_accepts_scoped_product_ticket(tmp_path):
     ({"allowed_paths": ["octopus/dev_worker.py"]}, "frontière de sécurité"),
     ({"allowed_paths": ["agents/web_guard.py"]}, "frontière de sécurité"),
     ({"allowed_paths": ["agents/browser.py"]}, "frontière de sécurité"),
+    ({"allowed_paths": ["agents/publish.py"]}, "frontière de sécurité"),
     ({"allowed_paths": ["docker/dev-sandbox.Dockerfile"]}, "frontière de sécurité"),
     ({"allowed_paths": ["tests/test_gui.py"]}, "oracles de test"),
     ({"test_sandbox": "host"}, "test_sandbox=docker"),
