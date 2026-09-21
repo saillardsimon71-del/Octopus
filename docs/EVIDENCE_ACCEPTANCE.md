@@ -31,7 +31,10 @@ It cannot modify:
 - this governance contract
 
 Evidence is produced by the supervising process and written under `data/acceptance-evidence/`, outside
-the builder's isolated clone. The evidence file is checksum-bound to the task and contract.
+the builder's isolated clone. Records are content-addressed and never overwritten: identical replay is
+idempotent, while different evidence for the same task/attempt/contract is appended under a different
+path. Each record identifies `octopus.acceptance.gate` as its producer and is checksum-bound to the
+task, contract, gate decision, and artifact fingerprint.
 
 The capability registry planned for later is **knowledge** and will remain untrusted input. Gate authority
 is **governed policy** and is not delegated to builders or dynamically discovered models.
@@ -100,6 +103,7 @@ uncertain gate fails closed; missing evidence is not treated as success.
 
 The bundle records:
 
+- schema version and trusted producer identity;
 - task and attempt;
 - contract id/hash;
 - deterministic test fact;
