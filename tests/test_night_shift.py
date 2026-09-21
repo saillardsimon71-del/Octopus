@@ -151,6 +151,26 @@ def test_connectors_python_canary_plan_is_valid_and_bounded():
     assert ticket["noop_allowed"] is False
 
 
+def test_businesses_python_canary_plan_is_valid_and_bounded():
+    from octopus import night_shift
+
+    path = Path(__file__).resolve().parents[1] / "octopus" / "config" / "night_shift_python_businesses_canary_v1.json"
+    plan = night_shift.load_plan(path)
+
+    assert plan["name"] == "python-canary-businesses-v1"
+    assert plan["policy"] == "python_canary"
+    assert len(plan["tickets"]) == 1
+    ticket = plan["tickets"][0]
+    assert ticket["allowed_paths"] == ["octopus/businesses.py"]
+    assert ticket["test_targets"] == ["tests/test_businesses.py"]
+    assert ticket["test_sandbox"] == "docker"
+    assert ticket["test_sandbox_image"] == "octopus-test-sandbox:py311"
+    assert ticket["max_files_changed"] == 1
+    assert ticket["max_lines_added"] <= 16
+    assert ticket["max_lines_deleted"] <= 16
+    assert ticket["noop_allowed"] is False
+
+
 def test_python_canary_requires_source_only_and_protects_trust_core():
     from octopus import night_shift
 
@@ -242,6 +262,7 @@ def test_python_canary_oracles_are_bound_to_each_surface():
     from octopus import night_shift
 
     assert night_shift.PYTHON_CANARY_ORACLES == {
+        "octopus/businesses.py": ("tests/test_businesses.py",),
         "octopus/capabilities.py": ("tests/test_capabilities.py",),
         "octopus/connectors.py": ("tests/test_connectors.py",),
         "octopus/resources.py": ("tests/test_resources.py",),
@@ -252,6 +273,7 @@ def test_python_canary_allowlist_includes_only_supervised_surfaces():
     from octopus import night_shift
 
     assert night_shift.PYTHON_CANARY_ALLOWED == {
+        "octopus/businesses.py",
         "octopus/capabilities.py",
         "octopus/connectors.py",
         "octopus/resources.py",
