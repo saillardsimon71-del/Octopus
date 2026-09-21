@@ -136,7 +136,7 @@ def test_cloud_service_rejects_bad_sha256_without_replacing_target(tmp_path, mon
 
 def test_download_artifact_rejects_file_outside_storage_root(tmp_path, monkeypatch):
     root = tmp_path / "root"
-    root.mkdir()
+    root.mkdir(exist_ok=True)
     outside = tmp_path / "outside.bin"
     outside.write_bytes(b"secret")
     monkeypatch.setenv("PODALUX_ROOT", str(root))
