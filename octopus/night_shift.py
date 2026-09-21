@@ -356,95 +356,105 @@ def run(
     consecutive_failures = 0
     stop_reason = "backlog_complete"
 
-    for index, ticket in enumerate(plan["tickets"][:max_tasks], start=1):
-        if time.monotonic() - started >= max_hours * 3600:
-            stop_reason = "time_limit"
-            break
-        if (paths.data_dir() / "NIGHT_SHIFT_STOP").exists():
-            stop_reason = "kill_switch"
-            break
-
-        log(f"[night] ticket {index}/{min(len(plan['tickets']), max_tasks)}")
-        tests = [
-            [sys.executable, "-m", "pytest", "-q", target]
-            for target in ticket["test_targets"]
-        ]
-        task_id = worker.enqueue(
-            "octopus",
-            "development.task",
-            {
-                "repository": str(night_worktree),
+    try:
+        for index, ticket in enumerate(plan["tickets"][:max_tasks], start=1):
+            if time.monotonic() - started >= max_hours * 3600:
+                stop_reason = "time_limit"
+                break
+            if (paths.data_dir() / "NIGHT_SHIFT_STOP").exists():
+                stop_reason = "kill_switch"
+                break
+    
+            log(f"[night] ticket {index}/{min(len(plan['tickets']), max_tasks)}")
+            tests = [
+                [sys.executable, "-m", "pytest", "-q", target]
+                for target in ticket["test_targets"]
+            ]
+            task_id = worker.enqueue(
+                "octopus",
+                "development.task",
+                {
+                    "repository": str(night_worktree),
+                    "goal": ticket["goal"],
+                    "tests": tests,
+                    "max_steps": ticket["max_steps"],
+                    "backend": "kilo",
+                    "allowed_paths": ticket["allowed_paths"],
+                    "acceptance_criteria": ticket["acceptance_criteria"],
+                    "noop_allowed": ticket["noop_allowed"],
+                    "test_sandbox": ticket["test_sandbox"],
+                    "test_sandbox_image": ticket["test_sandbox_image"],
+                    "max_files_changed": ticket["max_files_changed"],
+                    "max_lines_added": ticket["max_lines_added"],
+                    "max_lines_deleted": ticket["max_lines_deleted"],
+                    "strict_repository_preflight": plan["policy"] == "python_canary",
+                    "require_baseline_oracle": plan["policy"] == "python_canary",
+                    "python_canary_ast": plan["policy"] == "python_canary",
+                    "allow_declarative_fallback": False,
+                },
+                priority=10_000,
+                idempotency_key=f"night:{run_id}:{index}",
+            )
+            result = worker.run_one(
+                owner=f"night-{run_id}",
+                kinds=["development.task"],
+                log=log,
+            )
+            entry = {
+                "index": index,
+                "task_id": task_id,
                 "goal": ticket["goal"],
-                "tests": tests,
-                "max_steps": ticket["max_steps"],
-                "backend": "kilo",
                 "allowed_paths": ticket["allowed_paths"],
-                "acceptance_criteria": ticket["acceptance_criteria"],
-                "noop_allowed": ticket["noop_allowed"],
-                "test_sandbox": ticket["test_sandbox"],
-                "test_sandbox_image": ticket["test_sandbox_image"],
-                "max_files_changed": ticket["max_files_changed"],
-                "max_lines_added": ticket["max_lines_added"],
-                "max_lines_deleted": ticket["max_lines_deleted"],
-                "strict_repository_preflight": plan["policy"] == "python_canary",
-                "require_baseline_oracle": plan["policy"] == "python_canary",
-                "python_canary_ast": plan["policy"] == "python_canary",
-                "allow_declarative_fallback": False,
-            },
-            priority=10_000,
-            idempotency_key=f"night:{run_id}:{index}",
-        )
-        result = worker.run_one(
-            owner=f"night-{run_id}",
-            kinds=["development.task"],
-            log=log,
-        )
-        entry = {
-            "index": index,
-            "task_id": task_id,
-            "goal": ticket["goal"],
-            "allowed_paths": ticket["allowed_paths"],
-            "result": result,
-        }
-
-        if result is None or result.get("id") != task_id:
-            entry["status"] = "runner_error"
+                "result": result,
+            }
+    
+            if result is None or result.get("id") != task_id:
+                entry["status"] = "runner_error"
+                report["tickets"].append(entry)
+                stop_reason = "unexpected_task_claim"
+                break
+    
+            entry["status"] = result["status"]
             report["tickets"].append(entry)
-            stop_reason = "unexpected_task_claim"
-            break
-
-        entry["status"] = result["status"]
-        report["tickets"].append(entry)
-        if result["status"] == "done":
-            output = result.get("output") or {}
-            if output.get("noop"):
-                entry["noop"] = True
+            if result["status"] == "done":
+                output = result.get("output") or {}
+                if output.get("noop"):
+                    entry["noop"] = True
+                    entry["night_head"] = _git(night_worktree, "rev-parse", "HEAD")
+                    consecutive_failures = 0
+                    continue
+                commit = str(output.get("commit") or "")
+                if not commit:
+                    stop_reason = "missing_commit"
+                    break
+                _fast_forward(
+                    night_worktree,
+                    commit,
+                    Path(str(output.get("worktree") or "")),
+                    str(output.get("branch") or ""),
+                )
                 entry["night_head"] = _git(night_worktree, "rev-parse", "HEAD")
                 consecutive_failures = 0
-                continue
-            commit = str(output.get("commit") or "")
-            if not commit:
-                stop_reason = "missing_commit"
-                break
-            _fast_forward(
-                night_worktree,
-                commit,
-                Path(str(output.get("worktree") or "")),
-                str(output.get("branch") or ""),
-            )
-            entry["night_head"] = _git(night_worktree, "rev-parse", "HEAD")
-            consecutive_failures = 0
-        else:
-            consecutive_failures += 1
-            if consecutive_failures >= max_failures:
-                stop_reason = "consecutive_failures"
-                break
-
-    report["status"] = stop_reason
-    report["final_head"] = _git(night_worktree, "rev-parse", "HEAD")
-    report["finished_at"] = time.time()
-    report["elapsed_s"] = round(time.monotonic() - started, 3)
-    target = _write_report(report)
-    report["report_path"] = str(target)
-    log(f"[night] terminé: {stop_reason}; rapport: {target}")
+            else:
+                consecutive_failures += 1
+                if consecutive_failures >= max_failures:
+                    stop_reason = "consecutive_failures"
+                    break
+    
+        report["status"] = stop_reason
+    except BaseException as exc:
+        report["status"] = f"crash:{type(exc).__name__}"
+        report["error"] = repr(exc)
+        raise
+    finally:
+        try:
+            report["final_head"] = _git(night_worktree, "rev-parse", "HEAD")
+        except Exception as final_exc:
+            report["final_head"] = None
+            report["final_head_error"] = repr(final_exc)
+        report["finished_at"] = time.time()
+        report["elapsed_s"] = round(time.monotonic() - started, 3)
+        target = _write_report(report)
+        report["report_path"] = str(target)
+        log(f"[night] terminé: {report['status']}; rapport: {target}")
     return report
