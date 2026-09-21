@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from octopus import acceptance, promotion
+from octopus import acceptance, dev_worker, promotion
 
 
 BASE = "1" * 40
@@ -113,6 +113,7 @@ def good_product_report() -> dict:
                     "gate_status": "ACCEPTED",
                     "evidence_path": "/tmp/octopus-evidence.json",
                     "evidence_sha256": "b" * 64,
+                    "artifact_fingerprint_sha256": "c" * 64,
                 },
             },
         }],
@@ -269,6 +270,9 @@ def product_report_for_repo(base_repo, repo, base, final):
     result["input"]["max_files_changed"] = 1
     result["output"]["commit"] = final
     result["output"]["changed_paths"] = ["octopus/resources.py"]
+    result["output"]["artifact_fingerprint_sha256"] = dev_worker._artifact_fingerprint(
+        repo, ["octopus/resources.py"],
+    )
     bundle = acceptance.build_evidence_bundle(
         task_id=result["id"],
         attempt=1,
