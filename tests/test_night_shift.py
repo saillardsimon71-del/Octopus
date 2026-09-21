@@ -23,16 +23,6 @@ def test_night_plan_is_docs_only_and_bounded():
         assert isinstance(ticket["noop_allowed"], bool)
 
 
-@pytest.mark.parametrize(
-    "allowed_paths",
-    [
-        ["octopus/actions.py"],
-        ["tests/test_dev_worker.py"],
-        ["AGENTS.md"],
-        ["docs/ACCEPTANCE_GATES.md"],
-        ["../README.md"],
-    ],
-)
 def test_night_stop_file_can_be_requested_and_cleared(tmp_path, monkeypatch):
     from octopus import night_shift
 
@@ -48,6 +38,16 @@ def test_night_stop_file_can_be_requested_and_cleared(tmp_path, monkeypatch):
     assert night_shift.clear_stop() is False
 
 
+@pytest.mark.parametrize(
+    "allowed_paths",
+    [
+        ["octopus/actions.py"],
+        ["tests/test_dev_worker.py"],
+        ["AGENTS.md"],
+        ["docs/ACCEPTANCE_GATES.md"],
+        ["../README.md"],
+    ],
+)
 def test_night_plan_rejects_unsafe_edit_scope(allowed_paths):
     from octopus import night_shift
 
