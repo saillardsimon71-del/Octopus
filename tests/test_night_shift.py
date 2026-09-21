@@ -345,6 +345,71 @@ def test_night_run_accepts_justified_noop_without_fast_forward(tmp_path, monkeyp
     assert forwarded == []
 
 
+def test_night_run_writes_report_when_fast_forward_crashes(tmp_path, monkeypatch):
+    from octopus import night_shift
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    plan = {
+        "name": "crash-night",
+        "policy": "docs_only",
+        "tickets": [{
+            "goal": "Improve README wording.",
+            "allowed_paths": ["README.md"],
+            "test_targets": ["tests/test_dev_worker.py"],
+            "max_steps": 12,
+            "acceptance_criteria": [],
+            "noop_allowed": False,
+        }],
+    }
+    monkeypatch.setattr(
+        night_shift, "preflight",
+        lambda repo: {"repository": str(repository), "base_head": "base"},
+    )
+    monkeypatch.setattr(night_shift.worker, "load_handlers", lambda: {})
+    monkeypatch.setattr(
+        night_shift, "_create_night_worktree",
+        lambda repo, run_id: (repository, f"octopus/night-{run_id}"),
+    )
+    monkeypatch.setattr(night_shift.worker, "enqueue", lambda *args, **kwargs: 42)
+    monkeypatch.setattr(
+        night_shift.worker, "run_one",
+        lambda **kwargs: {
+            "id": 42,
+            "status": "done",
+            "output": {
+                "commit": "abc123",
+                "backend": "kilo",
+                "worktree": str(repository),
+                "branch": "codex/devtask-42",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        night_shift, "_fast_forward",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr(
+        night_shift, "_git",
+        lambda repo, *args, **kwargs: "base" if args[:2] == ("rev-parse", "HEAD") else "",
+    )
+    written = {}
+
+    def capture(report):
+        written.update(report.copy())
+        return tmp_path / "report.json"
+
+    monkeypatch.setattr(night_shift, "_write_report", capture)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        night_shift.run(repository, plan, max_tasks=1, max_hours=1, max_failures=1)
+
+    assert written["status"] == "crash:RuntimeError"
+    assert "boom" in written["error"]
+    assert written["final_head"] == "base"
+    assert written["finished_at"] >= written["started_at"]
+
+
 def test_night_run_stops_after_consecutive_failures(tmp_path, monkeypatch):
     from octopus import night_shift
 
