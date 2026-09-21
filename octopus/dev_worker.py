@@ -1154,6 +1154,8 @@ def _docker_probe_args(
         "--cpus", "1.0",
         "--ulimit", "nofile=1024:1024",
         "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
+        "--tmpfs", "/workspace/data:rw,nosuid,nodev,size=64m",
+        "--tmpfs", "/workspace/agents/data:rw,nosuid,nodev,size=64m",
         "-e", "HOME=/tmp",
         "-e", "USERPROFILE=/tmp",
         "-e", "XDG_CONFIG_HOME=/tmp",
