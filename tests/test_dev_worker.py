@@ -600,11 +600,11 @@ def test_devworker_kilo_run_is_inline_configured_and_deny_by_default(tmp_path, m
     worktree.mkdir()
     captured = {}
 
-    def fake_run(args, cwd, **kwargs):
-        captured.update(args=args, cwd=cwd, kwargs=kwargs)
+    def fake_run_kilo_process(args, cwd, env):
+        captured.update(args=args, cwd=str(cwd), env=env)
         return SimpleNamespace(returncode=0, stdout='{"type":"text","text":"done"}\n', stderr="")
 
-    monkeypatch.setattr(dev_worker.subprocess, "run", fake_run)
+    monkeypatch.setattr(dev_worker, "_run_kilo_process", fake_run_kilo_process)
     output = dev_worker._run_kilo(
         worktree,
         "Change only calc.py.",
@@ -629,10 +629,9 @@ def test_devworker_kilo_run_is_inline_configured_and_deny_by_default(tmp_path, m
     assert "Do not survey the entire repository." not in args[-1]
     assert "Prefer grep or glob before reading files." not in args[-1]
     assert captured["cwd"] == str(worktree)
-    assert captured["kwargs"]["timeout"] == dev_worker.KILO_TIMEOUT_S
     assert output.endswith("done\"}\n")
 
-    env = captured["kwargs"]["env"]
+    env = captured["env"]
     assert env["KILO_DISABLE_PROJECT_CONFIG"] == "1"
     assert env["KILO_PURE"] == "1"
     assert env["KILO_TELEMETRY_LEVEL"] == "off"
@@ -669,6 +668,60 @@ def test_devworker_kilo_run_is_inline_configured_and_deny_by_default(tmp_path, m
         assert permissions[name]["**/*secret*"] == "deny"
 
 
+def test_run_kilo_process_starts_isolated_process_group(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    captured = {}
+
+    class FakeProcess:
+        pid = 4321
+        returncode = 0
+
+        def communicate(self, timeout):
+            captured["timeout"] = timeout
+            return "ok", ""
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(dev_worker.subprocess, "Popen", fake_popen)
+
+    result = dev_worker._run_kilo_process(["kilo", "run"], tmp_path, {"PATH": "x"})
+
+    assert result.returncode == 0
+    assert result.stdout == "ok"
+    assert captured["timeout"] == dev_worker.KILO_TIMEOUT_S
+    if os.name == "nt":
+        assert captured["kwargs"]["creationflags"] == getattr(dev_worker.subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        assert "start_new_session" not in captured["kwargs"]
+    else:
+        assert captured["kwargs"]["start_new_session"] is True
+        assert "creationflags" not in captured["kwargs"]
+
+
+def test_run_kilo_process_timeout_kills_process_tree(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    killed = []
+
+    class FakeProcess:
+        pid = 4321
+        returncode = None
+
+        def communicate(self, timeout):
+            raise dev_worker.subprocess.TimeoutExpired(["kilo", "run"], timeout)
+
+    monkeypatch.setattr(dev_worker.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(dev_worker, "_terminate_process_tree", lambda process: killed.append(process.pid))
+
+    with pytest.raises(dev_worker.DevWorkerError, match="arbre de processus arrêté"):
+        dev_worker._run_kilo_process(["kilo", "run"], tmp_path, {"PATH": "x"})
+
+    assert killed == [4321]
+
+
 def test_kilo_permissions_restrict_writes_to_allowed_paths():
     from octopus import dev_worker
 
@@ -686,8 +739,8 @@ def test_devworker_kilo_failure_includes_bounded_cli_error(tmp_path, monkeypatch
     from octopus import dev_worker
 
     monkeypatch.setattr(
-        dev_worker.subprocess,
-        "run",
+        dev_worker,
+        "_run_kilo_process",
         lambda *args, **kwargs: SimpleNamespace(returncode=7, stdout="partial", stderr="gateway failed"),
     )
 
@@ -702,11 +755,11 @@ def test_run_kilo_preserves_supplied_retry_prompt(tmp_path, monkeypatch):
 
     seen = {}
 
-    def fake_run(args, **kwargs):
+    def fake_run_kilo_process(args, cwd, env):
         seen["args"] = args
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
-    monkeypatch.setattr(dev_worker.subprocess, "run", fake_run)
+    monkeypatch.setattr(dev_worker, "_run_kilo_process", fake_run_kilo_process)
 
     dev_worker._run_kilo(
         tmp_path,
