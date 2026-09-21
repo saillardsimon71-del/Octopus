@@ -1474,6 +1474,42 @@ def test_development_task_commits_only_after_acceptance_gate(tmp_path, monkeypat
     assert event_types.index("development.gate_decision") < event_types.index("development.committed")
 
 
+def test_acceptance_probe_rejects_multiple_marked_payloads(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    monkeypatch.setattr(
+        dev_worker.acceptance,
+        "probe_command",
+        lambda contract: ["python", "-m", "octopus.acceptance_probe"],
+    )
+    monkeypatch.setattr(
+        dev_worker,
+        "_docker_image_id",
+        lambda *args, **kwargs: "sha256:" + "a" * 64,
+    )
+    monkeypatch.setattr(dev_worker, "_cleanup_docker_container", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        dev_worker,
+        "_run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                'OCTOPUS_EVIDENCE_JSON={"runtime":{"launched":true}}\n'
+                'OCTOPUS_EVIDENCE_JSON={"runtime":{"launched":false}}\n'
+            ),
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(dev_worker.DevWorkerError, match="plusieurs payloads"):
+        dev_worker._run_acceptance_probe(
+            tmp_path,
+            {"version": 1},
+            sandbox_image="octopus-test-sandbox:py311",
+            expected_image_id="sha256:" + "a" * 64,
+        )
+
+
 def test_docker_probe_args_keep_evidence_isolated(tmp_path):
     from octopus import dev_worker
 
