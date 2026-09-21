@@ -159,6 +159,84 @@ def test_evidence_file_is_hash_bound_to_contract_and_task(tmp_path):
         )
 
 
+def test_evidence_persistence_is_content_addressed_and_non_overwriting(tmp_path):
+    contract = gui_contract()
+    first = acceptance.build_evidence_bundle(
+        task_id=9,
+        attempt=1,
+        contract=contract,
+        facts={
+            "runtime": {"launched": True},
+            "ui": {"primary_nav": ["Home", "Operate", "Build", "Review"]},
+        },
+    )
+    first["gate_decision"] = acceptance.evaluate_contract(contract, first)
+
+    path_a, sha_a = acceptance.persist_evidence(tmp_path, first)
+    original = path_a.read_bytes()
+
+    # Idempotent replay returns the same immutable record.
+    path_a2, sha_a2 = acceptance.persist_evidence(tmp_path, first)
+    assert path_a2 == path_a
+    assert sha_a2 == sha_a
+    assert path_a.read_bytes() == original
+
+    # Different evidence for the same task/attempt/contract is appended under a
+    # different content-addressed path; the previous record is never overwritten.
+    second = acceptance.build_evidence_bundle(
+        task_id=9,
+        attempt=1,
+        contract=contract,
+        facts={
+            "runtime": {"launched": False, "exception": "TclError: regression"},
+            "ui": {"primary_nav": None},
+        },
+    )
+    second["gate_decision"] = acceptance.evaluate_contract(contract, second)
+    path_b, sha_b = acceptance.persist_evidence(tmp_path, second)
+
+    assert path_b != path_a
+    assert sha_b != sha_a
+    assert path_a.read_bytes() == original
+
+
+def test_verify_evidence_rejects_untrusted_producer_and_wrong_decision_contract(tmp_path):
+    contract = gui_contract()
+    bundle = acceptance.build_evidence_bundle(
+        task_id=11,
+        attempt=1,
+        contract=contract,
+        facts={
+            "runtime": {"launched": True},
+            "ui": {"primary_nav": ["Home", "Operate", "Build", "Review"]},
+        },
+    )
+    bundle["gate_decision"] = acceptance.evaluate_contract(contract, bundle)
+
+    forged = dict(bundle)
+    forged["producer"] = "builder"
+    path, sha = acceptance.persist_evidence(tmp_path, forged)
+    with pytest.raises(acceptance.AcceptanceError, match="producteur evidence"):
+        acceptance.verify_evidence_file(
+            path,
+            expected_sha256=sha,
+            expected_contract_hash=acceptance.contract_hash(contract),
+            expected_task_id=11,
+        )
+
+    wrong_decision = dict(bundle)
+    wrong_decision["gate_decision"] = dict(bundle["gate_decision"])
+    wrong_decision["gate_decision"]["contract_hash"] = "0" * 64
+    path2, sha2 = acceptance.persist_evidence(tmp_path, wrong_decision)
+    with pytest.raises(acceptance.AcceptanceError, match="autre contrat"):
+        acceptance.verify_evidence_file(
+            path2,
+            expected_sha256=sha2,
+            expected_contract_hash=acceptance.contract_hash(contract),
+            expected_task_id=11,
+        )
+
+
 def test_probe_command_is_closed_world():
     command = acceptance.probe_command(gui_contract())
 
