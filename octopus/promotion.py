@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +98,8 @@ def build_manifest(report: dict) -> dict:
             changed_paths.update(paths)
 
         if policy == "python_canary":
+            from . import night_shift
+
             task_input = result.get("input") or {}
             required_flags = {
                 "strict_repository_preflight": True,
@@ -112,6 +115,29 @@ def build_manifest(report: dict) -> dict:
             oracle_tests = output.get("oracle_tests")
             if isinstance(oracle_tests, bool) or not isinstance(oracle_tests, int) or oracle_tests <= 0:
                 raise PromotionError(f"ticket #{index}: oracle_tests positif requis")
+
+            if len(allowed) != 1 or allowed[0] not in night_shift.PYTHON_CANARY_ORACLES:
+                raise PromotionError(f"ticket #{index}: surface python_canary non approuvée")
+            if task_input.get("allowed_paths") != allowed:
+                raise PromotionError(f"ticket #{index}: allowed_paths worker incohérent")
+            expected_targets = list(night_shift.PYTHON_CANARY_ORACLES[allowed[0]])
+            commands = task_input.get("tests")
+            if not isinstance(commands, list) or not commands:
+                raise PromotionError(f"ticket #{index}: commandes oracle manquantes")
+            actual_targets = [
+                command[-1] if isinstance(command, list) and command else None
+                for command in commands
+            ]
+            if actual_targets != expected_targets:
+                raise PromotionError(
+                    f"ticket #{index}: oracle worker attendu {expected_targets}, reçu {actual_targets}"
+                )
+            if task_input.get("max_files_changed") != 1:
+                raise PromotionError(f"ticket #{index}: max_files_changed invalide")
+            for field in ("max_lines_added", "max_lines_deleted"):
+                value = task_input.get(field)
+                if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 80:
+                    raise PromotionError(f"ticket #{index}: {field} hors politique actuelle")
 
         night_head = entry.get("night_head")
         if night_head is not None:
@@ -130,4 +156,81 @@ def build_manifest(report: dict) -> dict:
         "changed_paths": sorted(changed_paths),
         "requires_human_review": True,
         "auto_merge": False,
+    }
+
+
+
+def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if check and result.returncode:
+        raise PromotionError((result.stderr or result.stdout or "git failed")[-2000:])
+    return result
+
+
+def _verify_repo(path_value: Any, expected_head: str, label: str) -> Path:
+    raw = str(path_value or "").strip()
+    if not raw:
+        raise PromotionError(f"{label} requis pour la vérification Git")
+    repo = Path(raw).resolve()
+    if not repo.is_dir():
+        raise PromotionError(f"{label} introuvable: {repo}")
+    root = Path(_git(repo, "rev-parse", "--show-toplevel").stdout.strip()).resolve()
+    if root != repo:
+        raise PromotionError(f"{label} n'est pas une racine Git: {repo}")
+    if _git(repo, "status", "--porcelain").stdout.strip():
+        raise PromotionError(f"{label} non propre")
+    head = _sha(_git(repo, "rev-parse", "HEAD").stdout.strip(), f"HEAD {label}")
+    if head != expected_head:
+        raise PromotionError(f"HEAD {label} différent du rapport")
+    return repo
+
+
+def verify_git(report: dict, manifest: dict) -> dict:
+    base_repository = _verify_repo(report.get("base_repository"), manifest["base_head"], "base_repository")
+    worktree = _verify_repo(report.get("night_worktree"), manifest["final_head"], "night_worktree")
+    if base_repository == worktree:
+        raise PromotionError("base_repository et night_worktree doivent être distincts")
+
+    ancestry = _git(
+        worktree, "merge-base", "--is-ancestor", manifest["base_head"], manifest["final_head"], check=False
+    )
+    if ancestry.returncode != 0:
+        raise PromotionError("final_head ne descend pas de base_head")
+
+    actual_commits = [
+        line.strip()
+        for line in _git(
+            worktree, "rev-list", "--reverse", f"{manifest['base_head']}..{manifest['final_head']}"
+        ).stdout.splitlines()
+        if line.strip()
+    ]
+    if actual_commits != manifest["commits"]:
+        raise PromotionError(
+            f"historique Git différent du rapport: attendu {manifest['commits']}, obtenu {actual_commits}"
+        )
+
+    actual_paths = sorted({
+        line.strip()
+        for line in _git(
+            worktree, "diff", "--name-only", manifest["base_head"], manifest["final_head"], "--"
+        ).stdout.splitlines()
+        if line.strip()
+    })
+    if actual_paths != manifest["changed_paths"]:
+        raise PromotionError(
+            f"diff Git différent du rapport: attendu {manifest['changed_paths']}, obtenu {actual_paths}"
+        )
+
+    return {
+        **manifest,
+        "git_verified": True,
+        "base_repository": str(base_repository),
+        "night_worktree": str(worktree),
     }
