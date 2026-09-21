@@ -79,7 +79,9 @@ def validate_contract(raw: Any) -> dict:
     contract_id = _bounded_text(raw.get("id"), "acceptance_contract.id", maximum=128)
     artifact_type = _bounded_text(raw.get("artifact_type"), "acceptance_contract.artifact_type", maximum=64)
 
-    probe_raw = raw.get("probe") or {"kind": "none"}
+    if "probe" not in raw:
+        raise AcceptanceError("acceptance_contract.probe explicite requis")
+    probe_raw = raw.get("probe")
     if not isinstance(probe_raw, dict):
         raise AcceptanceError("acceptance_contract.probe doit être un objet")
     kind = str(probe_raw.get("kind") or "").strip()
@@ -134,7 +136,12 @@ def validate_contract(raw: Any) -> dict:
         if op not in _ALLOWED_OPS:
             raise AcceptanceError(f"critère MUST {rule_id}: opérateur non supporté: {op!r}")
         rule: dict[str, Any] = {"id": rule_id, "fact": fact, "op": op}
-        if op not in {"truthy", "falsy"}:
+        if op in {"truthy", "falsy"}:
+            if "expected" in item:
+                raise AcceptanceError(
+                    f"critère MUST {rule_id}: expected interdit pour {op}"
+                )
+        else:
             if "expected" not in item:
                 raise AcceptanceError(f"critère MUST {rule_id}: expected requis")
             rule["expected"] = _json_copy(item["expected"])
