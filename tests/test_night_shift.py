@@ -23,6 +23,101 @@ def test_night_plan_is_docs_only_and_bounded():
         assert isinstance(ticket["noop_allowed"], bool)
 
 
+def test_product_ticket_accepts_wide_scoped_surface_and_real_oracles():
+    from octopus import night_shift
+
+    allowed = [
+        "agents/gui/workbench.py",
+        "agents/gui/intelligence.py",
+        "octopus/config/catalog.json",
+        "octopus/model_profiles.py",
+    ]
+    plan = night_shift.validate_plan({
+        "name": "gui-product",
+        "policy": "product_ticket",
+        "tickets": [{
+            "goal": "Build one coherent product surface.",
+            "allowed_paths": allowed,
+            "test_targets": ["tests/test_gui.py", "tests/test_gui_intelligence.py"],
+            "max_steps": 30,
+            "max_files_changed": 4,
+            "max_lines_added": 4000,
+            "max_lines_deleted": 3000,
+        }],
+    })
+
+    ticket = plan["tickets"][0]
+    assert ticket["allowed_paths"] == allowed
+    assert ticket["test_sandbox"] == "docker"
+    assert ticket["max_files_changed"] == 4
+    assert ticket["max_lines_added"] == 4000
+    assert ticket["max_lines_deleted"] == 3000
+
+
+@pytest.mark.parametrize("path", [
+    "octopus/dev_worker.py",
+    "octopus/night_shift.py",
+    "octopus/promotion.py",
+    "octopus/compute_finance.py",
+    "octopus/economy.py",
+    "octopus/actions.py",
+    "octopus/browser_actions.py",
+    "octopus/smtp_executor.py",
+    "agents/web_guard.py",
+    "agents/browser.py",
+    "docker/dev-sandbox.Dockerfile",
+    "tests/test_gui.py",
+    ".env",
+])
+def test_product_ticket_protects_small_control_kernel(path):
+    from octopus import night_shift
+
+    with pytest.raises(night_shift.NightShiftError):
+        night_shift.validate_plan({
+            "policy": "product_ticket",
+            "tickets": [{
+                "goal": "unsafe",
+                "allowed_paths": [path],
+                "test_targets": ["tests/test_gui.py"],
+            }],
+        })
+
+
+@pytest.mark.parametrize("override, message", [
+    ({"max_files_changed": 21}, "max_files_changed product_ticket"),
+    ({"max_lines_added": 5001}, "max_lines_added product_ticket"),
+    ({"max_lines_deleted": 5001}, "max_lines_deleted product_ticket"),
+])
+def test_product_ticket_uses_engine_radius_caps_not_canary_caps(override, message):
+    from octopus import night_shift
+
+    ticket = {
+        "goal": "wide but bounded",
+        "allowed_paths": [f"octopus/product_{i}.py" for i in range(20)],
+        "test_targets": ["tests/test_gateway.py"],
+        "max_steps": 30,
+    }
+    ticket.update(override)
+    with pytest.raises(night_shift.NightShiftError, match=message):
+        night_shift.validate_plan({
+            "policy": "product_ticket",
+            "tickets": [ticket],
+        })
+
+
+def test_product_ticket_requires_explicit_test_oracle():
+    from octopus import night_shift
+
+    with pytest.raises(night_shift.NightShiftError, match="test_targets explicite"):
+        night_shift.validate_plan({
+            "policy": "product_ticket",
+            "tickets": [{
+                "goal": "no weak default oracle",
+                "allowed_paths": ["agents/gui/workbench.py"],
+            }],
+        })
+
+
 def test_night_stop_file_can_be_requested_and_cleared(tmp_path, monkeypatch):
     from octopus import night_shift
 
@@ -359,6 +454,87 @@ def test_python_canary_runner_passes_docker_and_radius_to_development_task(tmp_p
     assert task_input["require_baseline_oracle"] is True
     assert task_input["python_canary_ast"] is True
     assert task_input["allow_declarative_fallback"] is False
+
+
+def test_product_ticket_runner_passes_supervised_policy_to_development_task(tmp_path, monkeypatch):
+    from octopus import night_shift
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    plan = {
+        "name": "product-gui",
+        "policy": "product_ticket",
+        "tickets": [{
+            "goal": "Redesign the GUI.",
+            "allowed_paths": ["agents/gui/workbench.py", "agents/gui/intelligence.py"],
+            "test_targets": ["tests/test_gui.py", "tests/test_gui_intelligence.py"],
+            "max_steps": 30,
+            "max_files_changed": 2,
+            "max_lines_added": 1800,
+            "max_lines_deleted": 1400,
+        }],
+    }
+    monkeypatch.setattr(
+        night_shift, "preflight",
+        lambda repo: {"repository": str(repository), "base_head": "base"},
+    )
+    monkeypatch.setattr(
+        night_shift.dev_worker, "_docker_sandbox_probe",
+        lambda *args, **kwargs: ("sha256:probe", "probe green"),
+    )
+    monkeypatch.setattr(night_shift.worker, "load_handlers", lambda: {})
+    monkeypatch.setattr(
+        night_shift, "_create_night_worktree",
+        lambda repo, run_id: (repository, f"octopus/night-{run_id}"),
+    )
+    captured = {}
+
+    def fake_enqueue(business, kind, input, **kwargs):
+        captured.update(input=input, kwargs=kwargs)
+        return 88
+
+    monkeypatch.setattr(night_shift.worker, "enqueue", fake_enqueue)
+    monkeypatch.setattr(
+        night_shift.worker, "run_one",
+        lambda **kwargs: {
+            "id": 88,
+            "status": "done",
+            "input": captured.get("input"),
+            "output": {
+                "commit": "abc123",
+                "backend": "kilo",
+                "self_policy": "product_ticket",
+                "tests_passed": True,
+                "baseline_oracle_runs": 2,
+                "oracle_tests": 2,
+                "post_oracle_tests": 2,
+                "test_sandbox": "docker",
+                "test_sandbox_image": "sha256:probe",
+                "changed_paths": ["agents/gui/workbench.py"],
+                "worktree": str(repository),
+                "branch": "codex/devtask-88",
+            },
+        },
+    )
+    monkeypatch.setattr(night_shift, "_fast_forward", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        night_shift, "_git",
+        lambda repo, *args, **kwargs: "abc123" if args[:2] == ("rev-parse", "HEAD") else "",
+    )
+    monkeypatch.setattr(night_shift, "_write_report", lambda report: tmp_path / "report.json")
+
+    result = night_shift.run(repository, plan, max_tasks=1, max_hours=1, max_failures=1)
+
+    assert result["status"] == "backlog_complete"
+    task_input = captured["input"]
+    assert task_input["self_modification_policy"] == "product_ticket"
+    assert task_input["strict_repository_preflight"] is True
+    assert task_input["require_baseline_oracle"] is True
+    assert task_input["python_canary_ast"] is False
+    assert task_input["allow_declarative_fallback"] is False
+    assert task_input["test_sandbox"] == "docker"
+    assert task_input["test_sandbox_image"] == "sha256:probe"
+    assert task_input["max_files_changed"] == 2
 
 
 def test_night_run_forces_kilo_scope_no_fallback_and_fast_forwards(tmp_path, monkeypatch):
