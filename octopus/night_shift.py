@@ -101,8 +101,8 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
                 raise NightShiftError(f"ticket #{index}: fichier hors allowlist python_canary: {path}")
         if path not in allowed_paths:
             allowed_paths.append(path)
-    if policy == "python_canary" and len(allowed_paths) > 3:
-        raise NightShiftError(f"ticket #{index}: python_canary autorise au plus 3 fichiers source")
+    if policy == "python_canary" and len(allowed_paths) != 1:
+        raise NightShiftError(f"ticket #{index}: python_canary exige exactement un fichier source")
 
     targets_raw = raw.get("test_targets") or ["tests/test_dev_worker.py"]
     if not isinstance(targets_raw, list) or not targets_raw:
@@ -142,16 +142,21 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
 
     if policy == "python_canary":
         test_sandbox = "docker"
-        sandbox_image = str(
+        requested_image = str(
             raw.get("test_sandbox_image") or dev_worker.DEFAULT_TEST_SANDBOX_IMAGE
         ).strip()
-        max_files_changed = int(raw.get("max_files_changed", len(allowed_paths)))
-        max_lines_added = int(raw.get("max_lines_added", 160))
-        max_lines_deleted = int(raw.get("max_lines_deleted", 120))
-        if not 1 <= max_files_changed <= 3:
-            raise NightShiftError(f"ticket #{index}: max_files_changed doit être compris entre 1 et 3")
-        if not 1 <= max_lines_added <= 300 or not 1 <= max_lines_deleted <= 300:
-            raise NightShiftError(f"ticket #{index}: rayon de lignes python_canary trop large")
+        if requested_image != dev_worker.DEFAULT_TEST_SANDBOX_IMAGE:
+            raise NightShiftError(
+                f"ticket #{index}: image sandbox python_canary imposée: {dev_worker.DEFAULT_TEST_SANDBOX_IMAGE}"
+            )
+        sandbox_image = dev_worker.DEFAULT_TEST_SANDBOX_IMAGE
+        max_files_changed = int(raw.get("max_files_changed", 1))
+        max_lines_added = int(raw.get("max_lines_added", 80))
+        max_lines_deleted = int(raw.get("max_lines_deleted", 80))
+        if max_files_changed != 1:
+            raise NightShiftError(f"ticket #{index}: python_canary exige max_files_changed=1")
+        if not 1 <= max_lines_added <= 80 or not 1 <= max_lines_deleted <= 80:
+            raise NightShiftError(f"ticket #{index}: rayon de lignes python_canary trop large (maximum 80)")
     else:
         test_sandbox = "host"
         sandbox_image = dev_worker.DEFAULT_TEST_SANDBOX_IMAGE
