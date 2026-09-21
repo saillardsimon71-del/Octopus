@@ -388,7 +388,7 @@ def run(
                 f"{plan['policy']} refuse de démarrer: probe Docker réel échoué: {exc}"
             ) from exc
         for ticket in plan["tickets"][:max_tasks]:
-            ticket["test_sandbox_image"] = resolved_images[ticket["test_sandbox_image"]]
+            ticket["test_sandbox_image_id"] = resolved_images[ticket["test_sandbox_image"]]
     run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     report = {
         "run_id": run_id,
@@ -448,6 +448,7 @@ def run(
                     "noop_allowed": ticket["noop_allowed"],
                     "test_sandbox": ticket["test_sandbox"],
                     "test_sandbox_image": ticket["test_sandbox_image"],
+                    "test_sandbox_image_id": ticket.get("test_sandbox_image_id"),
                     "max_files_changed": ticket["max_files_changed"],
                     "max_lines_added": ticket["max_lines_added"],
                     "max_lines_deleted": ticket["max_lines_deleted"],
