@@ -127,9 +127,8 @@ prétendue élimination massive de code. Chiffrage final en N.
 - Conventions de métriques (`delivery`, `customer_acceptance`, `customer_use`, `human_minutes:phase`)
   et catégories de ledger : pas d'entités prospect/order/payment nouvelles, pas de migration.
 - Tests dans les fichiers existants. Aucun package/dependency produit supplémentaire.
-- Fichiers `memory/PRD.md` et `memory/test_credentials.md` : mémo de reprise requis par l'environnement,
-  aucun nouvel état applicatif ; credentials non applicables. `test_reports/iteration_1.json` : trace
-  de vérification. Logs/XML de test locaux ignorés par Git, conservés pour inspection.
+- Les mémos et rapports générés par l'environnement de travail ne font pas partie du produit :
+  ils ont été retirés avant revue. Les logs/XML de test restent locaux et ignorés par Git.
 
 ## H. Ce que j'ai refusé de construire
 
@@ -190,20 +189,19 @@ La dernière suite avec navigateur est vérifiée sans exclusion de tests :
 xvfb-run -a python -m pytest -o addopts='' -q -rs tests/ --junitxml=/app/test_reports/pytest/pytest_results_final.xml
 ```
 
-Résultat final : **873 passés, 0 échec, 0 ignoré, 1 avertissement Tk**, 115.62 s (XML vérifié). Historique et suivi :
-`test_reports/iteration_1.json`. Les traces XML/logs sont locales, non versionnées.
+Résultat final : **873 passés, 0 échec, 0 ignoré, 1 avertissement Tk**, 115.62 s (XML vérifié).
+Les traces XML/logs sont locales et non versionnées. Après publication de la branche, les workflows
+GitHub `Compute finance safety` et `video-foundation` ont également terminé avec succès.
 Aucun canary commercial, fournisseur LLM/GPU, paiement ou envoi externe réel n'a été exécuté.
 
 ## M. Git
 
-Baseline canonique : `d2279f628703cb88ca1bf78fcb591389dcc9f764`.
-L'utilisateur a explicitement autorisé les modifications dans cet espace après constat de la
-contrainte Git de l'environnement. Aucun commit manuel, push ni merge effectué. La branche dédiée
-et les petits commits n'ont donc **pas** été fabriqués : sauvegarde/revue à faire via Save to GitHub
-sur une branche autre que main. Branche de travail constatée : `main`, HEAD inchangé au hash ci-dessus,
-arbre modifié, non commité manuellement. Les métadonnées `.emergent/` générées par l'environnement
-ont été préservées, non éditées par cette intervention. Ne pas confondre le diff préparé pour revue
-avec une série de commits propres déjà créée.
+Baseline canonique de cette intervention : `d2279f628703cb88ca1bf78fcb591389dcc9f764`.
+Le travail a été publié sur `recalibrate/market-first-octopus` et ouvert en Pull Request #59
+vers `main`. Les artefacts de session/environnement générés lors de la sauvegarde ont été retirés
+avant revue. La branche reste séparée de `main` tant que la revue humaine n'est pas terminée.
+La CI GitHub du HEAD revu est verte sur `Compute finance safety` et `video-foundation`.
+La fusion n'est pas une preuve économique : elle ne doit intervenir qu'après revue du diff final.
 
 ## N. Complexité — faits, pas score
 
@@ -216,9 +214,8 @@ Périmètre : comparaison à `d2279f6`, hors logs/XML générés et métadonnée
 | Documentation canonique/historique | 15 modifiés | 840 | 1511 |
 | Exclusion des logs/XML générés | 1 modifié | 2 | 0 |
 | Total des fichiers déjà suivis | 31 modifiés | 1244 | 1539 |
-| Mémos de reprise + rapport de tests | 3 ajoutés | 135 | 0 |
-
-Fichiers applicatifs ajoutés : **0**. Fichiers supprimés : **0**. Net suivi : **−295 lignes** ; avec traces : **−160 lignes**.
+Fichiers applicatifs ajoutés : **0**. Les artefacts de session/environnement ont été retirés avant revue.
+Le diff final de la PR touche **31 fichiers** avec **1 249 ajouts / 1 539 suppressions** (net **−290 lignes**).
 Concepts actifs retirés/dépréciés : self-development par défaut, infrastructure avant client,
 pourcentages de progression et métrique technique prise seule comme preuve économique.
 Zéro nouvelle table, runtime, agent, service, base ou intégration produit.
