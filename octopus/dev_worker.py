@@ -2118,7 +2118,6 @@ def development_task(ctx):
                             gate_status=gate_result["decision"]["status"],
                             evidence_path=gate_result["evidence_path"],
                             evidence_sha256=gate_result["evidence_sha256"],
-                    artifact_fingerprint_sha256=gate_result["artifact_fingerprint_sha256"],
                             artifact_fingerprint_sha256=gate_result["artifact_fingerprint_sha256"],
                         )
                     ctx.emit("development.noop", result)
