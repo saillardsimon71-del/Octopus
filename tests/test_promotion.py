@@ -109,8 +109,14 @@ def test_build_manifest_accepts_product_ticket_with_human_review():
     (lambda r: r["tickets"][0]["result"]["output"].update(tests_passed=False), "tests verts"),
     (lambda r: r["tickets"][0]["result"]["output"].update(baseline_oracle_runs=1), "baseline oracle"),
     (lambda r: r["tickets"][0]["result"]["output"].update(post_oracle_tests=16), "oracle final"),
-    (lambda r: r["tickets"][0].update(allowed_paths=["agents/browser.py"]), "noyau product_ticket"),
-    (lambda r: r["tickets"][0].update(allowed_paths=["tests/test_resources.py"]), "modification des tests"),
+    (lambda r: (
+        r["tickets"][0].update(allowed_paths=["agents/browser.py"]),
+        r["tickets"][0]["result"]["output"].update(changed_paths=["agents/browser.py"]),
+    ), "noyau product_ticket"),
+    (lambda r: (
+        r["tickets"][0].update(allowed_paths=["tests/test_resources.py"]),
+        r["tickets"][0]["result"]["output"].update(changed_paths=["tests/test_resources.py"]),
+    ), "modification des tests"),
     (lambda r: r["tickets"][0]["result"]["input"].update(max_files_changed=21), "max_files_changed"),
     (lambda r: r["tickets"][0]["result"]["input"].update(max_lines_added=5001), "max_lines_added"),
 ])
@@ -279,25 +285,18 @@ def test_verify_git_product_ticket_fails_if_promotion_tests_are_red(tmp_path, mo
 def test_verify_git_product_ticket_enforces_real_diff_radius(tmp_path, monkeypatch):
     from octopus import dev_worker
 
-    base_repo, repo, base, final = _night_repo(tmp_path)
-    report = product_report_for_repo(base_repo, repo, base, final)
-    report["tickets"][0]["result"]["input"]["max_lines_added"] = 1
-    report["tickets"][0]["result"]["input"]["max_lines_deleted"] = 1
-    manifest = promotion.build_manifest(report)
-    monkeypatch.setattr(dev_worker, "_run_tests", lambda *args, **kwargs: ("green", True))
-
-    # Existing fixture changes exactly one added and one deleted line: the declared radius is accepted.
-    verified = promotion.verify_git(report, manifest)
-    assert verified["git_verified"] is True
-
+    base_repo, repo, base, _ = _night_repo(tmp_path)
+    subprocess.run(["git", "reset", "--hard", base], cwd=repo, check=True, capture_output=True)
     path = repo / "octopus" / "resources.py"
     path.write_text("VALUE = 3\nEXTRA = 1\nMORE = 2\n", encoding="utf-8")
     subprocess.run(["git", "commit", "-qam", "wider"], cwd=repo, check=True)
     wider = _git(repo, "rev-parse", "HEAD")
-    report["final_head"] = wider
-    report["tickets"][0]["night_head"] = wider
-    report["tickets"][0]["result"]["output"]["commit"] = wider
+
+    report = product_report_for_repo(base_repo, repo, base, wider)
+    report["tickets"][0]["result"]["input"]["max_lines_added"] = 1
+    report["tickets"][0]["result"]["input"]["max_lines_deleted"] = 1
     manifest = promotion.build_manifest(report)
+    monkeypatch.setattr(dev_worker, "_run_tests", lambda *args, **kwargs: ("green", True))
 
     with pytest.raises(promotion.PromotionError, match="lignes ajoutées réelles"):
         promotion.verify_git(report, manifest)
