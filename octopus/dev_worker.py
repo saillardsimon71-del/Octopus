@@ -118,6 +118,15 @@ DEV_INSPECTION_LIMIT = 6
 DEV_MIN_LLM_INTERVAL_S = 13.0
 KILO_MODEL = "kilo/stepfun/step-3.7-flash:free"
 KILO_AGENT = "octopus-devworker"
+_KILO_ENV_KEEP = frozenset({
+    "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC",
+    "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+    "TEMP", "TMP", "TMPDIR",
+    "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
+    "KILO_API_KEY", "KILOCODE_API_KEY", "KILO_PROVIDER",
+})
 KILO_COMMAND = "kilo.cmd" if os.name == "nt" else "kilo"
 KILO_TIMEOUT_S = 600
 KILO_TEST_FEEDBACK_CHARS = 4000
@@ -262,6 +271,20 @@ def _build_kilo_prompt(
     return " ".join(parts)
 
 
+def _kilo_environment(config_root: str, config: dict) -> dict[str, str]:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() in _KILO_ENV_KEEP
+    }
+    env["XDG_CONFIG_HOME"] = config_root
+    env["KILO_CONFIG_CONTENT"] = json.dumps(config, separators=(",", ":"))
+    env["KILO_DISABLE_PROJECT_CONFIG"] = "1"
+    env["KILO_PURE"] = "1"
+    env["KILO_TELEMETRY_LEVEL"] = "off"
+    return env
+
+
 def _run_kilo(
         worktree: Path, goal: str, tests: list[list[str]], max_steps: int,
         prompt: str | None = None, allowed_paths: list[str] | None = None) -> str:
@@ -282,13 +305,7 @@ def _run_kilo(
         },
     }
     with tempfile.TemporaryDirectory(prefix="octopus-kilo-config-") as config_root:
-        env = dict(os.environ)
-        env.pop("KILO_CONFIG", None)
-        env.pop("KILO_CONFIG_DIR", None)
-        env["XDG_CONFIG_HOME"] = config_root
-        env["KILO_CONFIG_CONTENT"] = json.dumps(config, separators=(",", ":"))
-        env["KILO_DISABLE_PROJECT_CONFIG"] = "1"
-        env["KILO_PURE"] = "1"
+        env = _kilo_environment(config_root, config)
         result = subprocess.run(
             [
                 KILO_COMMAND, "run", "--auto", "--dir", str(worktree), "--model", KILO_MODEL,

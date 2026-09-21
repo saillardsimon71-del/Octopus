@@ -593,6 +593,9 @@ def test_devworker_cannot_commit_after_failed_tests(tmp_path, monkeypatch):
 def test_devworker_kilo_run_is_inline_configured_and_deny_by_default(tmp_path, monkeypatch):
     from octopus import dev_worker
 
+    monkeypatch.setenv("AZURE_SPEECH_KEY", "must-not-leak")
+    monkeypatch.setenv("OCTOPUS_SUPER_SECRET", "must-not-leak")
+    monkeypatch.setenv("KILO_API_KEY", "allowed-auth")
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     captured = {}
@@ -632,6 +635,10 @@ def test_devworker_kilo_run_is_inline_configured_and_deny_by_default(tmp_path, m
     env = captured["kwargs"]["env"]
     assert env["KILO_DISABLE_PROJECT_CONFIG"] == "1"
     assert env["KILO_PURE"] == "1"
+    assert env["KILO_TELEMETRY_LEVEL"] == "off"
+    assert env["KILO_API_KEY"] == "allowed-auth"
+    assert "AZURE_SPEECH_KEY" not in env
+    assert "OCTOPUS_SUPER_SECRET" not in env
     assert env["XDG_CONFIG_HOME"]
     assert "KILO_CONFIG" not in env
     assert "KILO_CONFIG_DIR" not in env
