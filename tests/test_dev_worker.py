@@ -827,11 +827,11 @@ def test_sanitized_test_env_hides_credentials_and_uses_temp_home(monkeypatch, tm
 
     assert "OMNIROUTE_API_KEY" not in env
     assert "SOME_TOKEN" not in env
-    assert env["NORMAL_VALUE"] == "kept"
+    assert "NORMAL_VALUE" not in env
     assert env["HOME"] == str(tmp_path)
     assert env["USERPROFILE"] == str(tmp_path)
     assert env["XDG_CONFIG_HOME"] == str(tmp_path)
-    assert "-p no:cacheprovider" in env["PYTEST_ADDOPTS"]
+    assert env["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
 
 
 def test_docker_test_args_are_networkless_read_only_and_secret_free(tmp_path):
