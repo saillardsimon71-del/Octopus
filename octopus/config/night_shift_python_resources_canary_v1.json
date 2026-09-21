@@ -1,0 +1,28 @@
+{
+  "name": "python-canary-resources-v1",
+  "policy": "python_canary",
+  "tickets": [
+    {
+      "goal": "In octopus/resources.py, introduce one small private helper named _normalize_resource_key that performs exactly str(value).strip().lower(). Use it only for resource-key normalization in declarations(), get(), and declare(). Preserve every public API, error message, database query, ordering rule, state transition, and resource semantic. Do not modify tests or any other file.",
+      "allowed_paths": [
+        "octopus/resources.py"
+      ],
+      "test_targets": [
+        "tests/test_resources.py"
+      ],
+      "max_steps": 18,
+      "acceptance_criteria": [
+        "_normalize_resource_key performs exactly str(value).strip().lower()",
+        "declarations(), get(), and declare() use the helper only where they previously normalized resource keys",
+        "all error messages and resource behavior remain unchanged",
+        "no new import or module-level side effect is introduced",
+        "the existing resource oracle passes with the same PASSED node set as the baseline"
+      ],
+      "noop_allowed": false,
+      "test_sandbox_image": "octopus-test-sandbox:py311",
+      "max_files_changed": 1,
+      "max_lines_added": 20,
+      "max_lines_deleted": 20
+    }
+  ]
+}
