@@ -158,6 +158,9 @@ def build_manifest(report: dict) -> dict:
                 raise PromotionError(f"ticket #{index}: self_policy non product_ticket")
             if output.get("test_sandbox") != "docker":
                 raise PromotionError(f"ticket #{index}: sandbox Docker requis")
+            sandbox_image = str(output.get("test_sandbox_image") or "")
+            if re.fullmatch(r"sha256:[0-9a-fA-F]{64}", sandbox_image) is None:
+                raise PromotionError(f"ticket #{index}: image sandbox résolue SHA256 requise")
             if output.get("tests_passed") is not True:
                 raise PromotionError(f"ticket #{index}: preuve tests verts manquante")
             if output.get("baseline_oracle_runs") != 2:
@@ -364,12 +367,17 @@ def verify_git(report: dict, manifest: dict) -> dict:
                 )
 
             commands = task_input["tests"]
-            test_output, green = dev_worker._run_tests(
-                worktree,
-                commands,
-                sandbox="docker",
-                sandbox_image=str(output.get("test_sandbox_image") or ""),
-            )
+            try:
+                test_output, green = dev_worker._run_tests(
+                    worktree,
+                    commands,
+                    sandbox="docker",
+                    sandbox_image=str(output.get("test_sandbox_image") or ""),
+                )
+            except (dev_worker.DevWorkerError, OSError, subprocess.SubprocessError) as exc:
+                raise PromotionError(
+                    f"ticket #{index}: vérification des tests impossible: {type(exc).__name__}: {exc}"
+                ) from exc
             if not green:
                 raise PromotionError(
                     f"ticket #{index}: tests de promotion en échec: {test_output[-2000:]}"
