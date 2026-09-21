@@ -338,6 +338,8 @@ def verify_evidence_file(
     expected_sha256: str,
     expected_contract_hash: str,
     expected_task_id: int | None = None,
+    expected_gate_status: str | None = None,
+    expected_artifact_fingerprint: str | None = None,
 ) -> dict:
     target = Path(path)
     try:
@@ -355,4 +357,10 @@ def verify_evidence_file(
     decision = bundle.get("gate_decision")
     if not isinstance(decision, dict) or decision.get("status") not in GATE_STATUSES:
         raise AcceptanceError("gate_decision evidence invalide")
+    if expected_gate_status is not None and decision.get("status") != expected_gate_status:
+        raise AcceptanceError("gate_status evidence différent du rapport")
+    if expected_artifact_fingerprint is not None:
+        observed = _fact_value(bundle.get("facts") or {}, "artifact.fingerprint_sha256")
+        if observed != expected_artifact_fingerprint:
+            raise AcceptanceError("empreinte artefact evidence différente du rapport")
     return bundle
