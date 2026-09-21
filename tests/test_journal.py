@@ -10,6 +10,14 @@ from agents import config, db, deepseek, runtime
 from octopus import journal
 
 
+def test_journal_enables_foreign_keys_on_every_connection():
+    conn = journal.connect()
+    try:
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
 def runs() -> list[dict]:
     return [dict(r) for r in journal.query("SELECT * FROM runs ORDER BY id")]
 

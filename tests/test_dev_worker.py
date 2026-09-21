@@ -135,6 +135,23 @@ def test_devworker_rejects_unsupported_patch_headers(tmp_path, header):
         _check_patch_paths(root, patch)
 
 
+def test_sanitized_test_env_is_allowlist_based(monkeypatch, tmp_path):
+    from octopus import dev_worker
+
+    monkeypatch.setenv("PATH", "safe-path")
+    monkeypatch.setenv("AZURE_SPEECH_KEY", "secret")
+    monkeypatch.setenv("UNRELATED_VALUE", "do-not-pass")
+    env = dev_worker._sanitized_test_env(str(tmp_path))
+
+    assert env["PATH"] == "safe-path"
+    assert "AZURE_SPEECH_KEY" not in env
+    assert "UNRELATED_VALUE" not in env
+    assert env["HOME"] == str(tmp_path)
+    assert env["USERPROFILE"] == str(tmp_path)
+    assert env["XDG_CONFIG_HOME"] == str(tmp_path)
+    assert env["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
+
+
 def test_devworker_rejects_unapproved_test_commands():
     from octopus.dev_worker import DevWorkerError, validate_test_commands
 
@@ -340,7 +357,7 @@ def test_devworker_retries_two_bounded_provider_rate_limits(tmp_path, monkeypatc
         return SimpleNamespace(data=action, text=json.dumps(action))
 
     monkeypatch.setattr(dev_worker.llm, "complete", complete)
-    monkeypatch.setattr(dev_worker.time, "sleep", sleeps.append)
+    monkeypatch.setattr(dev_worker, "_sleep", sleeps.append)
     monkeypatch.setattr(
         dev_worker, "_tool",
         lambda action, worktree, tests, tests_passed: ("fake-commit", True, "fake-commit"),
@@ -378,7 +395,7 @@ def test_devworker_paces_omniroute_step_starts(monkeypatch):
     sleeps = []
     monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
     monkeypatch.setattr(dev_worker.time, "monotonic", lambda: 100.0)
-    monkeypatch.setattr(dev_worker.time, "sleep", sleeps.append)
+    monkeypatch.setattr(dev_worker, "_sleep", sleeps.append)
 
     started = dev_worker._wait_for_llm_slot(95.0)
 
@@ -810,11 +827,11 @@ def test_sanitized_test_env_hides_credentials_and_uses_temp_home(monkeypatch, tm
 
     assert "OMNIROUTE_API_KEY" not in env
     assert "SOME_TOKEN" not in env
-    assert env["NORMAL_VALUE"] == "kept"
+    assert "NORMAL_VALUE" not in env
     assert env["HOME"] == str(tmp_path)
     assert env["USERPROFILE"] == str(tmp_path)
     assert env["XDG_CONFIG_HOME"] == str(tmp_path)
-    assert "-p no:cacheprovider" in env["PYTEST_ADDOPTS"]
+    assert env["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
 
 
 def test_docker_test_args_are_networkless_read_only_and_secret_free(tmp_path):

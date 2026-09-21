@@ -33,18 +33,9 @@ PROTECTED_DOCS = {
     "AGENTS.md",
     "docs/ACCEPTANCE_GATES.md",
 }
-PYTHON_CANARY_PROTECTED = frozenset({
-    "octopus/dev_worker.py",
-    "octopus/night_shift.py",
-    "octopus/worker.py",
-    "octopus/tasks.py",
-    "octopus/paths.py",
-    "octopus/__main__.py",
-    "octopus/__init__.py",
-    "conftest.py",
-    "setup.py",
-    "sitecustomize.py",
-    "usercustomize.py",
+PYTHON_CANARY_ALLOWED = frozenset({
+    "octopus/capabilities.py",
+    "octopus/resources.py",
 })
 
 
@@ -105,8 +96,8 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
                 raise NightShiftError(f"ticket #{index}: tests existants non modifiables: {path}")
             if path.endswith("/__init__.py") or path == "__init__.py":
                 raise NightShiftError(f"ticket #{index}: __init__.py protégé en python_canary: {path}")
-            if path in PYTHON_CANARY_PROTECTED:
-                raise NightShiftError(f"ticket #{index}: noyau de confiance protégé: {path}")
+            if path not in PYTHON_CANARY_ALLOWED:
+                raise NightShiftError(f"ticket #{index}: fichier hors allowlist python_canary: {path}")
         if path not in allowed_paths:
             allowed_paths.append(path)
     if policy == "python_canary" and len(allowed_paths) > 3:
