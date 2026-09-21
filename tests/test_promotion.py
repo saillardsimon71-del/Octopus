@@ -106,6 +106,8 @@ def test_build_manifest_accepts_product_ticket_with_human_review():
     (lambda r: r["tickets"][0]["result"]["output"].update(self_policy="scoped_kilo"), "self_policy"),
     (lambda r: r["tickets"][0]["result"]["input"].update(self_modification_policy="python_canary"),
      "self_modification_policy"),
+    (lambda r: r["tickets"][0]["result"]["output"].update(test_sandbox_image="octopus-test-sandbox:py311"),
+     "image sandbox résolue"),
     (lambda r: r["tickets"][0]["result"]["output"].update(tests_passed=False), "tests verts"),
     (lambda r: r["tickets"][0]["result"]["output"].update(baseline_oracle_runs=1), "baseline oracle"),
     (lambda r: r["tickets"][0]["result"]["output"].update(post_oracle_tests=16), "oracle final"),
@@ -238,6 +240,16 @@ def product_report_for_repo(base_repo, repo, base, final):
     report["tickets"][0]["result"]["output"]["commit"] = final
     report["tickets"][0]["result"]["output"]["changed_paths"] = ["octopus/resources.py"]
     return report
+
+
+def test_verify_git_requires_human_review_contract(tmp_path):
+    base_repo, repo, base, final = _night_repo(tmp_path)
+    report = report_for_repo(base_repo, repo, base, final)
+    manifest = promotion.build_manifest(report)
+    manifest["requires_human_review"] = False
+
+    with pytest.raises(promotion.PromotionError, match="revue humaine"):
+        promotion.verify_git(report, manifest)
 
 
 def test_verify_git_product_ticket_rechecks_exact_commit_and_tests(tmp_path, monkeypatch):
