@@ -98,6 +98,8 @@ def build_manifest(report: dict) -> dict:
             changed_paths.update(paths)
 
         if policy == "python_canary":
+            from . import night_shift
+
             task_input = result.get("input") or {}
             required_flags = {
                 "strict_repository_preflight": True,
@@ -113,6 +115,29 @@ def build_manifest(report: dict) -> dict:
             oracle_tests = output.get("oracle_tests")
             if isinstance(oracle_tests, bool) or not isinstance(oracle_tests, int) or oracle_tests <= 0:
                 raise PromotionError(f"ticket #{index}: oracle_tests positif requis")
+
+            if len(allowed) != 1 or allowed[0] not in night_shift.PYTHON_CANARY_ORACLES:
+                raise PromotionError(f"ticket #{index}: surface python_canary non approuvée")
+            if task_input.get("allowed_paths") != allowed:
+                raise PromotionError(f"ticket #{index}: allowed_paths worker incohérent")
+            expected_targets = list(night_shift.PYTHON_CANARY_ORACLES[allowed[0]])
+            commands = task_input.get("tests")
+            if not isinstance(commands, list) or not commands:
+                raise PromotionError(f"ticket #{index}: commandes oracle manquantes")
+            actual_targets = [
+                command[-1] if isinstance(command, list) and command else None
+                for command in commands
+            ]
+            if actual_targets != expected_targets:
+                raise PromotionError(
+                    f"ticket #{index}: oracle worker attendu {expected_targets}, reçu {actual_targets}"
+                )
+            if task_input.get("max_files_changed") != 1:
+                raise PromotionError(f"ticket #{index}: max_files_changed invalide")
+            for field in ("max_lines_added", "max_lines_deleted"):
+                value = task_input.get(field)
+                if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 80:
+                    raise PromotionError(f"ticket #{index}: {field} hors politique actuelle")
 
         night_head = entry.get("night_head")
         if night_head is not None:
