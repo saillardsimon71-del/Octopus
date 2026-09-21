@@ -389,13 +389,17 @@ def _malformed_tool_call(exc: Exception) -> bool:
     return type(exc).__name__ == "BadRequestError" and "Failed to parse tool call arguments as JSON" in str(exc)
 
 
+def _sleep(seconds: float) -> None:
+    _sleep(seconds)
+
+
 def _wait_for_llm_slot(previous_started: float) -> float:
     now = time.monotonic()
     if os.environ.get("OMNIROUTE_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
         return now
     delay = previous_started + DEV_MIN_LLM_INTERVAL_S - now
     if delay > 0:
-        time.sleep(delay)
+        _sleep(delay)
         now += delay
     return now
 
@@ -1218,7 +1222,7 @@ def _run_declarative_backend(ctx, goal: str, worktree: Path, branch: str,
                 if rate_limit_retries < 2 and delay is not None:
                     rate_limit_retries += 1
                     ctx.emit("development.rate_limited", {"retry_after_s": delay})
-                    time.sleep(delay)
+                    _sleep(delay)
                     continue
                 if not structured_retried and _malformed_tool_call(exc):
                     structured_retried = True
