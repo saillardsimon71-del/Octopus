@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -130,4 +131,71 @@ def build_manifest(report: dict) -> dict:
         "changed_paths": sorted(changed_paths),
         "requires_human_review": True,
         "auto_merge": False,
+    }
+
+
+
+def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if check and result.returncode:
+        raise PromotionError((result.stderr or result.stdout or "git failed")[-2000:])
+    return result
+
+
+def verify_git(report: dict, manifest: dict) -> dict:
+    raw_worktree = str(report.get("night_worktree") or "").strip()
+    if not raw_worktree:
+        raise PromotionError("night_worktree requis pour la vérification Git")
+    worktree = Path(raw_worktree).resolve()
+    if not worktree.is_dir():
+        raise PromotionError(f"night_worktree introuvable: {worktree}")
+
+    if _git(worktree, "status", "--porcelain").stdout.strip():
+        raise PromotionError("night_worktree non propre")
+
+    head = _sha(_git(worktree, "rev-parse", "HEAD").stdout.strip(), "HEAD night_worktree")
+    if head != manifest["final_head"]:
+        raise PromotionError("HEAD night_worktree différent de final_head")
+
+    ancestry = _git(
+        worktree, "merge-base", "--is-ancestor", manifest["base_head"], manifest["final_head"], check=False
+    )
+    if ancestry.returncode != 0:
+        raise PromotionError("final_head ne descend pas de base_head")
+
+    actual_commits = [
+        line.strip()
+        for line in _git(
+            worktree, "rev-list", "--reverse", f"{manifest['base_head']}..{manifest['final_head']}"
+        ).stdout.splitlines()
+        if line.strip()
+    ]
+    if actual_commits != manifest["commits"]:
+        raise PromotionError(
+            f"historique Git différent du rapport: attendu {manifest['commits']}, obtenu {actual_commits}"
+        )
+
+    actual_paths = sorted({
+        line.strip()
+        for line in _git(
+            worktree, "diff", "--name-only", manifest["base_head"], manifest["final_head"], "--"
+        ).stdout.splitlines()
+        if line.strip()
+    })
+    if actual_paths != manifest["changed_paths"]:
+        raise PromotionError(
+            f"diff Git différent du rapport: attendu {manifest['changed_paths']}, obtenu {actual_paths}"
+        )
+
+    return {
+        **manifest,
+        "git_verified": True,
+        "night_worktree": str(worktree),
     }
