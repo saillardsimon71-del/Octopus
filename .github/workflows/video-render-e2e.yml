@@ -13,6 +13,9 @@ on:
         required: true
         default: "cash_devis_cgv01"
 
+permissions:
+  contents: read
+
 concurrency:
   group: video-render-e2e
   cancel-in-progress: false
@@ -25,13 +28,7 @@ jobs:
       # Voix : azure/cloudflare si les secrets existent, sinon piper (local au runner, sans compte).
       # Le Space Hugging Face n'est plus dans la chaine par defaut : son quota anonyme ne tient pas un short.
       TTS_CHAIN: "azure,cloudflare,piper"
-      AZURE_SPEECH_KEY: ${{ secrets.AZURE_SPEECH_KEY }}
-      AZURE_SPEECH_REGION: ${{ secrets.AZURE_SPEECH_REGION }}
       AZURE_TTS_VOICE: ${{ vars.AZURE_TTS_VOICE }}
-      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
-      PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-      PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
       CHATTERBOX_LANG: "fr"
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +47,13 @@ jobs:
         run: npm ci
       - name: Render short
         run: python tools/render_short.py "${{ inputs.offer_id || 'cash_devis_cgv01' }}"
+        env:
+          AZURE_SPEECH_KEY: ${{ secrets.AZURE_SPEECH_KEY }}
+          AZURE_SPEECH_REGION: ${{ secrets.AZURE_SPEECH_REGION }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
       - name: Upload video and report
         if: always()
         uses: actions/upload-artifact@v4
