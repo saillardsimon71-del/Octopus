@@ -126,3 +126,47 @@ def test_smtp_executor_rejects_unsafe_or_invalid_messages(monkeypatch, channel, 
     _env(monkeypatch)
     with pytest.raises(StrategyError, match=message):
         smtp_executor.send_email(channel, payload)
+
+
+def test_smtp_executor_preserves_utf8_subject_and_body(monkeypatch):
+    _env(monkeypatch)
+    captured = {}
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def ehlo(self):
+            pass
+
+        def starttls(self, context):
+            pass
+
+        def login(self, username, password):
+            pass
+
+        def send_message(self, msg, from_addr, to_addrs):
+            captured["subject"] = msg["Subject"]
+            captured["body"] = msg.get_content().strip()
+            captured["charset"] = msg.get_content_charset()
+            return {}
+
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    smtp_executor.send_email(
+        _channel(),
+        {
+            "to": "prospect@example.test",
+            "subject": "Audit accessibilité — réponse rapide",
+            "text": "Message réel et contrôlé. À bientôt.",
+        },
+    )
+
+    assert captured["subject"] == "Audit accessibilité — réponse rapide"
+    assert captured["body"] == "Message réel et contrôlé. À bientôt."
+    assert captured["charset"].lower() == "utf-8"
