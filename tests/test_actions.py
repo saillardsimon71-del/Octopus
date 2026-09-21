@@ -92,3 +92,28 @@ def test_agent_tool_and_status_expose_actions():
     assert status["action_executors"] == [] and status["recent_actions"][0]["status"] == "blocked"
     with pytest.raises(StrategyError):
         actions.propose("podalux", channel, "message", {}, requested_by="orbit")
+
+
+def test_executor_can_require_idempotency_key():
+    channel = _channel()
+    economy.update_channel(B, channel, actor="human", status="active", access="act")
+    actions.register_executor(
+        "marketplace",
+        "message",
+        lambda c, p: {"observation": "ok", "source_ref": "https://place-x.example/message/1"},
+        cost_class="local",
+        requires_idempotency=True,
+    )
+
+    blocked = actions.propose(B, channel, "message", {}, requested_by="agent:GROWTH")
+    assert blocked["status"] == "blocked" and "idempotency_key" in blocked["reason"]
+
+    done = actions.propose(
+        B, channel, "message", {}, requested_by="agent:GROWTH", idempotency_key="msg-1"
+    )
+    assert done["status"] == "executed"
+
+    duplicate = actions.propose(
+        B, channel, "message", {}, requested_by="agent:GROWTH", idempotency_key="msg-1"
+    )
+    assert duplicate["duplicate"] is True
