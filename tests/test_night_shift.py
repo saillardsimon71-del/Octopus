@@ -87,6 +87,35 @@ def test_resources_python_canary_plan_is_valid_and_bounded():
     assert ticket["noop_allowed"] is False
 
 
+def test_multimodule_python_canary_v3_plan_is_valid_and_bounded():
+    from octopus import night_shift
+
+    path = Path(__file__).resolve().parents[1] / "octopus" / "config" / "night_shift_python_multimodule_v3.json"
+    plan = night_shift.load_plan(path)
+
+    assert plan["name"] == "python-canary-multimodule-v3"
+    assert plan["policy"] == "python_canary"
+    assert len(plan["tickets"]) == 4
+    assert [ticket["allowed_paths"] for ticket in plan["tickets"]] == [
+        ["octopus/capabilities.py"],
+        ["octopus/resources.py"],
+        ["octopus/capabilities.py"],
+        ["octopus/resources.py"],
+    ]
+    assert [ticket["test_targets"] for ticket in plan["tickets"]] == [
+        ["tests/test_capabilities.py"],
+        ["tests/test_resources.py"],
+        ["tests/test_capabilities.py"],
+        ["tests/test_resources.py"],
+    ]
+    for ticket in plan["tickets"]:
+        assert ticket["test_sandbox"] == "docker"
+        assert ticket["max_files_changed"] == 1
+        assert ticket["max_lines_added"] <= 20
+        assert ticket["max_lines_deleted"] <= 20
+        assert ticket["noop_allowed"] is False
+
+
 def test_python_canary_requires_source_only_and_protects_trust_core():
     from octopus import night_shift
 
