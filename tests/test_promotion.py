@@ -71,6 +71,8 @@ def good_product_report() -> dict:
                     "self_modification_policy": "product_ticket",
                     "allowed_paths": ["octopus/resources.py", "octopus/config/catalog.json"],
                     "tests": [["python", "-m", "pytest", "-q", "tests/test_resources.py"]],
+                    "test_sandbox_image": "octopus-test-sandbox:py311",
+                    "test_sandbox_image_id": "sha256:" + "a" * 64,
                     "max_files_changed": 2,
                     "max_lines_added": 1200,
                     "max_lines_deleted": 900,
@@ -82,6 +84,7 @@ def good_product_report() -> dict:
                     "changed_paths": ["octopus/resources.py"],
                     "test_sandbox": "docker",
                     "test_sandbox_image": "sha256:" + "a" * 64,
+                    "test_sandbox_image_ref": "octopus-test-sandbox:py311",
                     "tests_passed": True,
                     "baseline_oracle_runs": 2,
                     "oracle_tests": 17,
@@ -260,12 +263,13 @@ def test_verify_git_product_ticket_rechecks_exact_commit_and_tests(tmp_path, mon
     manifest = promotion.build_manifest(report)
     seen = {}
 
-    def green(worktree, commands, *, sandbox, sandbox_image):
+    def green(worktree, commands, *, sandbox, sandbox_image, expected_image_id=None):
         seen.update(
             worktree=worktree,
             commands=commands,
             sandbox=sandbox,
             sandbox_image=sandbox_image,
+            expected_image_id=expected_image_id,
         )
         return ("1 passed", True)
 
@@ -276,7 +280,8 @@ def test_verify_git_product_ticket_rechecks_exact_commit_and_tests(tmp_path, mon
     assert verified["git_verified"] is True
     assert seen["sandbox"] == "docker"
     assert seen["commands"] == [["python", "-m", "pytest", "-q", "tests/test_resources.py"]]
-    assert seen["sandbox_image"].startswith("sha256:")
+    assert seen["sandbox_image"] == "octopus-test-sandbox:py311"
+    assert seen["expected_image_id"].startswith("sha256:")
 
 
 def test_verify_git_product_ticket_fails_if_promotion_tests_are_red(tmp_path, monkeypatch):

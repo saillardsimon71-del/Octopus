@@ -1256,6 +1256,66 @@ def test_run_tests_docker_fails_closed_without_image(tmp_path, monkeypatch):
     assert calls[1][:3] == ["docker", "image", "inspect"]
 
 
+def test_run_tests_docker_uses_stable_tag_and_verifies_pinned_identity(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    expected = "sha256:" + "a" * 64
+    calls = []
+
+    def fake_run(args, cwd, **kwargs):
+        calls.append(args)
+        if args[:3] == ["docker", "info", "--format"]:
+            return SimpleNamespace(returncode=0, stdout="linux\n", stderr="")
+        if args[:3] == ["docker", "image", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout=expected + "\n", stderr="")
+        if args[:2] == ["docker", "run"]:
+            return SimpleNamespace(returncode=0, stdout="PASSED test_x.py::test_x\n", stderr="")
+        if args[:3] == ["docker", "rm", "-f"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(dev_worker, "_run", fake_run)
+
+    output, green = dev_worker._run_tests(
+        tmp_path,
+        [[sys.executable, "-m", "pytest", "-q", "test_x.py"]],
+        sandbox="docker",
+        sandbox_image="octopus-test-sandbox:py311",
+        expected_image_id=expected,
+    )
+
+    assert green is True
+    run_args = next(args for args in calls if args[:2] == ["docker", "run"])
+    assert "octopus-test-sandbox:py311" in run_args
+    assert expected not in run_args
+    assert "PASSED" in output
+
+
+def test_run_tests_docker_fails_closed_if_tag_identity_changes(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    expected = "sha256:" + "a" * 64
+    actual = "sha256:" + "b" * 64
+
+    def fake_run(args, cwd, **kwargs):
+        if args[:3] == ["docker", "info", "--format"]:
+            return SimpleNamespace(returncode=0, stdout="linux\n", stderr="")
+        if args[:3] == ["docker", "image", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout=actual + "\n", stderr="")
+        raise AssertionError("docker run must not start after identity mismatch")
+
+    monkeypatch.setattr(dev_worker, "_run", fake_run)
+
+    with pytest.raises(dev_worker.DevWorkerError, match="modifiée depuis le pré-vol"):
+        dev_worker._run_tests(
+            tmp_path,
+            [[sys.executable, "-m", "pytest", "-q", "test_x.py"]],
+            sandbox="docker",
+            sandbox_image="octopus-test-sandbox:py311",
+            expected_image_id=expected,
+        )
+
+
 def test_validate_kilo_result_enforces_diff_radius(tmp_path):
     from octopus import dev_worker
 
@@ -1290,8 +1350,10 @@ def test_development_task_can_use_docker_test_sandbox(tmp_path, monkeypatch):
 
     seen = []
 
-    def fake_run_tests(worktree, tests, *, sandbox="host", sandbox_image=dev_worker.DEFAULT_TEST_SANDBOX_IMAGE):
-        seen.append((sandbox, sandbox_image, tests))
+    def fake_run_tests(
+            worktree, tests, *, sandbox="host", sandbox_image=dev_worker.DEFAULT_TEST_SANDBOX_IMAGE,
+            expected_image_id=None):
+        seen.append((sandbox, sandbox_image, expected_image_id, tests))
         return "green", True
 
     monkeypatch.setattr(dev_worker, "_run_kilo", fake_kilo)
@@ -1319,8 +1381,10 @@ def test_development_task_can_use_docker_test_sandbox(tmp_path, monkeypatch):
     assert result["output"]["test_sandbox"] == "docker"
     assert seen
     assert seen[0][0] == "docker"
-    assert seen[0][1] == "sha256:fixed"
+    assert seen[0][1] == "octopus-test-sandbox:py311"
+    assert seen[0][2] == "sha256:fixed"
     assert result["output"]["test_sandbox_image"] == "sha256:fixed"
+    assert result["output"]["test_sandbox_image_ref"] == "octopus-test-sandbox:py311"
 
 
 def test_task_clone_is_independent_and_outside_source_repo(tmp_path):
