@@ -340,7 +340,7 @@ def test_devworker_retries_two_bounded_provider_rate_limits(tmp_path, monkeypatc
         return SimpleNamespace(data=action, text=json.dumps(action))
 
     monkeypatch.setattr(dev_worker.llm, "complete", complete)
-    monkeypatch.setattr(dev_worker.time, "sleep", sleeps.append)
+    monkeypatch.setattr(dev_worker, "_sleep", sleeps.append)
     monkeypatch.setattr(
         dev_worker, "_tool",
         lambda action, worktree, tests, tests_passed: ("fake-commit", True, "fake-commit"),
@@ -378,7 +378,7 @@ def test_devworker_paces_omniroute_step_starts(monkeypatch):
     sleeps = []
     monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
     monkeypatch.setattr(dev_worker.time, "monotonic", lambda: 100.0)
-    monkeypatch.setattr(dev_worker.time, "sleep", sleeps.append)
+    monkeypatch.setattr(dev_worker, "_sleep", sleeps.append)
 
     started = dev_worker._wait_for_llm_slot(95.0)
 
