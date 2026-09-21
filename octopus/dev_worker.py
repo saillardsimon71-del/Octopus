@@ -138,9 +138,9 @@ KILO_MAX_PASSES = 3
 # deliberately excluded because two trailing spaces can encode a hard break.
 _DETERMINISTIC_TRAILING_WHITESPACE_SUFFIXES = frozenset({".json"})
 _DIFF_CHECK_TRAILING_WHITESPACE_RE = re.compile(
-    r"^(?P<path>.+):(?P<line>\\d+): trailing whitespace\\.$"
+    r"^(?P<path>.+):(?P<line>\d+): trailing whitespace\.$"
 )
-_DIFF_HUNK_RE = re.compile(r"^@@ -\\d+(?:,\\d+)? \\+(?P<start>\\d+)(?:,(?P<count>\\d+))? @@")
+_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(?P<start>\d+)(?:,(?P<count>\d+))? @@")
 DEFAULT_TEST_SANDBOX_IMAGE = "octopus-test-sandbox:py311"
 PYTHON_CANARY_ORACLES = {
     "octopus/businesses.py": ("tests/test_businesses.py",),
