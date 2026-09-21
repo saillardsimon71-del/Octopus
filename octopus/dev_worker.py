@@ -177,8 +177,10 @@ OCTOPUS_PRODUCT_PROTECTED_PATHS = OCTOPUS_SELF_PROTECTED_PATHS | frozenset({
     "agents/browser.py",
     "agents/publish.py",
     "docker/dev-sandbox.Dockerfile",
+    ".github/workflows/compute-finance.yml",
+    ".github/workflows/video-batch.yml",
     ".github/workflows/video-foundation.yml",
-    ".github/workflows/compute-finance-safety.yml",
+    ".github/workflows/video-render-e2e.yml",
     "docs/EVIDENCE_ACCEPTANCE.md",
 })
 # Product tickets use the generic development-task radius. The concrete ticket still
