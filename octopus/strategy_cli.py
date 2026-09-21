@@ -104,6 +104,13 @@ def add_parser(sub) -> None:
     x = es.add_parser("actions", help="actions proposées, bloquées ou exécutées")
     x.add_argument("business")
     x.add_argument("--status", default=None)
+    x = es.add_parser("act", help="exécute une action réelle supervisée sur un canal")
+    x.add_argument("business")
+    x.add_argument("channel", type=int)
+    x.add_argument("action")
+    x.add_argument("--payload", default="{}", help="objet JSON transmis à l'exécuteur")
+    x.add_argument("--experiment", type=int, default=None)
+    x.add_argument("--idempotency-key", required=True)
     x = es.add_parser("allow", help="accorde une enveloppe de dépense (humain)")
     x.add_argument("business")
     x.add_argument("amount", type=float)
@@ -168,6 +175,17 @@ def run_economy(args) -> int:
             from . import actions
             for a in actions.list_actions(b, status=args.status):
                 print(f"#{a['id']:<5} {a['status']:9} canal #{a['channel_id']} {a['action']}  {a['reason'] or ''}")
+        elif cmd == "act":
+            from . import actions
+            payload = json.loads(args.payload)
+            if not isinstance(payload, dict):
+                raise strategy.StrategyError("--payload doit être un objet JSON")
+            result = actions.propose(
+                b, args.channel, args.action, payload, requested_by="human",
+                experiment_id=args.experiment, idempotency_key=args.idempotency_key,
+            )
+            print(json.dumps(result, ensure_ascii=False, default=str))
+            return 0 if result["status"] == "executed" or result.get("duplicate") else 2
         elif cmd == "allow":
             expires = time.time() + args.days * 86400 if args.days else None
             allowance = economy.grant_allowance(b, args.amount, args.currency, granted_by="human", rationale=args.rationale,
