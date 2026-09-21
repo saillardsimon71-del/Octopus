@@ -149,20 +149,29 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     return result
 
 
+def _verify_repo(path_value: Any, expected_head: str, label: str) -> Path:
+    raw = str(path_value or "").strip()
+    if not raw:
+        raise PromotionError(f"{label} requis pour la vérification Git")
+    repo = Path(raw).resolve()
+    if not repo.is_dir():
+        raise PromotionError(f"{label} introuvable: {repo}")
+    root = Path(_git(repo, "rev-parse", "--show-toplevel").stdout.strip()).resolve()
+    if root != repo:
+        raise PromotionError(f"{label} n'est pas une racine Git: {repo}")
+    if _git(repo, "status", "--porcelain").stdout.strip():
+        raise PromotionError(f"{label} non propre")
+    head = _sha(_git(repo, "rev-parse", "HEAD").stdout.strip(), f"HEAD {label}")
+    if head != expected_head:
+        raise PromotionError(f"HEAD {label} différent du rapport")
+    return repo
+
+
 def verify_git(report: dict, manifest: dict) -> dict:
-    raw_worktree = str(report.get("night_worktree") or "").strip()
-    if not raw_worktree:
-        raise PromotionError("night_worktree requis pour la vérification Git")
-    worktree = Path(raw_worktree).resolve()
-    if not worktree.is_dir():
-        raise PromotionError(f"night_worktree introuvable: {worktree}")
-
-    if _git(worktree, "status", "--porcelain").stdout.strip():
-        raise PromotionError("night_worktree non propre")
-
-    head = _sha(_git(worktree, "rev-parse", "HEAD").stdout.strip(), "HEAD night_worktree")
-    if head != manifest["final_head"]:
-        raise PromotionError("HEAD night_worktree différent de final_head")
+    base_repository = _verify_repo(report.get("base_repository"), manifest["base_head"], "base_repository")
+    worktree = _verify_repo(report.get("night_worktree"), manifest["final_head"], "night_worktree")
+    if base_repository == worktree:
+        raise PromotionError("base_repository et night_worktree doivent être distincts")
 
     ancestry = _git(
         worktree, "merge-base", "--is-ancestor", manifest["base_head"], manifest["final_head"], check=False
@@ -197,5 +206,6 @@ def verify_git(report: dict, manifest: dict) -> dict:
     return {
         **manifest,
         "git_verified": True,
+        "base_repository": str(base_repository),
         "night_worktree": str(worktree),
     }
