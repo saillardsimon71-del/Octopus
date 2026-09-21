@@ -2,7 +2,7 @@
 
 Une action est proposée par un agent ; elle s'exécute seulement si :
 1. le canal appartient au business, est actif et l'humain lui a accordé l'accès `act` ;
-2. un exécuteur est enregistré pour (type de canal, action) — aucun n'est fourni par défaut ;
+2. un exécuteur est enregistré pour (type de canal, action) ; le noyau fournit uniquement un executor web borné (`browser_form:submit`) ;
 3. son coût éventuel est couvert par une enveloppe (`economy.authorize_spend`).
 Sinon elle reste tracée avec la raison du blocage. Le résultat d'une exécution devient une preuve
 observée (l'exécuteur doit renvoyer une source vérifiable), rattachée à l'expérience.
@@ -115,3 +115,10 @@ def list_actions(business: str, *, status: str | None = None, limit: int = 50) -
         sql += " AND status=?"
         params.append(status)
     return [dict(r) for r in journal.query(sql + " ORDER BY id DESC LIMIT ?", tuple(params + [limit]))]
+
+
+# Executor générique minimal de Phase 2. Les intégrations spécifiques (YouTube, Fiverr, etc.)
+# restent des adapters séparés et ne doivent pas contourner cette frontière.
+from . import browser_actions as _browser_actions
+
+register_executor("browser_form", "submit", _browser_actions.submit_form, cost_class="local")
