@@ -692,7 +692,7 @@ def test_run_kilo_process_starts_isolated_process_group(tmp_path, monkeypatch):
 
     assert result.returncode == 0
     assert result.stdout == "ok"
-    assert captured["timeout"] == dev_worker.KILO_TIMEOUT_S
+    assert 0 < captured["timeout"] <= dev_worker.KILO_POLL_S
     if os.name == "nt":
         assert captured["kwargs"]["creationflags"] == getattr(dev_worker.subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         assert "start_new_session" not in captured["kwargs"]
@@ -715,11 +715,38 @@ def test_run_kilo_process_timeout_kills_process_tree(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dev_worker.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
     monkeypatch.setattr(dev_worker, "_terminate_process_tree", lambda process: killed.append(process.pid))
+    monkeypatch.setattr(dev_worker, "KILO_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(dev_worker, "KILO_POLL_S", 0.01)
 
     with pytest.raises(dev_worker.DevWorkerError, match="arbre de processus arrêté"):
         dev_worker._run_kilo_process(["kilo", "run"], tmp_path, {"PATH": "x"})
 
     assert killed == [4321]
+
+
+def test_run_kilo_process_live_kill_switch_stops_tree(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    killed = []
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "NIGHT_SHIFT_STOP").write_text("stop\n", encoding="utf-8")
+
+    class FakeProcess:
+        pid = 9876
+        returncode = None
+
+        def communicate(self, timeout):
+            raise AssertionError("communicate must not run after kill switch")
+
+    monkeypatch.setattr(dev_worker.paths, "data_dir", lambda: data)
+    monkeypatch.setattr(dev_worker.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(dev_worker, "_terminate_process_tree", lambda process: killed.append(process.pid))
+
+    with pytest.raises(dev_worker.DevWorkerError, match="NIGHT_SHIFT_STOP"):
+        dev_worker._run_kilo_process(["kilo", "run"], tmp_path, {"PATH": "x"})
+
+    assert killed == [9876]
 
 
 def test_kilo_permissions_restrict_writes_to_allowed_paths():

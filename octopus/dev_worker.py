@@ -130,6 +130,7 @@ _KILO_ENV_KEEP = frozenset({
 })
 KILO_COMMAND = "kilo.cmd" if os.name == "nt" else "kilo"
 KILO_TIMEOUT_S = 600
+KILO_POLL_S = 1.0
 KILO_TEST_FEEDBACK_CHARS = 4000
 KILO_MAX_PASSES = 3
 DEFAULT_TEST_SANDBOX_IMAGE = "octopus-test-sandbox:py311"
@@ -348,11 +349,20 @@ def _run_kilo_process(args: list[str], cwd: Path, env: dict[str, str]) -> subpro
     else:
         kwargs["start_new_session"] = True
     process = subprocess.Popen(args, **kwargs)
-    try:
-        stdout, stderr = process.communicate(timeout=KILO_TIMEOUT_S)
-    except subprocess.TimeoutExpired as exc:
-        _terminate_process_tree(process)
-        raise DevWorkerError(f"Kilo CLI timeout après {KILO_TIMEOUT_S}s; arbre de processus arrêté") from exc
+    deadline = time.monotonic() + KILO_TIMEOUT_S
+    while True:
+        if (paths.data_dir() / "NIGHT_SHIFT_STOP").exists():
+            _terminate_process_tree(process)
+            raise DevWorkerError("Kilo arrêté par NIGHT_SHIFT_STOP; arbre de processus arrêté")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate_process_tree(process)
+            raise DevWorkerError(f"Kilo CLI timeout après {KILO_TIMEOUT_S}s; arbre de processus arrêté")
+        try:
+            stdout, stderr = process.communicate(timeout=min(KILO_POLL_S, remaining))
+            break
+        except subprocess.TimeoutExpired:
+            continue
     return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
