@@ -46,6 +46,10 @@ def declarations_path() -> Path:
     return paths.home() / "resources.toml"
 
 
+def _normalize_resource_key(value) -> str:
+    return str(value).strip().lower()
+
+
 def declarations() -> dict[str, dict]:
     """Inventaire fourni par l'humain : `resources.toml` a la racine. Absent = inventaire vide."""
     path = declarations_path()
@@ -58,7 +62,7 @@ def declarations() -> dict[str, dict]:
     raw = tomllib.loads(path.read_text(encoding="utf-8"))
     found: dict[str, dict] = {}
     for entry in raw.get("resource", []):
-        key = str(entry.get("key", "")).strip().lower()
+        key = _normalize_resource_key(entry.get("key", ""))
         if not key:
             raise ResourceError("chaque ressource declaree a besoin d'une cle")
         if key in found:
@@ -92,7 +96,7 @@ def _row(row) -> dict:
 
 
 def get(key: str) -> dict | None:
-    rows = journal.query("SELECT * FROM resources WHERE key=?", (str(key).strip().lower(),))
+    rows = journal.query("SELECT * FROM resources WHERE key=?", (_normalize_resource_key(key),))
     return _row(rows[0]) if rows else None
 
 
@@ -118,7 +122,7 @@ def declare(key: str, kind: str, label: str, *, created_by: str, locator: str | 
             capabilities: list[str] | None = None, needs: list[str] | None = None, probe: str | None = None,
             probe_args: dict | None = None, notes: str | None = None, business: str | None = None) -> int:
     """Ajoute une ressource a l'inventaire. Etat initial `declared` : rien n'est suppose disponible."""
-    key = str(key).strip().lower()
+    key = _normalize_resource_key(key)
     if not key:
         raise ResourceError("cle de ressource vide")
     now = time.time()
