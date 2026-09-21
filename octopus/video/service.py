@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import urllib.request
+from urllib.parse import urlsplit
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Mapping
@@ -133,20 +134,35 @@ class VideoService:
 
     @staticmethod
     def _download_artifact(url: str, destination: Path, max_size: int, expected_sha256: str | None = None) -> None:
-        if not url.startswith(("https://", "http://", "file://")):
-            raise VideoServiceError(f"schéma d'URL artefact refusé: {url}")
+        parsed = urlsplit(url)
+        scheme = parsed.scheme.lower()
+        if scheme not in {"https", "file"}:
+            raise VideoServiceError(f"schéma d'URL artefact refusé: {scheme or url}")
         if expected_sha256 is not None:
             expected = expected_sha256.strip().lower()
             if len(expected) != 64 or any(ch not in "0123456789abcdef" for ch in expected):
                 raise VideoServiceError(f"sha256 artefact invalide pour {destination.name}")
         else:
             expected = None
+        if scheme == "https" and expected is None:
+            raise VideoServiceError(f"sha256 artefact distant requis pour {destination.name}")
+
+        source_path = None
+        if scheme == "file":
+            if parsed.netloc not in ("", "localhost"):
+                raise VideoServiceError(f"file:// artefact distant refusé: {url}")
+            root = Path(os.environ.get("PODALUX_ROOT", Path.cwd())).resolve()
+            source_path = Path(urllib.request.url2pathname(parsed.path)).resolve()
+            if not source_path.is_relative_to(root):
+                raise VideoServiceError(f"file:// hors racine de stockage: {source_path}")
+
         destination.parent.mkdir(parents=True, exist_ok=True)
         tmp = destination.with_suffix(destination.suffix + ".part")
         total = 0
         digest = hashlib.sha256()
         try:
-            with urllib.request.urlopen(url, timeout=120) as response, tmp.open("wb") as out:
+            response_cm = source_path.open("rb") if source_path is not None else urllib.request.urlopen(url, timeout=120)
+            with response_cm as response, tmp.open("wb") as out:
                 while True:
                     chunk = response.read(1024 * 1024)
                     if not chunk:
