@@ -215,7 +215,7 @@ Périmètre : comparaison à `d2279f6`, hors logs/XML générés et métadonnée
 | Exclusion des logs/XML générés | 1 modifié | 2 | 0 |
 | Total des fichiers déjà suivis | 31 modifiés | 1244 | 1539 |
 Fichiers applicatifs ajoutés : **0**. Les artefacts de session/environnement ont été retirés avant revue.
-Le diff final de la PR touche **31 fichiers** avec **1 249 ajouts / 1 539 suppressions** (net **−290 lignes**).
+Le diff final de la PR touche **31 fichiers** avec **1 246 ajouts / 1 539 suppressions** (net **−293 lignes**).
 Concepts actifs retirés/dépréciés : self-development par défaut, infrastructure avant client,
 pourcentages de progression et métrique technique prise seule comme preuve économique.
 Zéro nouvelle table, runtime, agent, service, base ou intégration produit.
