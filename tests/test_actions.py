@@ -13,6 +13,7 @@ B = "atelier_test"
 @pytest.fixture(autouse=True)
 def no_executors(monkeypatch):
     monkeypatch.setattr(actions, "_EXECUTORS", {})
+    monkeypatch.delenv("OCTOPUS_ENABLE_SMTP_EXECUTOR", raising=False)
 
 
 def _channel():
@@ -80,6 +81,26 @@ def test_paid_action_needs_an_allowance_and_failures_release_the_spend():
     assert economy.authorize_spend(B, 5, "EUR", "réutilisable", requested_by="human")["status"] == "authorized"
     actions.register_executor("marketplace", "silent", lambda c, p: {"observation": "ok"}, cost_class="local")
     assert actions.propose(B, channel, "silent", {}, requested_by="agent:GROWTH")["status"] == "failed"
+
+
+def test_executor_can_require_idempotency_before_irreversible_action():
+    channel = _channel()
+    economy.update_channel(B, channel, actor="human", status="active", access="act")
+    calls = []
+    actions.register_executor(
+        "marketplace", "message", lambda c, p: calls.append(p) or {
+            "observation": "message envoyé", "source_ref": "message:test"
+        }, cost_class="local", requires_idempotency=True,
+    )
+    blocked = actions.propose(B, channel, "message", {"text": "bonjour"}, requested_by="human")
+    assert blocked["status"] == "blocked" and "idempotency_key" in blocked["reason"] and calls == []
+    done = actions.propose(
+        B, channel, "message", {"text": "bonjour"}, requested_by="human", idempotency_key="msg-1"
+    )
+    assert done["status"] == "executed" and calls == [{"text": "bonjour"}]
+    assert actions.propose(
+        B, channel, "message", {"text": "autre"}, requested_by="human", idempotency_key="msg-1"
+    )["duplicate"] is True
 
 
 def test_agent_tool_and_status_expose_actions():
