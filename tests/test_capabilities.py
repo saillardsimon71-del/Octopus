@@ -202,7 +202,7 @@ def test_capability_gap_detection_with_evaluations():
 
 
 def test_enum_normalization_preserves_historical_separator_semantics():
-    cap = Capability(identifier="free-quota", cost_class="  FREE-QUOTA  ")
+    cap = Capability(identifier="free-quota", kind="local_tool", cost_class="  FREE-QUOTA  ")
     assert cap.cost_class == CostClass.FREE_QUOTA
 
     for value in ("free  quota", "free\tquota", "free\u00a0quota", "free--quota"):
