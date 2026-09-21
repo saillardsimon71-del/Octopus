@@ -5,11 +5,28 @@ import subprocess
 
 import pytest
 
-from octopus import promotion
+from octopus import acceptance, promotion
 
 
 BASE = "1" * 40
 COMMIT = "2" * 40
+
+
+def product_contract() -> dict:
+    return {
+        "version": 1,
+        "id": "promotion-product-v1",
+        "artifact_type": "code",
+        "probe": {"kind": "none"},
+        "must": [
+            {
+                "id": "tests_green",
+                "fact": "tests.passed",
+                "op": "equals",
+                "expected": True,
+            }
+        ],
+    }
 
 
 def good_report() -> dict:
@@ -25,6 +42,7 @@ def good_report() -> dict:
             "allowed_paths": ["octopus/resources.py"],
             "night_head": COMMIT,
             "result": {
+                "id": 101,
                 "status": "done",
                 "input": {
                     "strict_repository_preflight": True,
@@ -62,6 +80,7 @@ def good_product_report() -> dict:
             "allowed_paths": ["octopus/resources.py", "octopus/config/catalog.json"],
             "night_head": COMMIT,
             "result": {
+                "id": 202,
                 "status": "done",
                 "input": {
                     "strict_repository_preflight": True,
@@ -71,6 +90,7 @@ def good_product_report() -> dict:
                     "self_modification_policy": "product_ticket",
                     "allowed_paths": ["octopus/resources.py", "octopus/config/catalog.json"],
                     "tests": [["python", "-m", "pytest", "-q", "tests/test_resources.py"]],
+                    "acceptance_contract": product_contract(),
                     "test_sandbox_image": "octopus-test-sandbox:py311",
                     "test_sandbox_image_id": "sha256:" + "a" * 64,
                     "max_files_changed": 2,
@@ -89,6 +109,10 @@ def good_product_report() -> dict:
                     "baseline_oracle_runs": 2,
                     "oracle_tests": 17,
                     "post_oracle_tests": 17,
+                    "acceptance_contract_hash": acceptance.contract_hash(product_contract()),
+                    "gate_status": "ACCEPTED",
+                    "evidence_path": "/tmp/octopus-evidence.json",
+                    "evidence_sha256": "b" * 64,
                 },
             },
         }],
@@ -114,6 +138,8 @@ def test_build_manifest_accepts_product_ticket_with_human_review():
     (lambda r: r["tickets"][0]["result"]["output"].update(tests_passed=False), "tests verts"),
     (lambda r: r["tickets"][0]["result"]["output"].update(baseline_oracle_runs=1), "baseline oracle"),
     (lambda r: r["tickets"][0]["result"]["output"].update(post_oracle_tests=16), "oracle final"),
+    (lambda r: r["tickets"][0]["result"]["output"].update(gate_status="REJECTED"), "gate_status"),
+    (lambda r: r["tickets"][0]["result"]["output"].update(acceptance_contract_hash="0" * 64), "acceptance_contract_hash"),
     (lambda r: (
         r["tickets"][0].update(allowed_paths=["agents/browser.py"]),
         r["tickets"][0]["result"]["output"].update(changed_paths=["agents/browser.py"]),
@@ -238,10 +264,26 @@ def product_report_for_repo(base_repo, repo, base, final):
     report["night_worktree"] = str(repo)
     report["tickets"][0]["night_head"] = final
     report["tickets"][0]["allowed_paths"] = ["octopus/resources.py"]
-    report["tickets"][0]["result"]["input"]["allowed_paths"] = ["octopus/resources.py"]
-    report["tickets"][0]["result"]["input"]["max_files_changed"] = 1
-    report["tickets"][0]["result"]["output"]["commit"] = final
-    report["tickets"][0]["result"]["output"]["changed_paths"] = ["octopus/resources.py"]
+    result = report["tickets"][0]["result"]
+    result["input"]["allowed_paths"] = ["octopus/resources.py"]
+    result["input"]["max_files_changed"] = 1
+    result["output"]["commit"] = final
+    result["output"]["changed_paths"] = ["octopus/resources.py"]
+    bundle = acceptance.build_evidence_bundle(
+        task_id=result["id"],
+        attempt=1,
+        contract=result["input"]["acceptance_contract"],
+        facts={
+            "tests": {"passed": True},
+            "git": {"changed_paths": ["octopus/resources.py"]},
+        },
+    )
+    bundle["gate_decision"] = acceptance.evaluate_contract(
+        result["input"]["acceptance_contract"], bundle,
+    )
+    evidence_path, evidence_sha = acceptance.persist_evidence(repo.parent, bundle)
+    result["output"]["evidence_path"] = str(evidence_path)
+    result["output"]["evidence_sha256"] = evidence_sha
     return report
 
 
