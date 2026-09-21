@@ -136,6 +136,7 @@ KILO_MAX_PASSES = 3
 DEFAULT_TEST_SANDBOX_IMAGE = "octopus-test-sandbox:py311"
 PYTHON_CANARY_ORACLES = {
     "octopus/capabilities.py": ("tests/test_capabilities.py",),
+    "octopus/connectors.py": ("tests/test_connectors.py",),
     "octopus/resources.py": ("tests/test_resources.py",),
 }
 OCTOPUS_SELF_MARKERS = (
