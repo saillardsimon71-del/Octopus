@@ -110,8 +110,9 @@ def send_email(channel: dict, payload: dict) -> dict:
     }
 
 
-def register(actions_module) -> None:
+def register() -> None:
     if configured():
-        actions_module.register_executor(
-            "email", "send", send_email, cost_class="local", requires_idempotency=True
+        from . import actions
+        actions.register_executor(
+            "email", "send", send_email, cost_class="free_quota", requires_idempotency=True
         )
