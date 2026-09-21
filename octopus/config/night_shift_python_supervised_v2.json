@@ -1,0 +1,72 @@
+{
+  "name": "python-canary-supervised-v2",
+  "policy": "python_canary",
+  "tickets": [
+    {
+      "goal": "In octopus/capabilities.py, introduce one small private helper named _normalize_enum_value that performs exactly the existing enum-like string normalization (strip, lowercase, replace hyphen with underscore, replace ordinary space with underscore) and use it from _coerce_enum. Preserve every public API, alias, error behavior, ordering rule, and evaluation semantic. Do not modify tests or any other file.",
+      "allowed_paths": [
+        "octopus/capabilities.py"
+      ],
+      "test_targets": [
+        "tests/test_capabilities.py"
+      ],
+      "max_steps": 16,
+      "acceptance_criteria": [
+        "_normalize_enum_value contains exactly the previous normalization semantics",
+        "_coerce_enum uses the helper",
+        "no new import or module-level side effect is introduced",
+        "public capability behavior and aliases remain unchanged",
+        "the existing capability oracle passes with the same PASSED node set as the baseline"
+      ],
+      "noop_allowed": false,
+      "test_sandbox_image": "octopus-test-sandbox:py311",
+      "max_files_changed": 1,
+      "max_lines_added": 20,
+      "max_lines_deleted": 20
+    },
+    {
+      "goal": "In octopus/capabilities.py, introduce one small private helper named _enum_expected_values that returns the same comma-separated enum values string currently built inline in _coerce_enum, and use it for both enum validation error paths. Preserve the exact error text and all behavior. Do not modify tests or any other file.",
+      "allowed_paths": [
+        "octopus/capabilities.py"
+      ],
+      "test_targets": [
+        "tests/test_capabilities.py"
+      ],
+      "max_steps": 16,
+      "acceptance_criteria": [
+        "_enum_expected_values centralizes only the repeated enum expected-values rendering",
+        "both _coerce_enum error paths use the helper",
+        "exception types and exact error messages remain unchanged",
+        "no new import or module-level side effect is introduced",
+        "the existing capability oracle passes with the same PASSED node set as the baseline"
+      ],
+      "noop_allowed": false,
+      "test_sandbox_image": "octopus-test-sandbox:py311",
+      "max_files_changed": 1,
+      "max_lines_added": 20,
+      "max_lines_deleted": 20
+    },
+    {
+      "goal": "In octopus/capabilities.py, introduce one small private helper named _normalize_lower_text that performs exactly strip().lower() for strings. Use it from _normalize_enum_value and from the existing string branch of _coerce_availability while preserving the additional enum hyphen/space replacement behavior and every availability token behavior exactly. Do not modify tests or any other file.",
+      "allowed_paths": [
+        "octopus/capabilities.py"
+      ],
+      "test_targets": [
+        "tests/test_capabilities.py"
+      ],
+      "max_steps": 18,
+      "acceptance_criteria": [
+        "_normalize_lower_text performs only strip and lowercase",
+        "_normalize_enum_value still additionally replaces hyphens and ordinary spaces with underscores",
+        "_coerce_availability accepts and rejects exactly the same values as before",
+        "no new import or module-level side effect is introduced",
+        "the existing capability oracle passes with the same PASSED node set as the baseline"
+      ],
+      "noop_allowed": false,
+      "test_sandbox_image": "octopus-test-sandbox:py311",
+      "max_files_changed": 1,
+      "max_lines_added": 20,
+      "max_lines_deleted": 20
+    }
+  ]
+}
