@@ -133,6 +133,14 @@ KILO_TIMEOUT_S = 600
 KILO_POLL_S = 1.0
 KILO_TEST_FEEDBACK_CHARS = 4000
 KILO_MAX_PASSES = 3
+# Deterministic repair is intentionally tiny and closed-world. JSON trailing
+# whitespace is semantically inert once the document parses; Markdown is
+# deliberately excluded because two trailing spaces can encode a hard break.
+_DETERMINISTIC_TRAILING_WHITESPACE_SUFFIXES = frozenset({".json"})
+_DIFF_CHECK_TRAILING_WHITESPACE_RE = re.compile(
+    r"^(?P<path>.+):(?P<line>\d+): trailing whitespace\.$"
+)
+_DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(?P<start>\d+)(?:,(?P<count>\d+))? @@")
 DEFAULT_TEST_SANDBOX_IMAGE = "octopus-test-sandbox:py311"
 PYTHON_CANARY_ORACLES = {
     "octopus/businesses.py": ("tests/test_businesses.py",),
@@ -1377,12 +1385,147 @@ def _validate_python_canary_ast(worktree: Path, original_head: str, changed_path
             )
 
 
+def _diff_added_line_numbers(worktree: Path, relative: str) -> set[int]:
+    """Return new-side line numbers introduced by the current HEAD diff for one file."""
+    result = _run(["git", "diff", "--unified=0", "HEAD", "--", relative], worktree)
+    if result.returncode:
+        raise DevWorkerError((result.stderr or result.stdout or "git diff failed")[-2000:])
+    added: set[int] = set()
+    new_line: int | None = None
+    for line in result.stdout.splitlines():
+        match = _DIFF_HUNK_RE.match(line)
+        if match:
+            new_line = int(match.group("start"))
+            continue
+        if new_line is None or line.startswith(("diff --git ", "index ", "--- ", "+++ ")):
+            continue
+        if line.startswith("\\ No newline at end of file"):
+            continue
+        if line.startswith("+"):
+            added.add(new_line)
+            new_line += 1
+        elif line.startswith("-"):
+            continue
+        else:
+            new_line += 1
+    return added
+
+
+def _deterministic_diff_check_fixes(
+        worktree: Path, allowed_paths: list[str] | None,
+) -> list[dict]:
+    """Repair only closed-world, semantics-preserving diff-check failures.
+
+    V1 intentionally handles valid JSON trailing whitespace only. It never
+    touches Markdown, Python, tests, protected kernel files, or lines outside
+    the current added/modified diff.
+    """
+    check = _run(["git", "diff", "--check", "HEAD", "--"], worktree)
+    if check.returncode == 0:
+        return []
+    raw = check.stderr or check.stdout or ""
+    flagged: dict[str, set[int]] = {}
+    for line in raw.splitlines():
+        match = _DIFF_CHECK_TRAILING_WHITESPACE_RE.match(line.strip())
+        if not match:
+            continue
+        relative = match.group("path").replace("\\", "/")
+        if Path(relative).suffix.lower() not in _DETERMINISTIC_TRAILING_WHITESPACE_SUFFIXES:
+            continue
+        if allowed_paths is not None and relative not in set(allowed_paths):
+            continue
+        if _forbidden_kilo_path(relative) or relative in OCTOPUS_PRODUCT_PROTECTED_PATHS:
+            continue
+        flagged.setdefault(relative, set()).add(int(match.group("line")))
+
+    if not flagged or len(flagged) > 5 or sum(map(len, flagged.values())) > 50:
+        return []
+
+    fixes = []
+    for relative, line_numbers in sorted(flagged.items()):
+        path = resolve_path(worktree, relative)
+        if not path.is_file() or path.stat().st_size > 1_000_000:
+            continue
+        added_lines = _diff_added_line_numbers(worktree, relative)
+        targets = sorted(line_numbers & added_lines)
+        if not targets:
+            continue
+        before_bytes = path.read_bytes()
+        try:
+            before_text = before_bytes.decode("utf-8")
+            before_json = json.loads(before_text)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        lines = before_text.splitlines(keepends=True)
+        changed = []
+        for number in targets:
+            if not 1 <= number <= len(lines):
+                continue
+            raw_line = lines[number - 1]
+            if raw_line.endswith("\r\n"):
+                body, ending = raw_line[:-2], "\r\n"
+            elif raw_line.endswith("\n") or raw_line.endswith("\r"):
+                body, ending = raw_line[:-1], raw_line[-1:]
+            else:
+                body, ending = raw_line, ""
+            trimmed = body.rstrip(" \t")
+            if trimmed != body:
+                lines[number - 1] = trimmed + ending
+                changed.append(number)
+        if not changed:
+            continue
+        after_text = "".join(lines)
+        try:
+            after_json = json.loads(after_text)
+        except json.JSONDecodeError:
+            continue
+        if after_json != before_json:
+            continue
+        after_bytes = after_text.encode("utf-8")
+        if after_bytes == before_bytes:
+            continue
+        path.write_bytes(after_bytes)
+        fixes.append({
+            "fixer_id": "json_trailing_whitespace_v1",
+            "file": relative,
+            "lines": changed,
+        })
+    return fixes
+
+
+def _augment_diff_check_feedback(feedback: str) -> str:
+    """Add precise guidance without auto-fixing whitespace-sensitive formats."""
+    markdown = False
+    trailing = False
+    for line in feedback.splitlines():
+        match = _DIFF_CHECK_TRAILING_WHITESPACE_RE.match(line.strip())
+        if not match:
+            continue
+        trailing = True
+        if Path(match.group("path")).suffix.lower() in {".md", ".markdown"}:
+            markdown = True
+    notes = []
+    if trailing:
+        notes.append(
+            "TRAILING_WHITESPACE_GUIDANCE: remove trailing spaces/tabs from every flagged line; "
+            "do not repeat the same invalid diff."
+        )
+    if markdown:
+        notes.append(
+            "MARKDOWN_TRAILING_WHITESPACE_GUIDANCE: two trailing spaces may encode a Markdown hard break, "
+            "but this repository rejects trailing whitespace. If the break is intentional, preserve its meaning "
+            "with an explicit <br> or paragraph structure instead of terminal spaces."
+        )
+    return feedback + (("\n" + "\n".join(notes)) if notes else "")
+
+
 def _validate_kilo_result(
         worktree: Path, original_head: str, original_branch: str,
         allowed_paths: list[str] | None = None, *,
         max_files_changed: int | None = None,
         max_lines_added: int | None = None,
-        max_lines_deleted: int | None = None) -> list[str]:
+        max_lines_deleted: int | None = None,
+        check_diff: bool = True) -> list[str]:
     if _git(worktree, "rev-parse", "HEAD") != original_head:
         raise DevWorkerError(f"Kilo a créé un commit; worktree conservé: {worktree}")
     if _git(worktree, "branch", "--show-current") != original_branch:
@@ -1410,12 +1553,13 @@ def _validate_kilo_result(
         max_lines_added=max_lines_added,
         max_lines_deleted=max_lines_deleted,
     )
-    check = _run(["git", "diff", "--check", "HEAD", "--"], worktree)
-    if check.returncode:
-        raise KiloRepairableError(
-            "diff_check",
-            (check.stderr or check.stdout or "diff Kilo invalide")[-2000:],
-        )
+    if check_diff:
+        check = _run(["git", "diff", "--check", "HEAD", "--"], worktree)
+        if check.returncode:
+            raise KiloRepairableError(
+                "diff_check",
+                (check.stderr or check.stdout or "diff Kilo invalide")[-2000:],
+            )
     return changed
 
 
@@ -1630,6 +1774,7 @@ def development_task(ctx):
     original_head = _git(worktree, "rev-parse", "HEAD")
     original_status = _status_entries(worktree)
     last_test_output = ""
+    deterministic_fixes: list[dict] = []
     for attempt in range(KILO_MAX_PASSES):
         repository_context = _repository_context(worktree)
         prompt = _build_kilo_prompt(
@@ -1669,6 +1814,24 @@ def development_task(ctx):
             raise DevWorkerError(f"Kilo a échoué après modification; worktree conservé: {worktree}: {exc}") from exc
 
         try:
+            # Validate every security/radius boundary before any deterministic repair.
+            pre_fix_paths = _validate_kilo_result(
+                worktree, original_head, branch, allowed_paths=allowed_paths,
+                max_files_changed=max_files_changed,
+                max_lines_added=max_lines_added,
+                max_lines_deleted=max_lines_deleted,
+                check_diff=False,
+            )
+            if python_canary_ast:
+                _validate_python_canary_ast(worktree, original_head, pre_fix_paths)
+            fixes = _deterministic_diff_check_fixes(worktree, allowed_paths)
+            if fixes:
+                deterministic_fixes.extend(fixes)
+                ctx.emit("development.deterministic_fix", {
+                    "attempt": attempt + 1,
+                    "fixes": fixes,
+                })
+            # Re-run the complete boundary validation after repair, including git diff --check.
             changed_paths = _validate_kilo_result(
                 worktree, original_head, branch, allowed_paths=allowed_paths,
                 max_files_changed=max_files_changed,
@@ -1707,6 +1870,7 @@ def development_task(ctx):
                         "test_sandbox_image": effective_test_image if test_sandbox == "docker" else None,
                         "final_text": _kilo_output_summary(kilo_output)["final_text"],
                         "self_policy": "product_ticket" if product_ticket else ("python_canary" if octopus_python_canary else "scoped_kilo"),
+                        "deterministic_fixes": deterministic_fixes,
                     }
                     ctx.emit("development.noop", result)
                     return result
@@ -1719,7 +1883,8 @@ def development_task(ctx):
                     })
                     continue
             final_text = _kilo_output_summary(kilo_output)["final_text"]
-            last_test_output = f"{exc.kind}: {exc.feedback}"
+            feedback = _augment_diff_check_feedback(exc.feedback) if exc.kind == "diff_check" else exc.feedback
+            last_test_output = f"{exc.kind}: {feedback}"
             if final_text:
                 last_test_output += f" | PREVIOUS_FINAL: {final_text}"
             if attempt < KILO_MAX_PASSES - 1:
@@ -1774,6 +1939,7 @@ def development_task(ctx):
                 "oracle_tests": len(baseline_signature or ()),
                 "post_oracle_tests": len(post_signature if baseline_signature is not None else ()),
                 "self_policy": "product_ticket" if product_ticket else ("python_canary" if octopus_python_canary else "scoped_kilo"),
+                "deterministic_fixes": deterministic_fixes,
             }
             ctx.emit("development.committed", result)
             return result

@@ -840,6 +840,99 @@ def test_development_task_retries_kilo_after_diff_check_failure(tmp_path, monkey
     assert any(event["type"] == "development.kilo_retry" for event in tasks.events(task_id=task_id))
 
 
+def test_deterministic_diff_check_fix_repairs_only_valid_json_added_lines(tmp_path):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path)
+    (repo / "config.json").write_text('{"value": 1}\n', encoding="utf-8")
+    git(repo, "add", "config.json")
+    git(repo, "commit", "-qm", "add config")
+    original_head = git(repo, "rev-parse", "HEAD")
+    branch = git(repo, "branch", "--show-current")
+
+    (repo / "config.json").write_text('{"value": 2}  \n', encoding="utf-8")
+
+    assert dev_worker._validate_kilo_result(
+        repo, original_head, branch, allowed_paths=["config.json"], check_diff=False,
+    ) == ["config.json"]
+
+    fixes = dev_worker._deterministic_diff_check_fixes(repo, ["config.json"])
+
+    assert fixes == [{
+        "fixer_id": "json_trailing_whitespace_v1",
+        "file": "config.json",
+        "lines": [1],
+    }]
+    assert (repo / "config.json").read_text(encoding="utf-8") == '{"value": 2}\n'
+    assert dev_worker._validate_kilo_result(
+        repo, original_head, branch, allowed_paths=["config.json"],
+    ) == ["config.json"]
+
+
+def test_deterministic_diff_check_fix_preserves_markdown_hard_break_and_guides_retry(tmp_path):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path)
+    docs = repo / "docs"
+    docs.mkdir()
+    gui = docs / "GUI.md"
+    gui.write_text("Before\n", encoding="utf-8")
+    git(repo, "add", "docs/GUI.md")
+    git(repo, "commit", "-qm", "add docs")
+
+    gui.write_text("Sous Operate : Missions et Agents.  \n", encoding="utf-8")
+    before = gui.read_bytes()
+
+    assert dev_worker._deterministic_diff_check_fixes(repo, ["docs/GUI.md"]) == []
+    assert gui.read_bytes() == before
+
+    feedback = dev_worker._augment_diff_check_feedback(
+        "docs/GUI.md:1: trailing whitespace.\n+Sous Operate : Missions et Agents.  "
+    )
+    assert "MARKDOWN_TRAILING_WHITESPACE_GUIDANCE" in feedback
+    assert "<br>" in feedback
+    assert "do not repeat the same invalid diff" in feedback
+
+
+def test_development_task_repairs_json_whitespace_without_spending_second_kilo_pass(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path)
+    (repo / "config.json").write_text('{"value": 1}\n', encoding="utf-8")
+    git(repo, "add", "config.json")
+    git(repo, "commit", "-qm", "add config")
+    prompts = []
+
+    def kilo_once(worktree, goal, tests, max_steps, prompt=None, allowed_paths=None):
+        prompts.append(prompt)
+        (worktree / "config.json").write_text('{"value": 2}  \n', encoding="utf-8")
+        return '{"type":"text","text":"updated config"}\n'
+
+    monkeypatch.setattr(dev_worker, "_run_kilo", kilo_once)
+
+    task_id = worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Update the JSON value.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "max_steps": 7,
+        "allowed_paths": ["config.json"],
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "done"
+    assert len(prompts) == 1
+    assert result["output"]["deterministic_fixes"] == [{
+        "fixer_id": "json_trailing_whitespace_v1",
+        "file": "config.json",
+        "lines": [1],
+    }]
+    worktree = Path(result["output"]["worktree"])
+    assert (worktree / "config.json").read_text(encoding="utf-8") == '{"value": 2}\n'
+    events = tasks.events(task_id=task_id)
+    assert any(event["type"] == "development.deterministic_fix" for event in events)
+
+
 def test_validate_allowed_paths_rejects_absolute_parent_and_sensitive_paths():
     from octopus import dev_worker
 
