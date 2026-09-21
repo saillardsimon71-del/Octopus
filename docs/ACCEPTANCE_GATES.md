@@ -170,7 +170,7 @@ Au moins une vidéo doit parcourir :
 OCTOPUS → publication réelle → identifiant externe → analytics observées
 ```
 
-**État actuel : ~20 %.**
+**État actuel : ~30 %.** L'executor réel `browser_form:submit` est présent et un canari externe HTTPBin a prouvé le 21/09/2026 : canal `active` + `access=act` → POST web réel → `source_ref=https://httpbin.org/post` → evidence `observed` → expérience évaluée `supports`, avec idempotence obligatoire. La preuve G6 reste ouverte : aucune publication vidéo réelle ni analytics de plateforme n'ont encore été observées.
 
 ## G7 — Boucle d'expérience économique fermée
 
@@ -191,7 +191,7 @@ objectif
 
 avec aucune valeur inventée, coût complet attribué, source réelle, décision persistée et learning vu par ORBIT au cycle suivant.
 
-**État actuel : ~20 %.** La boucle est testée en simulation/code, pas encore fermée avec canal commercial réel.
+**État actuel : ~35 %.** Une boucle externe non commerciale a été fermée en live le 21/09/2026 : objectif → hypothèse → expérience → action HTTP externe → preuve observée → `evaluate_experiment` → décision persistée. Ce canari valide le transport réel et la chaîne de preuve, mais ne valide pas G7 : il manque encore un canal commercial réel, une mesure économique réelle et, pour le cash, une entrée de ledger effectivement encaissée.
 
 ## G8 — V1 OCTOPUS exploitable
 
@@ -236,8 +236,8 @@ Ce tableau est une estimation d'ingénierie, pas une moyenne mathématique.
 | G3 Salad live | 20 % | canary + crash test |
 | G4 Benchmark GPU | 10 % | premiers runs comparables |
 | G5 <1¢ vidéo | 25 % | série réelle de 10 vidéos |
-| G6 Publication/analytics | 20 % | executor réel |
-| G7 Boucle économique réelle | 20 % | expérience monde réel |
+| G6 Publication/analytics | 30 % | publication vidéo réelle + identifiant externe + analytics observées |
+| G7 Boucle économique réelle | 35 % | première action commerciale réelle + métrique économique observée + cash réel |
 | G8 V1 exploitable | **~55–60 % global** | fermer G1→G7 |
 
 La vision longue « entreprise autonome générique » reste autour de **30–35 %**, car les connecteurs réels, la publication, les analytics et la boucle de revenu restent à prouver.
