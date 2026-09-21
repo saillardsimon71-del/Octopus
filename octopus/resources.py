@@ -50,6 +50,10 @@ def _normalize_resource_key(value) -> str:
     return str(value).strip().lower()
 
 
+def _normalize_resource_text(value) -> str:
+    return str(value).strip().lower()
+
+
 def declarations() -> dict[str, dict]:
     """Inventaire fourni par l'humain : `resources.toml` a la racine. Absent = inventaire vide."""
     path = declarations_path()
@@ -67,13 +71,13 @@ def declarations() -> dict[str, dict]:
             raise ResourceError("chaque ressource declaree a besoin d'une cle")
         if key in found:
             raise ResourceError(f"ressource declaree deux fois : {key!r}")
-        needs = [str(n).strip().lower() for n in entry.get("needs", []) if str(n).strip()]
+        needs = [_normalize_resource_text(n) for n in entry.get("needs", []) if str(n).strip()]
         unknown = [n for n in needs if n not in HUMAN_NEEDS]
         if unknown:
             raise ResourceError(f"{key} : frontiere humaine inconnue {unknown} (attendu : {HUMAN_NEEDS})")
         found[key] = {
             "key": key,
-            "kind": str(entry.get("kind", "autre")).strip().lower(),
+            "kind": _normalize_resource_text(entry.get("kind", "autre")),
             "label": str(entry.get("label") or key),
             "locator": entry.get("locator"),
             "business": entry.get("business"),
@@ -133,9 +137,9 @@ def declare(key: str, kind: str, label: str, *, created_by: str, locator: str | 
         resource_id = int(conn.execute(
             "INSERT INTO resources (key, kind, label, locator, business, capabilities, needs, probe, probe_args, "
             "notes, declared_at, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (key, str(kind).strip().lower() or "autre", str(label).strip() or key, locator, business,
+            (key, _normalize_resource_text(kind) or "autre", str(label).strip() or key, locator, business,
              json.dumps(sorted({str(c).strip().lower() for c in capabilities or [] if str(c).strip()})),
-             json.dumps([str(n).strip().lower() for n in needs or []]), probe,
+             json.dumps([_normalize_resource_text(n) for n in needs or []]), probe,
              json.dumps(probe_args or {}, ensure_ascii=False), notes, now, str(created_by), now, now)).lastrowid)
         tasks._emit(conn, business or "octopus", None, "resources.declared", {"key": key, "kind": kind})
     return resource_id
