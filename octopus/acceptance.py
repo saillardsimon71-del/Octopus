@@ -42,6 +42,12 @@ class AcceptanceError(ValueError):
     pass
 
 
+def _reject_unknown_fields(value: dict, allowed: set[str] | frozenset[str], field: str) -> None:
+    unknown = sorted(set(value) - set(allowed))
+    if unknown:
+        raise AcceptanceError(f"{field}: champs inconnus: {unknown}")
+
+
 def _bounded_text(value: Any, field: str, *, maximum: int = 200) -> str:
     if not isinstance(value, str):
         raise AcceptanceError(f"{field} doit être une chaîne")
@@ -62,6 +68,11 @@ def validate_contract(raw: Any) -> dict:
     """Validate and normalize a versioned, immutable acceptance contract."""
     if not isinstance(raw, dict):
         raise AcceptanceError("acceptance_contract doit être un objet")
+    _reject_unknown_fields(
+        raw,
+        frozenset({"version", "id", "artifact_type", "probe", "must"}),
+        "acceptance_contract",
+    )
     if raw.get("version") != SCHEMA_VERSION:
         raise AcceptanceError(f"acceptance_contract.version doit valoir {SCHEMA_VERSION}")
 
@@ -75,7 +86,14 @@ def validate_contract(raw: Any) -> dict:
     if kind not in _ALLOWED_PROBES:
         raise AcceptanceError(f"probe non supporté: {kind!r}")
     probe: dict[str, Any] = {"kind": kind}
+    if kind == "none":
+        _reject_unknown_fields(probe_raw, frozenset({"kind"}), "acceptance_contract.probe")
     if kind == "tk_navigation":
+        _reject_unknown_fields(
+            probe_raw,
+            frozenset({"kind", "module", "class", "attribute"}),
+            "acceptance_contract.probe",
+        )
         module = _bounded_text(probe_raw.get("module"), "probe.module", maximum=200)
         class_name = _bounded_text(probe_raw.get("class"), "probe.class", maximum=100)
         attribute = _bounded_text(
@@ -100,6 +118,11 @@ def validate_contract(raw: Any) -> dict:
     for index, item in enumerate(must_raw, start=1):
         if not isinstance(item, dict):
             raise AcceptanceError(f"critère MUST #{index}: objet attendu")
+        _reject_unknown_fields(
+            item,
+            frozenset({"id", "fact", "op", "expected", "description"}),
+            f"critère MUST #{index}",
+        )
         rule_id = _bounded_text(item.get("id"), f"critère MUST #{index}.id", maximum=100)
         if rule_id in seen_ids:
             raise AcceptanceError(f"critère MUST dupliqué: {rule_id}")
@@ -184,9 +207,9 @@ def build_evidence_bundle(
     artifacts: list[dict] | None = None,
 ) -> dict:
     normalized = validate_contract(contract)
-    if not isinstance(task_id, int) or task_id < 0:
+    if isinstance(task_id, bool) or not isinstance(task_id, int) or task_id < 0:
         raise AcceptanceError("task_id invalide")
-    if not isinstance(attempt, int) or attempt < 0:
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 0:
         raise AcceptanceError("attempt invalide")
     if not isinstance(facts, dict):
         raise AcceptanceError("facts doit être un objet")
