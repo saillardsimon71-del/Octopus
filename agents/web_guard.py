@@ -74,6 +74,16 @@ def _blocked_ip(ip: ipaddress._BaseAddress) -> bool:
 
 def _resolved_ips(host: str) -> list[ipaddress._BaseAddress]:
     try:
+        return [ipaddress.ip_address(host)]
+    except ValueError:
+        pass
+    if ":" not in host:
+        try:
+            packed = socket.inet_aton(host)
+            return [ipaddress.ip_address(packed)]
+        except OSError:
+            pass
+    try:
         infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
         raise BrowseRefused(f"hôte non résolvable : {host}") from exc
