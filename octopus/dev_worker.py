@@ -390,7 +390,7 @@ def _malformed_tool_call(exc: Exception) -> bool:
 
 
 def _sleep(seconds: float) -> None:
-    _sleep(seconds)
+    time.sleep(seconds)
 
 
 def _wait_for_llm_slot(previous_started: float) -> float:
