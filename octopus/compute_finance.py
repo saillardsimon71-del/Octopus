@@ -101,6 +101,31 @@ def _row(row) -> dict | None:
     return dict(row) if row is not None else None
 
 
+def require_active_provider_reservation(
+    reservation_id: int | None, *, provider: str, idempotency_key: str, price_per_hour: float
+) -> dict:
+    if isinstance(reservation_id, bool) or not isinstance(reservation_id, int) or reservation_id <= 0:
+        raise FinancialCircuitOpen("création GPU refusée sans réservation financière active")
+    rows = journal.query("SELECT * FROM compute_reservations WHERE id=?", (reservation_id,))
+    if not rows:
+        raise FinancialCircuitOpen(f"réservation GPU #{reservation_id} introuvable")
+    row = dict(rows[0])
+    if row["status"] != "reserved":
+        raise FinancialCircuitOpen(f"réservation GPU #{reservation_id} non active: {row['status']}")
+    if row["provider"] != provider or row["idempotency_key"] != idempotency_key:
+        raise FinancialCircuitOpen("réservation GPU incohérente avec le provider ou la clé d'idempotence")
+    if float(price_per_hour) > float(row["price_per_hour"]) + 1e-9:
+        raise FinancialCircuitOpen("prix fournisseur supérieur au prix réservé")
+    links = journal.query(
+        "SELECT s.status FROM compute_spend_links l JOIN spend_requests s ON s.id=l.spend_request_id "
+        "WHERE l.reservation_id=?",
+        (reservation_id,),
+    )
+    if not links or links[0]["status"] != "authorized":
+        raise FinancialCircuitOpen("création GPU refusée sans allowance humaine autorisée")
+    return row
+
+
 class FinancialCircuitBreaker:
     def __init__(self, limits: BudgetLimits | None = None, *, now=time.time):
         self.limits = limits or BudgetLimits.from_env()
@@ -582,7 +607,11 @@ class GuardedComputeManager:
             raise FinancialCircuitOpen("réservation idempotente existante sans opération fournisseur")
 
         try:
-            operation = provider.create(selection.offer, request, idempotency_key=idempotency_key)
+            operation = provider.create(
+                selection.offer, request,
+                idempotency_key=idempotency_key,
+                reservation_id=int(reservation["id"]),
+            )
         except Exception as exc:
             # Après l'entrée dans create(), une erreur réseau peut être post-soumission. Fail closed :
             # on conserve le budget et exige une réconciliation, jamais une seconde création automatique.
