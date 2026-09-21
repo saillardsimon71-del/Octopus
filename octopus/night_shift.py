@@ -40,7 +40,11 @@ PYTHON_CANARY_PROTECTED = frozenset({
     "octopus/tasks.py",
     "octopus/paths.py",
     "octopus/__main__.py",
+    "octopus/__init__.py",
     "conftest.py",
+    "setup.py",
+    "sitecustomize.py",
+    "usercustomize.py",
 })
 
 
@@ -99,6 +103,8 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
                 raise NightShiftError(f"ticket #{index}: python_canary exige des fichiers .py: {path}")
             if path.startswith("tests/") or path.endswith("/conftest.py") or path == "conftest.py":
                 raise NightShiftError(f"ticket #{index}: tests existants non modifiables: {path}")
+            if path.endswith("/__init__.py") or path == "__init__.py":
+                raise NightShiftError(f"ticket #{index}: __init__.py protégé en python_canary: {path}")
             if path in PYTHON_CANARY_PROTECTED:
                 raise NightShiftError(f"ticket #{index}: noyau de confiance protégé: {path}")
         if path not in allowed_paths:
@@ -250,8 +256,19 @@ def _create_night_worktree(repository: Path, run_id: str) -> tuple[Path, str]:
     return target, branch
 
 
-def _fast_forward(night_worktree: Path, commit: str) -> None:
+def _fast_forward(
+        night_worktree: Path, commit: str, source_repo: Path | None = None,
+        source_branch: str | None = None) -> None:
     current = _git(night_worktree, "rev-parse", "HEAD")
+    if source_repo is not None:
+        if not source_repo.is_dir() or not source_branch:
+            raise NightShiftError("source de commit isolé invalide")
+        _git(night_worktree, "fetch", "--no-tags", str(source_repo), source_branch)
+        fetched = _git(night_worktree, "rev-parse", "FETCH_HEAD")
+        if fetched != commit:
+            raise NightShiftError(
+                f"commit importé inattendu: attendu {commit[:12]}, obtenu {fetched[:12]}"
+            )
     parent = _git(night_worktree, "rev-parse", f"{commit}^")
     if parent != current:
         raise NightShiftError(
@@ -298,21 +315,16 @@ def run(
 
     plan = validate_plan(plan)
     ready = preflight(repository)
+    resolved_images = {}
     if plan["policy"] == "python_canary":
-        for image in sorted({ticket["test_sandbox_image"] for ticket in plan["tickets"][:max_tasks]}):
-            probe = subprocess.run(
-                ["docker", "image", "inspect", image],
-                cwd=ready["repository"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=30,
-            )
-            if probe.returncode:
-                raise NightShiftError(
-                    f"python_canary refuse de démarrer: image Docker absente: {image}"
-                )
+        try:
+            for image in sorted({ticket["test_sandbox_image"] for ticket in plan["tickets"][:max_tasks]}):
+                image_id, _ = dev_worker._docker_sandbox_probe(Path(ready["repository"]), image)
+                resolved_images[image] = image_id
+        except (dev_worker.DevWorkerError, OSError, subprocess.SubprocessError) as exc:
+            raise NightShiftError(f"python_canary refuse de démarrer: probe Docker réel échoué: {exc}") from exc
+        for ticket in plan["tickets"][:max_tasks]:
+            ticket["test_sandbox_image"] = resolved_images[ticket["test_sandbox_image"]]
     run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     report = {
         "run_id": run_id,
@@ -321,6 +333,7 @@ def run(
         "base_repository": ready["repository"],
         "base_head": ready["base_head"],
         "model": dev_worker.KILO_MODEL,
+        "sandbox_images": resolved_images,
         "max_tasks": max_tasks,
         "max_hours": max_hours,
         "max_failures": max_failures,
@@ -356,22 +369,6 @@ def run(
             [sys.executable, "-m", "pytest", "-q", target]
             for target in ticket["test_targets"]
         ]
-        baseline_output, baseline_green = dev_worker._run_tests(
-            night_worktree,
-            tests,
-            sandbox=ticket["test_sandbox"],
-            sandbox_image=ticket["test_sandbox_image"],
-        )
-        if not baseline_green:
-            report["tickets"].append({
-                "index": index,
-                "status": "baseline_tests_failed",
-                "goal": ticket["goal"],
-                "allowed_paths": ticket["allowed_paths"],
-                "baseline_output": baseline_output[-4000:],
-            })
-            stop_reason = "baseline_tests_failed"
-            break
         task_id = worker.enqueue(
             "octopus",
             "development.task",
@@ -389,6 +386,9 @@ def run(
                 "max_files_changed": ticket["max_files_changed"],
                 "max_lines_added": ticket["max_lines_added"],
                 "max_lines_deleted": ticket["max_lines_deleted"],
+                "strict_repository_preflight": plan["policy"] == "python_canary",
+                "require_baseline_oracle": plan["policy"] == "python_canary",
+                "python_canary_ast": plan["policy"] == "python_canary",
                 "allow_declarative_fallback": False,
             },
             priority=10_000,
@@ -426,7 +426,12 @@ def run(
             if not commit:
                 stop_reason = "missing_commit"
                 break
-            _fast_forward(night_worktree, commit)
+            _fast_forward(
+                night_worktree,
+                commit,
+                Path(str(output.get("worktree") or "")),
+                str(output.get("branch") or ""),
+            )
             entry["night_head"] = _git(night_worktree, "rev-parse", "HEAD")
             consecutive_failures = 0
         else:
