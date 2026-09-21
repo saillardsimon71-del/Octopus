@@ -33,10 +33,7 @@ PROTECTED_DOCS = {
     "AGENTS.md",
     "docs/ACCEPTANCE_GATES.md",
 }
-PYTHON_CANARY_ORACLES = {
-    "octopus/capabilities.py": ("tests/test_capabilities.py",),
-    "octopus/resources.py": ("tests/test_resources.py",),
-}
+PYTHON_CANARY_ORACLES = dev_worker.PYTHON_CANARY_ORACLES
 PYTHON_CANARY_ALLOWED = frozenset(PYTHON_CANARY_ORACLES)
 
 
