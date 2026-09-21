@@ -1137,13 +1137,18 @@ def _cleanup_docker_container(worktree: Path, container_name: str) -> None:
 
 def _run_tests(
         worktree: Path, tests: list[list[str]], *, sandbox: str = "host",
-        sandbox_image: str = DEFAULT_TEST_SANDBOX_IMAGE) -> tuple[str, bool]:
+        sandbox_image: str = DEFAULT_TEST_SANDBOX_IMAGE,
+        expected_image_id: str | None = None) -> tuple[str, bool]:
     outputs = []
     if sandbox == "docker":
-        image_id = _docker_image_id(worktree, sandbox_image)
         for command in tests:
+            image_id = _docker_image_id(worktree, sandbox_image)
+            if expected_image_id is not None and image_id.lower() != expected_image_id.lower():
+                raise DevWorkerError(
+                    f"image sandbox Docker modifiée depuis le pré-vol: attendu {expected_image_id}, obtenu {image_id}"
+                )
             container_name = f"octopus-t-{uuid.uuid4().hex[:12]}"
-            args = _docker_test_args(worktree, image_id, command, container_name=container_name)
+            args = _docker_test_args(worktree, sandbox_image, command, container_name=container_name)
             try:
                 result = _run(args, worktree, timeout=300)
             except subprocess.TimeoutExpired as exc:
@@ -1151,6 +1156,11 @@ def _run_tests(
                 raise DevWorkerError("sandbox Docker timeout; conteneur forcé à l'arrêt") from exc
             finally:
                 _cleanup_docker_container(worktree, container_name)
+            after_image_id = _docker_image_id(worktree, sandbox_image)
+            if expected_image_id is not None and after_image_id.lower() != expected_image_id.lower():
+                raise DevWorkerError(
+                    f"image sandbox Docker modifiée pendant les tests: attendu {expected_image_id}, obtenu {after_image_id}"
+                )
             combined = (result.stdout or "") + (result.stderr or "")
             if len(combined.encode("utf-8", errors="replace")) > 2_000_000:
                 raise DevWorkerError("sortie sandbox Docker trop volumineuse")
@@ -1234,6 +1244,7 @@ def _docker_sandbox_probe(base_dir: Path, image: str) -> tuple[str, str]:
 def _tool(
         action: dict, worktree: Path, tests: list[list[str]], tests_passed: bool, *,
         test_sandbox: str = "host", test_sandbox_image: str = DEFAULT_TEST_SANDBOX_IMAGE,
+        test_sandbox_image_id: str | None = None,
 ) -> tuple[str, bool, str | None]:
     name = action["action"]
     if name == "read":
@@ -1261,6 +1272,7 @@ def _tool(
     if name == "test":
         output, passed = _run_tests(
             worktree, tests, sandbox=test_sandbox, sandbox_image=test_sandbox_image,
+            expected_image_id=test_sandbox_image_id,
         )
         return output, passed, None
     if not tests_passed:
@@ -1701,6 +1713,9 @@ def development_task(ctx):
     ).strip()
     if not test_sandbox_image or len(test_sandbox_image) > 200:
         raise DevWorkerError("test_sandbox_image invalide")
+    expected_test_image_id = str(ctx.input.get("test_sandbox_image_id") or "").strip() or None
+    if expected_test_image_id is not None and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", expected_test_image_id) is None:
+        raise DevWorkerError("test_sandbox_image_id invalide")
     max_files_changed = _validate_positive_limit(
         ctx.input.get("max_files_changed"), "max_files_changed", maximum=20,
     )
@@ -1740,13 +1755,19 @@ def development_task(ctx):
         return _run_declarative_backend(ctx, goal, worktree, branch, tests, max_steps)
 
     effective_test_image = test_sandbox_image
+    effective_test_image_id: str | None = None
     if octopus_python_canary:
         trusted_image_id, _ = _docker_sandbox_probe(worktree, DEFAULT_TEST_SANDBOX_IMAGE)
+        if expected_test_image_id is not None and expected_test_image_id.lower() != trusted_image_id.lower():
+            raise DevWorkerError("image sandbox résolue différente du pré-vol night-shift")
         if test_sandbox_image.startswith("sha256:") and test_sandbox_image.lower() != trusted_image_id.lower():
             raise DevWorkerError("image sandbox résolue différente de l'image OCTOPUS approuvée")
-        effective_test_image = trusted_image_id
+        effective_test_image = DEFAULT_TEST_SANDBOX_IMAGE
+        effective_test_image_id = trusted_image_id
     elif test_sandbox == "docker":
-        effective_test_image = _docker_image_id(worktree, test_sandbox_image)
+        effective_test_image_id = _docker_image_id(worktree, test_sandbox_image)
+        if expected_test_image_id is not None and expected_test_image_id.lower() != effective_test_image_id.lower():
+            raise DevWorkerError("image sandbox résolue différente du pré-vol night-shift")
 
     baseline_signature: tuple[tuple[str, str], ...] | None = None
     if require_baseline_oracle:
@@ -1754,6 +1775,7 @@ def development_task(ctx):
         for baseline_attempt in range(2):
             baseline_output, baseline_green = _run_tests(
                 worktree, tests, sandbox=test_sandbox, sandbox_image=effective_test_image,
+                expected_image_id=effective_test_image_id,
             )
             signature = _pytest_oracle_signature(baseline_output)
             if not baseline_green or not signature or any(status != "PASSED" for status, _ in signature):
@@ -1768,7 +1790,7 @@ def development_task(ctx):
         ctx.emit("development.baseline", {
             "tests": len(baseline_signature),
             "sandbox": test_sandbox,
-            "image": effective_test_image if test_sandbox == "docker" else None,
+            "image": effective_test_image_id if test_sandbox == "docker" else None,
         })
 
     original_head = _git(worktree, "rev-parse", "HEAD")
@@ -1845,6 +1867,8 @@ def development_task(ctx):
                 test_output, tests_passed, _ = _tool(
                     {"action": "test"}, worktree, tests, False,
                     test_sandbox=test_sandbox, test_sandbox_image=effective_test_image,
+            test_sandbox_image_id=effective_test_image_id,
+                    test_sandbox_image_id=effective_test_image_id,
                 )
                 if tests_passed and baseline_signature is not None:
                     noop_signature = _pytest_oracle_signature(test_output)
@@ -1867,7 +1891,8 @@ def development_task(ctx):
                         "oracle_tests": len(baseline_signature or ()),
                         "post_oracle_tests": len(noop_signature if baseline_signature is not None else ()),
                         "test_sandbox": test_sandbox,
-                        "test_sandbox_image": effective_test_image if test_sandbox == "docker" else None,
+                        "test_sandbox_image": effective_test_image_id if test_sandbox == "docker" else None,
+                        "test_sandbox_image_ref": effective_test_image if test_sandbox == "docker" else None,
                         "final_text": _kilo_output_summary(kilo_output)["final_text"],
                         "self_policy": "product_ticket" if product_ticket else ("python_canary" if octopus_python_canary else "scoped_kilo"),
                         "deterministic_fixes": deterministic_fixes,
@@ -1903,6 +1928,7 @@ def development_task(ctx):
         test_output, tests_passed, _ = _tool(
             {"action": "test"}, worktree, tests, False,
             test_sandbox=test_sandbox, test_sandbox_image=effective_test_image,
+            test_sandbox_image_id=effective_test_image_id,
         )
         if tests_passed and baseline_signature is not None:
             post_signature = _pytest_oracle_signature(test_output)
@@ -1923,6 +1949,7 @@ def development_task(ctx):
             _, _, commit = _tool(
                 {"action": "commit", "message": commit_message}, worktree, tests, tests_passed,
                 test_sandbox=test_sandbox, test_sandbox_image=effective_test_image,
+            test_sandbox_image_id=effective_test_image_id,
             )
             result = {
                 "commit": commit,
@@ -1933,7 +1960,8 @@ def development_task(ctx):
                 "model": KILO_MODEL,
                 "changed_paths": changed_paths,
                 "test_sandbox": test_sandbox,
-                "test_sandbox_image": effective_test_image if test_sandbox == "docker" else None,
+                "test_sandbox_image": effective_test_image_id if test_sandbox == "docker" else None,
+                "test_sandbox_image_ref": effective_test_image if test_sandbox == "docker" else None,
                 "tests_passed": True,
                 "baseline_oracle_runs": 2 if baseline_signature is not None else 0,
                 "oracle_tests": len(baseline_signature or ()),
