@@ -33,10 +33,11 @@ PROTECTED_DOCS = {
     "AGENTS.md",
     "docs/ACCEPTANCE_GATES.md",
 }
-PYTHON_CANARY_ALLOWED = frozenset({
-    "octopus/capabilities.py",
-    "octopus/resources.py",
-})
+PYTHON_CANARY_ORACLES = {
+    "octopus/capabilities.py": ("tests/test_capabilities.py",),
+    "octopus/resources.py": ("tests/test_resources.py",),
+}
+PYTHON_CANARY_ALLOWED = frozenset(PYTHON_CANARY_ORACLES)
 
 
 def default_plan_path() -> Path:
@@ -100,8 +101,8 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
                 raise NightShiftError(f"ticket #{index}: fichier hors allowlist python_canary: {path}")
         if path not in allowed_paths:
             allowed_paths.append(path)
-    if policy == "python_canary" and len(allowed_paths) > 3:
-        raise NightShiftError(f"ticket #{index}: python_canary autorise au plus 3 fichiers source")
+    if policy == "python_canary" and len(allowed_paths) != 1:
+        raise NightShiftError(f"ticket #{index}: python_canary exige exactement un fichier source")
 
     targets_raw = raw.get("test_targets") or ["tests/test_dev_worker.py"]
     if not isinstance(targets_raw, list) or not targets_raw:
@@ -114,6 +115,17 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
         if not target.startswith("tests/") or not target.endswith(".py"):
             raise NightShiftError(f"ticket #{index}: cible pytest refusée: {value}")
         test_targets.append(value)
+
+    if policy == "python_canary":
+        required_targets = []
+        for source_path in allowed_paths:
+            for target in PYTHON_CANARY_ORACLES[source_path]:
+                if target not in required_targets:
+                    required_targets.append(target)
+        if test_targets != required_targets:
+            raise NightShiftError(
+                f"ticket #{index}: oracle python_canary attendu {required_targets}, reçu {test_targets}"
+            )
 
     max_steps = int(raw.get("max_steps", DEFAULT_MAX_STEPS))
     step_cap = 25 if policy == "docs_only" else 30
@@ -130,16 +142,21 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
 
     if policy == "python_canary":
         test_sandbox = "docker"
-        sandbox_image = str(
+        requested_image = str(
             raw.get("test_sandbox_image") or dev_worker.DEFAULT_TEST_SANDBOX_IMAGE
         ).strip()
-        max_files_changed = int(raw.get("max_files_changed", len(allowed_paths)))
-        max_lines_added = int(raw.get("max_lines_added", 160))
-        max_lines_deleted = int(raw.get("max_lines_deleted", 120))
-        if not 1 <= max_files_changed <= 3:
-            raise NightShiftError(f"ticket #{index}: max_files_changed doit être compris entre 1 et 3")
-        if not 1 <= max_lines_added <= 300 or not 1 <= max_lines_deleted <= 300:
-            raise NightShiftError(f"ticket #{index}: rayon de lignes python_canary trop large")
+        if requested_image != dev_worker.DEFAULT_TEST_SANDBOX_IMAGE:
+            raise NightShiftError(
+                f"ticket #{index}: image sandbox python_canary imposée: {dev_worker.DEFAULT_TEST_SANDBOX_IMAGE}"
+            )
+        sandbox_image = dev_worker.DEFAULT_TEST_SANDBOX_IMAGE
+        max_files_changed = int(raw.get("max_files_changed", 1))
+        max_lines_added = int(raw.get("max_lines_added", 80))
+        max_lines_deleted = int(raw.get("max_lines_deleted", 80))
+        if max_files_changed != 1:
+            raise NightShiftError(f"ticket #{index}: python_canary exige max_files_changed=1")
+        if not 1 <= max_lines_added <= 80 or not 1 <= max_lines_deleted <= 80:
+            raise NightShiftError(f"ticket #{index}: rayon de lignes python_canary trop large (maximum 80)")
     else:
         test_sandbox = "host"
         sandbox_image = dev_worker.DEFAULT_TEST_SANDBOX_IMAGE
