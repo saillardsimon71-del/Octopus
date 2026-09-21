@@ -32,7 +32,7 @@ def _load_configured_executors() -> None:
     from . import smtp_executor
     key = ("email", "send")
     if key not in _EXECUTORS and smtp_executor.configured():
-        smtp_executor.register(__import__(__name__, fromlist=["register_executor"]))
+        smtp_executor.register()
 
 
 def executors() -> list[tuple[str, str]]:
