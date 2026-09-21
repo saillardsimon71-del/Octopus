@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextvars
 import ipaddress
+import socket
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from urllib.parse import unquote, urlsplit
@@ -62,6 +63,32 @@ def _host_matches(host: str, domains) -> bool:
     return any(host == d or host.endswith("." + d) for d in domains)
 
 
+def _blocked_ip(ip: ipaddress._BaseAddress) -> bool:
+    mapped = getattr(ip, "ipv4_mapped", None)
+    ip = mapped or ip
+    return bool(
+        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+        or ip.is_multicast or ip.is_unspecified
+    )
+
+
+def _resolved_ips(host: str) -> list[ipaddress._BaseAddress]:
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise BrowseRefused(f"hôte non résolvable : {host}") from exc
+    resolved = []
+    for info in infos:
+        raw = str(info[4][0]).split("%", 1)[0]
+        try:
+            resolved.append(ipaddress.ip_address(raw))
+        except ValueError:
+            continue
+    if not resolved:
+        raise BrowseRefused(f"hôte non résolvable : {host}")
+    return resolved
+
+
 def classify(url: str) -> str:
     parts = urlsplit(url.strip())
     if parts.scheme not in ("http", "https"):
@@ -71,12 +98,7 @@ def classify(url: str) -> str:
         raise BrowseRefused("URL sans hôte")
     if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
         raise BrowseRefused(f"hôte local refusé : {host}")
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        ip = None
-    if ip is not None and (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-                           or ip.is_multicast or ip.is_unspecified):
+    if any(_blocked_ip(ip) for ip in _resolved_ips(host)):
         raise BrowseRefused(f"adresse locale ou privée refusée : {host}")
     return ACCOUNT if _host_matches(host, config.ACCOUNT_DOMAINS) else PUBLIC
 
