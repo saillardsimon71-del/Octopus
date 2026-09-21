@@ -94,6 +94,11 @@ def test_python_canary_requires_source_only_and_protects_trust_core():
         "tests/test_capabilities.py",
         "octopus/dev_worker.py",
         "octopus/night_shift.py",
+        "octopus/compute_finance.py",
+        "octopus/economy.py",
+        "octopus/video/service.py",
+        "agents/web_guard.py",
+        "ops/compute_watchdog.py",
         "octopus/__init__.py",
         "sitecustomize.py",
         "README.md",
@@ -107,6 +112,15 @@ def test_python_canary_requires_source_only_and_protects_trust_core():
                     "test_targets": ["tests/test_capabilities.py"],
                 }],
             })
+
+
+def test_python_canary_allowlist_includes_only_supervised_surfaces():
+    from octopus import night_shift
+
+    assert night_shift.PYTHON_CANARY_ALLOWED == {
+        "octopus/capabilities.py",
+        "octopus/resources.py",
+    }
 
 
 def test_python_canary_runner_passes_docker_and_radius_to_development_task(tmp_path, monkeypatch):
