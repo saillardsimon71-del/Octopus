@@ -7,6 +7,23 @@ from types import SimpleNamespace
 import pytest
 
 
+def product_contract():
+    return {
+        "version": 1,
+        "id": "product-tests-v1",
+        "artifact_type": "code",
+        "probe": {"kind": "none"},
+        "must": [
+            {
+                "id": "tests_green",
+                "fact": "tests.passed",
+                "op": "equals",
+                "expected": True,
+            }
+        ],
+    }
+
+
 def test_night_plan_is_docs_only_and_bounded():
     from octopus import night_shift
 
@@ -39,6 +56,7 @@ def test_product_ticket_accepts_wide_scoped_surface_and_real_oracles():
             "goal": "Build one coherent product surface.",
             "allowed_paths": allowed,
             "test_targets": ["tests/test_gui.py", "tests/test_gui_intelligence.py"],
+            "acceptance_contract": product_contract(),
             "max_steps": 30,
             "max_files_changed": 4,
             "max_lines_added": 4000,
@@ -58,6 +76,9 @@ def test_product_ticket_accepts_wide_scoped_surface_and_real_oracles():
     "octopus/dev_worker.py",
     "octopus/night_shift.py",
     "octopus/promotion.py",
+    "octopus/acceptance.py",
+    "octopus/acceptance_probe.py",
+    "docs/EVIDENCE_ACCEPTANCE.md",
     "octopus/compute_finance.py",
     "octopus/economy.py",
     "octopus/actions.py",
@@ -96,6 +117,7 @@ def test_product_ticket_uses_engine_radius_caps_not_canary_caps(override, messag
         "goal": "wide but bounded",
         "allowed_paths": [f"octopus/product_{i}.py" for i in range(20)],
         "test_targets": ["tests/test_gateway.py"],
+        "acceptance_contract": product_contract(),
         "max_steps": 30,
     }
     ticket.update(override)
@@ -115,6 +137,20 @@ def test_product_ticket_requires_explicit_test_oracle():
             "tickets": [{
                 "goal": "no weak default oracle",
                 "allowed_paths": ["agents/gui/workbench.py"],
+            }],
+        })
+
+
+def test_product_ticket_requires_explicit_acceptance_contract():
+    from octopus import night_shift
+
+    with pytest.raises(night_shift.NightShiftError, match="acceptance_contract explicite"):
+        night_shift.validate_plan({
+            "policy": "product_ticket",
+            "tickets": [{
+                "goal": "tests alone are not acceptance",
+                "allowed_paths": ["agents/gui/workbench.py"],
+                "test_targets": ["tests/test_gui.py"],
             }],
         })
 
@@ -470,6 +506,7 @@ def test_product_ticket_runner_passes_supervised_policy_to_development_task(tmp_
             "goal": "Redesign the GUI.",
             "allowed_paths": ["agents/gui/workbench.py", "agents/gui/intelligence.py"],
             "test_targets": ["tests/test_gui.py", "tests/test_gui_intelligence.py"],
+            "acceptance_contract": product_contract(),
             "max_steps": 30,
             "max_files_changed": 2,
             "max_lines_added": 1800,
@@ -530,6 +567,7 @@ def test_product_ticket_runner_passes_supervised_policy_to_development_task(tmp_
     assert result["status"] == "backlog_complete"
     task_input = captured["input"]
     assert task_input["self_modification_policy"] == "product_ticket"
+    assert task_input["acceptance_contract"] == product_contract()
     assert task_input["strict_repository_preflight"] is True
     assert task_input["require_baseline_oracle"] is True
     assert task_input["python_canary_ast"] is False

@@ -1050,10 +1050,14 @@ def test_octopus_product_ticket_allows_scoped_non_python_product_files(tmp_path)
 
 @pytest.mark.parametrize("change, message", [
     ({"allowed_paths": ["octopus/dev_worker.py"]}, "frontière de sécurité"),
+    ({"allowed_paths": ["octopus/acceptance.py"]}, "frontière de sécurité"),
+    ({"allowed_paths": ["octopus/acceptance_probe.py"]}, "frontière de sécurité"),
+    ({"allowed_paths": ["docs/EVIDENCE_ACCEPTANCE.md"]}, "frontière de sécurité"),
     ({"allowed_paths": ["agents/web_guard.py"]}, "frontière de sécurité"),
     ({"allowed_paths": ["agents/browser.py"]}, "frontière de sécurité"),
     ({"allowed_paths": ["agents/publish.py"]}, "frontière de sécurité"),
     ({"allowed_paths": ["docker/dev-sandbox.Dockerfile"]}, "frontière de sécurité"),
+    ({"allowed_paths": [".github/workflows/video-foundation.yml"]}, "frontière de sécurité"),
     ({"allowed_paths": ["tests/test_gui.py"]}, "oracles de test"),
     ({"test_sandbox": "host"}, "test_sandbox=docker"),
     ({"require_baseline_oracle": False}, "require_baseline_oracle"),
@@ -1385,6 +1389,146 @@ def test_development_task_can_use_docker_test_sandbox(tmp_path, monkeypatch):
     assert seen[0][2] == "sha256:fixed"
     assert result["output"]["test_sandbox_image"] == "sha256:fixed"
     assert result["output"]["test_sandbox_image_ref"] == "octopus-test-sandbox:py311"
+
+
+def test_product_ticket_requires_acceptance_contract_before_execution(tmp_path):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=True)
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "A product ticket must be judged by a contract.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "backend": "kilo",
+        "allowed_paths": ["calc.py"],
+        "self_modification_policy": "product_ticket",
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "failed"
+    assert "acceptance_contract explicite" in result["error"]
+
+
+def test_development_task_commits_only_after_acceptance_gate(tmp_path, monkeypatch):
+    from octopus import acceptance, dev_worker
+
+    repo = repository(tmp_path, passing=False)
+    evidence_root = tmp_path / "evidence-root"
+    monkeypatch.setattr(dev_worker.paths, "data_dir", lambda: evidence_root)
+
+    def fake_kilo(worktree, goal, tests, max_steps, prompt=None, allowed_paths=None):
+        (worktree / "calc.py").write_text("def answer():\n    return 2\n", encoding="utf-8")
+        return '{"type":"text","text":"implemented"}\n'
+
+    monkeypatch.setattr(dev_worker, "_run_kilo", fake_kilo)
+    contract = {
+        "version": 1,
+        "id": "calc-result-v1",
+        "artifact_type": "code",
+        "probe": {"kind": "none"},
+        "must": [
+            {
+                "id": "tests_green",
+                "fact": "tests.passed",
+                "op": "equals",
+                "expected": True,
+            },
+            {
+                "id": "changed_calc_only",
+                "fact": "git.changed_paths",
+                "op": "equals",
+                "expected": ["calc.py"],
+            },
+        ],
+    }
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "Make the deterministic result equal two.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "max_steps": 8,
+        "backend": "kilo",
+        "allowed_paths": ["calc.py"],
+        "acceptance_contract": contract,
+        "allow_declarative_fallback": False,
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "done"
+    output = result["output"]
+    assert output["gate_status"] == "ACCEPTED"
+    assert output["acceptance_contract_hash"] == acceptance.contract_hash(contract)
+    assert len(output["artifact_fingerprint_sha256"]) == 64
+    evidence_path = Path(output["evidence_path"])
+    assert evidence_path.is_file()
+    loaded = acceptance.verify_evidence_file(
+        evidence_path,
+        expected_sha256=output["evidence_sha256"],
+        expected_contract_hash=output["acceptance_contract_hash"],
+        expected_task_id=result["id"],
+    )
+    assert loaded["gate_decision"]["status"] == "ACCEPTED"
+    event_types = [event["type"] for event in tasks.events(task_id=result["id"], limit=100)]
+    assert "development.ready_for_evaluation" in event_types
+    assert "development.gate_decision" in event_types
+    assert event_types.index("development.gate_decision") < event_types.index("development.committed")
+
+
+def test_acceptance_probe_rejects_multiple_marked_payloads(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    monkeypatch.setattr(
+        dev_worker.acceptance,
+        "probe_command",
+        lambda contract: ["python", "-m", "octopus.acceptance_probe"],
+    )
+    monkeypatch.setattr(
+        dev_worker,
+        "_docker_image_id",
+        lambda *args, **kwargs: "sha256:" + "a" * 64,
+    )
+    monkeypatch.setattr(dev_worker, "_cleanup_docker_container", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        dev_worker,
+        "_run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=(
+                'OCTOPUS_EVIDENCE_JSON={"runtime":{"launched":true}}\n'
+                'OCTOPUS_EVIDENCE_JSON={"runtime":{"launched":false}}\n'
+            ),
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(dev_worker.DevWorkerError, match="plusieurs payloads"):
+        dev_worker._run_acceptance_probe(
+            tmp_path,
+            {"version": 1},
+            sandbox_image="octopus-test-sandbox:py311",
+            expected_image_id="sha256:" + "a" * 64,
+        )
+
+
+def test_docker_probe_args_keep_evidence_isolated(tmp_path):
+    from octopus import dev_worker
+
+    args = dev_worker._docker_probe_args(
+        tmp_path,
+        "octopus-test-sandbox:py311",
+        ["xvfb-run", "-a", "python", "-m", "octopus.acceptance_probe", "tk-navigation"],
+        container_name="probe-test",
+    )
+
+    assert ["--network", "none"] == args[args.index("--network"):args.index("--network") + 2]
+    assert "--read-only" in args
+    assert ["--cap-drop", "ALL"] == args[args.index("--cap-drop"):args.index("--cap-drop") + 2]
+    assert "type=bind,source=" in args[args.index("--mount") + 1]
+    assert "OCTOPUS_HOME=/tmp/octopus-state" in args
+    assert "PODALUX_ROOT=/tmp/podalux-state" in args
+    mount = args[args.index("--mount") + 1]
+    assert mount.endswith(",target=/workspace,readonly")
 
 
 def test_task_clone_is_independent_and_outside_source_repo(tmp_path):
