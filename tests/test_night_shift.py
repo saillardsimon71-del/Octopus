@@ -65,6 +65,7 @@ def test_product_ticket_accepts_wide_scoped_surface_and_real_oracles():
     "octopus/smtp_executor.py",
     "agents/web_guard.py",
     "agents/browser.py",
+    "agents/publish.py",
     "docker/dev-sandbox.Dockerfile",
     "tests/test_gui.py",
     ".env",
