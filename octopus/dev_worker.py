@@ -164,6 +164,7 @@ OCTOPUS_PRODUCT_PROTECTED_PATHS = OCTOPUS_SELF_PROTECTED_PATHS | frozenset({
     "octopus/smtp_executor.py",
     "agents/web_guard.py",
     "agents/browser.py",
+    "agents/publish.py",
     "docker/dev-sandbox.Dockerfile",
 })
 # Product tickets use the generic development-task radius. The concrete ticket still
