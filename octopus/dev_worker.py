@@ -133,6 +133,19 @@ KILO_TIMEOUT_S = 600
 KILO_TEST_FEEDBACK_CHARS = 4000
 KILO_MAX_PASSES = 3
 DEFAULT_TEST_SANDBOX_IMAGE = "octopus-test-sandbox:py311"
+PYTHON_CANARY_ORACLES = {
+    "octopus/capabilities.py": ("tests/test_capabilities.py",),
+    "octopus/resources.py": ("tests/test_resources.py",),
+}
+OCTOPUS_SELF_MARKERS = (
+    "octopus/dev_worker.py",
+    "octopus/night_shift.py",
+)
+OCTOPUS_SELF_PROTECTED_PATHS = frozenset({
+    "AGENTS.md",
+    "octopus/AGENTS.md",
+    "docs/ACCEPTANCE_GATES.md",
+})
 _RETRY_DELAY_RE = re.compile(r"try again in ([0-9]+(?:\.[0-9]+)?)\s*(?:s|seconds?)\b", re.IGNORECASE)
 
 _KILO_SENSITIVE_PATTERNS = (
@@ -153,6 +166,7 @@ _KILO_PROTECTED_PATTERNS = (
     ".git/**", "**/.git/**", ".kilo/**", "**/.kilo/**", ".kilocode/**", "**/.kilocode/**",
     "kilo.json", "kilo.jsonc", "opencode.json", "opencode.jsonc", "**/kilo.json", "**/kilo.jsonc",
     "**/opencode.json", "**/opencode.jsonc", "AGENTS.md", "**/AGENTS.md",
+    "docs/ACCEPTANCE_GATES.md",
 )
 
 
@@ -672,6 +686,89 @@ def _validate_allowed_paths(raw) -> list[str] | None:
         if normalized not in out:
             out.append(normalized)
     return out
+
+
+def _is_octopus_self_repository(repository: Path) -> bool:
+    root = repository.resolve()
+    return all((root / marker).is_file() for marker in OCTOPUS_SELF_MARKERS)
+
+
+def _pytest_targets(commands: list[list[str]]) -> list[str]:
+    targets = []
+    for command in commands:
+        targets.extend(arg for arg in command[3:] if not arg.startswith("-"))
+    return targets
+
+
+def _validate_octopus_self_modification_policy(
+        repository: Path, backend: str, allowed_paths: list[str] | None, tests: list[list[str]],
+        test_sandbox: str, test_sandbox_image: str, max_files_changed: int | None,
+        max_lines_added: int | None, max_lines_deleted: int | None,
+        strict_repository_preflight: bool, require_baseline_oracle: bool,
+        python_canary_ast: bool, allow_declarative_fallback: bool) -> bool:
+    """Fail closed for OCTOPUS modifying its own repository.
+
+    Returns True only for the tightly bounded Python-canary path.
+    """
+    if not _is_octopus_self_repository(repository):
+        return False
+    if backend != "kilo":
+        raise DevWorkerError("auto-modification OCTOPUS exige backend=kilo")
+    if not allowed_paths:
+        raise DevWorkerError("auto-modification OCTOPUS exige allowed_paths explicite")
+    if allow_declarative_fallback:
+        raise DevWorkerError("fallback declarative interdit pour auto-modification OCTOPUS")
+
+    protected = sorted(set(allowed_paths) & OCTOPUS_SELF_PROTECTED_PATHS)
+    if protected:
+        raise DevWorkerError("chemin de gouvernance protégé: " + ", ".join(protected))
+
+    python_paths = [path for path in allowed_paths if path.endswith(".py")]
+    unsupported = [
+        path for path in allowed_paths
+        if not path.endswith(".py") and not path.lower().endswith(".md")
+    ]
+    if unsupported:
+        raise DevWorkerError(
+            "auto-modification OCTOPUS limitée aux docs Markdown et surfaces Python approuvées: "
+            + ", ".join(unsupported)
+        )
+    if not python_paths:
+        return False
+
+    if len(allowed_paths) != 1 or len(python_paths) != 1:
+        raise DevWorkerError("python_canary OCTOPUS exige exactement un fichier Python")
+    source = python_paths[0]
+    expected_oracle = PYTHON_CANARY_ORACLES.get(source)
+    if expected_oracle is None:
+        raise DevWorkerError(f"surface Python non approuvée pour auto-modification OCTOPUS: {source}")
+    actual_targets = _pytest_targets(tests)
+    if actual_targets != list(expected_oracle):
+        raise DevWorkerError(
+            f"oracle Python attendu {list(expected_oracle)}, reçu {actual_targets}"
+        )
+    if test_sandbox != "docker":
+        raise DevWorkerError("auto-modification Python OCTOPUS exige test_sandbox=docker")
+    if (
+        test_sandbox_image != DEFAULT_TEST_SANDBOX_IMAGE
+        and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", test_sandbox_image) is None
+    ):
+        raise DevWorkerError("image sandbox Python OCTOPUS non approuvée")
+    if max_files_changed != 1:
+        raise DevWorkerError("auto-modification Python OCTOPUS exige max_files_changed=1")
+    for name, value in (
+        ("max_lines_added", max_lines_added),
+        ("max_lines_deleted", max_lines_deleted),
+    ):
+        if value is None or not 1 <= value <= 80:
+            raise DevWorkerError(f"auto-modification Python OCTOPUS exige {name} entre 1 et 80")
+    if not strict_repository_preflight:
+        raise DevWorkerError("auto-modification Python OCTOPUS exige strict_repository_preflight")
+    if not require_baseline_oracle:
+        raise DevWorkerError("auto-modification Python OCTOPUS exige require_baseline_oracle")
+    if not python_canary_ast:
+        raise DevWorkerError("auto-modification Python OCTOPUS exige python_canary_ast")
+    return True
 
 
 def _enforce_allowed_paths(changed_paths: list[str], allowed_paths: list[str] | None) -> None:
@@ -1387,9 +1484,17 @@ def development_task(ctx):
     strict_repository_preflight = bool(ctx.input.get("strict_repository_preflight", False))
     require_baseline_oracle = bool(ctx.input.get("require_baseline_oracle", False))
     python_canary_ast = bool(ctx.input.get("python_canary_ast", False))
-    allow_declarative_fallback = bool(ctx.input.get("allow_declarative_fallback", True))
+    allow_declarative_fallback = bool(ctx.input.get("allow_declarative_fallback", False))
+    if backend == "kilo" and allowed_paths is None:
+        raise DevWorkerError("backend=kilo exige allowed_paths explicite")
     if backend == "declarative" and allowed_paths is not None:
         raise DevWorkerError("allowed_paths exige backend=kilo")
+    octopus_python_canary = _validate_octopus_self_modification_policy(
+        repository, backend, allowed_paths, tests, test_sandbox, test_sandbox_image,
+        max_files_changed, max_lines_added, max_lines_deleted,
+        strict_repository_preflight, require_baseline_oracle,
+        python_canary_ast, allow_declarative_fallback,
+    )
 
     worktree, branch = _create_worktree(repository, ctx.id)
     _assert_safe_allowed_paths(worktree, allowed_paths)
@@ -1399,7 +1504,12 @@ def development_task(ctx):
         return _run_declarative_backend(ctx, goal, worktree, branch, tests, max_steps)
 
     effective_test_image = test_sandbox_image
-    if test_sandbox == "docker":
+    if octopus_python_canary:
+        trusted_image_id, _ = _docker_sandbox_probe(worktree, DEFAULT_TEST_SANDBOX_IMAGE)
+        if test_sandbox_image.startswith("sha256:") and test_sandbox_image.lower() != trusted_image_id.lower():
+            raise DevWorkerError("image sandbox résolue différente de l'image OCTOPUS approuvée")
+        effective_test_image = trusted_image_id
+    elif test_sandbox == "docker":
         effective_test_image = _docker_image_id(worktree, test_sandbox_image)
 
     baseline_signature: tuple[tuple[str, str], ...] | None = None
@@ -1498,6 +1608,7 @@ def development_task(ctx):
                         "changed_paths": [],
                         "noop": True,
                         "final_text": _kilo_output_summary(kilo_output)["final_text"],
+                        "self_policy": "python_canary" if octopus_python_canary else "scoped_kilo",
                     }
                     ctx.emit("development.noop", result)
                     return result
@@ -1561,6 +1672,7 @@ def development_task(ctx):
                 "test_sandbox": test_sandbox,
                 "test_sandbox_image": effective_test_image if test_sandbox == "docker" else None,
                 "oracle_tests": len(baseline_signature or ()),
+                "self_policy": "python_canary" if octopus_python_canary else "scoped_kilo",
             }
             ctx.emit("development.committed", result)
             return result
