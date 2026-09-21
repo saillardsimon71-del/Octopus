@@ -45,3 +45,8 @@ remotion/public/img/*/
 
 # Rushes telecharges par offre (regeneres par tools/fetch_broll.py)
 remotion/public/video/*/
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
