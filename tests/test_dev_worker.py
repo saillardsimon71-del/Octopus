@@ -799,6 +799,7 @@ def test_development_task_retries_kilo_after_diff_check_failure(tmp_path, monkey
         "goal": "Make the deterministic test pass.",
         "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
         "max_steps": 7,
+        "allowed_paths": ["calc.py"],
     })
 
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
@@ -818,6 +819,109 @@ def test_validate_allowed_paths_rejects_absolute_parent_and_sensitive_paths():
     for value in ([r"C:\\outside.py"], ["../outside.py"], [".env"]):
         with pytest.raises(dev_worker.DevWorkerError):
             dev_worker._validate_allowed_paths(value)
+
+
+def _octopus_self_repo(tmp_path):
+    repo = tmp_path / "octopus-self"
+    (repo / "octopus").mkdir(parents=True)
+    (repo / "tests").mkdir()
+    (repo / "docs").mkdir()
+    (repo / "octopus" / "dev_worker.py").write_text("# marker\n", encoding="utf-8")
+    (repo / "octopus" / "night_shift.py").write_text("# marker\n", encoding="utf-8")
+    (repo / "octopus" / "capabilities.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "tests" / "test_capabilities.py").write_text("def test_value():\n    assert True\n", encoding="utf-8")
+    return repo
+
+
+def _self_policy_kwargs(repo):
+    return {
+        "repository": repo,
+        "backend": "kilo",
+        "allowed_paths": ["octopus/capabilities.py"],
+        "tests": [[sys.executable, "-m", "pytest", "-q", "tests/test_capabilities.py"]],
+        "test_sandbox": "docker",
+        "test_sandbox_image": "octopus-test-sandbox:py311",
+        "max_files_changed": 1,
+        "max_lines_added": 20,
+        "max_lines_deleted": 20,
+        "strict_repository_preflight": True,
+        "require_baseline_oracle": True,
+        "python_canary_ast": True,
+        "allow_declarative_fallback": False,
+    }
+
+
+def test_octopus_self_policy_accepts_only_registered_python_canary(tmp_path):
+    from octopus import dev_worker
+
+    values = _self_policy_kwargs(_octopus_self_repo(tmp_path))
+
+    assert dev_worker._validate_octopus_self_modification_policy(**values) is True
+
+
+@pytest.mark.parametrize("change, message", [
+    ({"backend": "declarative"}, "backend=kilo"),
+    ({"allowed_paths": None}, "allowed_paths explicite"),
+    ({"allowed_paths": ["octopus/economy.py"]}, "surface Python non approuvée"),
+    ({"tests": [[sys.executable, "-m", "pytest", "-q", "tests/test_resources.py"]]}, "oracle Python attendu"),
+    ({"test_sandbox": "host"}, "test_sandbox=docker"),
+    ({"test_sandbox_image": "custom:latest"}, "image sandbox Python OCTOPUS non approuvée"),
+    ({"max_files_changed": 2}, "max_files_changed=1"),
+    ({"max_lines_added": 81}, "max_lines_added entre 1 et 80"),
+    ({"max_lines_deleted": None}, "max_lines_deleted entre 1 et 80"),
+    ({"strict_repository_preflight": False}, "strict_repository_preflight"),
+    ({"require_baseline_oracle": False}, "require_baseline_oracle"),
+    ({"python_canary_ast": False}, "python_canary_ast"),
+    ({"allow_declarative_fallback": True}, "fallback declarative interdit"),
+])
+def test_octopus_self_policy_rejects_python_bypasses(tmp_path, change, message):
+    from octopus import dev_worker
+
+    values = _self_policy_kwargs(_octopus_self_repo(tmp_path))
+    values.update(change)
+
+    with pytest.raises(dev_worker.DevWorkerError, match=message):
+        dev_worker._validate_octopus_self_modification_policy(**values)
+
+
+def test_octopus_self_policy_allows_scoped_docs_but_protects_governance(tmp_path):
+    from octopus import dev_worker
+
+    repo = _octopus_self_repo(tmp_path)
+    values = _self_policy_kwargs(repo)
+    values.update(
+        allowed_paths=["docs/CURRENT_STATE.md"],
+        tests=[[sys.executable, "-m", "pytest", "-q", "tests/test_capabilities.py"]],
+        test_sandbox="host",
+        max_files_changed=None,
+        max_lines_added=None,
+        max_lines_deleted=None,
+        strict_repository_preflight=False,
+        require_baseline_oracle=False,
+        python_canary_ast=False,
+    )
+    assert dev_worker._validate_octopus_self_modification_policy(**values) is False
+
+    values["allowed_paths"] = ["docs/ACCEPTANCE_GATES.md"]
+    with pytest.raises(dev_worker.DevWorkerError, match="gouvernance protégé"):
+        dev_worker._validate_octopus_self_modification_policy(**values)
+
+
+def test_development_task_kilo_requires_explicit_write_scope(tmp_path, monkeypatch):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path, passing=True)
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo),
+        "goal": "No implicit write scope.",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "backend": "kilo",
+    })
+
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+
+    assert result["status"] == "failed"
+    assert "allowed_paths explicite" in result["error"]
 
 
 def test_development_task_rejects_kilo_change_outside_allowed_paths(tmp_path, monkeypatch):
@@ -866,6 +970,7 @@ def test_development_task_disables_declarative_fallback_when_requested(tmp_path,
         "goal": "Make the deterministic test pass.",
         "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
         "backend": "kilo",
+        "allowed_paths": ["calc.py"],
         "allow_declarative_fallback": False,
     })
 
@@ -1192,6 +1297,7 @@ def test_development_task_uses_kilo_then_validates_tests_and_commits(tmp_path, m
         "goal": "Make the deterministic test pass.",
         "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
         "max_steps": 7,
+        "allowed_paths": ["calc.py"],
     })
 
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
@@ -1236,6 +1342,8 @@ def test_development_task_falls_back_only_when_kilo_left_worktree_clean(tmp_path
         "goal": "Make the deterministic test pass.",
         "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
         "max_steps": 3,
+        "allowed_paths": ["calc.py"],
+        "allow_declarative_fallback": True,
     })
 
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
@@ -1262,6 +1370,7 @@ def test_development_task_does_not_fallback_after_kilo_modification(tmp_path, mo
         "repository": str(repo),
         "goal": "Make the deterministic test pass.",
         "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "allowed_paths": ["calc.py"],
     })
 
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
@@ -1290,6 +1399,7 @@ def test_development_task_rejects_commit_created_by_kilo(tmp_path, monkeypatch):
         "repository": str(repo),
         "goal": "Make the deterministic test pass.",
         "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "allowed_paths": ["calc.py"],
     })
 
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
@@ -1314,6 +1424,7 @@ def test_development_task_rejects_forbidden_kilo_path(tmp_path, monkeypatch):
         "repository": str(repo),
         "goal": "Make the deterministic test pass.",
         "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "allowed_paths": ["calc.py"],
     })
 
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
@@ -1339,6 +1450,7 @@ def test_development_task_does_not_commit_when_kilo_tests_fail(tmp_path, monkeyp
         "repository": str(repo),
         "goal": "Make the deterministic test pass.",
         "tests": [[sys.executable, "-m", "pytest", "-q", "test_calc.py"]],
+        "allowed_paths": ["calc.py"],
     })
 
     result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
