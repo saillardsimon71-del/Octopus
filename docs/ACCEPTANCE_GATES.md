@@ -7,6 +7,39 @@ Une étape n'est pas DONE parce qu'un fichier existe, qu'une IA dit « terminé 
 
 Chaque gate exige une preuve, des tests, un état persistant et le scénario d'échec pertinent.
 
+## Fondation transversale — Evidence → Contract → Gate
+
+Pour les `product_ticket`, des tests verts ne suffisent plus à prouver le résultat produit.
+
+La chaîne cible est :
+
+```text
+mission
+→ AcceptanceContract immuable
+→ builder
+→ ready_for_evaluation
+→ EvidenceBundle produit hors du worktree du builder
+→ GateDecision déterministe
+→ ACCEPTED / REJECTED / UNCERTAIN
+→ commit/promotion uniquement après ACCEPTED
+```
+
+Règles de gouvernance :
+
+- le builder peut lire le contrat mais ne peut pas modifier le gate, son probe, le contrat de gouvernance ou les oracles ;
+- l'evidence est liée au hash du contrat, à la tâche et à l'empreinte SHA-256 de l'artefact évalué ;
+- la promotion doit vérifier le checksum de l'evidence et rejouer le gate sur le commit final ;
+- `REJECTED` fournit des critères échoués à la passe de correction suivante ;
+- `UNCERTAIN` échoue fermé : absence de preuve ≠ succès ;
+- un futur reviewer vision fournira de l'evidence supplémentaire mais ne pourra pas remplacer les assertions déterministes ;
+- le capability registry futur restera une connaissance apprenable ; l'autorité du gate reste gouvernée.
+
+Premier cas de régression obligatoire : le gate doit rejeter automatiquement l'ancienne GUI lorsqu'elle
+expose `Intelligence` dans la navigation primaire alors que le contrat impose exactement
+`Home / Operate / Build / Review`, et il doit détecter un échec de lancement runtime.
+
+La conception détaillée vit dans `docs/EVIDENCE_ACCEPTANCE.md`.
+
 ## G0 — Dépôt et reprise fiables
 
 DONE si :
