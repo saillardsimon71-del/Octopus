@@ -1,187 +1,103 @@
 # État actuel d'OCTOPUS
 
-**Date de mise à jour : 21 septembre 2026**  
-**Document de référence pour la reprise.**
+**Date de mise à jour : 21 septembre 2026**
 
-## 1. Git / intégration
+## 1. Référence Git
 
-Branche de référence : main.
-
-HEAD vérifié au moment de cette mise à jour :
+`main` vérifié :
 
 ~~~text
-951d398272ee9e13c1c3c1bf7775de97a5f41fb0
+cd8a3b315d6d000580b1674013880030b11ec206
 ~~~
 
-Ce HEAD contient la fusion de la PR **#38 — businesses as fourth supervised Python canary surface**.
+Ce HEAD contient la promotion du quatrième canari Python supervisé via la PR **#42**.
 
 Aucune PR n'était ouverte juste après cette fusion.
 
-Les protections GitHub restent actives : les PR récentes ont exigé trois checks avant merge :
+## 2. Phase plomberie : TERMINÉE
 
-- targeted-tests
-- contract-and-worker
-- local-browser-and-control-plane
+Les quatre surfaces supervisées ont maintenant passé un canari réel, une vérification Git indépendante et une promotion via PR :
 
-Le statut Vercel externe peut échouer sur une limite de build ; il n'est pas un check requis OCTOPUS.
+1. `octopus/capabilities.py`
+2. `octopus/resources.py`
+3. `octopus/connectors.py`
+4. `octopus/businesses.py`
 
-## 2. Vision
+Dernier run :
 
-OCTOPUS est un moteur local d'activités autonomes orienté vers des résultats économiques observés :
+- run : `20260921-144425-9ac816`
+- policy : `python_canary`
+- status : `backlog_complete`
+- modèle : `kilo/stepfun/step-3.7-flash:free`
+- sandbox : Docker
+- oracle : 8 tests
+- `git_verified: true`
+- un seul fichier modifié
+- diff : +5 / -1
+- PR #42 : checks requis verts puis merge
 
-~~~text
-ressources réelles
-→ objectifs / hypothèses / expériences
-→ agents + outils contrôlés
-→ action dans le monde réel
-→ preuves / métriques observées
-→ ledger / décision / réinvestissement
-→ nouveau cycle
-~~~
+La généralisation du self-development est considérée **suffisante pour V1**.
 
-La contrainte économique principale reste le **cash réellement encaissé**, puis marge, récurrence, profit et autonomie.
+Ne pas ajouter de nouvelles surfaces canary juste pour augmenter la couverture. Les modules sensibles ne sont modifiés que lorsqu'un besoin produit concret l'exige.
 
-## 3. Frontières déjà établies
+## 3. Nettoyage legacy
 
-- LLM : routage centralisé, profil normal free-first / zero-cost, aucun fallback payant implicite.
-- Finance : fail-closed ; compute metered, TTS/search distants et futurs connecteurs doivent déclarer leur coût et respecter les allowances.
-- Développement autonome : worker isolé, worktree dédié, tests déterministes, commits bornés, Kilo/Step 3.7 Flash free.
-- Night shift : rapports persistants, reprise, promotion gate et validation Git.
-- Python canary : Docker imposé, baseline oracle obligatoire, AST guard, preflight strict, 1 fichier source par ticket, rayon de diff borné, fallback déclaratif interdit.
+La PR #41 a supprimé :
 
-## 4. Canaris Python — état réel
+- `core/`
+- `businesses/short_video/`
 
-Trois surfaces ont déjà été exécutées avec succès en conditions réelles puis promues :
+Soit 33 fichiers / 616 lignes d'une ancienne architecture parallèle non utilisée.
 
-1. octopus/capabilities.py → oracle tests/test_capabilities.py
-2. octopus/resources.py → oracle tests/test_resources.py
-3. octopus/connectors.py → oracle tests/test_connectors.py
+Restent déclarés :
 
-Le canari réel connectors.py a passé :
+- `podalux` : encore relié aux handlers/runtime historiques actifs ;
+- `veille` : business OCTOPUS complet et testé ;
+- `studio` : namespace runtime du moteur vidéo, conservé tant que le Studio l'utilise.
 
-- run 20260921-121758-e06c18
-- policy python_canary
-- Docker octopus-test-sandbox:py311
-- 1 ticket, 1 tentative, 1 fichier modifié
-- AST guard + preflight strict
-- aucun fallback
-- promotion Git vérifiée
-- PR #37 mergée
+## 4. Phase active : première boucle économique réelle
 
-La quatrième surface est maintenant enregistrée sur main :
+La priorité est maintenant l'issue **#40 — Phase 2: close the first real economic loop**.
 
-4. octopus/businesses.py → oracle tests/test_businesses.py
-
-Plan :
-
-~~~text
-octopus/config/night_shift_python_businesses_canary_v1.json
-~~~
-
-**Preuve encore manquante : le vrai run local du canari businesses.**
-
-## 5. Seuil de sortie de la phase “plomberie”
-
-La plomberie générale n'a pas vocation à devenir un projet sans fin.
-
-Le seuil choisi est :
-
-~~~text
-businesses.py canary réel
-→ backlog_complete
-→ promotion git_verified
-→ diff limité à octopus/businesses.py
-→ oracle identique
-→ PR de promotion verte et mergée
-~~~
-
-Si ces conditions passent sans défaut structurel nouveau, la phase de généralisation du self-development est considérée **suffisante pour V1**.
-
-Il ne faut pas ajouter mécaniquement actions.py, economy.py, strategy.py, compute_finance.py, etc. comme canaris juste pour augmenter un compteur. Ces zones plus sensibles seront modifiées lorsqu'un besoin produit/business concret l'exige, avec leurs propres tests et frontières.
-
-## 6. Prochaine phase — preuves économiques
-
-Après le dernier canari businesses, la priorité quitte la plomberie et revient aux gates produit :
-
-### G6 — canal réel / publication / action
-
-Construire au moins un executor réel, idempotent, avec source externe persistée.
-
-### G7 — boucle économique réelle
-
-Faire une expérience complète :
+Chaîne exigée :
 
 ~~~text
 objectif
 → hypothèse
 → expérience
 → action réelle
-→ mesure observée
+→ preuve observée
 → ledger
 → evaluate_experiment
 → décision
 → prochaine action
 ~~~
 
-### Cash-in
-
-Le premier jalon commercial n'est pas “plus d'autonomie interne” mais :
+Premier jalon commercial :
 
 ~~~text
-au moins 1 euro réellement encaissé
+1 € réellement encaissé
 → source vérifiable
-→ ledger observed
-→ attribution à un business / canal / expérience
+→ écriture ledger observed
+→ attribution business / canal / expérience
 ~~~
 
-## 7. Ce qui reste hors de cette preuve
+## 5. Contraintes inchangées
 
-- G1 live : attestation du pool OmniRoute free-only.
-- G3/G4/G5 : compute GPU live, benchmark et coût réel vidéo.
-- G6/G7 : action/publication et expérience économique réellement fermée.
-- G8 : V1 exploitable de bout en bout.
+- zéro dépense implicite ;
+- aucune preuve `observed` sans source vérifiable ;
+- aucune donnée business inventée ;
+- accès `act` explicite pour un canal réel ;
+- actions externes idempotentes ;
+- secrets hors Git ;
+- changements petits et testés.
 
-Ces sujets doivent être traités selon leur valeur économique réelle, pas seulement selon l'ordre historique des travaux.
+## 6. Gates restant à fermer par preuve réelle
 
-## 8. Point de reprise immédiat
+- G1 live : attestation du pool OmniRoute free-only ;
+- G3/G4/G5 : compute GPU live / benchmark / coût vidéo ;
+- G6 : canal et action externes réels ;
+- G7 : expérience économique réelle fermée ;
+- G8 : V1 exploitable bout en bout.
 
-Sur le PC Windows :
-
-~~~powershell
-$WT = 'C:\Users\saill\.codex\worktrees\python-canary-prelaunch'
-$PY = 'C:\Users\saill\Projects\video-factory\.venv\Scripts\python.exe'
-
-Set-Location $WT
-
-git fetch origin
-git checkout --detach origin/main
-
-git log -1 --oneline
-git status --short
-
-& $PY -m octopus night-resume
-
-docker image inspect octopus-test-sandbox:py311 --format '{{.Id}}'
-
-& $PY -m pytest -q `
-  tests/test_night_shift.py `
-  tests/test_dev_worker.py `
-  tests/test_businesses.py
-
-if ($LASTEXITCODE -ne 0) {
-    throw "Tests locaux échoués - ne pas lancer le canari businesses."
-}
-
-& $PY -m octopus night-shift `
-  --repo . `
-  --plan octopus/config/night_shift_python_businesses_canary_v1.json `
-  --hours 1 `
-  --max-tasks 1 `
-  --max-failures 1
-~~~
-
-Ensuite : promotion gate, diff, push de la branche de promotion, PR, CI, merge.
-
-## 9. Règle de reprise
-
-Toujours vérifier l'état Git réel avant modification. Les fichiers sous docs/archive/ sont historiques. Le dépôt et ses tests priment sur toute ancienne conversation.
+La priorité produit est désormais G6/G7 et le premier cash-in, pas l'ajout de plomberie abstraite.
