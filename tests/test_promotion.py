@@ -105,13 +105,18 @@ def _night_repo(tmp_path):
     path.write_text("VALUE = 2\n", encoding="utf-8")
     subprocess.run(["git", "commit", "-qam", "canary"], cwd=repo, check=True)
     final = _git(repo, "rev-parse", "HEAD")
-    return repo, base, final
+
+    base_repo = tmp_path / "base"
+    subprocess.run(["git", "clone", "-q", str(repo), str(base_repo)], check=True)
+    subprocess.run(["git", "checkout", "-q", "--detach", base], cwd=base_repo, check=True)
+    return base_repo, repo, base, final
 
 
-def report_for_repo(repo, base, final):
+def report_for_repo(base_repo, repo, base, final):
     report = good_report()
     report["base_head"] = base
     report["final_head"] = final
+    report["base_repository"] = str(base_repo)
     report["night_worktree"] = str(repo)
     report["tickets"][0]["night_head"] = final
     report["tickets"][0]["result"]["output"]["commit"] = final
@@ -119,21 +124,22 @@ def report_for_repo(repo, base, final):
 
 
 def test_verify_git_accepts_exact_night_history(tmp_path):
-    repo, base, final = _night_repo(tmp_path)
-    report = report_for_repo(repo, base, final)
+    base_repo, repo, base, final = _night_repo(tmp_path)
+    report = report_for_repo(base_repo, repo, base, final)
     manifest = promotion.build_manifest(report)
 
     verified = promotion.verify_git(report, manifest)
 
     assert verified["git_verified"] is True
+    assert verified["base_repository"] == str(base_repo.resolve())
     assert verified["night_worktree"] == str(repo.resolve())
     assert verified["commits"] == [final]
     assert verified["changed_paths"] == ["octopus/resources.py"]
 
 
 def test_verify_git_rejects_reported_paths_that_do_not_match_diff(tmp_path):
-    repo, base, final = _night_repo(tmp_path)
-    report = report_for_repo(repo, base, final)
+    base_repo, repo, base, final = _night_repo(tmp_path)
+    report = report_for_repo(base_repo, repo, base, final)
     report["tickets"][0]["allowed_paths"] = ["octopus/capabilities.py"]
     report["tickets"][0]["result"]["output"]["changed_paths"] = ["octopus/capabilities.py"]
     manifest = promotion.build_manifest(report)
@@ -143,10 +149,26 @@ def test_verify_git_rejects_reported_paths_that_do_not_match_diff(tmp_path):
 
 
 def test_verify_git_rejects_dirty_or_advanced_worktree(tmp_path):
-    repo, base, final = _night_repo(tmp_path)
-    report = report_for_repo(repo, base, final)
+    base_repo, repo, base, final = _night_repo(tmp_path)
+    report = report_for_repo(base_repo, repo, base, final)
     manifest = promotion.build_manifest(report)
 
     (repo / "untracked.txt").write_text("dirty\n", encoding="utf-8")
     with pytest.raises(promotion.PromotionError, match="non propre"):
+        promotion.verify_git(report, manifest)
+
+
+def test_verify_git_rejects_stale_base_repository(tmp_path):
+    base_repo, repo, base, final = _night_repo(tmp_path)
+    report = report_for_repo(base_repo, repo, base, final)
+    manifest = promotion.build_manifest(report)
+
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=base_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=base_repo, check=True)
+    marker = base_repo / "stale.txt"
+    marker.write_text("advance\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=base_repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "advance"], cwd=base_repo, check=True)
+
+    with pytest.raises(promotion.PromotionError, match="HEAD base_repository différent"):
         promotion.verify_git(report, manifest)
