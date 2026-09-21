@@ -194,6 +194,7 @@ def build_evidence_bundle(
         raise AcceptanceError("artifacts doit être une liste")
     return {
         "schema_version": SCHEMA_VERSION,
+        "producer": "octopus.acceptance.gate",
         "task_id": task_id,
         "attempt": attempt,
         "contract_id": normalized["id"],
@@ -318,6 +319,11 @@ def evidence_bytes(bundle: dict) -> bytes:
 
 
 def persist_evidence(root: Path, bundle: dict) -> tuple[Path, str]:
+    """Persist one immutable, content-addressed evidence record.
+
+    A rerun producing identical bytes is idempotent. Different evidence for the same
+    task/attempt/contract gets a different path instead of overwriting history.
+    """
     root = Path(root).resolve()
     task_id = int(bundle["task_id"])
     attempt = int(bundle["attempt"])
@@ -326,10 +332,22 @@ def persist_evidence(root: Path, bundle: dict) -> tuple[Path, str]:
         raise AcceptanceError("contract_hash invalide dans evidence bundle")
     directory = root / "acceptance-evidence" / f"task-{task_id}"
     directory.mkdir(parents=True, exist_ok=True)
-    target = directory / f"attempt-{attempt}-{contract_sha[:12]}.json"
     payload = evidence_bytes(bundle)
-    target.write_bytes(payload)
-    return target, hashlib.sha256(payload).hexdigest()
+    payload_sha = hashlib.sha256(payload).hexdigest()
+    target = directory / (
+        f"attempt-{attempt}-{contract_sha[:12]}-{payload_sha[:16]}.json"
+    )
+    try:
+        with target.open("xb") as handle:
+            handle.write(payload)
+    except FileExistsError:
+        try:
+            existing = target.read_bytes()
+        except OSError as exc:
+            raise AcceptanceError(f"evidence existante illisible: {exc}") from exc
+        if existing != payload:
+            raise AcceptanceError("collision de chemin evidence: contenu différent")
+    return target, payload_sha
 
 
 def verify_evidence_file(
@@ -348,8 +366,14 @@ def verify_evidence_file(
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise AcceptanceError(f"evidence illisible: {exc}") from exc
     actual_sha = hashlib.sha256(payload).hexdigest()
+    if _SHA256_RE.fullmatch(str(expected_sha256)) is None:
+        raise AcceptanceError("checksum evidence attendu invalide")
     if actual_sha != expected_sha256:
         raise AcceptanceError("checksum evidence différent du rapport")
+    if bundle.get("schema_version") != SCHEMA_VERSION:
+        raise AcceptanceError("schema_version evidence invalide")
+    if bundle.get("producer") != "octopus.acceptance.gate":
+        raise AcceptanceError("producteur evidence non fiable")
     if bundle.get("contract_hash") != expected_contract_hash:
         raise AcceptanceError("contract_hash evidence différent du rapport")
     if expected_task_id is not None and bundle.get("task_id") != expected_task_id:
@@ -357,6 +381,8 @@ def verify_evidence_file(
     decision = bundle.get("gate_decision")
     if not isinstance(decision, dict) or decision.get("status") not in GATE_STATUSES:
         raise AcceptanceError("gate_decision evidence invalide")
+    if decision.get("contract_hash") != expected_contract_hash:
+        raise AcceptanceError("gate_decision liée à un autre contrat")
     if expected_gate_status is not None and decision.get("status") != expected_gate_status:
         raise AcceptanceError("gate_status evidence différent du rapport")
     if expected_artifact_fingerprint is not None:
