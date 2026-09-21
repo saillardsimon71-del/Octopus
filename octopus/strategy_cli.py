@@ -177,7 +177,10 @@ def run_economy(args) -> int:
                 print(f"#{a['id']:<5} {a['status']:9} canal #{a['channel_id']} {a['action']}  {a['reason'] or ''}")
         elif cmd == "act":
             from . import actions
-            payload = json.loads(args.payload)
+            try:
+                payload = json.loads(args.payload)
+            except json.JSONDecodeError as exc:
+                raise strategy.StrategyError(f"--payload JSON invalide : {exc.msg}") from exc
             if not isinstance(payload, dict):
                 raise strategy.StrategyError("--payload doit être un objet JSON")
             result = actions.propose(
