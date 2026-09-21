@@ -24,6 +24,9 @@ class BrowserTool:
 
     def __init__(self, headless: bool = False, profile_dir: Path | None = None, persistent: bool = True,
                  guard=None):
+        # BrowserTool is also used by the generic OCTOPUS action executor. Do not assume
+        # the historical Podalux bootstrap has already created its compatibility tables.
+        db.init_db()
         self.headless = headless
         self.guard = guard
         self.blocked: list[str] = []
