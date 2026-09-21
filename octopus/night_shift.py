@@ -37,6 +37,30 @@ PYTHON_CANARY_ORACLES = dev_worker.PYTHON_CANARY_ORACLES
 PYTHON_CANARY_ALLOWED = frozenset(PYTHON_CANARY_ORACLES)
 
 
+def stop_file() -> Path:
+    return paths.data_dir() / "NIGHT_SHIFT_STOP"
+
+
+def stop_requested() -> bool:
+    return stop_file().exists()
+
+
+def request_stop() -> Path:
+    target = stop_file()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("stop\n", encoding="utf-8")
+    return target
+
+
+def clear_stop() -> bool:
+    target = stop_file()
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def default_plan_path() -> Path:
     return Path(__file__).resolve().parent / "config" / "night_shift.json"
 
@@ -366,7 +390,7 @@ def run(
             if time.monotonic() - started >= max_hours * 3600:
                 stop_reason = "time_limit"
                 break
-            if (paths.data_dir() / "NIGHT_SHIFT_STOP").exists():
+            if stop_requested():
                 stop_reason = "kill_switch"
                 break
     
