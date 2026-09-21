@@ -159,6 +159,7 @@ def cmd_promotion(args) -> int:
     try:
         report = promotion.load_report(Path(args.report))
         manifest = promotion.build_manifest(report)
+        manifest = promotion.verify_git(report, manifest)
     except promotion.PromotionError as exc:
         print(f"promotion refusée: {exc}")
         return 2
