@@ -177,6 +177,8 @@ OCTOPUS_PRODUCT_PROTECTED_PATHS = OCTOPUS_SELF_PROTECTED_PATHS | frozenset({
     "agents/browser.py",
     "agents/publish.py",
     "docker/dev-sandbox.Dockerfile",
+    ".github/workflows/video-foundation.yml",
+    ".github/workflows/compute-finance-safety.yml",
     "docs/EVIDENCE_ACCEPTANCE.md",
 })
 # Product tickets use the generic development-task radius. The concrete ticket still
@@ -205,6 +207,7 @@ _KILO_PROTECTED_PATTERNS = (
     "kilo.json", "kilo.jsonc", "opencode.json", "opencode.jsonc", "**/kilo.json", "**/kilo.jsonc",
     "**/opencode.json", "**/opencode.jsonc", "AGENTS.md", "**/AGENTS.md",
     "docs/ACCEPTANCE_GATES.md", "docs/EVIDENCE_ACCEPTANCE.md",
+    ".github/workflows/**",
     "octopus/acceptance.py", "octopus/acceptance_probe.py",
 )
 
