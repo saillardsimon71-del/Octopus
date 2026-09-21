@@ -191,7 +191,7 @@ objectif
 
 avec aucune valeur inventée, coût complet attribué, source réelle, décision persistée et learning vu par ORBIT au cycle suivant.
 
-**État actuel : ~35 %.** Une boucle externe non commerciale a été fermée en live le 21/09/2026 : objectif → hypothèse → expérience → action HTTP externe → preuve observée → `evaluate_experiment` → décision persistée. Ce canari valide le transport réel et la chaîne de preuve, mais ne valide pas G7 : il manque encore un canal commercial réel, une mesure économique réelle et, pour le cash, une entrée de ledger effectivement encaissée.
+**État actuel : ~45 %.** Deux boucles externes non commerciales ont été fermées en live le 21/09/2026 : HTTPBin puis SMTP OVH réel. Le canari SMTP a prouvé `email:send` sur `smtp.mail.ovh.net:465` avec réception effective dans une boîte contrôlée, `source_ref` Message-ID, evidence `observed`, `evaluate_experiment=supports` et décision persistée. Ces preuves valident le transport réel et la chaîne de preuve, mais ne ferment pas G7 : il manque encore une action commerciale réelle, une mesure économique réelle et, pour le cash, une entrée de ledger effectivement encaissée.
 
 ## G8 — V1 OCTOPUS exploitable
 
@@ -237,7 +237,7 @@ Ce tableau est une estimation d'ingénierie, pas une moyenne mathématique.
 | G4 Benchmark GPU | 10 % | premiers runs comparables |
 | G5 <1¢ vidéo | 25 % | série réelle de 10 vidéos |
 | G6 Publication/analytics | 30 % | publication vidéo réelle + identifiant externe + analytics observées |
-| G7 Boucle économique réelle | 35 % | première action commerciale réelle + métrique économique observée + cash réel |
+| G7 Boucle économique réelle | 45 % | première action commerciale réelle + réponse/conversion observée + cash réel |
 | G8 V1 exploitable | **~55–60 % global** | fermer G1→G7 |
 
 La vision longue « entreprise autonome générique » reste autour de **30–35 %**, car les connecteurs réels, la publication, les analytics et la boucle de revenu restent à prouver.
