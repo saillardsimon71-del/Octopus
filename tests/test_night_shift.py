@@ -162,6 +162,30 @@ def test_python_canary_requires_source_only_and_protects_trust_core():
             })
 
 
+def test_python_canary_rejects_unrelated_oracle():
+    from octopus import night_shift
+
+    with pytest.raises(night_shift.NightShiftError, match="oracle python_canary attendu"):
+        night_shift.validate_plan({
+            "name": "weak-oracle",
+            "policy": "python_canary",
+            "tickets": [{
+                "goal": "Attempt to validate capabilities with an unrelated test.",
+                "allowed_paths": ["octopus/capabilities.py"],
+                "test_targets": ["tests/test_resources.py"],
+            }],
+        })
+
+
+def test_python_canary_oracles_are_bound_to_each_surface():
+    from octopus import night_shift
+
+    assert night_shift.PYTHON_CANARY_ORACLES == {
+        "octopus/capabilities.py": ("tests/test_capabilities.py",),
+        "octopus/resources.py": ("tests/test_resources.py",),
+    }
+
+
 def test_python_canary_allowlist_includes_only_supervised_surfaces():
     from octopus import night_shift
 
