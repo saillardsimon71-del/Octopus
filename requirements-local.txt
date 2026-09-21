@@ -16,4 +16,4 @@ faster-whisper>=1.2,<2
 numpy>=1.26,<3
 
 # Développement / tests
-pytest>=8,<9
+pytest>=9.0.3,<10
