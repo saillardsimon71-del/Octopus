@@ -133,11 +133,21 @@ class GPUAIClient:
         return min(offers, key=lambda offer: (offer.price_per_hour, not offer.instant_boot,
                                                offer.capacity_class != "secure", offer.offering_id))
 
-    def create(self, offer: ComputeOffer, request: ComputeRequest, *, idempotency_key: str) -> ComputeOperation:
+    def create(
+        self, offer: ComputeOffer, request: ComputeRequest, *,
+        idempotency_key: str, reservation_id: int | None = None,
+    ) -> ComputeOperation:
         if offer.provider != self.provider:
             raise GPUAIError(f"offre d'un autre fournisseur: {offer.provider}")
         if offer.price_per_hour > request.max_price_per_hour:
             raise GPUAIError("le prix de l'offre dépasse la limite demandée")
+        from .compute_finance import require_active_provider_reservation
+        require_active_provider_reservation(
+            reservation_id,
+            provider=self.provider,
+            idempotency_key=idempotency_key,
+            price_per_hour=offer.price_per_hour,
+        )
         payload: dict[str, Any] = {
             "gpu_type": offer.accelerator,
             "gpu_count": offer.gpu_count,
