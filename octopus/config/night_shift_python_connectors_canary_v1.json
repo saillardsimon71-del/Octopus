@@ -1,0 +1,28 @@
+{
+  "name": "python-canary-connectors-v1",
+  "policy": "python_canary",
+  "tickets": [
+    {
+      "goal": "In octopus/connectors.py, introduce one small private helper named _domain_description that returns exactly DOMAINS[domain]. Use it only in summary_line() for the two existing places that currently index DOMAINS directly. Preserve every public API, domain order, output text, failure behavior, probe behavior, and source-status semantic. Do not modify tests or any other file.",
+      "allowed_paths": [
+        "octopus/connectors.py"
+      ],
+      "test_targets": [
+        "tests/test_connectors.py"
+      ],
+      "max_steps": 16,
+      "acceptance_criteria": [
+        "_domain_description returns exactly DOMAINS[domain]",
+        "summary_line uses the helper only where it previously indexed DOMAINS",
+        "domain ordering and rendered text remain unchanged",
+        "no new import or module-level side effect is introduced",
+        "the connector oracle passes with the same PASSED node set as the baseline"
+      ],
+      "noop_allowed": false,
+      "test_sandbox_image": "octopus-test-sandbox:py311",
+      "max_files_changed": 1,
+      "max_lines_added": 16,
+      "max_lines_deleted": 16
+    }
+  ]
+}
