@@ -177,6 +177,32 @@ def test_python_canary_rejects_unrelated_oracle():
         })
 
 
+@pytest.mark.parametrize("overrides, message", [
+    ({"allowed_paths": ["octopus/capabilities.py", "octopus/resources.py"],
+      "test_targets": ["tests/test_capabilities.py", "tests/test_resources.py"]},
+     "exactement un fichier source"),
+    ({"test_sandbox_image": "custom:test"}, "image sandbox python_canary imposée"),
+    ({"max_files_changed": 2}, "max_files_changed=1"),
+    ({"max_lines_added": 81}, "maximum 80"),
+    ({"max_lines_deleted": 81}, "maximum 80"),
+])
+def test_python_canary_rejects_wider_execution_radius(overrides, message):
+    from octopus import night_shift
+
+    ticket = {
+        "goal": "bounded",
+        "allowed_paths": ["octopus/capabilities.py"],
+        "test_targets": ["tests/test_capabilities.py"],
+    }
+    ticket.update(overrides)
+    with pytest.raises(night_shift.NightShiftError, match=message):
+        night_shift.validate_plan({
+            "name": "bounded",
+            "policy": "python_canary",
+            "tickets": [ticket],
+        })
+
+
 def test_python_canary_oracles_are_bound_to_each_surface():
     from octopus import night_shift
 
