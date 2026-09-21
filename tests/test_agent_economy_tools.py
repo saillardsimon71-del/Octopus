@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 
 from agents import deepseek, runtime, web_guard
-from octopus import builtin_handlers, economy, journal, strategy, worker  # noqa: F401
+from octopus import actions, builtin_handlers, economy, journal, strategy, worker  # noqa: F401
 
 B = "atelier_test"
 
@@ -92,6 +92,15 @@ def test_economy_cli_round_trip(capsys, tmp_path):
     assert '"granted"' in capsys.readouterr().out
     assert main(["economy", "access", B, "1", "--status", "active", "--access", "act"]) == 0
     assert economy.channels(B)[0]["access"] == "act"
+    actions.register_executor(
+        "website", "ping",
+        lambda channel, payload: {"observation": "ping réel", "source_ref": "https://example.test/ping"},
+        cost_class="local", requires_idempotency=True,
+    )
+    assert main(["economy", "act", B, "1", "ping", "--payload", '{"ok":true}',
+                 "--idempotency-key", "cli-ping-1"]) == 0
+    executed = json.loads(capsys.readouterr().out)
+    assert executed["status"] == "executed"
     assert main(["economy", "actions", B]) == 0
 
 
