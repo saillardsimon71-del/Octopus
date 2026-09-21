@@ -49,6 +49,25 @@ def test_night_plan_rejects_unsafe_edit_scope(allowed_paths):
         night_shift.validate_plan(raw)
 
 
+def test_supervised_python_canary_v2_plan_is_valid_and_bounded():
+    from octopus import night_shift
+
+    path = Path(__file__).resolve().parents[1] / "octopus" / "config" / "night_shift_python_supervised_v2.json"
+    plan = night_shift.load_plan(path)
+
+    assert plan["name"] == "python-canary-supervised-v2"
+    assert plan["policy"] == "python_canary"
+    assert len(plan["tickets"]) == 3
+    for ticket in plan["tickets"]:
+        assert ticket["allowed_paths"] == ["octopus/capabilities.py"]
+        assert ticket["test_targets"] == ["tests/test_capabilities.py"]
+        assert ticket["test_sandbox"] == "docker"
+        assert ticket["max_files_changed"] == 1
+        assert ticket["max_lines_added"] <= 20
+        assert ticket["max_lines_deleted"] <= 20
+        assert ticket["noop_allowed"] is False
+
+
 def test_python_canary_requires_source_only_and_protects_trust_core():
     from octopus import night_shift
 
