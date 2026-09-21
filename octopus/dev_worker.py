@@ -772,23 +772,26 @@ def _enforce_diff_radius(
         raise DevWorkerError("rayon de modification dépassé: " + ", ".join(failures))
 
 
-_TEST_ENV_SECRET_MARKERS = (
-    "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "COOKIE", "SESSION", "AUTH",
-)
+_TEST_ENV_KEEP = frozenset({
+    "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC",
+    "TEMP", "TMP", "TMPDIR",
+    "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+    "PYTHONUTF8", "PYTHONIOENCODING",
+    "CI", "GITHUB_ACTIONS",
+})
 
 
 def _sanitized_test_env(home: str) -> dict[str, str]:
     env = {
         key: value
         for key, value in os.environ.items()
-        if not any(marker in key.upper() for marker in _TEST_ENV_SECRET_MARKERS)
+        if key.upper() in _TEST_ENV_KEEP
     }
     env["HOME"] = home
     env["USERPROFILE"] = home
     env["XDG_CONFIG_HOME"] = home
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    pytest_addopts = env.get("PYTEST_ADDOPTS", "").strip()
-    env["PYTEST_ADDOPTS"] = f"{pytest_addopts} -p no:cacheprovider".strip()
+    env["PYTEST_ADDOPTS"] = "-p no:cacheprovider"
     return env
 
 
