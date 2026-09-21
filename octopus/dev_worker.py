@@ -1867,7 +1867,6 @@ def development_task(ctx):
                 test_output, tests_passed, _ = _tool(
                     {"action": "test"}, worktree, tests, False,
                     test_sandbox=test_sandbox, test_sandbox_image=effective_test_image,
-            test_sandbox_image_id=effective_test_image_id,
                     test_sandbox_image_id=effective_test_image_id,
                 )
                 if tests_passed and baseline_signature is not None:
@@ -1949,7 +1948,7 @@ def development_task(ctx):
             _, _, commit = _tool(
                 {"action": "commit", "message": commit_message}, worktree, tests, tests_passed,
                 test_sandbox=test_sandbox, test_sandbox_image=effective_test_image,
-            test_sandbox_image_id=effective_test_image_id,
+                test_sandbox_image_id=effective_test_image_id,
             )
             result = {
                 "commit": commit,
