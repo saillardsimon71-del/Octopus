@@ -114,6 +114,27 @@ def test_devworker_rejects_paths_outside_worktree(tmp_path):
         resolve_path(root, "../secret.txt")
 
 
+@pytest.mark.parametrize("header", [
+    "rename from calc.py",
+    "rename to .forbidden/calc.py",
+    "copy from calc.py",
+    "copy to .forbidden/calc.py",
+    "old mode 100644",
+    "new mode 100755",
+    "new file mode 120000",
+    "deleted file mode 120000",
+    "GIT binary patch",
+])
+def test_devworker_rejects_unsupported_patch_headers(tmp_path, header):
+    from octopus.dev_worker import DevWorkerError, _check_patch_paths
+
+    root = tmp_path / "worktree"
+    root.mkdir()
+    patch = f"diff --git a/calc.py b/calc.py\n{header}\n"
+    with pytest.raises(DevWorkerError, match="en-tête de patch interdit"):
+        _check_patch_paths(root, patch)
+
+
 def test_devworker_rejects_unapproved_test_commands():
     from octopus.dev_worker import DevWorkerError, validate_test_commands
 
