@@ -320,7 +320,7 @@ def verify_git(report: dict, manifest: dict) -> dict:
         )
 
     if manifest["policy"] == "product_ticket":
-        from . import dev_worker
+        from . import acceptance, dev_worker
 
         protected = sorted(set(actual_paths) & dev_worker.OCTOPUS_PRODUCT_PROTECTED_PATHS)
         if protected:
