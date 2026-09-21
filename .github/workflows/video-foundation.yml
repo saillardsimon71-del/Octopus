@@ -33,63 +33,98 @@ jobs:
         run: docker run --rm octopus-test-sandbox:py311 python -m pytest --version
       - name: Verify sandbox Tk imports
         run: docker run --rm octopus-test-sandbox:py311 python -c "import tkinter, customtkinter; print('tk-sandbox-ok')"
-      - name: Prove evidence gate rejects current legacy primary navigation
+      - name: Prove evidence gate rejects frozen GUI regressions
         run: |
+          cat > ci_acceptance_bad_gui.py <<'PY'
+          import customtkinter as ctk
+
+          class RejectedNavigationWorkbench(ctk.CTk):
+              def __init__(self):
+                  super().__init__()
+                  self.nav_buttons = {
+                      name: object()
+                      for name in ["Home", "Operate", "Build", "Review", "Intelligence"]
+                  }
+
+          class CrashingShortcutWorkbench(ctk.CTk):
+              def __init__(self):
+                  super().__init__()
+                  self.nav_buttons = {
+                      name: object()
+                      for name in ["Home", "Operate", "Build", "Review"]
+                  }
+                  # Frozen reproduction of the real runtime failure discovered during
+                  # human review of the rejected GUI ticket.
+                  self.bind_all("<Control-Key-10>", lambda _event: None)
+          PY
           python - <<'PY'
           from pathlib import Path
           from octopus import dev_worker
 
-          contract = {
-              "version": 1,
-              "id": "ci-gui-regression-v1",
-              "artifact_type": "desktop_gui",
-              "probe": {
-                  "kind": "tk_navigation",
-                  "module": "agents.gui.intelligence",
-                  "class": "EntrepreneurialWorkbench",
-                  "attribute": "nav_buttons",
-              },
-              "must": [
-                  {
-                      "id": "runtime_launches",
-                      "fact": "runtime.launched",
-                      "op": "equals",
-                      "expected": True,
+          def contract_for(class_name):
+              return {
+                  "version": 1,
+                  "id": f"ci-gui-regression-{class_name}",
+                  "artifact_type": "desktop_gui",
+                  "probe": {
+                      "kind": "tk_navigation",
+                      "module": "ci_acceptance_bad_gui",
+                      "class": class_name,
+                      "attribute": "nav_buttons",
                   },
-                  {
-                      "id": "primary_nav_exact",
-                      "fact": "ui.primary_nav",
-                      "op": "equals",
-                      "expected": ["Home", "Operate", "Build", "Review"],
-                  },
-                  {
-                      "id": "no_intelligence_primary",
-                      "fact": "ui.primary_nav",
-                      "op": "not_contains",
-                      "expected": "Intelligence",
-                  },
-              ],
-          }
+                  "must": [
+                      {
+                          "id": "runtime_launches",
+                          "fact": "runtime.launched",
+                          "op": "equals",
+                          "expected": True,
+                      },
+                      {
+                          "id": "primary_nav_exact",
+                          "fact": "ui.primary_nav",
+                          "op": "equals",
+                          "expected": ["Home", "Operate", "Build", "Review"],
+                      },
+                      {
+                          "id": "no_intelligence_primary",
+                          "fact": "ui.primary_nav",
+                          "op": "not_contains",
+                          "expected": "Intelligence",
+                      },
+                  ],
+              }
+
           root = Path(".").resolve()
           image_id = dev_worker._docker_image_id(root, dev_worker.DEFAULT_TEST_SANDBOX_IMAGE)
-          result = dev_worker._run_acceptance_gate(
-              root,
-              contract,
-              task_id=0,
-              attempt=1,
-              tests_passed=True,
-              changed_paths=[],
-              sandbox_image=dev_worker.DEFAULT_TEST_SANDBOX_IMAGE,
-              expected_image_id=image_id,
-              persist=False,
+
+          def prove_rejected(class_name, required_failures):
+              result = dev_worker._run_acceptance_gate(
+                  root,
+                  contract_for(class_name),
+                  task_id=0,
+                  attempt=1,
+                  tests_passed=True,
+                  changed_paths=[],
+                  sandbox_image=dev_worker.DEFAULT_TEST_SANDBOX_IMAGE,
+                  expected_image_id=image_id,
+                  persist=False,
+              )
+              decision = result["decision"]
+              print(class_name, decision)
+              assert decision["status"] == "REJECTED", decision
+              failed = {item["id"] for item in decision["criteria"] if item["passed"] is False}
+              assert set(required_failures) <= failed, failed
+
+          prove_rejected(
+              "RejectedNavigationWorkbench",
+              {"primary_nav_exact", "no_intelligence_primary"},
           )
-          decision = result["decision"]
-          print(decision)
-          assert decision["status"] == "REJECTED", decision
-          failed = {item["id"] for item in decision["criteria"] if item["passed"] is False}
-          assert "primary_nav_exact" in failed, failed
-          assert "no_intelligence_primary" in failed, failed
+          prove_rejected(
+              "CrashingShortcutWorkbench",
+              {"runtime_launches"},
+          )
           PY
+          rm -f ci_acceptance_bad_gui.py
       - name: Run cloud, H3 and OmniRoute tests
         run: python -m pip install pytest && python -m pytest -q tests/test_video_*.py tests/test_omniroute.py tests/test_acceptance.py tests/test_dev_worker.py tests/test_night_shift.py tests/test_promotion.py tests/test_minimax_h3_cloud.py
 
