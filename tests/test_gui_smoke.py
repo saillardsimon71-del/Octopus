@@ -53,3 +53,24 @@ def test_workbench_opens_every_page_and_keeps_refreshing(isolated, monkeypatch):
         app.destroy()
     assert errors == []
     assert len(ticks) > before, "le rafraîchissement périodique s'est arrêté"
+
+
+@pytest.mark.parametrize("kind", ["doctor", "orca"])
+def test_late_background_result_after_leaving_system_page(monkeypatch, kind):
+    # Simule déterministement une réponse lente, sans lancer de sonde externe/thread réel.
+    monkeypatch.setattr(EntrepreneurialWorkbench, "_run_doctor", lambda self: None)
+    app = EntrepreneurialWorkbench()
+    try:
+        app._show_page("Système")
+        old_widget = app.system_checks if kind == "doctor" else app.orca_result
+        app._show_page("Cockpit")
+        assert not old_widget.winfo_exists()
+        setattr(app, "_system_busy" if kind == "doctor" else "_orca_busy", True)
+        result = ("doctor", [{"name": "fixture", "ok": True, "blocking": False, "detail": "offline"}]) \
+            if kind == "doctor" else ("orca", "fixture", "green")
+        app._background_results.put(result)
+        app._refresh()  # doit vider la réponse et programmer le prochain refresh, sans TclError
+        assert app._background_results.empty()
+        assert not getattr(app, "_system_busy" if kind == "doctor" else "_orca_busy")
+    finally:
+        app.destroy()

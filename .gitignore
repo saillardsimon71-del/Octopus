@@ -25,6 +25,8 @@ __pycache__/
 cycle_gui.log
 cycle_gui.err
 jobs/*.bak
+test_reports/*.log
+test_reports/pytest/
 
 # Secrets
 .env

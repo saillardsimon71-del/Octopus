@@ -1,127 +1,87 @@
-# Evidence → Contract → Gate
+# Evidence, contrat et autorité
 
-## Purpose
+## Rôle exact
 
-A development task is not successful because the builder says it is finished or because pytest is green.
-The builder produces a **candidate**. A protected evaluator must own the evidence and decide whether the
-candidate satisfies an immutable acceptance contract.
-
-This foundation intentionally stays small:
+Le builder produit un candidat. Un gate déterministe vérifie les assertions d'un contrat immuable.
+Ce mécanisme est un **filtre technique nécessaire**, pas une preuve indépendante de bon produit
+et encore moins de succès économique. `ACCEPTED` n'autorise aucune fusion sans revue humaine.
 
 ```text
-mission
-  -> AcceptanceContract
-  -> builder
-  -> ready_for_evaluation
-  -> EvidenceBundle
-  -> deterministic GateDecision
-  -> ACCEPTED / REJECTED / UNCERTAIN
-  -> commit + promotion only after ACCEPTED
+problème observé → development.task → AcceptanceContract
+ → candidat → tests → EvidenceBundle → GateDecision
+ → ACCEPTED / REJECTED / UNCERTAIN → revue humaine → promotion
+ → retour à la même mission → mesure avant/après
 ```
 
-## Trust boundary
+Les preuves commerciales restent dans `strategy_evidence` et les encaissements dans le ledger.
+Pas de deuxième moteur d'acceptation commerciale ou de nouveau registre d'autorités.
 
-The product builder may read the contract and modify only its declared `allowed_paths`.
-It cannot modify:
+## Plus petit noyau gouverné — responsabilités, pas nouveau package
 
-- `octopus/acceptance.py`
-- `octopus/acceptance_probe.py`
-- the self-development worker/promotion policy
-- the deterministic tests
-- this governance contract
+| Frontière | Implémentation existante |
+|---|---|
+| Droits d'agir, canal et accès ressource | `economy.add/update_channel`, `resources.update`, `actions.propose` |
+| Dépenses et plafonds | `economy`, `llm`/catalogue de politique, `compute_finance` et watchdog |
+| Exécution des effets externes | `actions`, `browser_actions`, `smtp_executor`, `agents/web_guard`/browser |
+| État durable et propriété d'exécution | `journal`, transactions/baux de `tasks`/`worker` |
+| Sémantique et provenance des preuves | `strategy`, `acceptance`, collecte dans `dev_worker` |
+| Modification/promotion du code et secrets candidat | allowlists/sandbox/environnement de `dev_worker`, `night_shift`, `promotion`, image et CI |
 
-Evidence is produced by the supervising process and written under `data/acceptance-evidence/`, outside
-the builder's isolated clone. Records are content-addressed and never overwritten: identical replay is
-idempotent, while different evidence for the same task/attempt/contract is appended under a different
-path. Each record identifies `octopus.acceptance.gate` as its producer and is checksum-bound to the
-task, contract, gate decision, and artifact fingerprint.
+Cette frontière est logique et ne correspond pas à six fichiers isolés. Elle dépend de la DB,
+du système hôte, de Python, de l'image approuvée et de leurs accès. Le code applicatif courant
+n'est pas une enclave de sécurité. Les chaînes `actor=human` sont des conventions d'API locale,
+pas une authentification : seules des personnes/processus autorisés doivent écrire la DB ou appeler ces API.
 
-The capability registry planned for later is **knowledge** and will remain untrusted input. Gate authority
-is **governed policy** and is not delegated to builders or dynamically discovered models.
+Scores de modèles, capabilities, prix observés, sources, prompts et performances sont des
+**connaissances**, jamais une permission d'envoyer, dépenser, accéder à un secret ou promouvoir.
+Le catalogue mélange encore politique et connaissances : le traiter comme gouverné, pas comme
+une surface d'apprentissage autonome. Aucun nouveau mécanisme d'autorité dynamique.
 
-## AcceptanceContract v1
+## Contrat et bundle existants
 
-The contract is JSON, versioned and canonicalized to a SHA-256 hash. A product ticket must provide it
-before Kilo starts. Its `must` rules are hard requirements. The initial deterministic operators are
-`equals`, `not_equals`, `contains`, `not_contains`, `set_equals`, `truthy`, and `falsy`.
-
-The first runtime probe is deliberately narrow: `tk_navigation`. It launches a Tk workbench under
-Docker/Xvfb, records whether initialization succeeds, and observes the primary navigation labels.
-
-Example:
+Contrat JSON version 1, canonicalisé/hashé ; `product_ticket` exige un contrat explicite avant Kilo.
+Chaque `must` a un identifiant et une assertion (`equals`, `not_equals`, `contains`, `not_contains`,
+`set_equals`, `truthy`, `falsy`). Probes disponibles : `none`, `tk_navigation`.
+Exemple minimal qui **ne prouve que le résultat des tests** :
 
 ```json
-{
-  "version": 1,
-  "id": "gui-primary-nav-v1",
-  "artifact_type": "desktop_gui",
-  "probe": {
-    "kind": "tk_navigation",
-    "module": "agents.gui.intelligence",
-    "class": "EntrepreneurialWorkbench",
-    "attribute": "nav_buttons"
-  },
-  "must": [
-    {
-      "id": "runtime_launches",
-      "fact": "runtime.launched",
-      "op": "equals",
-      "expected": true
-    },
-    {
-      "id": "primary_nav_exact",
-      "fact": "ui.primary_nav",
-      "op": "equals",
-      "expected": ["Home", "Operate", "Build", "Review"]
-    },
-    {
-      "id": "no_intelligence_primary",
-      "fact": "ui.primary_nav",
-      "op": "not_contains",
-      "expected": "Intelligence"
-    }
-  ]
-}
+{"version":1,"id":"tests-only","artifact_type":"code","probe":{"kind":"none"},
+ "must":[{"id":"tests-green","fact":"tests.passed","op":"equals","expected":true}]}
 ```
 
-This contract rejects both failures observed during the rejected GUI experiment:
+`REJECTED` : une assertion échoue. `UNCERTAIN` : fait manquant/incompatible sans échec certain.
+`ACCEPTED` : assertions connues satisfaites, dans les limites de leur observateur.
+Les bundles sont produits hors du clone candidat, append-only/content-addressed, liés à la tâche,
+au contrat et à l'empreinte de l'artefact. `promotion.verify_git` vérifie Git, le bundle, rejoue
+les tests et le gate ; il exige revue humaine et `auto_merge=false`.
 
-1. a Tk initialization exception such as the invalid `<Control-Key-10>` binding;
-2. a primary navigation that still exposes `Intelligence`.
+## Vérification adversariale et correction locale
 
-## Gate semantics
+La collecte fusionnait arbitrairement le JSON du probe dans les faits du contrôleur. Un candidat
+importé par le probe pouvait ainsi tenter de remplacer `tests.passed`, `git.changed_paths` ou
+`artifact.fingerprint_sha256`. Désormais seuls les namespaces `runtime` et `ui` du probe sont
+acceptés ; tout autre namespace provoque un refus. Les tests couvrent les trois écrasements et
+un namespace inconnu. Le marqueur stdout n'est **pas** une signature cryptographique.
 
-- `ACCEPTED`: every MUST has conclusive evidence and passes.
-- `REJECTED`: at least one MUST conclusively fails.
-- `UNCERTAIN`: no MUST is known to fail, but required evidence is missing/incompatible.
-- `WAITING_FOR_HUMAN`, `WAITING_FOR_RESOURCE`, `ABORTED_SAFE`: reserved states for the next layer.
+## Limites conservées volontairement
 
-A rejected deterministic gate may feed its failed criteria back to Kilo for another bounded pass. An
-uncertain gate fails closed; missing evidence is not treated as success.
+- `tk_navigation` importe le candidat et lit son attribut, par exemple `nav_buttons` : ce n'est
+  pas une inspection visuelle indépendante. Une liste déclarée peut différer de l'interface visible.
+- Le candidat partage le processus Python du probe et peut influencer son observateur ; la
+  restriction des namespaces ne rend pas `runtime`/`ui` indépendants ni infalsifiables.
+- Un hash prouve l'identité d'octets, pas la vérité, le besoin client ou la pertinence du contrat.
+- Les chemins protégés ne couvrent pas automatiquement toute la fermeture des dépendances.
+- Un oracle connu peut être optimisé ; des tests stables peuvent mesurer le mauvais objectif.
+- Une `source_ref` saisie à la main ou par un exécuteur n'est pas vérifiée indépendamment par le rapport.
+- Un exécuteur payant personnalisé peut encore mal gérer un timeout : le chemin générique libère
+  sa réservation sur exception. Ne pas activer de nouveau transport payant avant traitement explicite
+  des résultats ambigus ; le pilote conserve les actions humaines ou transports locaux existants.
 
-## EvidenceBundle
+Réponse proportionnée : pas d'auto-promotion, pas de nouvelles autorités, revue humaine du résultat
+réel et protections actuelles maintenues. Aucun chantier de sandbox/oracle universel dans cette session.
 
-The bundle records:
+## Ne pas étendre maintenant
 
-- schema version and trusted producer identity;
-- task and attempt;
-- contract id/hash;
-- deterministic test fact;
-- changed paths;
-- runtime/UI facts from trusted probes;
-- gate decision.
-
-The builder does not write this file.
-
-## Next extensions
-
-Do not add a Model Lab or arbitrary MCP installation before this foundation has production evidence.
-Extend the same structure one domain at a time:
-
-- web control plane: Playwright/DOM facts, screenshots, visual regression;
-- video: frames, duration, transcript/audio facts, QC;
-- business: observed analytics/payment facts;
-- self-development: runtime smoke and repository invariants.
-
-A future vision reviewer is an additional evidence source, not the authority. Deterministic L0 facts run
-first. Human/reviewer disagreements become calibration data later.
+Pas de Web Control Plane, Model Lab, nouveau reviewer automatique, MCP discovery ou acquisition
+de capabilities. Le prochain probe doit répondre à une régression constatée sur une mission utile,
+pas à la volonté de rendre le système d'évaluation plus impressionnant.

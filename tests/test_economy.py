@@ -213,9 +213,10 @@ def test_observed_metric_refutes_at_deadline_and_unverified_values_do_not_count(
     assert result["verdict"] == "refutes" and result["value"] == 1
 
 
-def test_deadline_without_any_measure_refutes_and_budget_exhaustion_stops():
+def test_missing_measure_is_inconclusive_but_observed_budget_exhaustion_stops():
     silent = _experiment(metric="inscrits", target_value=10, deadline_at=time.time() - 1)
-    assert economy.evaluate_experiment(B, silent)["verdict"] == "refutes"
+    # Une absence de mesure ne réfute pas une hypothèse : ancien comportement retiré.
+    assert economy.evaluate_experiment(B, silent)["verdict"] == "inconclusive"
     costly = _experiment(metric="cash_net:EUR", target_value=100, budget_limit=10, budget_currency="EUR")
     economy.record_cash(B, "out", 10, "EUR", "pub", nature="observed", created_by="human", source_ref="f",
                         experiment_id=costly)
@@ -272,6 +273,121 @@ def test_cycle_evaluates_running_experiments_and_reinvests_without_llm(transport
     status = economy.status(B)
     assert [e["id"] for e in status["running_experiments"]] == [waiting]
     assert status["cash"]["by_currency"]["EUR"]["net_observed"] == 20
+
+
+def _observation(experiment, metric, value, **fields):
+    return strategy.create("evidence", B, metric, created_by="human", source_type="manual_review",
+                           source_ref="test-fixture#observation", captured_at=time.time(), observation="fixture",
+                           experiment_id=experiment, metric=metric, value=value,
+                           **{"nature": "observed", **fields})
+
+
+def test_done_and_paid_do_not_prove_delivery_or_customer_success():
+    experiment = _experiment(metric="cash_net:EUR", target_value=50)
+    task = tasks.enqueue(B, "manual-work")
+    strategy.link(B, "experiment", experiment, "task", task, "executed_by")
+    claimed = tasks.claim("tester")
+    assert claimed["id"] == task
+    tasks.complete(task, "tester", {"done": True})
+    _cash_in(99, experiment_id=experiment)
+    result = economy.evaluate_experiment(B, experiment, apply=False)
+    assert result["verdict"] == "supports" and result["verdict_scope"] == "configured_metric_only"
+    report = result["outcomes"]
+    assert report["technical_completion"]["status"] == "done"
+    assert report["delivery"]["status"] == report["customer_acceptance"]["status"] == "unknown"
+    assert report["human_minutes"]["observed_total"] is None
+    # La catégorie historique vente n'est pas silencieusement reclassée.
+    assert report["contribution_by_currency"] == {}
+    assert strategy.get("experiment", experiment, B)["status"] == "running"
+
+
+def test_outcomes_latest_observed_retraction_and_human_time():
+    experiment = _experiment()
+    _observation(experiment, "delivery", 1, nature="unverified")
+    assert economy.experiment_outcomes(B, experiment)["delivery"]["status"] == "unknown"
+    first = _observation(experiment, "delivery", 1)
+    correction = _observation(experiment, "delivery", 0)
+    _observation(experiment, "customer_acceptance", 0)
+    _observation(experiment, "human_minutes:research", 12)
+    _observation(experiment, "human_minutes:research", 8)
+    removed = _observation(experiment, "human_minutes:verification", 4)
+    _observation(experiment, "human_minutes:production", 999, nature="unverified")
+    report = economy.experiment_outcomes(B, experiment)
+    assert report["delivery"]["status"] == "not_delivered"
+    assert report["customer_acceptance"]["status"] == "rejected"
+    assert report["human_minutes"]["observed_total"] == 24
+    for evidence in (correction, removed):
+        strategy.transition("evidence", evidence, B, "retracted", actor="human")
+    report = economy.experiment_outcomes(B, experiment)
+    assert report["delivery"]["evidence_id"] == first
+    assert report["human_minutes"] == {"observed_total": 20, "by_phase": {"research": 20}}
+    with pytest.raises(StrategyError):
+        economy.experiment_outcomes("another-business", experiment)
+
+
+def test_contribution_keeps_capital_estimates_refunds_and_currencies_separate():
+    experiment = _experiment()
+    for direction, amount, currency, category, nature in [
+        ("in", 99, "EUR", "customer_payment", "observed"),
+        ("out", 9, "EUR", "customer_refund", "observed"),
+        ("out", 10, "EUR", "variable_cost", "observed"),
+        ("in", 500, "EUR", "capital", "observed"),
+        ("in", 900, "EUR", "customer_payment", "unverified"),
+        ("in", 20, "USD", "customer_payment", "observed"),
+    ]:
+        economy.record_cash(B, direction, amount, currency, category, nature=nature, created_by="human",
+                            source_ref="test-ledger", experiment_id=experiment)
+    estimate = _observation(experiment, "cost_estimate:EUR", 30, nature="unverified")
+    report = economy.experiment_outcomes(B, experiment)
+    eur = report["contribution_by_currency"]["EUR"]
+    assert eur["recorded_contribution"] == 80
+    assert eur["customer_receipts_observed"] == 99
+    assert eur["customer_refunds_observed"] == 9
+    assert report["contribution_by_currency"]["USD"]["recorded_contribution"] is None
+    assert report["cost_estimates"][0]["id"] == estimate
+    assert report["cash_by_currency"]["EUR"]["in_unverified"] == 900
+
+
+def test_zero_budget_is_not_exhaustion_and_unverified_cash_is_not_observed_zero():
+    experiment = _experiment(metric="cash_net:EUR", target_value=0, budget_limit=0, budget_currency="EUR")
+    economy.record_cash(B, "in", 99, "EUR", "customer_payment", nature="unverified",
+                        created_by="human", experiment_id=experiment)
+    result = economy.evaluate_experiment(B, experiment)
+    assert result["value"] is None and result["verdict"] == "pending"
+
+
+def test_boolean_metric_uses_latest_observation_not_sum():
+    experiment = _experiment(metric="customer_acceptance", target_value=1, stop_value=0, deadline_at=1)
+    _observation(experiment, "customer_acceptance", 1)
+    _observation(experiment, "customer_acceptance", 0)
+    result = economy.evaluate_experiment(B, experiment, apply=False)
+    assert result["value"] == 0 and result["verdict"] == "refutes"
+    assert result["outcomes"]["customer_acceptance"]["status"] == "rejected"
+
+
+@pytest.mark.parametrize("metric", ["delivery", "customer_acceptance", "customer_use", "human_minutes:research"])
+def test_missing_reserved_measure_can_be_concluded_without_inventing_zero(metric):
+    experiment = _experiment(metric=metric, target_value=1, deadline_at=1)
+    result = economy.evaluate_experiment(B, experiment)
+    assert result["verdict"] == "inconclusive" and result["value"] is None
+    proof = strategy.get("evidence", result["evidence_id"], B)
+    assert proof["nature"] == "computed" and proof["value"] is None
+    assert economy.experiment_outcomes(B, experiment)["customer_acceptance"]["status"] == "unknown"
+
+
+@pytest.mark.parametrize("amount", [float("nan"), float("inf"), -float("inf"), True])
+def test_nonfinite_money_never_enters_ledger_or_allowances(amount):
+    with pytest.raises(StrategyError):
+        _cash_in(amount)
+    with pytest.raises(StrategyError):
+        economy.grant_allowance(B, amount, "EUR", granted_by="human", rationale="test")
+    assert economy.cash_summary(B) == {}
+
+
+def test_agent_cannot_grant_itself_act_during_channel_creation():
+    with pytest.raises(StrategyError, match="seul un humain"):
+        economy.add_channel(B, "email", "Canal", created_by="agent:ORBIT", access="act")
+    assert economy.channels(B) == []
 
 
 def test_drive_queues_one_budgeted_exploration_mission_without_prescribing_a_business_model(transport):

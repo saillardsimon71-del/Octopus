@@ -1,315 +1,94 @@
-# Gates d'acceptation OCTOPUS
+# Critères d'acceptation OCTOPUS
 
-**Date : 19/09/2026**  
-**But : remplacer les formulations vagues par des critères binaires et vérifiables.**
+## Deux questions distinctes
 
-Une étape n'est pas DONE parce qu'un fichier existe, qu'une IA dit « terminé » ou qu'un test isolé passe.
+1. **Technique** : le changement respecte-t-il son contrat, ses tests et les frontières gouvernées ?
+2. **Économique** : le travail a-t-il été livré, payé, accepté/utilisé et à quel coût humain/variable ?
 
-Chaque gate exige une preuve, des tests, un état persistant et le scénario d'échec pertinent.
+Un `ACCEPTED`, `task done` ou `evaluate_experiment=supports` ne répond jamais seul à la deuxième.
+Les anciens pourcentages de progression et l'ordre obligatoire GPU → vidéo → marché sont retirés :
+ils ne mesuraient pas la preuve économique et imposaient des dépendances inutiles au pilote manuel.
 
-## Fondation transversale — Evidence → Contract → Gate
+## G0 — Travail examinable
 
-Pour les `product_ticket`, des tests verts ne suffisent plus à prouver le résultat produit.
+- HEAD/main, branche, arbre et origine des observations connus.
+- Changements limités, tests réellement exécutés et diff relu.
+- Aucune donnée client ou secret commité ; revue avant toute fusion.
+- Les documents courants ne contredisent pas le code vérifié.
 
-La chaîne cible est :
+## G1/G2 — Permissions et argent
 
-```text
-mission
-→ AcceptanceContract immuable
-→ builder
-→ ready_for_evaluation
-→ EvidenceBundle produit hors du worktree du builder
-→ GateDecision déterministe
-→ ACCEPTED / REJECTED / UNCERTAIN
-→ commit/promotion uniquement après ACCEPTED
-```
+Ces protections survivent, mais une expérience sans LLM/compute n'attend pas un benchmark GPU.
 
-Règles de gouvernance :
+- LLM gratuits par défaut, attestation du pool avant usage ; aucun fallback payant implicite.
+- Accès `act` accordé par un humain ; knowledge n'accorde pas de droits.
+- Dépenses explicites et bornées dans l'unique ledger/allowances.
+- Compute provisionné via `GuardedComputeManager`, watchdog indépendant.
+- RunPod/H3 legacy restent sous opt-in explicite et allowance ; pas de nouveau paid path.
+- Une soumission ambiguë ne doit pas être rejouée automatiquement comme si elle avait échoué.
+- Tests hors ligne ne prouvent ni gratuité réelle d'un fournisseur ni disponibilité live.
 
-- le builder peut lire le contrat mais ne peut pas modifier le gate, son probe, le contrat de gouvernance ou les oracles ;
-- l'evidence est liée au hash du contrat, à la tâche et à l'empreinte SHA-256 de l'artefact évalué ;
-- la promotion doit vérifier le checksum de l'evidence et rejouer le gate sur le commit final ;
-- `REJECTED` fournit des critères échoués à la passe de correction suivante ;
-- `UNCERTAIN` échoue fermé : absence de preuve ≠ succès ;
-- un futur reviewer vision fournira de l'evidence supplémentaire mais ne pourra pas remplacer les assertions déterministes ;
-- le capability registry futur restera une connaissance apprenable ; l'autorité du gate reste gouvernée.
+## G3–G5 — Runbooks compute/vidéo conditionnels, gelés
 
-Premier cas de régression obligatoire : le gate doit rejeter automatiquement l'ancienne GUI lorsqu'elle
-expose `Intelligence` dans la navigation primaire alors que le contrat impose exactement
-`Home / Operate / Build / Review`, et il doit détecter un échec de lancement runtime.
+Lifecycle, crash/stop, benchmark et coût/vidéo restent à prouver avant un usage industriel vidéo.
+Les protocoles sont `COMPUTE_GPU.md` et `benchmarks/GPU_COST_BENCHMARK_PLAN.md`.
+Ils ne sont **ni la définition de V1 ni des prérequis du service d'enrichissement supervisé**.
+Aucun canary payant à lancer pour faire avancer cette session.
 
-La conception détaillée vit dans `docs/EVIDENCE_ACCEPTANCE.md`.
+## G6 — Effet externe constaté
 
-## G0 — Dépôt et reprise fiables
+- Destinataire/canal et autorité d'agir vérifiés par l'humain.
+- Trace de l'action, identité stable, résultat de transport et ambiguïtés conservés.
+- Preuve de livraison distincte d'un simple « message envoyé ».
+- Refus/opt-out respectés par l'opérateur du pilote.
 
-DONE si :
+Les preuves HTTPBin/SMTP consignées dans l'historique prouvent le transport, pas une vente.
+Leur source historique n'a pas été rejouée lors de cette intervention.
 
-- branche de travail explicite ;
-- `main` non modifié directement ;
-- `docs/CURRENT_STATE.md` correspond à Git ;
-- `docs/HANDOFF_WORK.md` donne la prochaine mission ;
-- anciens handoffs sous `docs/archive/` ;
-- workflows concernés du dernier HEAD code connus ;
-- aucun secret runtime commité.
-
-**État actuel : ~90 %.** Le rangement documentaire existe ; le dernier HEAD de code vérifié avait `Compute finance safety` et `video-foundation` verts.
-
-## G1 — Cerveau LLM contrôlé et mesurable
-
-DONE si :
-
-### Routage
-- tous les agents de production passent par `octopus.llm` ;
-- les appels directs legacy ne sont pas accessibles accidentellement en production ;
-- les tâches choisissent capacité/politique, pas une marque dans leur logique métier.
-
-### Zero-cost
-- le pool OmniRoute `zero_cost` est free-only par construction ou le coût réel est attesté après appel ;
-- modèle/provider réellement exécuté journalisé ;
-- route non attestable jamais comptée comme « 0 $ certain » ;
-- panne du pool gratuit n'entraîne jamais un appel payant implicite.
-
-### Validation
-- JSON invalide déclenche le fallback dans `octopus.llm` ;
-- verdict vision invalide peut fallback avant retour caller ;
-- chaque tentative a le bon statut `ok/invalid/error/blocked`.
-
-### Paid
-- le mode normal n'utilise **aucun LLM payant** ;
-- un LLM payant éventuel nécessite un mode exceptionnel explicitement activé par politique humaine ;
-- aucune route payante ne peut être atteinte implicitement depuis `zero_cost`.
-
-Tests minimum :
-- OmniRoute gratuit down → aucun paid call ;
-- JSON invalide → candidat suivant ;
-- resolved model enregistré ;
-- upstream payant sous zero_cost → refus ;
-- aucun fallback payant implicite.
-
-**État actuel : PARTIAL.** G1.1 à G1.5 sont couverts hors réseau, dont la double activation explicite du bypass legacy direct. Preuve manquante : vérification live du pool OmniRoute free-only. Voir `audits/LLM_BRAIN_AUDIT_2026-09-19.md`.
-
-## G2 — Frontière financière universelle
-
-DONE si aucune dépense automatique connue ne peut être créée hors politique.
-
-### Compute instance
-- Salad/GPU.ai ne peuvent être provisionnés depuis un handler métier que via `GuardedComputeManager` ;
-- un test statique/AST empêche la régression.
-
-### Serverless/API metered
-- tout chemin metered actif a réservation, soumission et settlement ;
-- RunPod renderer et H3 sont legacy, désactivés en fonctionnement normal et exigent l'opt-in explicite `OCTOPUS_ALLOW_LEGACY_RUNPOD=1` en plus de leur allowance existante ;
-- timeout local n'est jamais interprété comme annulation distante ;
-- soumission ambiguë jamais retry automatiquement.
-
-### Autres services
-- TTS/search déclarés free_quota/paid ;
-- tout futur mode LLM payant reste exceptionnel, explicitement activé et économiquement gardé ;
-- connecteurs futurs déclarent leur propre cost class.
-
-### Ledger
-Une requête peut produire le coût engagé et le coût réellement observé/calculé du jour, par business et catégorie, sans addition manuelle de dashboards.
-
-**État actuel : DONE hors déploiement/live.** Le compute provisionné est fermé par AST et `GuardedComputeManager`; RunPod/H3 sont legacy et fail-closed sans opt-in; TTS/search distants exigent `free_quota`; les connecteurs déclarent leur cost class; le ledger expose engagé/réel par jour, business et catégorie; la reprise persistée du watchdog est testée hors réseau.
-
-## G3 — Worker Salad lifecycle prouvé
-
-DONE si un canary réel démontre :
+## G7 — Première boucle économique réelle
 
 ```text
-reserve
-→ create/start
-→ ready
-→ submit
-→ output externe
-→ stop
-→ provider confirme stopped
-→ settle
+besoin observable → expérience bornée → travail → livraison
+ → paiement / acceptation / usage distincts
+ → coûts + minutes humaines + inconnues → décision
 ```
 
-et :
-- pas d'auto-recharge nécessaire ;
-- aucune ressource orpheline ;
-- restart policy non bouclante ;
-- watchdog réellement séparé ;
-- tuer le producteur n'empêche pas l'arrêt ;
-- restart OCTOPUS réconcilie l'état ;
-- output possède checksum/manifest ;
-- output COMPLETED non recalculé.
+Requis pour revendiquer un premier résultat commercial :
 
-Crash test obligatoire :
+- besoin et accord client réels, lot identifié ;
+- livraison constatée avec référence consultable ;
+- encaissement client vérifié, pas facture seule, apport, promesse ou transport réussi ;
+- acceptation/utilisation constatée ou explicitement inconnue ;
+- coûts variables, devises et temps humain enregistrés ; coûts manquants signalés ;
+- revue de la contribution complète avant toute affirmation de rentabilité ;
+- décision humaine motivée, persistée et liée aux preuves.
+
+Une expérience peut légitimement s'arrêter sans paiement. Sa valeur d'apprentissage n'est pas
+du chiffre d'affaires. Une échéance sans mesure reste `inconclusive`, pas un fait négatif.
+
+## G8 — V1 utilisable, pas autonomie universelle
+
+Une personne peut suivre ce parcours avec `HANDOFF_WORK.md`, reprendre les états et comprendre
+les inconnues. Le rapport `economy outcome` ne crée pas de faits et ne décide pas à sa place.
+La réduction du temps humain n'est affirmée qu'après deux mesures comparables avant/après.
+Pas d'exigence artificielle de 50 jobs média pour un service qui ne génère aucune vidéo.
+
+## Contrat technique et promotion
 
 ```text
-GPU running
-→ tuer worker/control-plane
-→ watchdog
-→ stop confirmé
+observation → tâche ciblée → contrat immuable → candidat
+ → tests → evidence → ACCEPTED / REJECTED / UNCERTAIN
+ → revue humaine → promotion → retour à la même mission
 ```
 
-**État actuel : ~20 %.** Code de protection présent, preuve fournisseur absente.
+Le contrôleur possède `tests`, `git` et `artifact`; le probe ne peut pas les écraser.
+Le probe Tk lit encore un attribut fourni par le candidat dans son processus : ce n'est pas
+une inspection indépendante de qualité visuelle. Un hash prouve l'identité, pas la vérité.
+Un contrat qui mesure le mauvais objectif peut passer ; toujours revoir le résultat réel.
+Limites et noyau gouverné : `EVIDENCE_ACCEPTANCE.md`.
 
-## G4 — Benchmark économique reproductible
+## Règle de clôture
 
-DONE si toutes les conditions de `benchmarks/GPU_COST_BENCHMARK_PLAN.md` sont satisfaites.
-
-Minimum :
-- workload versionné ;
-- prix live enregistrés ;
-- mêmes paramètres ;
-- échecs inclus ;
-- coût avec nature explicite ;
-- >=2 candidats comparables ou indisponibilité documentée ;
-- primary + fallback déterminés ;
-- données consommées par `ComputeBroker`.
-
-**État actuel : ~10 %.** Protocole écrit, runs live non réalisés.
-
-## G5 — Production vidéo < 1 centime GPU
-
-Jalon économique principal.
-
-DONE si, sur **10 vidéos finales consécutives** du profil de production :
-
-- aucune intervention manuelle dans le compute ;
-- toutes les vidéos attendues récupérées et valides ;
-- aucune double génération facturable ;
-- aucun GPU orphelin ;
-- coût GPU moyen <= **$0.008/video** ;
-- coût GPU maximum normal <= **$0.010/video** ;
-- coûts des échecs/préemptions inclus ;
-- même baseline modèle/qualité que le benchmark retenu ;
-- batch prédit hors cap refusé avant création ;
-- ledger et métriques retrouvent le même nombre de vidéos.
-
-Le « coût vidéo » ici est le GPU de génération. TTS, storage, LLM et publication restent suivis séparément pour obtenir ensuite le coût total de contenu.
-
-**État actuel : ~25 %.** Les briques existent, KPI non prouvé.
-
-## G6 — Publication réelle et analytics
-
-DONE si :
-- canal réel enregistré ;
-- accès `act` accordé explicitement ;
-- executor réel ;
-- publication idempotente ;
-- source/ref externe sauvegardée ;
-- analytics récupérées sans chiffres inventés ;
-- données `observed` ;
-- retry sans doublon de publication.
-
-Au moins une vidéo doit parcourir :
-
-```text
-OCTOPUS → publication réelle → identifiant externe → analytics observées
-```
-
-**État actuel : ~30 %.** L'executor réel `browser_form:submit` est présent et un canari externe HTTPBin a prouvé le 21/09/2026 : canal `active` + `access=act` → POST web réel → `source_ref=https://httpbin.org/post` → evidence `observed` → expérience évaluée `supports`, avec idempotence obligatoire. La preuve G6 reste ouverte : aucune publication vidéo réelle ni analytics de plateforme n'ont encore été observées.
-
-## G7 — Boucle d'expérience économique fermée
-
-DONE si une vraie expérience fait :
-
-```text
-objectif
-→ hypothèse
-→ expérience
-→ action/contenu
-→ monde réel
-→ mesure observée
-→ ledger
-→ evaluate_experiment
-→ décision
-→ prochaine action
-```
-
-avec aucune valeur inventée, coût complet attribué, source réelle, décision persistée et learning vu par ORBIT au cycle suivant.
-
-**État actuel : ~45 %.** Deux boucles externes non commerciales ont été fermées en live le 21/09/2026 : HTTPBin puis SMTP OVH réel. Le canari SMTP a prouvé `email:send` sur `smtp.mail.ovh.net:465` avec réception effective dans une boîte contrôlée, `source_ref` Message-ID, evidence `observed`, `evaluate_experiment=supports` et décision persistée. Ces preuves valident le transport réel et la chaîne de preuve, mais ne ferment pas G7 : il manque encore une action commerciale réelle, une mesure économique réelle et, pour le cash, une entrée de ledger effectivement encaissée.
-
-## G8 — V1 OCTOPUS exploitable
-
-La V1 n'exige pas une entreprise universelle 100 % autonome.
-
-DONE si :
-
-### Fiabilité
-- 50 jobs média/compute sans double facturation ;
-- 0 GPU orphelin connu ;
-- reprise après restart vérifiée ;
-- dépenses réconciliées ;
-- tâches bloquées demandent un humain au lieu d'inventer.
-
-### Économie
-- au moins un business réel ;
-- un canal réel ;
-- coûts observés ;
-- métriques observées ;
-- une expérience complétée de bout en bout.
-
-### Opérations
-- GUI/CLI permet de voir ce qui tourne ;
-- état, coût, blocage, prochaine action inspectables ;
-- providers remplaçables sans réécrire ORBIT.
-
-### Sécurité
-- secrets hors Git ;
-- actions payantes bornées ;
-- frontières humaines respectées ;
-- aucune preuve `observed` sans source.
-
-## Tableau de progression
-
-Ce tableau est une estimation d'ingénierie, pas une moyenne mathématique.
-
-| Gate | État estimé | Prochaine preuve |
-|---|---:|---|
-| G0 Dépôt/reprise | 90 % | docs/CI synchronisées |
-| G1 LLM broker | 60 % | attestation OmniRoute + fallback validation |
-| G2 Finance universelle | 100 % hors live | déploiement watchdog et canary relèvent de G3 |
-| G3 Salad live | 20 % | canary + crash test |
-| G4 Benchmark GPU | 10 % | premiers runs comparables |
-| G5 <1¢ vidéo | 25 % | série réelle de 10 vidéos |
-| G6 Publication/analytics | 30 % | publication vidéo réelle + identifiant externe + analytics observées |
-| G7 Boucle économique réelle | 45 % | première action commerciale réelle + réponse/conversion observée + cash réel |
-| G8 V1 exploitable | **~55–60 % global** | fermer G1→G7 |
-
-La vision longue « entreprise autonome générique » reste autour de **30–35 %**, car les connecteurs réels, la publication, les analytics et la boucle de revenu restent à prouver.
-
-## Ordre strict recommandé
-
-```text
-G0
- ↓
-G1 + G2
- ↓
-G3
- ↓
-G4
- ↓
-G5
- ↓
-G6
- ↓
-G7
- ↓
-G8
-```
-
-G1 et G2 peuvent avancer en parallèle.
-
-## Règle de session Work
-
-Une session annonce :
-- gate visée ;
-- preuve manquante ;
-- changements prévus ;
-- tests prévus ;
-- critère de sortie.
-
-En fin de session, `DONE` est autorisé uniquement si tous les critères sont prouvés. Sinon :
-
-```text
-PARTIAL — preuve manquante : ...
-```
-
-Ce vocabulaire remplace les « ça a l'air prêt ».
+Rapporter commandes exactes, résultats et environnement. CI configurée ≠ CI exécutée ;
+tests verts ≠ bon produit. Si une preuve manque : **PARTIAL — preuve manquante : ...**
+Ne jamais compenser un manque de preuve externe par davantage d'infrastructure.

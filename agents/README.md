@@ -1,5 +1,9 @@
 # Groupe d'agents Podalux
 
+> **Sous-système historique conservé, pas identité d'OCTOPUS.** Ces rôles et le cycle vidéo
+> servent leurs consommateurs existants. La priorité est le pilote supervisé décrit dans
+> `../docs/HANDOFF_WORK.md`, sans ajout d'agents ni optimisation vidéo préalable.
+
 Orchestrateur de 6 agents pilotés par un gateway LLM compatible OpenAI. En configuration normale, les appels passent par OmniRoute en `zero_cost` ; RunPod reste un renderer legacy sous opt-in explicite.
 
 ## Roster
@@ -13,7 +17,7 @@ Orchestrateur de 6 agents pilotés par un gateway LLM compatible OpenAI. En conf
 | **CONVERT** | Monétisation | offre, prix, CTA, job vidéo |
 | **SOUT** | Recherche | veille, sources, sélection d'offres |
 
-## Cycle économique
+## Cycle technique de production Podalux (pas preuve de résultat économique)
 
 ```text
 SOUT → CONVERT → FORGE → GROWTH → LEDGER → ORBIT

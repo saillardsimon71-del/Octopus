@@ -14,6 +14,7 @@ Règles :
 """
 from __future__ import annotations
 
+import math
 import time
 
 from . import connectors, journal, tasks
@@ -134,8 +135,9 @@ def _check_fields(spec: dict, fields: dict) -> None:
         raise StrategyError(f"champs inconnus : {sorted(unknown)}")
     for name in NUMERIC:
         value = fields.get(name)
-        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
-            raise StrategyError(f"{name} doit être un nombre")
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                  or not math.isfinite(value)):
+            raise StrategyError(f"{name} doit être un nombre fini")
     for amount, currency in (("budget_limit", "budget_currency"), ("spend_amount", "spend_currency")):
         if fields.get(amount) is not None:
             if fields[amount] < 0:
@@ -157,6 +159,18 @@ def _check_evidence(fields: dict, created_by: str) -> None:
         raise StrategyError("une valeur calculée exige source_ref (le calcul ou ses entrées)")
     if fields.get("value") is not None and not str(fields.get("metric") or "").strip():
         raise StrategyError("une valeur exige metric")
+    metric, value = fields.get("metric") or "", fields.get("value")
+    # Conventions de mesure du pilote, dans les preuves existantes (aucun nouvel état).
+    if metric in ("delivery", "customer_acceptance", "customer_use") or metric.startswith("human_minutes:"):
+        if fields.get("experiment_id") is None:
+            raise StrategyError("une mesure de résultat exige experiment_id")
+        if nature == "computed" and value is None:
+            return  # L'évaluateur conserve explicitement l'absence de mesure, pas un faux zéro.
+        if metric.startswith("human_minutes:"):
+            if not metric.partition(":")[2].strip() or value is None or value < 0:
+                raise StrategyError("human_minutes exige une phase et une durée positive ou nulle")
+        elif value not in (0, 1):
+            raise StrategyError(f"{metric} exige value=0 ou value=1 ; absence de preuve = inconnu")
 
 
 def _check_external(conn, kind: str, item_id: int, business: str) -> None:

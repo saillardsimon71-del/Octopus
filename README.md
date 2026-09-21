@@ -1,133 +1,90 @@
 # OCTOPUS
 
-OCTOPUS est un **control-plane entrepreneurial multi-business**. Il orchestre des agents, des tâches durables, un navigateur contrôlé, une boucle économique persistante et plusieurs chemins de production média. Podalux est aujourd'hui son premier business réellement intégré.
+**Un atelier économique supervisé : tester un besoin, faire le travail, livrer, mesurer, décider.**
 
-> **Constitution / règles agents :** lire [AGENTS.md](AGENTS.md).  
-> **Vision durable :** lire [docs/VISION.md](docs/VISION.md).  
-> **État de référence :** lire [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md).  
-> **Reprise Codex :** lire [docs/CODEX_START.md](docs/CODEX_START.md).  
-> **Reprise Work :** lire [docs/HANDOFF_WORK.md](docs/HANDOFF_WORK.md).
+MARKET FIRST. AUTOMATION SECOND. GENERALIZATION LAST.
 
-## Architecture
+OCTOPUS possède une queue durable, des outils et des protections éprouvés par des tests.
+Cela ne prouve pas encore qu'un client achète son travail. Le prochain jalon est une expérience
+commerciale réelle, pas une nouvelle infrastructure ou une refonte d'interface.
 
-```text
-                         ┌──────────────────────┐
-                         │       OCTOPUS        │
-                         │ control-plane + DB   │
-                         └──────────┬───────────┘
-                                    │
-             ┌──────────────────────┼───────────────────────┐
-             │                      │                       │
-      stratégie / économie      tâches / agents        média / vidéo
-             │                      │                       │
-  strategy + economy +         durable queue            VideoService
-  resources + evidence         leases/retries                │
-             │                      │                renderers / GPU jobs
-             └──────────────┬───────┘                       │
-                            │                         ComputeBroker
-                         ORBIT                         + breaker
-                            │                       Salad / GPU.ai
-                      outils / browser                    │
-                            │                         watchdog
-                     Playwright guard
-```
-
-Les rôles historiques restent :
+## Un seul chemin principal
 
 ```text
-SOUT → CONVERT → FORGE → GROWTH → LEDGER → ORBIT
+objectif humain + limites
+ → hypothèse / expérience bornée             strategy
+ → travail manuel ou tâche durable          tasks / worker
+ → action externe autorisée                 actions (ou intervention humaine tracée)
+ → livraison / retour client                 strategy evidence
+ → encaissement et coûts                     economy / ledger
+ → temps humain + inconnues + rapport        economy outcome
+ → continuer / corriger / arrêter             strategy decision + revue humaine
+ → si bottleneck mesuré : development.task → nouvelle mesure sur la même mission
 ```
 
-La GUI Workbench est une surface de pilotage ; elle ne doit pas devenir un second moteur métier.
+`task done` ≠ livré ≠ accepté ≠ utilisé ≠ payé ≠ rentable.
+`supports` est un verdict sur **une métrique**, pas une certification commerciale.
+
+## Utiliser le système maintenant
+
+Le [protocole supervisé](docs/HANDOFF_WORK.md) utilise les commandes existantes pour lancer
+un pilote d'enrichissement factuel sourcé de fiches produits. Aucun nouveau business module,
+scraper, CRM, LLM ou service payant n'est nécessaire pour commencer.
+
+```bash
+python -m octopus strategy --help
+python -m octopus economy --help
+python -m octopus economy outcome BUSINESS EXPERIMENT_ID
+python -m octopus strategy snapshot BUSINESS
+```
+
+Le rapport sépare travail technique, livraison, acceptation, usage, cash, coûts et temps humain.
+Les inconnues restent inconnues. La contribution affichée ne couvre que les écritures explicitement
+classées ; ce n'est pas une marge complète ni un calcul de coût humain.
+
+## Architecture réellement conservée
+
+Monolithe Python, journal SQLite : `strategy`, `tasks`, `worker`, `actions`, `economy`.
+Un seul ledger. Les preuves sont immuables et rétractables ; les liens réutilisent les objets existants.
+CLI, rapports, logs et revue humaine constituent le chemin d'exploitation prioritaire.
+
+Les agents/vidéos Podalux, la veille, le Studio et la GUI CustomTkinter restent disponibles.
+Leur extension est gelée jusqu'à un besoin observé. Ils ne sont pas requis pour tenir un pilote.
+`development.task` n'est plus chargé par un worker ordinaire ; l'atelier reste accessible via
+`night-shift` ou le chargement explicite documenté dans `docs/HANDOFF_WORK.md`.
+
+## Invariants
+
+- Aucune dépense sans autorisation ; pas de retry ambigu aveugle.
+- L'humain gouverne accès, budgets, secrets, règles de preuve et promotion.
+- Aucun revenu, client, coût ou résultat inventé ; sources déclarées à vérifier.
+- LLM `zero_cost` par défaut, jamais de repli payant implicite.
+- Compute payant via `GuardedComputeManager` ; protections et watchdog conservés.
+- Pas de changement Git distant ni de fusion automatique dans main.
 
 ## Sources de vérité
 
-- **Constitution du projet** : `AGENTS.md`
-- **Vision / ligne directrice** : `docs/VISION.md`
-- **État actuel vérifié** : `docs/CURRENT_STATE.md`
-- **Critères de DONE** : `docs/ACCEPTANCE_GATES.md`
-- **Reprise Codex** : `docs/CODEX_START.md`
-- **Reprise Work** : `docs/HANDOFF_WORK.md`
-- **Prochaines étapes** : `NEXT_STEPS.md`
-- **Compute GPU et disjoncteur financier** : `docs/COMPUTE_GPU.md`
-- **Index de la documentation** : `docs/README.md`
+| Document | Rôle |
+|---|---|
+| [AGENTS.md](AGENTS.md) | Constitution et dette de complexité |
+| [VISION.md](docs/VISION.md) | Direction produit |
+| [CURRENT_STATE.md](docs/CURRENT_STATE.md) | Réalité vérifiée et limites |
+| [HANDOFF_WORK.md](docs/HANDOFF_WORK.md) | Golden path exécutable |
+| [ACCEPTANCE_GATES.md](docs/ACCEPTANCE_GATES.md) | Preuves techniques et économiques |
+| [EVIDENCE_ACCEPTANCE.md](docs/EVIDENCE_ACCEPTANCE.md) | Autorité de l'evidence et limites |
+| [NEXT_STEPS.md](NEXT_STEPS.md) | Prochaine expérience, pas catalogue de chantiers |
 
-Les anciens rapports de session et prompts d'implémentation sont conservés sous `docs/archive/` et ne doivent pas être utilisés comme état courant.
+Les plans spécialisés et archives ne constituent pas la roadmap active.
 
-## Invariants importants
+## Installation et tests
 
-1. **Pas de dépense GPU directe.** Tout nouveau chemin payant doit passer par `GuardedComputeManager` et le disjoncteur financier.
-2. **Pas de dépense sans allowance.** Par défaut, une enveloppe USD explicite est requise avant toute réservation GPU.
-3. **Pas de retry payant aveugle.** Une soumission ambiguë reste ambiguë jusqu'à réconciliation.
-4. **SQLite est la source de vérité durable** pour tâches, stratégie, économie et réservations compute.
-5. **Aucune donnée business inventée.** Revenus, clients, métriques ou preuves absentes restent absents.
-6. **Aucun secret dans Git.** Les credentials restent dans les variables d'environnement / secrets runtime.
-7. **`main` n'est pas un espace de travail.** Les changements passent par une branche et une PR avec CI verte.
-
-## Compute GPU
-
-La branche active de développement contient :
-
-- `octopus/salad.py` — provider SaladCloud ;
-- `octopus/gpuai.py` — provider GPU.ai + réconciliation/stop ;
-- `octopus/compute_broker.py` — choix du provider/GPU ;
-- `octopus/compute_finance.py` — réservations, hard caps, allowances, coût réel ;
-- `ops/compute_watchdog.py` — watchdog indépendant ;
-- `.github/workflows/compute-finance.yml` — tests de sécurité compute.
-
-Les plafonds par défaut sont prudents : **$0.01/unité**, **$0.25/batch**, **$1/business/jour**, **$2 global/jour**. Ce sont des garde-fous OCTOPUS, pas une garantie contractuelle de facturation du fournisseur.
-
-**Limite actuelle importante :** le pipeline vidéo réel n'est pas encore forcé à utiliser exclusivement `GuardedComputeManager`. Tant que ce verrouillage n'est pas terminé et qu'un canary live n'a pas été mesuré, la PR compute reste une fondation protégée, pas une autorisation de production industrielle.
-
-## Démarrage local
-
-Sous Windows :
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\setup-local.ps1
-.\.venv\Scripts\python.exe -m agents.run doctor
-.\.venv\Scripts\python.exe run_gui.py
-```
-
-Worker OCTOPUS :
-
-```powershell
-.\.venv\Scripts\python.exe -m octopus worker
-```
-
-Voir `docs/LOCAL_SETUP.md` pour les détails.
-
-## Tests
-
-Suite compute ciblée :
+Voir [LOCAL_SETUP.md](docs/LOCAL_SETUP.md) pour l'installation Windows et les dépendances historiques.
+Sous un environnement Python configuré, les commandes économiques ne démarrent ni GUI, ni LLM,
+ni worker vidéo. `OCTOPUS_HOME` et `OCTOPUS_DB` permettent d'isoler un journal de travail.
 
 ```bash
-python -m pytest -q \
-  tests/test_compute_finance.py \
-  tests/test_compute_salad.py \
-  tests/test_compute_broker.py \
-  tests/test_compute_gpuai.py
+python -m pytest -o addopts='' -q tests/test_economy.py tests/test_strategy.py tests/test_economy_act_cli.py
+python -m pytest -o addopts='' -q
 ```
 
-Le workflow historique `video-foundation` couvre aussi le renderer, le control-plane, la stratégie, l'économie, la GUI et les tests multi-business.
-
-## Développement
-
-Avant de modifier l'architecture :
-
-1. lire `AGENTS.md` ;
-2. vérifier branche, status, log et diff ;
-3. lire `docs/CURRENT_STATE.md` et `docs/ACCEPTANCE_GATES.md` ;
-4. utiliser `docs/CODEX_START.md` en Codex ou `docs/HANDOFF_WORK.md` en Work ;
-5. vérifier les tests réellement verts sur le HEAD courant ;
-6. faire un changement petit, vérifiable et réversible ;
-7. mettre à jour l'état documentaire si la réalité change.
-
-Répartition recommandée :
-
-```text
-Chat  → décisions / architecture
-Work  → audit / recherche / workflows multi-étapes
-Codex → code / terminal / tests / Git
-```
+Les tests utilisent des bases temporaires et des transports simulés, jamais des preuves commerciales.

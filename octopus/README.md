@@ -1,5 +1,10 @@
 # OCTOPUS : noyau commun des activités
 
+> **Référence technique historique (v0.2), pas vision courante.** Lire d'abord `../README.md`
+> et `../docs/HANDOFF_WORK.md`. Le chemin principal est `strategy → travail → evidence/ledger
+> → economy outcome → décision humaine`. Les profils et budgets ci-dessous décrivent des
+> compatibilités ; la politique normale actuelle est `zero_cost` via OmniRoute.
+
 Version 0.2. Quatre briques, utilisées par Podalux sans changer ses signatures :
 
 | Brique | Fichier | Rôle |
@@ -13,7 +18,7 @@ Version 0.2. Quatre briques, utilisées par Podalux sans changer ses signatures 
 
 | Profil | Comportement |
 |---|---|
-| `legacy` (défaut) | modèle imposé par le code, requêtes identiques à l'historique (vérifié par `tests/test_legacy_compat.py`) |
+| `legacy` (compatibilité explicite) | modèle imposé par le code, requêtes identiques à l'historique (vérifié par `tests/test_legacy_compat.py`) |
 | `zero_cost` | local et quotas gratuits seulement ; un modèle n'est utilisé que s'il a réussi le banc (5 essais, 90 %, moins de 60 jours) |
 | `low_cost` | local et gratuit validés d'abord, payant en dernier recours, dans le budget |
 | `quality_first` | meilleur modèle validé d'abord, repli sur un modèle gratuit si le budget bloque |
