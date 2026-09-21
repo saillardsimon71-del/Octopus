@@ -27,3 +27,4 @@ jobs:
           tests/test_compute_salad.py
           tests/test_compute_broker.py
           tests/test_compute_gpuai.py
+          tests/test_compute_no_bypass.py
