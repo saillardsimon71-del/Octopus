@@ -112,6 +112,79 @@ def secret(name: str) -> str:
 
 
 _health: dict[str, tuple[float, bool, str]] = {}
+_rate_limit_cooldowns: dict[str, tuple[float, str]] = {}
+_DEFAULT_RATE_LIMIT_COOLDOWN_S = 30.0
+
+
+def _rate_limit_delay(exc: Exception) -> float | None:
+    """Retourne le délai de cooldown si l'exception est un 429, sinon None.
+
+    Retry-After numérique est privilégié quand le gateway/provider le transmet.
+    Le fallback court évite de retenter immédiatement une route déjà limitée sans
+    transformer un incident transitoire en bannissement pour tout le run.
+    """
+    response = getattr(exc, "response", None)
+    status = getattr(exc, "status_code", None)
+    if status is None and response is not None:
+        status = getattr(response, "status_code", None)
+
+    message = str(exc).lower()
+    is_rate_limit = status == 429 or (
+        "429" in message and any(marker in message for marker in (
+            "rate limit", "rate_limit", "rate-limit", "too many requests", "rate_limit_exceeded",
+        ))
+    )
+    if not is_rate_limit:
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            raw = json.dumps(body, ensure_ascii=False).lower()
+            is_rate_limit = (
+                '"code": 429' in raw
+                or '"code":"429"' in raw
+                or "rate_limit" in raw
+                or "rate limit" in raw
+            ) and "429" in raw
+    if not is_rate_limit:
+        return None
+
+    headers = getattr(response, "headers", None) if response is not None else None
+    if headers:
+        retry_ms = headers.get("retry-after-ms")
+        if retry_ms is not None:
+            try:
+                return max(0.1, float(retry_ms) / 1000.0)
+            except (TypeError, ValueError):
+                pass
+        retry_after = headers.get("retry-after")
+        if retry_after is not None:
+            try:
+                return max(0.1, float(retry_after))
+            except (TypeError, ValueError):
+                pass
+    return _DEFAULT_RATE_LIMIT_COOLDOWN_S
+
+
+def _set_rate_limit_cooldown(model_id: str, exc: Exception) -> float | None:
+    delay = _rate_limit_delay(exc)
+    if delay is None:
+        return None
+    _rate_limit_cooldowns[model_id] = (
+        time.monotonic() + delay,
+        f"429 rate limit; cooldown {delay:g}s",
+    )
+    return delay
+
+
+def _rate_limit_cooldown_reason(model_id: str) -> str | None:
+    entry = _rate_limit_cooldowns.get(model_id)
+    if entry is None:
+        return None
+    until, reason = entry
+    remaining = until - time.monotonic()
+    if remaining <= 0:
+        _rate_limit_cooldowns.pop(model_id, None)
+        return None
+    return f"{reason} ({remaining:.1f}s restantes)"
 
 
 def provider_status(name: str, provider: dict) -> tuple[bool, str]:
@@ -318,6 +391,9 @@ def _ineligibility(cat, profile_name: str, profile: dict, task: str, task_def: d
     if (profile_name == "zero_cost" and model["provider"] == "omniroute"
             and model.get("zero_cost_attestation") != "free_only"):
         return "pool OmniRoute : attestation free_only absente"
+    cooldown = _rate_limit_cooldown_reason(model_id)
+    if cooldown:
+        return cooldown
     ok, why = provider_status(model["provider"], cat.provider(model["provider"]))
     if not ok:
         return why
@@ -610,9 +686,12 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
             except Exception as exc:
                 method_name = structured_method or "none"
                 failure = f"echec [{method_name}] : {type(exc).__name__}: {str(exc)[:160]}"
+                cooldown_delay = _set_rate_limit_cooldown(model_id, exc)
                 considered.append({"model": model_id, "eligible": True, "reason": failure})
                 justification = _justify(profile_name, task, model_id, model, considered, pinned)
                 justification["structured_method"] = structured_method
+                if cooldown_delay is not None:
+                    justification["rate_limit_cooldown_s"] = cooldown_delay
                 journal.record_llm_call({**base, "status": "error", "error": failure,
                                          "duration_ms": int((time.perf_counter() - started) * 1000),
                                          "justification": json.dumps(justification, ensure_ascii=False)})
@@ -624,6 +703,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                     break
                 raise
 
+            _rate_limit_cooldowns.pop(model_id, None)
             duration_ms = int((time.perf_counter() - started) * 1000)
             cost = (result.provider_cost_usd if result.provider_cost_usd is not None
                     else pricing.call_cost(model.get("price"), usage, peak))
