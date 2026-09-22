@@ -75,6 +75,24 @@ def mission(ctx):
     return output
 
 
+def _mission_tool_trace(results, *, tools=("search", "browse"), result_chars=1200):
+    """Trace diagnostique compacte, sans modifier le comportement de la mission."""
+    wanted = set(tools)
+    trace = []
+    for subtask in results or []:
+        role = subtask.get("role")
+        for step in subtask.get("steps") or []:
+            if step.get("tool") not in wanted:
+                continue
+            trace.append({
+                "role": role,
+                "step": step.get("step"),
+                "tool": step.get("tool"),
+                "result": str(step.get("result") or "")[:result_chars],
+            })
+    return trace
+
+
 @handler("orbit.mission", resource="llm")
 def orbit_mission(ctx):
     """Mission ORBIT pour n'importe quel business, rattachable à un objectif, une hypothèse ou une expérience.
@@ -112,6 +130,9 @@ def orbit_mission(ctx):
         # Le handler ne doit pas jeter les preuves brutes que runtime a preservees.
         output["synthesis_error"] = result.get("synthesis_error")
         output["results"] = result.get("results") or []
+
+    if ctx.input.get("trace_tools"):
+        output["tool_trace"] = _mission_tool_trace(result.get("results") or [])
 
     if context:
         output["strategy"] = {k: context[k] for k in ("objective_id", "hypothesis_id", "experiment_id")}
