@@ -67,8 +67,9 @@ def test_new_run_has_a_fresh_cache(monkeypatch, web):
 
 
 def test_tool_gate_blocks_disallowed_tool_before_execution(monkeypatch):
-    called = []
+    called, posts = [], []
     monkeypatch.setitem(runtime.TOOLS["ask_human"], "fn", lambda args: called.append(args) or "should not run")
+    monkeypatch.setattr(runtime.db, "post", lambda agent, content, *a, **k: posts.append(content))
     scripted(monkeypatch, [
         {"tool": "ask_human", "args": {"question": "cash ?"}},
         {"final": "continue sans humain"},
@@ -79,6 +80,8 @@ def test_tool_gate_blocks_disallowed_tool_before_execution(monkeypatch):
     assert called == []
     assert '"refused": true' in result["steps"][0]["result"]
     assert "interdit par la politique" in result["steps"][0]["result"]
+    assert any("refus outil ask_human" in message for message in posts)
+    assert not any(message.startswith("action ask_human") for message in posts)
 
 
 def test_tool_gate_rejects_missing_required_argument(monkeypatch):
