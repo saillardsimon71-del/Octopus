@@ -70,6 +70,8 @@ def add_parser(sub) -> None:
                    help="profil LLM explicite pour cette mission (ex. flash_fallback)")
     n.add_argument("--budget-usd", type=float, default=None,
                    help="plafond LLM dur pour cette tâche, en USD")
+    n.add_argument("--trace-tools", action="store_true",
+                   help="inclut une trace compacte des résultats search/browse dans la sortie de tâche")
     r = s.add_parser("review", help="planifie une revue (tâche strategy.review)")
     r.add_argument("business")
     r.add_argument("--in", dest="due_in", type=float, default=0, help="délai en secondes")
@@ -261,6 +263,7 @@ def run(args) -> int:
                 "orbit.mission",
                 {"goal": args.goal, "max_steps": args.max_steps,
                  "allowed_tools": allowed_tools, "profile": args.profile,
+                 "trace_tools": bool(args.trace_tools),
                  **{k: context[k] for k in refs if context[k] is not None}},
                 budget_usd=args.budget_usd,
             )
