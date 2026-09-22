@@ -367,38 +367,92 @@ def _budget_block(ctx, cat: catalog.Catalog, business: str, estimate: float) -> 
     return None
 
 
+def _structured_methods(model: dict, json_mode: bool, json_schema: dict | None,
+                        tool_schemas: list[dict] | None) -> list[str | None]:
+    """Ordre empirique des mecanismes de sortie structuree pour un modele.
+
+    La capacite a produire du JSON ne signifie pas que le provider accepte
+    response_format=json_object. Une methode "text" garde le contrat JSON dans
+    le prompt mais n'ajoute aucune contrainte API.
+    """
+    if not json_mode and json_schema is None:
+        return [None]
+
+    declared = list(model.get("structured_methods", []))
+    if declared:
+        methods = declared
+    elif json_schema is not None:
+        schema_mode = model.get("json_schema_mode")
+        if schema_mode == "tool_call":
+            methods = ["tool_call", "text"]
+        elif schema_mode == "json_object":
+            methods = ["json_object", "text"]
+        else:
+            methods = ["json_schema", "text"]
+    else:
+        methods = ["json_object", "text"]
+
+    allowed = {"json_schema", "json_object", "tool_call", "text"}
+    methods = [m for m in methods if m in allowed]
+    if "tool_call" in methods and (json_schema is None or not tool_schemas):
+        methods = [m for m in methods if m != "tool_call"]
+    if not methods:
+        methods = ["text"]
+    return methods
+
+
+def _structured_method_error(exc: Exception) -> bool:
+    """Erreur liee au mecanisme de sortie, donc retentable sur le meme modele."""
+    if isinstance(exc, ValueError):
+        return True
+    name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    if "badrequest" in name or "unprocessable" in name:
+        return True
+    markers = (
+        "failed to generate json",
+        "invalid_request_body",
+        "response_format",
+        "json schema",
+        "structured output",
+    )
+    return any(marker in message for marker in markers)
+
+
 def _build_request(model: dict, messages: list[dict], max_tokens: int, json_mode: bool,
                    reasoning: str | None, json_schema: dict | None = None,
-                   tool_schemas: list[dict] | None = None) -> dict:
+                   tool_schemas: list[dict] | None = None,
+                   structured_method: str | None = None) -> dict:
     request: dict = {"model": model["api_model"], "messages": messages, "max_tokens": max_tokens}
     capabilities = model.get("capabilities", [])
     if reasoning and "reasoning_effort" in capabilities:
         request["reasoning_effort"] = reasoning
     for key, value in copy.deepcopy(model.get("params", {})).items():
         request.setdefault(key, value)
-    if json_schema is not None and "json" in capabilities:
-        schema_mode = model.get("json_schema_mode")
-        if schema_mode == "tool_call":
-            if not tool_schemas:
-                raise ValueError("schémas d'outils déclaratifs requis pour le mode tool_call")
-            request["tools"] = copy.deepcopy(tool_schemas)
-            request["tool_choice"] = "required"
-        elif schema_mode == "json_object":
-            request["response_format"] = {"type": "json_object"}
-        else:
-            request["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "octopus_response",
-                    "strict": True,
-                    "schema": copy.deepcopy(json_schema),
-                },
-            }
-    elif json_mode and "json" in capabilities:
+
+    if structured_method == "tool_call":
+        if json_schema is None or not tool_schemas:
+            raise ValueError("schémas d'outils déclaratifs requis pour le mode tool_call")
+        request["tools"] = copy.deepcopy(tool_schemas)
+        request["tool_choice"] = "required"
+    elif structured_method == "json_schema":
+        if json_schema is None:
+            raise ValueError("json_schema requis pour le mode json_schema")
+        request["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "octopus_response",
+                "strict": True,
+                "schema": copy.deepcopy(json_schema),
+            },
+        }
+    elif structured_method == "json_object":
         request["response_format"] = {"type": "json_object"}
+    elif structured_method in {None, "text"}:
+        pass
+    else:
+        raise ValueError(f"methode structuree inconnue: {structured_method}")
     return request
-
-
 def _justify(profile_name: str, task: str, model_id: str, model: dict, considered: list[dict],
              pinned: bool) -> dict:
     justification = {"profile": profile_name, "task": task, "chosen": model_id,
@@ -457,7 +511,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
     last_error: Exception | None = None
     budget_block: str | None = None
 
-    for attempt, model_id in enumerate(candidates, start=1):
+    for candidate_attempt, model_id in enumerate(candidates, start=1):
         model = cat.model(model_id)
         if model is None:
             considered.append({"model": model_id, "eligible": False, "reason": "absent du catalogue"})
@@ -467,86 +521,107 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
             considered.append({"model": model_id, "eligible": False, "reason": reason})
             continue
         provider = cat.provider(model["provider"])
-        now = time.time()
-        peak = pricing.is_peak(now, provider.get("peak_utc_weekdays"))
-        base = {
-            "ts": now, "run_id": ctx.id if ctx else None, "root_run_id": ctx.root_id if ctx else None,
-            "business": business_name, "agent": agent, "task": task, "profile": profile_name,
-            "model": model_id, "provider": model["provider"], "cost_class": model["cost_class"],
-            "requested_model": model["api_model"],
-            "attempt": attempt, "peak": int(peak), "prompt_sha256": digest, "prompt_chars": prompt_chars,
-        }
-        estimate = pricing.estimate_max_cost(model.get("price"), prompt_chars + images * pricing.IMAGE_CHARS_ESTIMATE,
-                                             max_tokens, peak)
-        block = _budget_block(ctx, cat, business_name, estimate)
-        if block:
-            considered.append({"model": model_id, "eligible": False, "reason": block})
-            journal.record_llm_call({**base, "status": "blocked", "error": block, "justification": json.dumps(
-                _justify(profile_name, task, model_id, model, considered, pinned), ensure_ascii=False)})
-            budget_block = block
-            if prof.get("fallback") and attempt < len(candidates):
-                continue
-            raise BudgetExceeded(block)
+        methods = _structured_methods(model, json_mode, json_schema, tool_schemas)
 
-        request = _build_request(
-            model, messages, max_tokens, json_mode, reasoning, json_schema, tool_schemas,
-        )
-        started = time.perf_counter()
-        try:
-            result = _transport_result(_transport(provider, request), request["model"], model["provider"])
-            text, usage = result.text, result.usage
-        except Exception as exc:
-            failure = f"echec : {type(exc).__name__}: {str(exc)[:160]}"
-            considered.append({"model": model_id, "eligible": True, "reason": failure})
-            journal.record_llm_call({**base, "status": "error", "error": failure,
-                                     "duration_ms": int((time.perf_counter() - started) * 1000),
-                                     "justification": json.dumps(_justify(profile_name, task, model_id, model,
-                                                                          considered, pinned), ensure_ascii=False)})
-            last_error = exc
-            if prof.get("fallback") and attempt < len(candidates):
-                continue
-            raise
-        duration_ms = int((time.perf_counter() - started) * 1000)
-        cost = (result.provider_cost_usd if result.provider_cost_usd is not None
-                else pricing.call_cost(model.get("price"), usage, peak))
-        data, status, error = None, "ok", _zero_cost_violation(profile_name, model, result)
-        if error is not None:
-            status = "blocked"
-        elif validate is not None:
+        for method_index, structured_method in enumerate(methods):
+            now = time.time()
+            peak = pricing.is_peak(now, provider.get("peak_utc_weekdays"))
+            base = {
+                "ts": now, "run_id": ctx.id if ctx else None, "root_run_id": ctx.root_id if ctx else None,
+                "business": business_name, "agent": agent, "task": task, "profile": profile_name,
+                "model": model_id, "provider": model["provider"], "cost_class": model["cost_class"],
+                "requested_model": model["api_model"],
+                "attempt": candidate_attempt, "peak": int(peak), "prompt_sha256": digest, "prompt_chars": prompt_chars,
+            }
+            estimate = pricing.estimate_max_cost(model.get("price"), prompt_chars + images * pricing.IMAGE_CHARS_ESTIMATE,
+                                                 max_tokens, peak)
+            block = _budget_block(ctx, cat, business_name, estimate)
+            if block:
+                reason_text = f"{block} [structured_method={structured_method or 'none'}]"
+                considered.append({"model": model_id, "eligible": False, "reason": reason_text})
+                justification = _justify(profile_name, task, model_id, model, considered, pinned)
+                justification["structured_method"] = structured_method
+                journal.record_llm_call({**base, "status": "blocked", "error": block, "justification": json.dumps(
+                    justification, ensure_ascii=False)})
+                budget_block = block
+                last_error = BudgetExceeded(block)
+                break
+
+            request = _build_request(
+                model, messages, max_tokens, json_mode, reasoning, json_schema, tool_schemas,
+                structured_method=structured_method,
+            )
+            started = time.perf_counter()
             try:
-                data = validate(text)
+                result = _transport_result(_transport(provider, request), request["model"], model["provider"])
+                text, usage = result.text, result.usage
             except Exception as exc:
-                status, error = "invalid", f"{type(exc).__name__}: {exc}"[:300]
-        justification = _justify(profile_name, task, model_id, model,
-                                 considered + [{"model": model_id, "eligible": True, "reason": "choisi"}], pinned)
-        call_id = journal.record_llm_call({
-            **base, "status": status, "error": error, "prompt_tokens": usage.prompt_tokens,
-            "cache_hit_tokens": usage.cache_hit_tokens, "cache_miss_tokens": usage.cache_miss_tokens,
-            "completion_tokens": usage.completion_tokens, "reasoning_tokens": usage.reasoning_tokens,
-            "cost_usd": cost, "duration_ms": duration_ms, "output_preview": text[:300],
-            "resolved_model": result.resolved_model, "resolved_provider": result.resolved_provider,
-            "request_id": result.request_id, "provider_cost_usd": result.provider_cost_usd,
-            "justification": json.dumps(justification, ensure_ascii=False),
-        })
-        if status == "blocked":
-            considered.append({"model": model_id, "eligible": False, "reason": error})
-            last_error = GatewayError(error)
-            if prof.get("fallback") and attempt < len(candidates):
-                continue
+                method_name = structured_method or "none"
+                failure = f"echec [{method_name}] : {type(exc).__name__}: {str(exc)[:160]}"
+                considered.append({"model": model_id, "eligible": True, "reason": failure})
+                justification = _justify(profile_name, task, model_id, model, considered, pinned)
+                justification["structured_method"] = structured_method
+                journal.record_llm_call({**base, "status": "error", "error": failure,
+                                         "duration_ms": int((time.perf_counter() - started) * 1000),
+                                         "justification": json.dumps(justification, ensure_ascii=False)})
+                last_error = exc
+                if (structured_method is not None and method_index + 1 < len(methods)
+                        and _structured_method_error(exc)):
+                    continue
+                if prof.get("fallback") and candidate_attempt < len(candidates):
+                    break
+                raise
+
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            cost = (result.provider_cost_usd if result.provider_cost_usd is not None
+                    else pricing.call_cost(model.get("price"), usage, peak))
+            data, status, error = None, "ok", _zero_cost_violation(profile_name, model, result)
+            if error is not None:
+                status = "blocked"
+            elif validate is not None:
+                try:
+                    data = validate(text)
+                except Exception as exc:
+                    status, error = "invalid", f"{type(exc).__name__}: {exc}"[:300]
+            justification = _justify(profile_name, task, model_id, model,
+                                     considered + [{"model": model_id, "eligible": True, "reason": "choisi"}], pinned)
+            justification["structured_method"] = structured_method
+            call_id = journal.record_llm_call({
+                **base, "status": status, "error": error, "prompt_tokens": usage.prompt_tokens,
+                "cache_hit_tokens": usage.cache_hit_tokens, "cache_miss_tokens": usage.cache_miss_tokens,
+                "completion_tokens": usage.completion_tokens, "reasoning_tokens": usage.reasoning_tokens,
+                "cost_usd": cost, "duration_ms": duration_ms, "output_preview": text[:300],
+                "resolved_model": result.resolved_model, "resolved_provider": result.resolved_provider,
+                "request_id": result.request_id, "provider_cost_usd": result.provider_cost_usd,
+                "justification": json.dumps(justification, ensure_ascii=False),
+            })
+            if status == "blocked":
+                considered.append({"model": model_id, "eligible": False, "reason": error})
+                last_error = GatewayError(error)
+                break
+            if status == "invalid":
+                method_name = structured_method or "none"
+                considered.append({"model": model_id, "eligible": True,
+                                   "reason": f"sortie invalide [{method_name}] : {error}"})
+                last_error = InvalidOutput(f"{model_id} [{method_name}] : {error}")
+                if structured_method is not None and method_index + 1 < len(methods):
+                    continue
+                if prof.get("fallback") and candidate_attempt < len(candidates):
+                    break
+                raise last_error
+            return Completion(text=text, model=model_id, provider=model["provider"], cost_usd=cost, usage=usage,
+                              call_id=call_id, requested_model=result.requested_model,
+                              resolved_model=result.resolved_model, resolved_provider=result.resolved_provider,
+                              request_id=result.request_id, provider_cost_usd=result.provider_cost_usd,
+                              data=data, justification=justification)
+
+        if not prof.get("fallback"):
+            if last_error is not None:
+                raise last_error
             break
-        if status == "invalid":
-            considered.append({"model": model_id, "eligible": True, "reason": f"sortie invalide : {error}"})
-            last_error = InvalidOutput(f"{model_id} : {error}")
-            if prof.get("fallback") and attempt < len(candidates):
-                continue
-            raise last_error
-        return Completion(text=text, model=model_id, provider=model["provider"], cost_usd=cost, usage=usage,
-                          call_id=call_id, requested_model=result.requested_model,
-                          resolved_model=result.resolved_model, resolved_provider=result.resolved_provider,
-                          request_id=result.request_id, provider_cost_usd=result.provider_cost_usd,
-                          data=data, justification=justification)
 
     if budget_block:
         detail = "; ".join(f"{c['model']} : {c['reason']}" for c in considered)
         raise BudgetExceeded(f"{budget_block} (candidats : {detail})")
     raise NoEligibleModel(task, profile_name, considered, last_error)
+
