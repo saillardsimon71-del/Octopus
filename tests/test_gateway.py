@@ -235,7 +235,14 @@ def test_rate_limited_route_is_skipped_until_cooldown_expires(transport, provide
             groq_calls += 1
             if groq_calls == 1:
                 return _FakeRateLimit(60)
-            return ('{"ok": "groq"}', Usage(prompt_tokens=20, completion_tokens=5))
+            return llm.TransportResult(
+                text='{"ok": "groq"}',
+                usage=Usage(prompt_tokens=20, completion_tokens=5),
+                requested_model=request["model"],
+                resolved_model="openai/gpt-oss-120b",
+                resolved_provider="groq",
+                provider_cost_usd=0.0,
+            )
         if request["model"] == "inclusionai/ling-3.0-flash-vl:free":
             return ('{"ok": "ling"}', Usage(prompt_tokens=20, completion_tokens=5))
         raise AssertionError(f"modele inattendu : {request['model']}")
