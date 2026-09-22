@@ -432,7 +432,7 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
     else:
         memory_hint = ""
         if allowed_tools is None or {"remember", "recall"} <= allowed_tools:
-            memory_hint = "Utilise `remember` pour stocker tes apprentissages et `recall` pour les relire. "
+            memory_hint = "Utilise `remember` pour stocker tes apprentissages et `recall` pour les relire."
         system = (
             f"Tu es l'agent {role} du groupe {group}. {role_desc} "
             f"Poursuis l'objectif en utilisant "
