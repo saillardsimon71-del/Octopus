@@ -65,6 +65,17 @@ def test_zero_cost_without_evidence_never_pays(transport, providers_up, monkeypa
     assert calls() == []
 
 
+def test_kilo_ling_can_bootstrap_agent_plan_without_bench(transport, providers_up, monkeypatch):
+    monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "0")
+    transport.reply('{"tasks": []}')
+
+    completion = llm.complete("agent.plan", MSG, profile="zero_cost", json_mode=True)
+
+    assert completion.model == "kilo/ling-3.0-flash-vl-free"
+    assert transport.models == ["inclusionai/ling-3.0-flash-vl:free"]
+
+
 def test_normal_zero_cost_routes_to_proven_local_model(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
     monkeypatch.setattr(deepseek, "_client", lambda: pytest.fail("le mode normal ne doit pas appeler DeepSeek directement"))
