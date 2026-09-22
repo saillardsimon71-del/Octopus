@@ -147,6 +147,52 @@ def test_agent_keeps_tool_result_context_for_mission_synthesis(monkeypatch):
     assert "site_sitequivend" in result["steps"][0]["result"]
 
 
+def test_orbit_mission_can_return_compact_search_browse_trace(monkeypatch):
+    from agents import task_handlers  # noqa: F401
+
+    monkeypatch.setattr(runtime, "run_mission", lambda *args, **kwargs: {
+        "plan": [{"role": "FORGE", "task": "collecter"}],
+        "results": [{
+            "role": "FORGE",
+            "task": "collecter",
+            "final": "fini",
+            "steps": [
+                {"step": 1, "tool": "search", "result": "titre\nhttps://example.com/source"},
+                {"step": 2, "tool": "remember", "result": "memo"},
+                {"step": 3, "tool": "browse", "result": '{"url":"https://example.com/source","texte":"preuve"}'},
+            ],
+        }],
+        "rapport": "rapport",
+        "synthesis_status": "validated",
+    })
+
+    task_id = worker.enqueue(B, "orbit.mission", {"goal": "tester", "trace_tools": True})
+    done = worker.run_one("w", kinds=["orbit.mission"], log=lambda s: None)
+
+    assert done["status"] == "done"
+    assert done["output"]["tool_trace"] == [
+        {"role": "FORGE", "step": 1, "tool": "search", "result": "titre\nhttps://example.com/source"},
+        {"role": "FORGE", "step": 3, "tool": "browse",
+         "result": '{"url":"https://example.com/source","texte":"preuve"}'},
+    ]
+
+
+def test_orbit_mission_trace_is_opt_in(monkeypatch):
+    from agents import task_handlers  # noqa: F401
+
+    monkeypatch.setattr(runtime, "run_mission", lambda *args, **kwargs: {
+        "plan": [],
+        "results": [{"role": "FORGE", "steps": [{"step": 1, "tool": "search", "result": "x"}]}],
+        "rapport": "rapport",
+        "synthesis_status": "validated",
+    })
+
+    worker.enqueue(B, "orbit.mission", {"goal": "tester"})
+    done = worker.run_one("w", kinds=["orbit.mission"], log=lambda s: None)
+
+    assert "tool_trace" not in done["output"]
+
+
 def test_degraded_orbit_mission_preserves_results_without_strategy_evidence(monkeypatch):
     from agents import task_handlers  # noqa: F401
 
