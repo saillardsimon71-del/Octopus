@@ -294,6 +294,30 @@ def test_wikipedia_user_agent_is_identifiable():
     assert "Mozilla" not in search.WIKI_UA["User-Agent"] and "Podalux" in search.WIKI_UA["User-Agent"]
 
 
+def test_mission_synthesis_receives_original_goal_constraints(monkeypatch):
+    calls = []
+    actions = iter([
+        {"tasks": [{"role": "SOUT", "task": "collecter"}]},
+        {"final": "aucune preuve suffisante"},
+        {"rapport": "aucune recommandation"},
+    ])
+
+    def call_json(agent, task, model, messages, **kwargs):
+        calls.append((task, messages))
+        return next(actions)
+
+    monkeypatch.setattr(deepseek, "call_json", call_json)
+    goal = "COLLECTE UNIQUEMENT. Ne recommande RIEN. Ne propose aucune action."
+    result = runtime.run_mission(goal, max_steps_per_agent=2)
+
+    assert result["synthesis_status"] == "validated"
+    synthesis_messages = next(messages for task, messages in calls if task == "synthese")
+    payload = json.loads(synthesis_messages[1]["content"])
+    assert payload["objectif_original"] == goal
+    assert payload["resultats_sous_taches"][0]["final"] == "aucune preuve suffisante"
+    assert "Respecte aussi toutes les contraintes de l'objectif original" in synthesis_messages[0]["content"]
+
+
 def test_mission_keeps_subagent_results_when_synthesis_gateway_fails(monkeypatch):
     actions = iter([
         {"tasks": [{"role": "SOUT", "task": "observer le marché"}]},

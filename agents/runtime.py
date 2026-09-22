@@ -613,14 +613,20 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         return {"plan": tasks, "results": results, "rapport": "(arrêt demandé)"}
     syn_sys = (
         "Tu es ORBIT. Synthétise les résultats des sous-tâches en un rapport final concis. "
+        "Respecte aussi toutes les contraintes de l'objectif original : une synthèse ne doit pas réintroduire "
+        "une recommandation, décision, action ou autre contenu que la mission interdisait. "
         "N'introduis aucun fait, chiffre, canal, ressource ou résultat absent des sous-tâches et de leurs résultats d'outils. "
         "Si un sous-agent affirme quelque chose sans preuve visible dans ses étapes, qualifie-le de non vérifié ou d'inférence, "
         "jamais de fait observé. Réponds en JSON : {\"rapport\":\"...\"}"
     )
+    synthesis_input = {
+        "objectif_original": goal,
+        "resultats_sous_taches": results,
+    }
     try:
         syn = deepseek.call_json("ORBIT", "synthese", pro,
                                  [{"role": "system", "content": syn_sys},
-                                  {"role": "user", "content": json.dumps(results, ensure_ascii=False)}],
+                                  {"role": "user", "content": json.dumps(synthesis_input, ensure_ascii=False)}],
                                  reasoning="high", max_tokens=4000)
     except llm.GatewayError as exc:
         # Le travail des sous-agents existe deja. Une panne de serialisation/synthese
