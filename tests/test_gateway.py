@@ -217,9 +217,20 @@ class _FakeRateLimit(Exception):
         self.response = type("Response", (), {"status_code": 429, "headers": headers})()
 
 
-def test_rate_limit_uses_retry_after_header():
-    assert llm._rate_limit_delay(_FakeRateLimit(12.5)) == pytest.approx(12.5)
+def test_rate_limit_uses_retry_after_header_without_shortening_local_floor():
+    assert llm._rate_limit_delay(_FakeRateLimit(12.5)) == pytest.approx(llm._DEFAULT_RATE_LIMIT_COOLDOWN_S)
+    assert llm._rate_limit_delay(_FakeRateLimit(75)) == pytest.approx(75)
     assert llm._rate_limit_delay(TimeoutError("lent")) is None
+
+
+def test_run_profile_overrides_ambient_environment(monkeypatch):
+    monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
+    cat = catalog.load()
+
+    with journal.run("octopus", "mission-test", profile="flash_fallback"):
+        ctx = journal.current_run()
+        assert llm._resolve_profile(cat, None, ctx) == "flash_fallback"
+        assert llm._resolve_profile(cat, "quality_first", ctx) == "quality_first"
 
 
 def test_rate_limited_route_is_skipped_until_cooldown_expires(transport, providers_up, monkeypatch):
