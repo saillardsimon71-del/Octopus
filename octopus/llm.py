@@ -152,13 +152,13 @@ def _rate_limit_delay(exc: Exception) -> float | None:
         retry_ms = headers.get("retry-after-ms")
         if retry_ms is not None:
             try:
-                return max(0.1, float(retry_ms) / 1000.0)
+                return max(_DEFAULT_RATE_LIMIT_COOLDOWN_S, float(retry_ms) / 1000.0)
             except (TypeError, ValueError):
                 pass
         retry_after = headers.get("retry-after")
         if retry_after is not None:
             try:
-                return max(0.1, float(retry_after))
+                return max(_DEFAULT_RATE_LIMIT_COOLDOWN_S, float(retry_after))
             except (TypeError, ValueError):
                 pass
     return _DEFAULT_RATE_LIMIT_COOLDOWN_S
@@ -359,8 +359,10 @@ def _usage(u) -> Usage:
 # --- routage ---------------------------------------------------------------------------
 
 def _resolve_profile(cat: catalog.Catalog, explicit: str | None, ctx) -> str:
-    return (explicit or os.environ.get("OCTOPUS_PROFILE", "").strip()
-            or (ctx.profile if ctx and ctx.profile else "") or cat.default_profile)
+    # Plus la source est locale/spécifique, plus elle a priorité :
+    # appel explicite > run/mission courant > environnement global > défaut catalogue.
+    return (explicit or (ctx.profile if ctx and ctx.profile else "")
+            or os.environ.get("OCTOPUS_PROFILE", "").strip() or cat.default_profile)
 
 
 def _prompt_size(messages: list[dict]) -> tuple[int, int]:
