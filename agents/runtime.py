@@ -430,11 +430,14 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
         first_user = f"Message de l'humain : {goal}"
         done_label = "réponse"
     else:
+        memory_hint = ""
+        if allowed_tools is None or {"remember", "recall"} <= allowed_tools:
+            memory_hint = "Utilise `remember` pour stocker tes apprentissages et `recall` pour les relire. "
         system = (
             f"Tu es l'agent {role} du groupe {group}. {role_desc} "
             f"Poursuis l'objectif en utilisant "
             f"les outils disponibles. À chaque étape, choisis UNE action. "
-            f"Utilise `remember` pour stocker tes apprentissages et `recall` pour les relire.\n\n"
+            f"{memory_hint}\n\n"
             f"Outils disponibles :\n{tools_desc(allowed_tools)}\n\n"
             f"{proof_rule}"
             "Réponds TOUJOURS en JSON : soit {\"tool\": \"<nom>\", \"args\": {...}} pour agir, "
@@ -541,7 +544,8 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
             context.append({"role": "user", "content":
                             "Tu répètes la même action sans progrès (ex. CAPTCHA/échec). " + recovery})
             repeat = 0
-        db.post(role, f"action {tool} {json.dumps(args, ensure_ascii=False)[:90]}")
+        if refusal is None:
+            db.post(role, f"action {tool} {json.dumps(args, ensure_ascii=False)[:90]}")
         context.append({"role": "user", "content": f"Résultat de {tool} : {result_str}"})
         # La synthèse de mission doit voir assez de preuve brute pour ne pas combler les trous par invention.
         steps.append({"step": i + 1, "tool": tool, "result": result_str[:1500]})
