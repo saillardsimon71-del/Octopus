@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 from . import strategy
 
@@ -65,6 +66,10 @@ def add_parser(sub) -> None:
         default=None,
         help="allowlist explicite séparée par des virgules ; absente = comportement historique (tous les outils)",
     )
+    n.add_argument("--profile", default=None,
+                   help="profil LLM explicite pour cette mission (ex. flash_fallback)")
+    n.add_argument("--budget-usd", type=float, default=None,
+                   help="plafond LLM dur pour cette tâche, en USD")
     r = s.add_parser("review", help="planifie une revue (tâche strategy.review)")
     r.add_argument("business")
     r.add_argument("--in", dest="due_in", type=float, default=0, help="délai en secondes")
@@ -246,10 +251,19 @@ def run(args) -> int:
             allowed_tools = None
             if args.allow_tools is not None:
                 allowed_tools = [name.strip() for name in args.allow_tools.split(",") if name.strip()]
-            task_id = worker.enqueue(args.business, "orbit.mission",
-                                     {"goal": args.goal, "max_steps": args.max_steps,
-                                      "allowed_tools": allowed_tools,
-                                      **{k: context[k] for k in refs if context[k] is not None}})
+            if args.profile is not None:
+                from . import catalog
+                catalog.load().profile(args.profile)  # erreur immédiate si profil inconnu
+            if args.budget_usd is not None and (not math.isfinite(args.budget_usd) or args.budget_usd < 0):
+                raise strategy.StrategyError("--budget-usd doit être fini et positif ou nul")
+            task_id = worker.enqueue(
+                args.business,
+                "orbit.mission",
+                {"goal": args.goal, "max_steps": args.max_steps,
+                 "allowed_tools": allowed_tools, "profile": args.profile,
+                 **{k: context[k] for k in refs if context[k] is not None}},
+                budget_usd=args.budget_usd,
+            )
             print(f"tâche orbit.mission #{task_id} en file (python -m octopus worker pour l'exécuter)")
         elif cmd == "review":
             review_id, task_id = strategy.schedule_review(args.business, due_in_s=args.due_in, created_by=args.by)

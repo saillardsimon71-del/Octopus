@@ -553,10 +553,14 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
 
 
 def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None = None,
-                allowed_tools: set[str] | None = None) -> dict:
-    """ORBIT planifie puis délègue aux rôles (multi-agents via le runtime)."""
+                allowed_tools: set[str] | None = None, profile: str | None = None) -> dict:
+    """ORBIT planifie puis délègue aux rôles (multi-agents via le runtime).
+
+    Le profil explicite est hérité par les runs agents imbriqués via le journal.
+    """
     allowed_tools = _normalize_allowed_tools(allowed_tools)
-    with journal.run(_business(business), "mission", label=goal, budget_usd=deepseek.config.CYCLE_BUDGET_USD):
+    with journal.run(_business(business), "mission", label=goal, budget_usd=deepseek.config.CYCLE_BUDGET_USD,
+                     profile=profile):
         with cancel.scope(), web_guard.session(), _search_cache():
             return _run_mission(goal, max_steps_per_agent, allowed_tools)
 

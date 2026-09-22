@@ -133,6 +133,10 @@ def _overlay_omniroute(raw: dict) -> dict:
         current_low = list(candidates.get("low_cost", []))
         if selected_model not in current_low:
             candidates["low_cost"] = [selected_model, *current_low]
+        if "flash_fallback" in candidates:
+            current_flash = list(candidates["flash_fallback"])
+            if selected_model not in current_flash:
+                candidates["flash_fallback"] = [selected_model, *current_flash]
         if raw.get("profiles", {}).get("zero_cost", {}).get("fallback"):
             task.setdefault("omniroute_bootstrap_baseline", {})["zero_cost"] = selected_model
     dev_task = raw.setdefault("tasks", {}).setdefault("development.step", {})

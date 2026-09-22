@@ -388,7 +388,7 @@ def _ineligibility(cat, profile_name: str, profile: dict, task: str, task_def: d
     missing = needs - set(model.get("capabilities", []))
     if missing:
         return "capacites manquantes : " + ", ".join(sorted(missing))
-    if (profile_name == "zero_cost" and model["provider"] == "omniroute"
+    if (profile_name in {"zero_cost", "flash_fallback"} and model["provider"] == "omniroute"
             and model.get("zero_cost_attestation") != "free_only"):
         return "pool OmniRoute : attestation free_only absente"
     cooldown = _rate_limit_cooldown_reason(model_id)
@@ -606,12 +606,18 @@ def _justify(profile_name: str, task: str, model_id: str, model: dict, considere
 
 
 def _zero_cost_violation(profile_name: str, model: dict, result: TransportResult) -> str | None:
-    if profile_name != "zero_cost":
+    # zero_cost interdit tout coût. flash_fallback autorise uniquement ses modèles
+    # explicitement "paid" (DeepSeek Flash dans les tâches agents) ; ses routes
+    # free_quota doivent rester réellement gratuites.
+    enforce_free = profile_name == "zero_cost" or (
+        profile_name == "flash_fallback" and model["cost_class"] != "paid"
+    )
+    if not enforce_free:
         return None
     if result.provider_cost_usd not in {None, 0.0}:
-        return f"route zero_cost bloquée : coût résolu {result.provider_cost_usd:.6f} $"
+        return f"route gratuite bloquée : coût résolu {result.provider_cost_usd:.6f} $"
     if model["provider"] == "omniroute" and not (result.resolved_model and result.resolved_provider):
-        return "route zero_cost bloquée : identité résolue absente"
+        return "route gratuite bloquée : identité résolue absente"
     return None
 
 

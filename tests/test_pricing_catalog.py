@@ -76,6 +76,21 @@ def test_real_catalog_is_valid_and_consistent():
     assert "paid" not in raw["profiles"]["zero_cost"]["allowed_cost_classes"]
 
 
+def test_flash_fallback_profile_uses_only_flash_as_paid_agent_fallback(monkeypatch):
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    cat = catalog.load()
+
+    assert cat.profile("flash_fallback")["fallback"] is True
+    assert cat.profile("flash_fallback")["require_evidence"] is False
+
+    for task_name in ("agent.react_step", "agent.plan", "agent.synthesize"):
+        candidates = cat.task(task_name)["candidates"]["flash_fallback"]
+        assert candidates[0] == "omniroute/devworker-groq"
+        paid = [model_id for model_id in candidates if cat.model(model_id)["cost_class"] == "paid"]
+        assert paid == ["deepseek/flash"]
+        assert "deepseek/v4-pro" not in candidates
+
+
 def test_legacy_task_mapping():
     cat = catalog.load()
     assert cat.legacy_task("GROWTH", "qc_vision") == "podalux.qc_vision"

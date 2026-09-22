@@ -153,6 +153,10 @@
       "description": "Local et gratuit d'abord ; payant seulement si aucune alternative validee, dans le budget.",
       "honor_pins": false, "allowed_cost_classes": ["local", "free_quota", "paid"], "require_evidence": true, "fallback": true
     },
+    "flash_fallback": {
+      "description": "Profil experimental : routes gratuites d'abord, puis uniquement DeepSeek-V4.1-Flash payant sous budget de mission.",
+      "honor_pins": false, "allowed_cost_classes": ["local", "free_quota", "paid"], "require_evidence": false, "fallback": true
+    },
     "quality_first": {
       "description": "Meilleur modele valide d'abord ; couts suivis et plafonnes.",
       "honor_pins": false, "allowed_cost_classes": ["paid", "free_quota", "local"], "require_evidence": true, "fallback": true
@@ -200,6 +204,7 @@
       "candidates": {
         "zero_cost": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b", "ollama/qwen3.5-4b"],
         "low_cost": ["groq/gpt-oss-120b", "ollama/qwen3.5-4b", "deepseek/flash"],
+        "flash_fallback": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b", "ollama/qwen3.5-4b", "deepseek/flash"],
         "quality_first": ["deepseek/flash"]
       }
     },
@@ -208,6 +213,7 @@
       "candidates": {
         "zero_cost": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b"],
         "low_cost": ["groq/gpt-oss-120b", "deepseek/flash", "deepseek/v4-pro"],
+        "flash_fallback": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b", "deepseek/flash"],
         "quality_first": ["deepseek/v4-pro"]
       }
     },
@@ -216,6 +222,7 @@
       "candidates": {
         "zero_cost": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b"],
         "low_cost": ["groq/gpt-oss-120b", "deepseek/flash", "deepseek/v4-pro"],
+        "flash_fallback": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b", "deepseek/flash"],
         "quality_first": ["deepseek/v4-pro"]
       }
     },
