@@ -268,8 +268,8 @@ def test_orbit_mission_tasks_keep_their_gateway_contract(monkeypatch):
         "omniroute/devworker-groq",
         "kilo/ling-3.0-flash-vl-free",
     ]
-    assert cat.model("omniroute/devworker-groq")["structured_methods"] == ["json_object", "text"]
-    assert cat.model("kilo/ling-3.0-flash-vl-free")["structured_methods"] == ["text"]
+    assert cat.model("omniroute/devworker-groq")["structured_methods"] == ["tool_call", "json_object", "text"]
+    assert cat.model("kilo/ling-3.0-flash-vl-free")["structured_methods"] == ["tool_call", "text"]
 
 
 # --- budgets -------------------------------------------------------------------------------
