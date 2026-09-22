@@ -222,6 +222,7 @@
       "candidates": {
         "zero_cost": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b"],
         "low_cost": ["groq/gpt-oss-120b", "deepseek/flash", "deepseek/v4-pro"],
+        "flash_fallback": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b", "deepseek/flash"],
         "quality_first": ["deepseek/v4-pro"]
       }
     },
