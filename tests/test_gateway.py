@@ -307,6 +307,39 @@ def test_fallback_to_next_free_model_after_failure(transport, providers_up, monk
     assert [c["attempt"] for c in calls()] == [1, 2]
 
 
+def test_flash_fallback_page_inspection_prefers_free_route_over_pinned_flash(
+        transport, monkeypatch):
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
+
+    def handler(provider, request):
+        if request["model"] == "auto/best-free":
+            return llm.TransportResult(
+                text="page visible",
+                usage=Usage(prompt_tokens=100, completion_tokens=20),
+                requested_model=request["model"],
+                resolved_model="free/vision-model",
+                resolved_provider="free-provider",
+                provider_cost_usd=0.0,
+            )
+        if request["model"] == "deepseek-flash":
+            pytest.fail("DeepSeek ne doit pas être appelé tant que la route gratuite réussit")
+        raise AssertionError(f"modele inattendu : {request['model']}")
+
+    transport.handler = handler
+    result = llm.complete(
+        "web.inspect_page",
+        [{"role": "user", "content": "Décris la capture."}],
+        profile="flash_fallback",
+        pin_model="deepseek/flash",
+        needs=("vision",),
+    )
+
+    assert result.model == "omniroute/auto-free"
+    assert result.cost_usd == 0
+    assert transport.models == ["auto/best-free"]
+
+
 def test_flash_fallback_uses_deepseek_only_after_free_routes_fail(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
     monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
