@@ -74,6 +74,104 @@ def test_kilo_ling_can_bootstrap_agent_plan_without_bench(transport, providers_u
 
     assert completion.model == "kilo/ling-3.0-flash-vl-free"
     assert transport.models == ["inclusionai/ling-3.0-flash-vl:free"]
+    assert "response_format" not in transport.calls[0][1]
+
+
+def test_structured_bad_request_retries_same_model_as_prompt_json(transport, providers_up, monkeypatch):
+    monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "0")
+    prove("podalux.write_job", "ollama/qwen3.5-4b")
+
+    def handler(provider, request):
+        if "response_format" in request:
+            return RuntimeError("[400]: Failed to generate JSON. Please adjust your prompt.")
+        return ('{"titre": "fallback texte"}', Usage(prompt_tokens=50, completion_tokens=10))
+
+    transport.handler = handler
+    result = deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG)
+
+    assert result == {"titre": "fallback texte"}
+    assert transport.models == ["qwen3.5:4b", "qwen3.5:4b"]
+    assert transport.calls[0][1]["response_format"] == {"type": "json_object"}
+    assert "response_format" not in transport.calls[1][1]
+    assert [r["status"] for r in calls()] == ["error", "ok"]
+    assert json.loads(calls()[1]["justification"])["structured_method"] == "text"
+
+
+def test_echoed_response_format_does_not_fake_structured_error():
+    class EchoedBadRequest(Exception):
+        body = {
+            "error": {"message": "Invalid message role", "code": "invalid_request_error"},
+            "request": {"response_format": {"type": "json_object"}},
+        }
+
+    assert llm._structured_method_error(EchoedBadRequest("400 response_format echoed")) is False
+
+
+def test_failed_generation_field_is_structured_error():
+    class FailedGeneration(Exception):
+        body = {
+            "error": {
+                "message": "Failed to generate JSON. Please adjust your prompt.",
+                "type": "invalid_request_error",
+                "failed_generation": "{not-json",
+            }
+        }
+
+    assert llm._structured_method_error(FailedGeneration("400")) is True
+
+
+def test_structured_fallback_keeps_grounding_messages_identical(transport, providers_up, monkeypatch):
+    monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "0")
+    prove("podalux.write_job", "ollama/qwen3.5-4b")
+    grounded = [
+        {"role": "system", "content": "RÈGLE DE PREUVE: toute inconnue reste inconnue."},
+        {"role": "user", "content": "Réponds en JSON."},
+    ]
+
+    class FailedGeneration(Exception):
+        body = {"error": {"message": "Failed to generate JSON", "failed_generation": "x"}}
+
+    def handler(provider, request):
+        if "response_format" in request:
+            return FailedGeneration("400")
+        return ('{"titre": "ok"}', Usage(prompt_tokens=50, completion_tokens=10))
+
+    transport.handler = handler
+    result = llm.complete("podalux.write_job", grounded, profile="zero_cost",
+                          json_mode=True, validate=llm.parse_json)
+
+    assert result.data == {"titre": "ok"}
+    assert len(transport.calls) == 2
+    assert transport.calls[0][1]["messages"] == grounded
+    assert transport.calls[1][1]["messages"] == grounded
+
+
+def test_structured_cascade_has_bounded_call_count(transport, providers_up, monkeypatch):
+    monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
+    providers_up.add("groq")
+
+    class FailedGeneration(Exception):
+        body = {"error": {"message": "Failed to generate JSON", "failed_generation": "x"}}
+
+    def handler(provider, request):
+        if request["model"] == "groq/openai/gpt-oss-120b" and "response_format" in request:
+            return FailedGeneration("400")
+        return RuntimeError("route indisponible après cette méthode")
+
+    transport.handler = handler
+    with pytest.raises(llm.NoEligibleModel):
+        llm.complete("agent.synthesize", MSG, profile="zero_cost", json_mode=True, validate=llm.parse_json)
+
+    # OmniRoute GPT-OSS: json_object puis text. Ling: text. Groq direct: indisponible avant transport.
+    assert transport.models == [
+        "groq/openai/gpt-oss-120b",
+        "groq/openai/gpt-oss-120b",
+        "inclusionai/ling-3.0-flash-vl:free",
+    ]
 
 
 def test_normal_zero_cost_routes_to_proven_local_model(transport, providers_up, monkeypatch):
@@ -146,7 +244,7 @@ def test_invalid_output_falls_back(transport, providers_up):
     transport.handler = by_model({"qwen3.5:4b": "pas du json", "deepseek-flash": '{"titre": "p"}'})
     c = llm.complete("podalux.write_job", MSG, profile="low_cost", json_mode=True, validate=llm.parse_json)
     assert c.model == "deepseek/flash" and c.data == {"titre": "p"}
-    assert [r["status"] for r in calls()] == ["invalid", "ok"]
+    assert [r["status"] for r in calls()] == ["invalid", "invalid", "ok"]
 
 
 def test_call_json_invalid_output_falls_back_between_free_models(transport, providers_up, monkeypatch):
@@ -156,8 +254,8 @@ def test_call_json_invalid_output_falls_back_between_free_models(transport, prov
     transport.handler = by_model({"qwen3.5:4b": "pas du json", "gemini-3.5-flash": '{"titre": "g"}'})
 
     assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "g"}
-    assert transport.models == ["qwen3.5:4b", "gemini-3.5-flash"]
-    assert [r["status"] for r in calls()] == ["invalid", "ok"]
+    assert transport.models == ["qwen3.5:4b", "qwen3.5:4b", "gemini-3.5-flash"]
+    assert [r["status"] for r in calls()] == ["invalid", "invalid", "ok"]
 
 
 def test_vision_invalid_verdict_falls_back_between_free_models(transport, providers_up, monkeypatch):
@@ -246,6 +344,8 @@ def test_orbit_mission_tasks_keep_their_gateway_contract(monkeypatch):
         "omniroute/devworker-groq",
         "kilo/ling-3.0-flash-vl-free",
     ]
+    assert cat.model("omniroute/devworker-groq")["structured_methods"] == ["tool_call", "json_object", "text"]
+    assert cat.model("kilo/ling-3.0-flash-vl-free")["structured_methods"] == ["tool_call", "text"]
 
 
 # --- budgets -------------------------------------------------------------------------------

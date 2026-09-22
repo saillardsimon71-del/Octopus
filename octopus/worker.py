@@ -184,7 +184,12 @@ def run_one(owner: str | None = None, *, lease_s: float = 60, kinds: list[str] |
                 tasks.set_run(task["id"], run.id, owner=owner)
             ctx.check_cancel()
             output = spec.fn(ctx)
-            tasks.complete(task["id"], owner, output)
+            completion_status = (
+                "done_degraded"
+                if isinstance(output, dict) and output.get("synthesis_status") == "degraded"
+                else "done"
+            )
+            tasks.complete(task["id"], owner, output, status=completion_status)
     except WaitingHuman as waiting:
         log(f"[worker] #{task['id']} {waiting}")
     except TaskCancelled as exc:

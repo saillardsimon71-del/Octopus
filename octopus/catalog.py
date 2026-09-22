@@ -9,6 +9,7 @@ from pathlib import Path
 from . import paths
 
 COST_CLASSES = ("local", "free_quota", "paid")
+STRUCTURED_METHODS = {"json_schema", "json_object", "tool_call", "text"}
 _cache: dict[str, tuple[float, "Catalog"]] = {}
 
 
@@ -108,6 +109,7 @@ def _overlay_omniroute(raw: dict) -> dict:
         }
     raw["models"]["omniroute/devworker-groq"].update({
         "json_schema_mode": "tool_call",
+        "structured_methods": ["tool_call", "json_object", "text"],
         "params": {"reasoning_effort": "low"},
     })
     free_defaults = {
@@ -174,6 +176,13 @@ def validate(raw: dict) -> None:
             raise CatalogError(f"{model_id} : classe de cout invalide {model.get('cost_class')!r}")
         if model["cost_class"] == "paid" and not model.get("price"):
             raise CatalogError(f"{model_id} : modele payant sans prix")
+        methods = model.get("structured_methods")
+        if methods is not None:
+            if not isinstance(methods, list) or not methods:
+                raise CatalogError(f"{model_id} : structured_methods invalide")
+            unknown = [method for method in methods if method not in STRUCTURED_METHODS]
+            if unknown:
+                raise CatalogError(f"{model_id} : methode structuree inconnue {unknown[0]!r}")
     for name, task in raw.get("tasks", {}).items():
         baseline = task.get("baseline")
         if baseline and baseline not in raw["models"]:

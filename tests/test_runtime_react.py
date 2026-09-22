@@ -6,6 +6,7 @@ import json
 import pytest
 
 from agents import deepseek, runtime, search
+from octopus import llm
 
 REAL_QUERIES = [  # run ORBIT du 16/09, 14:07-14:10
     "meilleures pratiques relance factures impayées modèles email",
@@ -89,3 +90,42 @@ def test_search_failures_are_reported(monkeypatch):
 
 def test_wikipedia_user_agent_is_identifiable():
     assert "Mozilla" not in search.WIKI_UA["User-Agent"] and "Podalux" in search.WIKI_UA["User-Agent"]
+
+
+def test_mission_keeps_subagent_results_when_synthesis_gateway_fails(monkeypatch):
+    actions = iter([
+        {"tasks": [{"role": "SOUT", "task": "observer le marché"}]},
+        {"final": "résultat sous-agent conservé"},
+    ])
+
+    def call_json(agent, task, model, messages, **kwargs):
+        if task == "synthese":
+            raise llm.NoEligibleModel("agent.synthesize", "zero_cost", [
+                {"model": "omniroute/devworker-groq", "reason": "structured output failed"},
+                {"model": "kilo/ling-3.0-flash-vl-free", "reason": "structured output failed"},
+            ])
+        return next(actions)
+
+    monkeypatch.setattr(deepseek, "call_json", call_json)
+    result = runtime.run_mission("objectif économique", max_steps_per_agent=2)
+
+    assert result["synthesis_status"] == "degraded"
+    assert result["results"][0]["final"] == "résultat sous-agent conservé"
+    assert "aucune synthèse factuelle validée" in result["rapport"]
+    assert "NoEligibleModel" in result["synthesis_error"]
+
+
+def test_mission_does_not_hide_non_gateway_synthesis_bug(monkeypatch):
+    actions = iter([
+        {"tasks": [{"role": "SOUT", "task": "observer"}]},
+        {"final": "résultat"},
+    ])
+
+    def call_json(agent, task, model, messages, **kwargs):
+        if task == "synthese":
+            raise RuntimeError("bug de code synthèse")
+        return next(actions)
+
+    monkeypatch.setattr(deepseek, "call_json", call_json)
+    with pytest.raises(RuntimeError, match="bug de code synthèse"):
+        runtime.run_mission("objectif", max_steps_per_agent=2)

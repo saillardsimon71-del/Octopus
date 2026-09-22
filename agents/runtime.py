@@ -14,7 +14,7 @@ import time
 import unicodedata
 from contextlib import contextmanager
 
-from octopus import journal
+from octopus import journal, llm
 
 from . import cancel, db, deepseek, web_guard
 
@@ -539,11 +539,34 @@ def _run_mission(goal: str, max_steps_per_agent: int) -> dict:
         "Si un sous-agent affirme quelque chose sans preuve visible dans ses étapes, qualifie-le de non vérifié ou d'inférence, "
         "jamais de fait observé. Réponds en JSON : {\"rapport\":\"...\"}"
     )
-    syn = deepseek.call_json("ORBIT", "synthese", pro,
-                             [{"role": "system", "content": syn_sys},
-                              {"role": "user", "content": json.dumps(results, ensure_ascii=False)}],
-                             reasoning="high", max_tokens=4000)
+    try:
+        syn = deepseek.call_json("ORBIT", "synthese", pro,
+                                 [{"role": "system", "content": syn_sys},
+                                  {"role": "user", "content": json.dumps(results, ensure_ascii=False)}],
+                                 reasoning="high", max_tokens=4000)
+    except llm.GatewayError as exc:
+        # Le travail des sous-agents existe deja. Une panne de serialisation/synthese
+        # ne doit pas jeter la mission ni fabriquer une nouvelle conclusion factuelle.
+        rapport = (
+            "Synthèse LLM indisponible. Les résultats bruts des sous-tâches sont conservés "
+            "dans results ; aucune synthèse factuelle validée n'a été produite."
+        )
+        error = f"{type(exc).__name__}: {exc}"
+        db.decide("ORBIT", "mission_done", {
+            "rapport": rapport,
+            "synthesis_status": "degraded",
+            "synthesis_error": error[:1500],
+        })
+        db.post("ORBIT", f"mission terminée en mode dégradé : {error[:120]}")
+        return {
+            "plan": tasks,
+            "results": results,
+            "rapport": rapport,
+            "synthesis_status": "degraded",
+            "synthesis_error": error,
+        }
+
     rapport = syn.get("rapport", "")
-    db.decide("ORBIT", "mission_done", {"rapport": rapport})
+    db.decide("ORBIT", "mission_done", {"rapport": rapport, "synthesis_status": "validated"})
     db.post("ORBIT", f"mission terminée : {rapport[:80]}")
-    return {"plan": tasks, "results": results, "rapport": rapport}
+    return {"plan": tasks, "results": results, "rapport": rapport, "synthesis_status": "validated"}
