@@ -453,6 +453,8 @@ def _build_request(model: dict, messages: list[dict], max_tokens: int, json_mode
     else:
         raise ValueError(f"methode structuree inconnue: {structured_method}")
     return request
+
+
 def _justify(profile_name: str, task: str, model_id: str, model: dict, considered: list[dict],
              pinned: bool) -> dict:
     justification = {"profile": profile_name, "task": task, "chosen": model_id,
