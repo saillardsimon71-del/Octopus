@@ -136,7 +136,7 @@
     "kilo/ling-3.0-flash-vl-free": {
       "provider": "kilo", "api_model": "inclusionai/ling-3.0-flash-vl:free", "cost_class": "free_quota",
       "capabilities": ["json", "vision", "tools"],
-      "structured_methods": ["text"],
+      "structured_methods": ["tool_call", "text"],
       "notes": "Route Kilo explicitement :free. Test reel 2026-09-22 : tool call valide, cout et upstream_inference_cost a 0. response_format=json_object non valide sur cette route ; JSON generique demande en texte puis valide localement."
     }
   },
