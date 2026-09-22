@@ -208,6 +208,74 @@ def test_latest_bench_run_wins(providers_up):
     assert journal.evidence("podalux.write_job", "ollama/qwen3.5-4b", rules)["eligible"] is False
 
 
+class _FakeRateLimit(Exception):
+    status_code = 429
+
+    def __init__(self, retry_after: float | None = None):
+        super().__init__("429 rate limit reached")
+        headers = {} if retry_after is None else {"retry-after": str(retry_after)}
+        self.response = type("Response", (), {"status_code": 429, "headers": headers})()
+
+
+def test_rate_limit_uses_retry_after_header():
+    assert llm._rate_limit_delay(_FakeRateLimit(12.5)) == pytest.approx(12.5)
+    assert llm._rate_limit_delay(TimeoutError("lent")) is None
+
+
+def test_rate_limited_route_is_skipped_until_cooldown_expires(transport, providers_up, monkeypatch):
+    monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
+
+    groq_calls = 0
+
+    def handler(provider, request):
+        nonlocal groq_calls
+        if request["model"] == "groq/openai/gpt-oss-120b":
+            groq_calls += 1
+            if groq_calls == 1:
+                return _FakeRateLimit(60)
+            return ('{"ok": "groq"}', Usage(prompt_tokens=20, completion_tokens=5))
+        if request["model"] == "inclusionai/ling-3.0-flash-vl:free":
+            return ('{"ok": "ling"}', Usage(prompt_tokens=20, completion_tokens=5))
+        raise AssertionError(f"modele inattendu : {request['model']}")
+
+    transport.handler = handler
+
+    first = llm.complete("agent.react_step", MSG, profile="zero_cost",
+                         json_mode=True, validate=llm.parse_json)
+    assert first.model == "kilo/ling-3.0-flash-vl-free"
+    assert transport.models == [
+        "groq/openai/gpt-oss-120b",
+        "inclusionai/ling-3.0-flash-vl:free",
+    ]
+    assert "omniroute/devworker-groq" in llm._rate_limit_cooldowns
+
+    second = llm.complete("agent.react_step", MSG, profile="zero_cost",
+                          json_mode=True, validate=llm.parse_json)
+    assert second.model == "kilo/ling-3.0-flash-vl-free"
+    assert transport.models == [
+        "groq/openai/gpt-oss-120b",
+        "inclusionai/ling-3.0-flash-vl:free",
+        "inclusionai/ling-3.0-flash-vl:free",
+    ]
+
+    # Expiration simulée : la route redevient candidate et peut réussir.
+    _, reason = llm._rate_limit_cooldowns["omniroute/devworker-groq"]
+    llm._rate_limit_cooldowns["omniroute/devworker-groq"] = (time.monotonic() - 1, reason)
+
+    third = llm.complete("agent.react_step", MSG, profile="zero_cost",
+                         json_mode=True, validate=llm.parse_json)
+    assert third.model == "omniroute/devworker-groq"
+    assert transport.models[-1] == "groq/openai/gpt-oss-120b"
+    assert "omniroute/devworker-groq" not in llm._rate_limit_cooldowns
+
+    rows = calls()
+    assert rows[0]["status"] == "error"
+    assert json.loads(rows[0]["justification"])["rate_limit_cooldown_s"] == pytest.approx(60)
+    assert len(rows) == 4  # aucune ligne réseau créée pour la route sautée pendant cooldown
+
+
 def test_fallback_to_next_free_model_after_failure(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
     prove("podalux.write_job", "ollama/qwen3.5-4b")
