@@ -402,19 +402,55 @@ def _structured_methods(model: dict, json_mode: bool, json_schema: dict | None,
 
 
 def _structured_method_error(exc: Exception) -> bool:
-    """Erreur liee au mecanisme de sortie, donc retentable sur le meme modele."""
+    """Vrai seulement si l'erreur pointe vers le mecanisme de sortie structuree.
+
+    On ne traite pas tout HTTP 400 comme une incompatibilite de methode : certains
+    providers reaffichent la requete (et donc le mot response_format) dans leur erreur.
+    """
     if isinstance(exc, ValueError):
         return True
-    name = type(exc).__name__.lower()
-    message = str(exc).lower()
-    if "badrequest" in name or "unprocessable" in name:
+
+    parts: list[str] = []
+    structured_signal = False
+
+    def collect(value: Any) -> None:
+        nonlocal structured_signal
+        if isinstance(value, dict):
+            for key, item in value.items():
+                lowered = str(key).lower()
+                if lowered == "failed_generation":
+                    structured_signal = True
+                    parts.append("failed_generation")
+                elif lowered in {"error", "code", "type", "reason", "message"}:
+                    collect(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item)
+        elif value is not None:
+            parts.append(str(value).lower())
+
+    collect(getattr(exc, "body", None))
+    message = " ".join(parts) if parts else str(exc).lower()
+
+    unrelated = (
+        "invalid_api_key", "authentication", "unauthorized", "permission",
+        "rate_limit", "context_length", "content_policy", "safety",
+        "model_not_found", "invalid model",
+    )
+    if any(marker in message for marker in unrelated):
+        return False
+
+    if structured_signal:
         return True
     markers = (
         "failed to generate json",
-        "invalid_request_body",
-        "response_format",
         "json schema",
         "structured output",
+        "unsupported response_format",
+        "response_format unsupported",
+        "response_format is not supported",
+        "invalid response_format",
+        "unknown response_format",
     )
     return any(marker in message for marker in markers)
 
