@@ -341,6 +341,20 @@ def test_memo_preserves_falsey_results_across_restart(handlers, value, resume):
     assert computations == [task_id]
 
 
+def test_worker_marks_degraded_output_as_distinct_final_status(handlers):
+    @worker.handler("test.degraded")
+    def degraded(ctx):
+        return {"synthesis_status": "degraded", "results": [{"final": "preuve brute"}]}
+
+    task_id = worker.enqueue("b", "test.degraded")
+    result = worker.run_one("w", **QUIET)
+
+    assert result["status"] == "done_degraded"
+    assert result["output"]["synthesis_status"] == "degraded"
+    assert result["output"]["results"][0]["final"] == "preuve brute"
+    assert tasks.cancel(task_id) == "done_degraded"
+
+
 def test_unknown_kind_fails_cleanly(handlers):
     tasks.enqueue("test", "inconnu.kind")
     assert worker.run_one("w", kinds=["inconnu.kind"], **QUIET)["status"] == "failed"
