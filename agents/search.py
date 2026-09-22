@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 import re
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlparse
 
 import requests
 
@@ -74,6 +74,44 @@ def _tavily_items(query: str, max_results: int) -> list[dict]:
             for res in r.json().get("results", [])][:max_results]
 
 
+def _bing_direct_url(url: str) -> str:
+    """Extrait l'URL éditeur quand Bing RSS renvoie un wrapper /news/apiclick.aspx."""
+    parsed = urlparse(url)
+    if parsed.netloc.lower() in {"www.bing.com", "bing.com"} and parsed.path == "/news/apiclick.aspx":
+        return dict(parse_qsl(parsed.query)).get("url", "")
+    return url
+
+
+def _bing_news_items(query: str, max_results: int) -> list[dict]:
+    r = requests.get(
+        "https://www.bing.com/news/search",
+        params={"q": query, "format": "RSS", "mkt": "fr-FR", "setlang": "fr"},
+        headers=UA,
+        timeout=15,
+    )
+    r.raise_for_status()
+    items = []
+    for it in re.findall(r"<item>(.*?)</item>", r.text, re.S)[:max_results]:
+        def tag(name, pattern=None):
+            m = re.search(pattern or rf"<{name}>(.*?)</{name}>", it, re.S)
+            return _strip_html(m.group(1)) if m else ""
+
+        url = _bing_direct_url(tag("link"))
+        if not url:
+            continue
+        items.append(
+            _item(
+                "bing_news",
+                tag("title"),
+                url,
+                tag("News:Source"),
+                tag("pubDate"),
+                tag("description"),
+            )
+        )
+    return items
+
+
 def _gnews_items(query: str, max_results: int) -> list[dict]:
     r = requests.get("https://news.google.com/rss/search",
                      params={"q": query, "hl": "fr", "gl": "FR", "ceid": "FR:fr"},
@@ -121,14 +159,17 @@ def search_items(query: str, max_results: int = 6) -> tuple[list[dict], list[str
             items = attempt(name, fn_name)
             if items:
                 return items, errors
+    items = attempt("Bing News", "_bing_news_items")
+    if items:
+        return items, errors
     items = attempt("Google News", "_gnews_items") + attempt("Wikipedia", "_wikipedia_items")
     return items, errors
 
 
 def format_items(items: list[dict]) -> str:
-    news = [i for i in items if i["provider"] == "google_news"]
+    news = [i for i in items if i["provider"] in ("bing_news", "google_news")]
     wiki = [i for i in items if i["provider"] == "wikipedia"]
-    web = [i for i in items if i["provider"] not in ("google_news", "wikipedia")]
+    web = [i for i in items if i["provider"] not in ("bing_news", "google_news", "wikipedia")]
     parts = []
     if web:
         parts.append("\n".join(f"- {i['title']}\n  {i['url']}\n  {i['snippet']}" for i in web))
