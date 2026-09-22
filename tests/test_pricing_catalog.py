@@ -96,7 +96,17 @@ def test_legacy_task_mapping():
     assert cat.legacy_task("GROWTH", "qc_vision") == "podalux.qc_vision"
     assert cat.legacy_task("FORGE", "action") == "agent.react_step"
     assert cat.legacy_task("ORBIT", "voir_page") == "web.describe_page"
+    assert cat.legacy_task("FORGE", "web.inspect_page") == "web.inspect_page"
     assert cat.legacy_task("LEDGER", "inconnue") == "legacy.ledger.inconnue"
+
+
+def test_flash_fallback_public_inspection_is_free_first(monkeypatch):
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    cat = catalog.load()
+    assert cat.task("web.inspect_page")["candidates"]["flash_fallback"] == [
+        "omniroute/auto-free",
+        "deepseek/flash",
+    ]
 
 
 @pytest.mark.parametrize("mutate, message", [
