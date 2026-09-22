@@ -273,6 +273,9 @@ def test_rate_limited_route_is_skipped_until_cooldown_expires(transport, provide
     rows = calls()
     assert rows[0]["status"] == "error"
     assert json.loads(rows[0]["justification"])["rate_limit_cooldown_s"] == pytest.approx(60)
+    skipped = json.loads(rows[2]["justification"])["considered"][0]
+    assert skipped["model"] == "omniroute/devworker-groq"
+    assert "429 rate limit; cooldown" in skipped["reason"]
     assert len(rows) == 4  # aucune ligne réseau créée pour la route sautée pendant cooldown
 
 
