@@ -327,6 +327,10 @@ def _ineligibility(cat, profile_name: str, profile: dict, task: str, task_def: d
     # fictif pour autoriser le premier démarrage.
     if evidence_required and model["provider"] == "omniroute" and profile_name in {"zero_cost", "low_cost"}:
         evidence_required = False
+    # Bootstrap borne : Ling :free a ete valide en appel reel (tool call + cout upstream nul)
+    # le 2026-09-22. Pas de nouvelle couche de bench juste pour debloquer la mission terrain.
+    if evidence_required and profile_name == "zero_cost" and model_id == "kilo/ling-3.0-flash-vl-free":
+        evidence_required = False
     if evidence_required:
         proof = journal.evidence(task, model_id, cat.evidence_rules())
         if not proof["eligible"]:
