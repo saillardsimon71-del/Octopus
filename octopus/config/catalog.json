@@ -242,6 +242,15 @@
         "quality_first": ["deepseek/flash"]
       }
     },
+    "web.inspect_page": {
+      "needs": ["vision"], "privacy": "public", "baseline": "deepseek/flash",
+      "candidates": {
+        "zero_cost": ["ollama/qwen3.5-4b"],
+        "low_cost": ["ollama/qwen3.5-4b", "deepseek/flash"],
+        "flash_fallback": ["deepseek/flash"],
+        "quality_first": ["deepseek/flash"]
+      }
+    },
     "web.describe_page": {
       "needs": ["vision"], "privacy": "sensitive", "baseline": "deepseek/flash",
       "candidates": {
@@ -269,6 +278,7 @@
     "SOUT/veille_synthese": "web.summarize",
     "SOUT/voir_page": "web.describe_page",
     "*/voir_page": "web.describe_page",
+    "*/web.inspect_page": "web.inspect_page",
     "*/action": "agent.react_step"
   }
 }
