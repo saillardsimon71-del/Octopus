@@ -145,3 +145,28 @@ def test_agent_keeps_tool_result_context_for_mission_synthesis(monkeypatch):
     result = runtime.run_agent("LEDGER", "observe seulement", max_steps=2, business=B)
     assert len(result["steps"][0]["result"]) > 200
     assert "site_sitequivend" in result["steps"][0]["result"]
+
+
+def test_degraded_orbit_mission_preserves_results_without_strategy_evidence(monkeypatch):
+    from agents import task_handlers  # noqa: F401
+
+    objective_id = strategy.create(
+        "objective", B, "Tester une mission", created_by="human", statement="Tester une mission économique"
+    )
+    monkeypatch.setattr(runtime, "run_mission", lambda *args, **kwargs: {
+        "plan": [{"role": "SOUT", "task": "observer"}],
+        "results": [{"role": "SOUT", "task": "observer", "final": "preuve brute", "steps": []}],
+        "rapport": "Synthèse LLM indisponible. Les résultats bruts sont conservés.",
+        "synthesis_status": "degraded",
+        "synthesis_error": "NoEligibleModel: test",
+    })
+
+    task_id = worker.enqueue(B, "orbit.mission", {"goal": "tester", "objective_id": objective_id})
+    done = worker.run_one("w", kinds=["orbit.mission"], log=lambda s: None)
+
+    assert done["status"] == "done_degraded"
+    assert done["output"]["synthesis_status"] == "degraded"
+    assert done["output"]["rapport_nature"] == "unavailable"
+    assert done["output"]["results"][0]["final"] == "preuve brute"
+    assert "evidence_id" not in done["output"]["strategy"]
+    assert not [row for row in strategy.list_items("evidence", B) if row.get("origin_task_id") == task_id]
