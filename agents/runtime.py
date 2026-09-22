@@ -291,8 +291,8 @@ TOOLS = {
     "ask_human": {"desc": "demande confirmation/info à l'humain", "params": {"question": "str"}, "fn": _ask_human},
     "publish": {"desc": "plan de publication (dry-run)", "params": {"offer_id": "str"}, "fn": _publish},
     "send_message": {"desc": "prospection : envoie un message (dry-run)", "params": {"platform": "str", "recipient": "str", "text": "str"}, "fn": _send_message},
-    "remember": {"desc": "mémorise un apprentissage", "params": {"agent": "str", "key": "str", "value": "str"}, "fn": _remember},
-    "recall": {"desc": "retrouve un apprentissage", "params": {"agent": "str", "key": "str"}, "fn": _recall},
+    "remember": {"desc": "mémorise un apprentissage", "params": {"agent": "str?", "key": "str", "value": "str"}, "fn": _remember},
+    "recall": {"desc": "retrouve un apprentissage", "params": {"agent": "str?", "key": "str"}, "fn": _recall},
     "economy_status": {"desc": "état économique réel du business : cash observé par devise, coûts LLM calculés, enveloppes de dépense, canaux, expériences en cours et leur verdict", "params": {}, "fn": _economy_status},
     "record_observation": {"desc": "enregistre un fait constaté (avec source_ref consultable = observé, sinon non vérifié), éventuellement une valeur mesurée pour une expérience", "params": {"summary": "str", "observation": "str", "source_ref": "str?", "metric": "str?", "value": "float?", "unit": "str?", "experiment_id": "int?", "channel_id": "int?"}, "fn": _record_observation},
     "propose_experiment": {"desc": "propose une expérience mesurable (objectif/hypothèse créés si absents) ; metric peut être cash_net:DEVISE", "params": {"objective": "str|objective_id", "hypothesis": "str|hypothesis_id", "action": "str", "metric": "str", "target_value": "float", "stop_value": "float?", "deadline_days": "float?", "budget_limit": "float?", "budget_currency": "str?", "channel_id": "int?"}, "fn": _propose_experiment},
@@ -349,6 +349,16 @@ def _validate_tool_args(tool: str, args) -> str | None:
             expected = "|".join(clean)
             return f"argument {name} : type attendu {expected}, reçu {type(value).__name__}"
     return None
+
+
+def _normalize_allowed_tools(allowed_tools) -> set[str] | None:
+    if allowed_tools is None:
+        return None
+    allowed = set(allowed_tools)
+    unknown = sorted(allowed - set(TOOLS))
+    if unknown:
+        raise ValueError(f"outils inconnus dans allowed_tools : {', '.join(unknown)}")
+    return allowed
 
 
 ROLES = {
@@ -453,6 +463,7 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
 
     `conversational=True` → l'agent répond à un message humain (pas un objectif).
     """
+    allowed_tools = _normalize_allowed_tools(allowed_tools)
     with journal.run(_business(business), "agent", label=f"{role} : {goal}",
                      budget_usd=deepseek.config.CYCLE_BUDGET_USD):
         token = _ROLE.set(role)
@@ -489,7 +500,8 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
             db.post(role, f"{done_label} : {str(r['final'])[:120]}")
             return {"role": role, "steps": steps, "final": r["final"]}
         tool = r.get("tool")
-        args = r.get("args") or {}
+        raw_args = r.get("args")
+        args = {} if raw_args is None else raw_args
         # L'action choisie entre dans l'historique : sans elle, le modèle ne voyait que les résultats
         # et relançait les mêmes requêtes (audit M2).
         context.append({"role": "assistant", "content": json.dumps(r, ensure_ascii=False)[:600]})
@@ -522,9 +534,12 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         repeat = repeat + 1 if sig == last_sig else 0
         last_sig = sig
         if repeat >= 2:
+            recovery = "Change d'approche"
+            if allowed_tools is None or "ask_human" in allowed_tools:
+                recovery += ", demande à l'humain (ask_human)"
+            recovery += ", ou réponds avec « final »."
             context.append({"role": "user", "content":
-                            "Tu répètes la même action sans progrès (ex. CAPTCHA/échec). "
-                            "Change d'approche, demande à l'humain (ask_human), ou réponds avec « final »."})
+                            "Tu répètes la même action sans progrès (ex. CAPTCHA/échec). " + recovery})
             repeat = 0
         db.post(role, f"action {tool} {json.dumps(args, ensure_ascii=False)[:90]}")
         context.append({"role": "user", "content": f"Résultat de {tool} : {result_str}"})
@@ -536,6 +551,7 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
 def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None = None,
                 allowed_tools: set[str] | None = None) -> dict:
     """ORBIT planifie puis délègue aux rôles (multi-agents via le runtime)."""
+    allowed_tools = _normalize_allowed_tools(allowed_tools)
     with journal.run(_business(business), "mission", label=goal, budget_usd=deepseek.config.CYCLE_BUDGET_USD):
         with cancel.scope(), web_guard.session(), _search_cache():
             return _run_mission(goal, max_steps_per_agent, allowed_tools)
