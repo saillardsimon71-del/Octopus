@@ -137,11 +137,6 @@ def _overlay_omniroute(raw: dict) -> dict:
             current_flash = list(candidates["flash_fallback"])
             if selected_model not in current_flash:
                 candidates["flash_fallback"] = [selected_model, *current_flash]
-        elif task_name == "web.inspect_page" and "flash_fallback" in raw.get("profiles", {}):
-            # Run #24 a montré que ce chemin tombait sur le pin DeepSeek directement.
-            # Pour l'expérience free-first, l'inspection publique essaie d'abord
-            # OmniRoute auto-free puis seulement DeepSeek Flash.
-            candidates["flash_fallback"] = [selected_model, "deepseek/flash"]
         if raw.get("profiles", {}).get("zero_cost", {}).get("fallback"):
             task.setdefault("omniroute_bootstrap_baseline", {})["zero_cost"] = selected_model
     dev_task = raw.setdefault("tasks", {}).setdefault("development.step", {})
