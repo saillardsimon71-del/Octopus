@@ -430,6 +430,20 @@ def _build_request(model: dict, messages: list[dict], max_tokens: int, json_mode
     for key, value in copy.deepcopy(model.get("params", {})).items():
         request.setdefault(key, value)
 
+    # Compatibilite des appels directs historiques a _build_request().
+    # La gateway moderne passe toujours structured_method explicitement.
+    if structured_method is None and (json_mode or json_schema is not None):
+        if json_schema is not None:
+            schema_mode = model.get("json_schema_mode")
+            if schema_mode == "tool_call":
+                structured_method = "tool_call"
+            elif schema_mode == "json_object":
+                structured_method = "json_object"
+            else:
+                structured_method = "json_schema"
+        elif json_mode and "json" in capabilities:
+            structured_method = "json_object"
+
     if structured_method == "tool_call":
         if json_schema is None or not tool_schemas:
             raise ValueError("schémas d'outils déclaratifs requis pour le mode tool_call")
