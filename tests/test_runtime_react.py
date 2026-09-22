@@ -113,3 +113,19 @@ def test_mission_keeps_subagent_results_when_synthesis_gateway_fails(monkeypatch
     assert result["results"][0]["final"] == "résultat sous-agent conservé"
     assert "aucune synthèse factuelle validée" in result["rapport"]
     assert "NoEligibleModel" in result["synthesis_error"]
+
+
+def test_mission_does_not_hide_non_gateway_synthesis_bug(monkeypatch):
+    actions = iter([
+        {"tasks": [{"role": "SOUT", "task": "observer"}]},
+        {"final": "résultat"},
+    ])
+
+    def call_json(agent, task, model, messages, **kwargs):
+        if task == "synthese":
+            raise RuntimeError("bug de code synthèse")
+        return next(actions)
+
+    monkeypatch.setattr(deepseek, "call_json", call_json)
+    with pytest.raises(RuntimeError, match="bug de code synthèse"):
+        runtime.run_mission("objectif", max_steps_per_agent=2)
