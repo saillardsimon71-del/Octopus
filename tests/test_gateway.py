@@ -227,8 +227,14 @@ def test_orbit_mission_tasks_keep_their_gateway_contract(monkeypatch):
     assert cat.legacy_task("ORBIT", "planification") == "agent.plan"
     assert cat.legacy_task("ORBIT", "synthese") == "agent.synthesize"
     assert cat.legacy_task("ORBIT", "action") == "agent.react_step"
-    assert cat.task("agent.plan")["candidates"]["zero_cost"][0] == "omniroute/auto-free"
-    assert cat.task("agent.synthesize")["candidates"]["zero_cost"][0] == "omniroute/auto-free"
+    assert cat.task("agent.plan")["candidates"]["zero_cost"][:2] == [
+        "omniroute/devworker-groq",
+        "kilo/ling-3.0-flash-vl-free",
+    ]
+    assert cat.task("agent.synthesize")["candidates"]["zero_cost"][:2] == [
+        "omniroute/devworker-groq",
+        "kilo/ling-3.0-flash-vl-free",
+    ]
 
 
 # --- budgets -------------------------------------------------------------------------------

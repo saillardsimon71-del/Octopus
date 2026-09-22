@@ -74,6 +74,16 @@
       "quota_note": "Essai gratuit : 5 requetes/min, 1 million de tokens/jour (gpt-oss-120b, qwen-3.8-27b).",
       "data_policy": "Non verifie.",
       "sources": ["https://inference-docs.cerebras.ai/support/rate-limits"]
+    },
+    "kilo": {
+      "kind": "cloud",
+      "base_url": "https://api.kilo.ai/api/gateway",
+      "api_key_env": "KILO_API_KEY",
+      "timeout_s": 90,
+      "max_retries": 0,
+      "quota_note": "Modeles explicitement suffixes :free uniquement ; disponibilite et quotas susceptibles d'evoluer.",
+      "data_policy": "Gateway tiers : appliquer les conditions Kilo et celles du fournisseur d'inference sous-jacent.",
+      "sources": ["https://kilo.ai/docs/gateway", "https://kilo.ai/docs/gateway/models-and-providers", "https://kilo.ai/docs/gateway/usage-and-billing"]
     }
   },
   "models": {
@@ -122,6 +132,11 @@
       "provider": "gemini", "api_model": "gemini-3.5-flash-lite", "cost_class": "free_quota",
       "capabilities": ["json", "vision", "reasoning_effort"],
       "notes": "Palier gratuit Gemini."
+    },
+    "kilo/ling-3.0-flash-vl-free": {
+      "provider": "kilo", "api_model": "inclusionai/ling-3.0-flash-vl:free", "cost_class": "free_quota",
+      "capabilities": ["json", "vision", "tools"],
+      "notes": "Route Kilo explicitement :free. Test reel 2026-09-22 : tool call valide, cout et upstream_inference_cost a 0."
     }
   },
   "profiles": {
@@ -182,7 +197,7 @@
     "agent.react_step": {
       "needs": ["json"], "privacy": "internal", "baseline": "deepseek/flash",
       "candidates": {
-        "zero_cost": ["groq/gpt-oss-120b", "ollama/qwen3.5-4b"],
+        "zero_cost": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b", "ollama/qwen3.5-4b"],
         "low_cost": ["groq/gpt-oss-120b", "ollama/qwen3.5-4b", "deepseek/flash"],
         "quality_first": ["deepseek/flash"]
       }
@@ -190,7 +205,7 @@
     "agent.plan": {
       "needs": ["json"], "privacy": "internal", "baseline": "deepseek/v4-pro",
       "candidates": {
-        "zero_cost": ["groq/gpt-oss-120b"],
+        "zero_cost": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b"],
         "low_cost": ["groq/gpt-oss-120b", "deepseek/flash", "deepseek/v4-pro"],
         "quality_first": ["deepseek/v4-pro"]
       }
@@ -198,7 +213,7 @@
     "agent.synthesize": {
       "needs": ["json"], "privacy": "internal", "baseline": "deepseek/v4-pro",
       "candidates": {
-        "zero_cost": ["groq/gpt-oss-120b"],
+        "zero_cost": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b"],
         "low_cost": ["groq/gpt-oss-120b", "deepseek/flash", "deepseek/v4-pro"],
         "quality_first": ["deepseek/v4-pro"]
       }
