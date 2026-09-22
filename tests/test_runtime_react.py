@@ -88,6 +88,28 @@ def test_search_failures_are_reported(monkeypatch):
     assert "Recouvrement de créances" in out and "Sources en erreur : Google News : ConnectionError" in out
 
 
+def test_keyless_search_results_keep_browsable_urls():
+    out = search.format_items([
+        search._item(
+            "google_news",
+            "PME et facturation électronique",
+            "https://news.google.com/rss/articles/example",
+            "Exemple",
+            "Tue, 22 Sep 2026 08:00:00 GMT",
+        ),
+        search._item(
+            "wikipedia",
+            "Micro-entrepreneur",
+            "https://fr.wikipedia.org/wiki/Micro-entrepreneur",
+            "Wikipédia",
+            snippet="Régime français.",
+        ),
+    ])
+
+    assert "https://news.google.com/rss/articles/example" in out
+    assert "https://fr.wikipedia.org/wiki/Micro-entrepreneur" in out
+
+
 def test_wikipedia_user_agent_is_identifiable():
     assert "Mozilla" not in search.WIKI_UA["User-Agent"] and "Podalux" in search.WIKI_UA["User-Agent"]
 
