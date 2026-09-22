@@ -172,6 +172,7 @@ def test_search_failures_are_reported(monkeypatch):
         raise ConnectionError("proxy refuse")
 
     monkeypatch.setattr(search, "_bing_news_items", lambda q, n: [])
+    monkeypatch.setattr(search, "_bing_web_items", lambda q, n: [])
     monkeypatch.setattr(search, "_gnews_items", down)
     monkeypatch.setattr(search, "_wikipedia_items", lambda q, n: [search._item(
         "wikipedia", "Recouvrement de créances", "https://fr.wikipedia.org/wiki/Recouvrement", "Wikipédia", "", "procédure")])
@@ -211,6 +212,7 @@ def test_keyless_search_prefers_bing_direct_results(monkeypatch):
     monkeypatch.setattr(search, "_bing_news_items", lambda q, n: [
         search._item("bing_news", "Titre", "https://example.com/article", "Exemple", "2026-09-22", "preuve")
     ])
+    monkeypatch.setattr(search, "_bing_web_items", lambda *a, **k: pytest.fail("Bing Web ne doit pas être consulté"))
     monkeypatch.setattr(search, "_gnews_items", lambda *a, **k: pytest.fail("Google News ne doit pas être consulté"))
     monkeypatch.setattr(search, "_wikipedia_items", lambda *a, **k: pytest.fail("Wikipedia ne doit pas être consulté"))
 
@@ -220,7 +222,50 @@ def test_keyless_search_prefers_bing_direct_results(monkeypatch):
     assert "Exemple" in out
 
 
-def test_keyless_search_results_keep_browsable_urls():
+def test_bing_web_rss_keeps_only_direct_external_urls(monkeypatch):
+    rss = """<rss><channel>
+    <item>
+      <title>Retards de paiement des PME</title>
+      <link>https://example.com/retards-paiement</link>
+      <description>Données sur les délais de paiement.</description>
+      <pubDate>Tue, 22 Sep 2026 08:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Wrapper Bing</title>
+      <link>https://www.bing.com/ck/a?x=1</link>
+      <description>À ignorer.</description>
+    </item>
+    </channel></rss>"""
+
+    class Response:
+        text = rss
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(search.requests, "get", lambda *a, **k: Response())
+    items = search._bing_web_items("retards paiement PME", 6)
+
+    assert len(items) == 1
+    assert items[0]["provider"] == "bing_web"
+    assert items[0]["url"] == "https://example.com/retards-paiement"
+
+
+def test_keyless_search_uses_bing_web_before_google_wrappers(monkeypatch):
+    monkeypatch.setattr(search.config, "BRAVE_API_KEY", "")
+    monkeypatch.setattr(search.config, "TAVILY_API_KEY", "")
+    monkeypatch.setattr(search, "_bing_news_items", lambda q, n: [])
+    monkeypatch.setattr(search, "_bing_web_items", lambda q, n: [
+        search._item("bing_web", "Titre", "https://example.com/direct", "Bing Web", "", "preuve")
+    ])
+    monkeypatch.setattr(search, "_gnews_items", lambda *a, **k: pytest.fail("Google News ne doit pas être consulté"))
+    monkeypatch.setattr(search, "_wikipedia_items", lambda *a, **k: pytest.fail("Wikipedia ne doit pas être consulté"))
+
+    out = search.web_search("besoin PME")
+
+    assert "https://example.com/direct" in out
+
+
+def test_google_news_wrappers_are_hints_not_browsable_urls():
     out = search.format_items([
         search._item(
             "google_news",
@@ -238,7 +283,10 @@ def test_keyless_search_results_keep_browsable_urls():
         ),
     ])
 
-    assert "https://news.google.com/rss/articles/example" in out
+    assert "https://news.google.com/rss/articles/example" not in out
+    assert "wrapper non exploitable par browse" in out
+    assert "PME et facturation électronique" in out
+    assert "Exemple" in out
     assert "https://fr.wikipedia.org/wiki/Micro-entrepreneur" in out
 
 

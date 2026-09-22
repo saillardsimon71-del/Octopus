@@ -1,9 +1,11 @@
-"""Recherche web : API (Brave/Tavily) si clé, sinon Google News RSS + Wikipedia (keyless).
+"""Recherche web : API (Brave/Tavily) si clé, sinon flux RSS / API keyless.
 
 Le problème des moteurs classiques (DuckDuckGo, Bing HTML) est le blocage anti-bot.
 On contourne avec des sources bot-friendly :
 - Brave / Tavily : vraie recherche web (clé gratuite requise).
-- Google News RSS : résultats d'actualité (keyless, XML).
+- Bing News RSS : actualités avec URL éditeur directe quand disponible.
+- Bing Web RSS : recherche web keyless, utilisée avant les wrappers Google News.
+- Google News RSS : piste titre/source uniquement quand aucune URL directe n'est trouvée.
 - Wikipedia : encyclopédie (API MediaWiki, keyless).
 
 `search_items` renvoie des résultats structurés (titre, URL, source, date, extrait) pour les
@@ -112,6 +114,29 @@ def _bing_news_items(query: str, max_results: int) -> list[dict]:
     return items
 
 
+def _bing_web_items(query: str, max_results: int) -> list[dict]:
+    """Recherche web Bing RSS ; ne conserve que des URL externes directement navigables."""
+    r = requests.get(
+        "https://www.bing.com/search",
+        params={"q": query, "format": "RSS", "mkt": "fr-FR", "setlang": "fr"},
+        headers=UA,
+        timeout=15,
+    )
+    r.raise_for_status()
+    items = []
+    for it in re.findall(r"<item>(.*?)</item>", r.text, re.S)[:max_results]:
+        def tag(name, pattern=None):
+            m = re.search(pattern or rf"<{name}>(.*?)</{name}>", it, re.S)
+            return _strip_html(m.group(1)) if m else ""
+
+        url = _bing_direct_url(tag("link"))
+        host = urlparse(url).netloc.lower()
+        if not url or host in {"bing.com", "www.bing.com", "news.google.com"}:
+            continue
+        items.append(_item("bing_web", tag("title"), url, "Bing Web", tag("pubDate"), tag("description")))
+    return items
+
+
 def _gnews_items(query: str, max_results: int) -> list[dict]:
     r = requests.get("https://news.google.com/rss/search",
                      params={"q": query, "hl": "fr", "gl": "FR", "ceid": "FR:fr"},
@@ -162,12 +187,16 @@ def search_items(query: str, max_results: int = 6) -> tuple[list[dict], list[str
     items = attempt("Bing News", "_bing_news_items")
     if items:
         return items, errors
+    items = attempt("Bing Web", "_bing_web_items")
+    if items:
+        return items, errors
     items = attempt("Google News", "_gnews_items") + attempt("Wikipedia", "_wikipedia_items")
     return items, errors
 
 
 def format_items(items: list[dict]) -> str:
-    news = [i for i in items if i["provider"] in ("bing_news", "google_news")]
+    news = [i for i in items if i["provider"] == "bing_news"]
+    google_news = [i for i in items if i["provider"] == "google_news"]
     wiki = [i for i in items if i["provider"] == "wikipedia"]
     web = [i for i in items if i["provider"] not in ("bing_news", "google_news", "wikipedia")]
     parts = []
@@ -175,10 +204,18 @@ def format_items(items: list[dict]) -> str:
         parts.append("\n".join(f"- {i['title']}\n  {i['url']}\n  {i['snippet']}" for i in web))
     if news:
         parts.append(
-            "Actualités (Google News) :\n"
+            "Actualités — URL éditeur directe :\n"
             + "\n".join(
                 f"- {i['title']} ({i['source']}, {i['date']})\n  {i['url']}"
                 for i in news
+            )
+        )
+    if google_news:
+        parts.append(
+            "Pistes Google News — wrapper non exploitable par browse ; reformuler la recherche avec le titre/source :\n"
+            + "\n".join(
+                f"- {i['title']} ({i['source']}, {i['date']})"
+                for i in google_news
             )
         )
     if wiki:
