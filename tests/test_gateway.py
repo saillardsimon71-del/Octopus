@@ -296,6 +296,39 @@ def test_fallback_to_next_free_model_after_failure(transport, providers_up, monk
     assert [c["attempt"] for c in calls()] == [1, 2]
 
 
+def test_flash_fallback_uses_deepseek_only_after_free_routes_fail(transport, providers_up, monkeypatch):
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
+    providers_up.update({"groq", "ollama"})
+
+    class RateLimited(Exception):
+        status_code = 429
+        response = type("Response", (), {"status_code": 429, "headers": {"retry-after": "60"}})()
+
+    def handler(provider, request):
+        if request["model"] == "groq/openai/gpt-oss-120b":
+            return RateLimited("429 rate limit reached")
+        if request["model"] == "inclusionai/ling-3.0-flash-vl:free":
+            return ("pas du json", Usage(prompt_tokens=40, completion_tokens=20))
+        if request["model"] == "deepseek-flash":
+            return ('{"ok": "deepseek"}', Usage(prompt_tokens=400, completion_tokens=100))
+        raise AssertionError(f"modele inattendu : {request['model']}")
+
+    transport.handler = handler
+    result = llm.complete("agent.react_step", MSG, profile="flash_fallback",
+                          json_mode=True, validate=llm.parse_json)
+
+    assert result.model == "deepseek/flash"
+    assert result.data == {"ok": "deepseek"}
+    assert transport.models == [
+        "groq/openai/gpt-oss-120b",
+        "inclusionai/ling-3.0-flash-vl:free",
+        "deepseek-flash",
+    ]
+    assert result.cost_usd > 0
+    assert all(row["model"] != "deepseek/v4-pro" for row in calls())
+
+
 def test_low_cost_pays_only_when_alternatives_are_ineligible(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "low_cost")
     providers_up.add("ollama")
