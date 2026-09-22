@@ -64,7 +64,15 @@ def agent_message(ctx):
 def mission(ctx):
     from .runtime import run_mission
     result = _run(ctx, lambda: run_mission(str(ctx.input["goal"]), max_steps_per_agent=int(ctx.input.get("max_steps", 8))))
-    return {"rapport": result.get("rapport"), "subtasks": len(result.get("plan") or [])}
+    output = {
+        "rapport": result.get("rapport"),
+        "subtasks": len(result.get("plan") or []),
+        "synthesis_status": result.get("synthesis_status", "validated"),
+    }
+    if output["synthesis_status"] == "degraded":
+        output["synthesis_error"] = result.get("synthesis_error")
+        output["results"] = result.get("results") or []
+    return output
 
 
 @handler("orbit.mission", resource="llm")
@@ -88,10 +96,23 @@ def orbit_mission(ctx):
         goal = f"{context['brief']}\n\n{goal}"
     result = _run(ctx, lambda: run_mission(goal, max_steps_per_agent=int(ctx.input.get("max_steps", 8)),
                                            business=ctx.business))
-    output = {"business": ctx.business, "rapport": result.get("rapport"), "rapport_nature": "inferred",
-              "subtasks": len(result.get("plan") or [])}
-    if context and output["rapport"]:
+    synthesis_status = result.get("synthesis_status", "validated")
+    output = {
+        "business": ctx.business,
+        "rapport": result.get("rapport"),
+        "rapport_nature": "inferred" if synthesis_status == "validated" else "unavailable",
+        "subtasks": len(result.get("plan") or []),
+        "synthesis_status": synthesis_status,
+    }
+    if synthesis_status == "degraded":
+        # Le handler ne doit pas jeter les preuves brutes que runtime a preservees.
+        output["synthesis_error"] = result.get("synthesis_error")
+        output["results"] = result.get("results") or []
+
+    if context:
         output["strategy"] = {k: context[k] for k in ("objective_id", "hypothesis_id", "experiment_id")}
+
+    if context and output["rapport"] and synthesis_status == "validated":
         target = next(kind for kind in ("experiment", "hypothesis", "objective") if context[f"{kind}_id"] is not None)
 
         def record():
@@ -104,4 +125,6 @@ def orbit_mission(ctx):
 
         output["strategy"]["evidence_id"] = ctx.memo("strategy_evidence", record)  # une seule preuve par tâche
         ctx.emit("strategy.mission.done", output["strategy"])
+    elif context and synthesis_status == "degraded":
+        ctx.emit("strategy.mission.degraded", output["strategy"])
     return output
