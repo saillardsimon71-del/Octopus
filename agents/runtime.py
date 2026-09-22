@@ -358,6 +358,13 @@ def build_prompts(role: str, goal: str, conversational: bool = False) -> tuple[s
     roles = GENERIC_ROLES if run is not None and run.business != DEFAULT_BUSINESS else ROLES
     role_desc = roles.get(role, "")
     group = _group()
+    proof_rule = ""
+    if run is not None and run.business != DEFAULT_BUSINESS:
+        proof_rule = (
+            "RÈGLE DE PREUVE : ne présente jamais comme observé, réel ou disponible un fait, un chiffre, "
+            "un canal ou une ressource qui n'apparaît pas dans un résultat d'outil de cette exécution. "
+            "Si l'information manque, écris qu'elle est inconnue ; une hypothèse ou une inférence doit rester explicitement telle.\n\n"
+        )
     if conversational:
         system = (
             f"Tu es l'agent {role} du groupe {group}. {role_desc} "
@@ -380,6 +387,7 @@ def build_prompts(role: str, goal: str, conversational: bool = False) -> tuple[s
             f"les outils disponibles. À chaque étape, choisis UNE action. "
             f"Utilise `remember` pour stocker tes apprentissages et `recall` pour les relire.\n\n"
             f"Outils disponibles :\n{tools_desc()}\n\n"
+            f"{proof_rule}"
             "Réponds TOUJOURS en JSON : soit {\"tool\": \"<nom>\", \"args\": {...}} pour agir, "
             "soit {\"final\": \"<réponse>\"} quand l'objectif est atteint."
         )
@@ -467,7 +475,8 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool) -> di
             repeat = 0
         db.post(role, f"action {tool} {json.dumps(args, ensure_ascii=False)[:90]}")
         context.append({"role": "user", "content": f"Résultat de {tool} : {result_str}"})
-        steps.append({"step": i + 1, "tool": tool, "result": result_str[:200]})
+        # La synthèse de mission doit voir assez de preuve brute pour ne pas combler les trous par invention.
+        steps.append({"step": i + 1, "tool": tool, "result": result_str[:1500]})
     return {"role": role, "steps": steps, "final": "(max steps atteint)"}
 
 
@@ -524,8 +533,12 @@ def _run_mission(goal: str, max_steps_per_agent: int) -> dict:
     if cancel.requested():
         db.post("ORBIT", "mission arrêtée par l'humain avant la synthèse")
         return {"plan": tasks, "results": results, "rapport": "(arrêt demandé)"}
-    syn_sys = ("Tu es ORBIT. Synthétise les résultats des sous-tâches en un rapport final "
-               "concis. Réponds en JSON : {\"rapport\":\"...\"}")
+    syn_sys = (
+        "Tu es ORBIT. Synthétise les résultats des sous-tâches en un rapport final concis. "
+        "N'introduis aucun fait, chiffre, canal, ressource ou résultat absent des sous-tâches et de leurs résultats d'outils. "
+        "Si un sous-agent affirme quelque chose sans preuve visible dans ses étapes, qualifie-le de non vérifié ou d'inférence, "
+        "jamais de fait observé. Réponds en JSON : {\"rapport\":\"...\"}"
+    )
     syn = deepseek.call_json("ORBIT", "synthese", pro,
                              [{"role": "system", "content": syn_sys},
                               {"role": "user", "content": json.dumps(results, ensure_ascii=False)}],

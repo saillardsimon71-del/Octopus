@@ -123,3 +123,25 @@ def test_agent_opens_a_new_business_that_the_portfolio_cycle_then_manages(transp
     queued = journal.query("SELECT business, budget_usd FROM tasks WHERE kind='orbit.mission'")
     assert all(r["budget_usd"] == 0.01 for r in queued)
     assert transport.calls == []
+
+
+
+def test_generic_agent_prompt_forbids_invented_observed_facts():
+    with journal.run(B, "agent"):
+        system, _, _ = runtime.build_prompts("LEDGER", "résume l'état économique")
+    assert "RÈGLE DE PREUVE" in system
+    assert "n'apparaît pas dans un résultat d'outil" in system
+    assert "inconnue" in system
+
+
+def test_agent_keeps_tool_result_context_for_mission_synthesis(monkeypatch):
+    payload = {"overview": {"available": 4}, "resources": [{"key": "site_sitequivend", "detail": "x" * 500}]}
+    actions = iter([
+        {"tool": "resources_status", "args": {}},
+        {"final": "terminé"},
+    ])
+    monkeypatch.setattr(deepseek, "call_json", lambda *a, **k: next(actions))
+    monkeypatch.setitem(runtime.TOOLS["resources_status"], "fn", lambda args: payload)
+    result = runtime.run_agent("LEDGER", "observe seulement", max_steps=2, business=B)
+    assert len(result["steps"][0]["result"]) > 200
+    assert "site_sitequivend" in result["steps"][0]["result"]
