@@ -358,6 +358,13 @@ def build_prompts(role: str, goal: str, conversational: bool = False) -> tuple[s
     roles = GENERIC_ROLES if run is not None and run.business != DEFAULT_BUSINESS else ROLES
     role_desc = roles.get(role, "")
     group = _group()
+    proof_rule = ""
+    if run is not None and run.business != DEFAULT_BUSINESS:
+        proof_rule = (
+            "RÈGLE DE PREUVE : ne présente jamais comme observé, réel ou disponible un fait, un chiffre, "
+            "un canal ou une ressource qui n'apparaît pas dans un résultat d'outil de cette exécution. "
+            "Si l'information manque, écris qu'elle est inconnue ; une hypothèse ou une inférence doit rester explicitement telle.\n\n"
+        )
     if conversational:
         system = (
             f"Tu es l'agent {role} du groupe {group}. {role_desc} "
@@ -380,9 +387,7 @@ def build_prompts(role: str, goal: str, conversational: bool = False) -> tuple[s
             f"les outils disponibles. À chaque étape, choisis UNE action. "
             f"Utilise `remember` pour stocker tes apprentissages et `recall` pour les relire.\n\n"
             f"Outils disponibles :\n{tools_desc()}\n\n"
-            "RÈGLE DE PREUVE : ne présente jamais comme observé, réel ou disponible un fait, un chiffre, "
-            "un canal ou une ressource qui n'apparaît pas dans un résultat d'outil de cette exécution. "
-            "Si l'information manque, écris qu'elle est inconnue ; une hypothèse ou une inférence doit rester explicitement telle.\n\n"
+            f"{proof_rule}"
             "Réponds TOUJOURS en JSON : soit {\"tool\": \"<nom>\", \"args\": {...}} pour agir, "
             "soit {\"final\": \"<réponse>\"} quand l'objectif est atteint."
         )
