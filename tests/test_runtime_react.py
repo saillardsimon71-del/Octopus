@@ -6,7 +6,7 @@ import json
 import pytest
 
 from agents import deepseek, runtime, search
-from octopus import llm
+from octopus import journal, llm
 
 REAL_QUERIES = [  # run ORBIT du 16/09, 14:07-14:10
     "meilleures pratiques relance factures impayées modèles email",
@@ -106,6 +106,26 @@ def test_tool_gate_rejects_wrong_argument_type(monkeypatch):
     result = runtime.run_agent("LEDGER", "mémoriser", max_steps=3, allowed_tools={"remember"})
 
     assert "type attendu str, reçu list" in result["steps"][0]["result"]
+
+
+def test_mission_profile_is_inherited_by_all_llm_calls(monkeypatch):
+    profiles = []
+    actions = iter([
+        {"tasks": [{"role": "SOUT", "task": "collecter"}]},
+        {"final": "preuve"},
+        {"rapport": "rapport"},
+    ])
+
+    def call_json(*args, **kwargs):
+        current = journal.current_run()
+        profiles.append(current.profile if current else None)
+        return next(actions)
+
+    monkeypatch.setattr(deepseek, "call_json", call_json)
+    result = runtime.run_mission("collecte", max_steps_per_agent=2, profile="flash_fallback")
+
+    assert result["synthesis_status"] == "validated"
+    assert profiles == ["flash_fallback", "flash_fallback", "flash_fallback"]
 
 
 def test_mission_propagates_tool_allowlist_to_subagents(monkeypatch):
