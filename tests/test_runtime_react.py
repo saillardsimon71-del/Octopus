@@ -79,6 +79,7 @@ def test_search_failures_are_reported(monkeypatch):
     def down(query, n):
         raise ConnectionError("proxy refuse")
 
+    monkeypatch.setattr(search, "_bing_news_items", lambda q, n: [])
     monkeypatch.setattr(search, "_gnews_items", down)
     monkeypatch.setattr(search, "_wikipedia_items", lambda q, n: [search._item(
         "wikipedia", "Recouvrement de créances", "https://fr.wikipedia.org/wiki/Recouvrement", "Wikipédia", "", "procédure")])
@@ -86,6 +87,45 @@ def test_search_failures_are_reported(monkeypatch):
     monkeypatch.setattr(search.config, "TAVILY_API_KEY", "")
     out = search.web_search("recouvrement")
     assert "Recouvrement de créances" in out and "Sources en erreur : Google News : ConnectionError" in out
+
+
+def test_bing_news_unwraps_publisher_url(monkeypatch):
+    rss = """<rss><channel><item>
+    <title>Facturation électronique des PME</title>
+    <link>https://www.bing.com/news/apiclick.aspx?ref=FexRss&amp;url=https%3A%2F%2Fexample.com%2Farticle&amp;mkt=fr-fr</link>
+    <description>Une preuve exploitable.</description>
+    <pubDate>Tue, 22 Sep 2026 08:00:00 GMT</pubDate>
+    <News:Source>Exemple</News:Source>
+    </item></channel></rss>"""
+
+    class Response:
+        text = rss
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(search.requests, "get", lambda *a, **k: Response())
+    items = search._bing_news_items("facturation électronique", 6)
+
+    assert len(items) == 1
+    assert items[0]["provider"] == "bing_news"
+    assert items[0]["url"] == "https://example.com/article"
+    assert items[0]["source"] == "Exemple"
+    assert items[0]["date"] == "Tue, 22 Sep 2026 08:00:00 GMT"
+
+
+def test_keyless_search_prefers_bing_direct_results(monkeypatch):
+    monkeypatch.setattr(search.config, "BRAVE_API_KEY", "")
+    monkeypatch.setattr(search.config, "TAVILY_API_KEY", "")
+    monkeypatch.setattr(search, "_bing_news_items", lambda q, n: [
+        search._item("bing_news", "Titre", "https://example.com/article", "Exemple", "2026-09-22", "preuve")
+    ])
+    monkeypatch.setattr(search, "_gnews_items", lambda *a, **k: pytest.fail("Google News ne doit pas être consulté"))
+    monkeypatch.setattr(search, "_wikipedia_items", lambda *a, **k: pytest.fail("Wikipedia ne doit pas être consulté"))
+
+    out = search.web_search("besoin PME")
+
+    assert "https://example.com/article" in out
+    assert "Exemple" in out
 
 
 def test_keyless_search_results_keep_browsable_urls():
