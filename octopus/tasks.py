@@ -3,7 +3,7 @@
 Plusieurs processus (worker, GUI, CLI) partagent la même base. Toute transition d'état passe par une
 transaction BEGIN IMMEDIATE : une tâche ne peut être prise que par un seul worker.
 
-Statuts : queued -> running -> done | failed | cancelled, et running -> waiting_human -> queued
+Statuts : queued -> running -> done | done_degraded | failed | cancelled, et running -> waiting_human -> queued
 (reprise après réponse). Un bail (lease) expiré signale un worker mort : la tâche repart en file
 si des tentatives restent, sinon elle échoue.
 """
@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from . import journal
 
 ACTIVE = ("queued", "running", "waiting_human")
-FINAL = ("done", "failed", "cancelled")
+FINAL = ("done", "done_degraded", "failed", "cancelled")
 
 
 class TaskError(RuntimeError):
@@ -188,14 +188,16 @@ def set_run(task_id: int, run_id: int | None, *, owner: str | None = None) -> No
         conn.execute("UPDATE tasks SET run_id=? WHERE id=?", (run_id, task_id))
 
 
-def complete(task_id: int, owner: str, output=None) -> None:
+def complete(task_id: int, owner: str, output=None, *, status: str = "done") -> None:
+    if status not in {"done", "done_degraded"}:
+        raise ValueError(f"statut de completion invalide : {status}")
     now = time.time()
     with _tx() as conn:
         row = _owned(conn, task_id, owner)
-        conn.execute("UPDATE tasks SET status='done', output=?, error=NULL, lease_owner=NULL, lease_until=NULL, "
+        conn.execute("UPDATE tasks SET status=?, output=?, error=NULL, lease_owner=NULL, lease_until=NULL, "
                      "updated_at=?, finished_at=? WHERE id=?",
-                     (json.dumps(output, ensure_ascii=False, default=str), now, now, task_id))
-        _emit(conn, row["business"], task_id, "task.done", {"kind": row["kind"]})
+                     (status, json.dumps(output, ensure_ascii=False, default=str), now, now, task_id))
+        _emit(conn, row["business"], task_id, f"task.{status}", {"kind": row["kind"]})
 
 
 def fail(task_id: int, owner: str, error: str, *, retry_delay_s: float = 30, final: bool = False) -> str:
