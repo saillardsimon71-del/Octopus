@@ -119,9 +119,10 @@ _DEFAULT_RATE_LIMIT_COOLDOWN_S = 30.0
 def _rate_limit_delay(exc: Exception) -> float | None:
     """Retourne le délai de cooldown si l'exception est un 429, sinon None.
 
-    Retry-After numérique est privilégié quand le gateway/provider le transmet.
-    Le fallback court évite de retenter immédiatement une route déjà limitée sans
-    transformer un incident transitoire en bannissement pour tout le run.
+    Retry-After numérique est respecté quand il est plus long que notre plancher
+    local ; il ne peut jamais raccourcir cette protection. Le fallback court évite
+    de retenter immédiatement une route déjà limitée sans transformer un incident
+    transitoire en bannissement pour tout le run.
     """
     response = getattr(exc, "response", None)
     status = getattr(exc, "status_code", None)
