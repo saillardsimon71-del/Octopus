@@ -60,6 +60,11 @@ def add_parser(sub) -> None:
     for ref in ("objective", "hypothesis", "experiment"):
         n.add_argument(f"--{ref}", type=int, default=None)
     n.add_argument("--max-steps", type=int, default=8)
+    n.add_argument(
+        "--allow-tools",
+        default=None,
+        help="allowlist explicite séparée par des virgules ; absente = comportement historique (tous les outils)",
+    )
     r = s.add_parser("review", help="planifie une revue (tâche strategy.review)")
     r.add_argument("business")
     r.add_argument("--in", dest="due_in", type=float, default=0, help="délai en secondes")
@@ -238,8 +243,12 @@ def run(args) -> int:
             worker.load_handlers()
             refs = {f"{ref}_id": getattr(args, ref) for ref in ("objective", "hypothesis", "experiment")}
             context = strategy.mission_context(args.business, **refs)  # erreur immédiate plutôt qu'en file
+            allowed_tools = None
+            if args.allow_tools is not None:
+                allowed_tools = [name.strip() for name in args.allow_tools.split(",") if name.strip()]
             task_id = worker.enqueue(args.business, "orbit.mission",
                                      {"goal": args.goal, "max_steps": args.max_steps,
+                                      "allowed_tools": allowed_tools,
                                       **{k: context[k] for k in refs if context[k] is not None}})
             print(f"tâche orbit.mission #{task_id} en file (python -m octopus worker pour l'exécuter)")
         elif cmd == "review":

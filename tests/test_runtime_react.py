@@ -66,6 +66,78 @@ def test_new_run_has_a_fresh_cache(monkeypatch, web):
     assert len(web) == 2
 
 
+def test_tool_gate_blocks_disallowed_tool_before_execution(monkeypatch):
+    called, posts = [], []
+    monkeypatch.setitem(runtime.TOOLS["ask_human"], "fn", lambda args: called.append(args) or "should not run")
+    monkeypatch.setattr(runtime.db, "post", lambda agent, content, *a, **k: posts.append(content))
+    scripted(monkeypatch, [
+        {"tool": "ask_human", "args": {"question": "cash ?"}},
+        {"final": "continue sans humain"},
+    ])
+
+    result = runtime.run_agent("ORBIT", "collecte", max_steps=3, allowed_tools={"search"})
+
+    assert called == []
+    assert '"refused": true' in result["steps"][0]["result"]
+    assert "interdit par la politique" in result["steps"][0]["result"]
+    assert any("refus outil ask_human" in message for message in posts)
+    assert not any(message.startswith("action ask_human") for message in posts)
+
+
+def test_tool_gate_rejects_missing_required_argument(monkeypatch):
+    monkeypatch.setitem(runtime.TOOLS["recall"], "fn", lambda args: pytest.fail("recall ne doit pas être exécuté"))
+    scripted(monkeypatch, [
+        {"tool": "recall", "args": {}},
+        {"final": "continue"},
+    ])
+
+    result = runtime.run_agent("GROWTH", "relire", max_steps=3, allowed_tools={"recall"})
+
+    assert "argument obligatoire manquant : key" in result["steps"][0]["result"]
+
+
+def test_tool_gate_rejects_wrong_argument_type(monkeypatch):
+    monkeypatch.setitem(runtime.TOOLS["remember"], "fn", lambda args: pytest.fail("remember ne doit pas être exécuté"))
+    scripted(monkeypatch, [
+        {"tool": "remember", "args": {"key": "evidence_records", "value": [{"id": 1}]}},
+        {"final": "continue"},
+    ])
+
+    result = runtime.run_agent("LEDGER", "mémoriser", max_steps=3, allowed_tools={"remember"})
+
+    assert "type attendu str, reçu list" in result["steps"][0]["result"]
+
+
+def test_mission_propagates_tool_allowlist_to_subagents(monkeypatch):
+    called = []
+    monkeypatch.setitem(runtime.TOOLS["ask_human"], "fn", lambda args: called.append(args) or "should not run")
+    actions = iter([
+        {"tasks": [{"role": "ORBIT", "task": "collecter sans humain"}]},
+        {"tool": "ask_human", "args": {"question": "cash ?"}},
+        {"final": "cash inconnu"},
+        {"rapport": "aucun appel humain exécuté"},
+    ])
+    monkeypatch.setattr(deepseek, "call_json", lambda *a, **k: next(actions))
+
+    result = runtime.run_mission("collecte", max_steps_per_agent=3, allowed_tools={"search"})
+
+    assert called == []
+    assert "interdit par la politique" in result["results"][0]["steps"][0]["result"]
+    assert result["synthesis_status"] == "validated"
+
+
+def test_tool_gate_allows_declared_tool(monkeypatch, web):
+    scripted(monkeypatch, [
+        {"tool": "search", "args": {"query": "retards de paiement PME"}},
+        {"final": "ok"},
+    ])
+
+    result = runtime.run_agent("SOUT", "chercher", max_steps=3, allowed_tools={"search"})
+
+    assert web == ["retards de paiement PME"]
+    assert result["steps"][0]["tool"] == "search"
+
+
 def test_history_contains_the_actions(monkeypatch, web):
     seen = scripted(monkeypatch, [{"tool": "search", "args": {"query": "relance"}}])
     runtime.run_agent("SOUT", "veille", max_steps=3)

@@ -79,7 +79,8 @@ def mission(ctx):
 def orbit_mission(ctx):
     """Mission ORBIT pour n'importe quel business, rattachable à un objectif, une hypothèse ou une expérience.
 
-    Entrée : {"goal": "...", "objective_id"?, "hypothesis_id"?, "experiment_id"?, "max_steps"?}.
+    Entrée : {"goal": "...", "objective_id"?, "hypothesis_id"?, "experiment_id"?, "max_steps"?,
+              "allowed_tools"?: ["search", ...]}.
     Le rapport est une inférence du modèle : il n'est jamais écrit comme résultat mesuré d'une expérience.
     """
     from octopus import strategy
@@ -94,8 +95,10 @@ def orbit_mission(ctx):
             if context[f"{kind}_id"] is not None:
                 strategy.link(ctx.business, kind, context[f"{kind}_id"], "task", ctx.id, "executed_by")
         goal = f"{context['brief']}\n\n{goal}"
+    allowed_tools = ctx.input.get("allowed_tools")
     result = _run(ctx, lambda: run_mission(goal, max_steps_per_agent=int(ctx.input.get("max_steps", 8)),
-                                           business=ctx.business))
+                                           business=ctx.business,
+                                           allowed_tools=set(allowed_tools) if allowed_tools is not None else None))
     synthesis_status = result.get("synthesis_status", "validated")
     output = {
         "business": ctx.business,

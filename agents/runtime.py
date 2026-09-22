@@ -291,8 +291,8 @@ TOOLS = {
     "ask_human": {"desc": "demande confirmation/info à l'humain", "params": {"question": "str"}, "fn": _ask_human},
     "publish": {"desc": "plan de publication (dry-run)", "params": {"offer_id": "str"}, "fn": _publish},
     "send_message": {"desc": "prospection : envoie un message (dry-run)", "params": {"platform": "str", "recipient": "str", "text": "str"}, "fn": _send_message},
-    "remember": {"desc": "mémorise un apprentissage", "params": {"agent": "str", "key": "str", "value": "str"}, "fn": _remember},
-    "recall": {"desc": "retrouve un apprentissage", "params": {"agent": "str", "key": "str"}, "fn": _recall},
+    "remember": {"desc": "mémorise un apprentissage", "params": {"agent": "str?", "key": "str", "value": "str"}, "fn": _remember},
+    "recall": {"desc": "retrouve un apprentissage", "params": {"agent": "str?", "key": "str"}, "fn": _recall},
     "economy_status": {"desc": "état économique réel du business : cash observé par devise, coûts LLM calculés, enveloppes de dépense, canaux, expériences en cours et leur verdict", "params": {}, "fn": _economy_status},
     "record_observation": {"desc": "enregistre un fait constaté (avec source_ref consultable = observé, sinon non vérifié), éventuellement une valeur mesurée pour une expérience", "params": {"summary": "str", "observation": "str", "source_ref": "str?", "metric": "str?", "value": "float?", "unit": "str?", "experiment_id": "int?", "channel_id": "int?"}, "fn": _record_observation},
     "propose_experiment": {"desc": "propose une expérience mesurable (objectif/hypothèse créés si absents) ; metric peut être cash_net:DEVISE", "params": {"objective": "str|objective_id", "hypothesis": "str|hypothesis_id", "action": "str", "metric": "str", "target_value": "float", "stop_value": "float?", "deadline_days": "float?", "budget_limit": "float?", "budget_currency": "str?", "channel_id": "int?"}, "fn": _propose_experiment},
@@ -306,11 +306,59 @@ TOOLS = {
 }
 
 
-def tools_desc() -> str:
+def tools_desc(allowed_tools: set[str] | None = None) -> str:
+    items = TOOLS.items() if allowed_tools is None else (
+        (name, spec) for name, spec in TOOLS.items() if name in allowed_tools
+    )
     return "\n".join(
         f"- {name}({', '.join(spec['params'])}) : {spec['desc']}"
-        for name, spec in TOOLS.items()
+        for name, spec in items
     )
+
+
+def _matches_tool_type(value, token: str) -> bool:
+    if token.endswith("_id"):
+        token = "int"
+    checks = {
+        "str": lambda v: isinstance(v, str),
+        "int": lambda v: isinstance(v, int) and not isinstance(v, bool),
+        "float": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+        "list": lambda v: isinstance(v, list),
+        "dict": lambda v: isinstance(v, dict),
+        "bool": lambda v: isinstance(v, bool),
+    }
+    check = checks.get(token)
+    return True if check is None else check(value)
+
+
+def _validate_tool_args(tool: str, args) -> str | None:
+    """Validation structurelle minimale des paramètres déclarés dans TOOLS."""
+    if not isinstance(args, dict):
+        return f"args doit être un objet, reçu {type(args).__name__}"
+    for name, declared in TOOLS[tool]["params"].items():
+        declared = str(declared)
+        variants = declared.split("|")
+        optional = all(v.endswith("?") for v in variants)
+        clean = [v[:-1] if v.endswith("?") else v for v in variants]
+        if name not in args or args[name] is None:
+            if optional:
+                continue
+            return f"argument obligatoire manquant : {name}"
+        value = args[name]
+        if not any(_matches_tool_type(value, token) for token in clean):
+            expected = "|".join(clean)
+            return f"argument {name} : type attendu {expected}, reçu {type(value).__name__}"
+    return None
+
+
+def _normalize_allowed_tools(allowed_tools) -> set[str] | None:
+    if allowed_tools is None:
+        return None
+    allowed = set(allowed_tools)
+    unknown = sorted(allowed - set(TOOLS))
+    if unknown:
+        raise ValueError(f"outils inconnus dans allowed_tools : {', '.join(unknown)}")
+    return allowed
 
 
 ROLES = {
@@ -352,7 +400,8 @@ def _group() -> str:
     return f"OCTOPUS (business {run.business})"
 
 
-def build_prompts(role: str, goal: str, conversational: bool = False) -> tuple[str, str, str]:
+def build_prompts(role: str, goal: str, conversational: bool = False,
+                  allowed_tools: set[str] | None = None) -> tuple[str, str, str]:
     """(prompt système, premier message, libellé de fin) de la boucle ReAct."""
     run = journal.current_run()
     roles = GENERIC_ROLES if run is not None and run.business != DEFAULT_BUSINESS else ROLES
@@ -374,19 +423,22 @@ def build_prompts(role: str, goal: str, conversational: bool = False) -> tuple[s
             f"IMPORTANT : tu es connecté à tes comptes (Stripe, Reddit, X, Fiverr, YouTube…) "
             f"via l'outil `browse`, qui ouvre les pages dans TON Chrome réel. Pour vérifier "
             f"un accès, utilise `browse` sur la page concernée.\n\n"
-            f"Outils disponibles :\n{tools_desc()}\n\n"
+            f"Outils disponibles :\n{tools_desc(allowed_tools)}\n\n"
             "Réponds TOUJOURS en JSON : soit {\"tool\": \"<nom>\", \"args\": {...}} pour agir, "
             "soit {\"final\": \"<ta réponse à l'humain>\"}."
         )
         first_user = f"Message de l'humain : {goal}"
         done_label = "réponse"
     else:
+        memory_hint = ""
+        if allowed_tools is None or {"remember", "recall"} <= allowed_tools:
+            memory_hint = "Utilise `remember` pour stocker tes apprentissages et `recall` pour les relire."
         system = (
             f"Tu es l'agent {role} du groupe {group}. {role_desc} "
             f"Poursuis l'objectif en utilisant "
             f"les outils disponibles. À chaque étape, choisis UNE action. "
-            f"Utilise `remember` pour stocker tes apprentissages et `recall` pour les relire.\n\n"
-            f"Outils disponibles :\n{tools_desc()}\n\n"
+            f"{memory_hint}\n\n"
+            f"Outils disponibles :\n{tools_desc(allowed_tools)}\n\n"
             f"{proof_rule}"
             "Réponds TOUJOURS en JSON : soit {\"tool\": \"<nom>\", \"args\": {...}} pour agir, "
             "soit {\"final\": \"<réponse>\"} quand l'objectif est atteint."
@@ -408,23 +460,26 @@ def _business(business: str | None) -> str:
 
 
 def run_agent(role: str, goal: str, max_steps: int = 10,
-              conversational: bool = False, *, business: str | None = None) -> dict:
+              conversational: bool = False, *, business: str | None = None,
+              allowed_tools: set[str] | None = None) -> dict:
     """Un agent (rôle) poursuit un objectif librement via la boucle ReAct.
 
     `conversational=True` → l'agent répond à un message humain (pas un objectif).
     """
+    allowed_tools = _normalize_allowed_tools(allowed_tools)
     with journal.run(_business(business), "agent", label=f"{role} : {goal}",
                      budget_usd=deepseek.config.CYCLE_BUDGET_USD):
         token = _ROLE.set(role)
         try:
             with cancel.scope(), web_guard.session(), _search_cache():
-                return _run_agent(role, goal, max_steps, conversational)
+                return _run_agent(role, goal, max_steps, conversational, allowed_tools)
         finally:
             _ROLE.reset(token)
 
 
-def _run_agent(role: str, goal: str, max_steps: int, conversational: bool) -> dict:
-    system, first_user, done_label = build_prompts(role, goal, conversational)
+def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
+               allowed_tools: set[str] | None = None) -> dict:
+    system, first_user, done_label = build_prompts(role, goal, conversational, allowed_tools)
     context = [{"role": "system", "content": system},
                {"role": "user", "content": first_user}]
     steps = []
@@ -448,7 +503,8 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool) -> di
             db.post(role, f"{done_label} : {str(r['final'])[:120]}")
             return {"role": role, "steps": steps, "final": r["final"]}
         tool = r.get("tool")
-        args = r.get("args") or {}
+        raw_args = r.get("args")
+        args = {} if raw_args is None else raw_args
         # L'action choisie entre dans l'historique : sans elle, le modèle ne voyait que les résultats
         # et relançait les mêmes requêtes (audit M2).
         context.append({"role": "assistant", "content": json.dumps(r, ensure_ascii=False)[:600]})
@@ -456,41 +512,59 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool) -> di
             context.append({"role": "user", "content": f"outil inconnu : {tool}. Disponibles : {list(TOOLS)}"})
             steps.append({"step": i + 1, "tool": tool, "result": "inconnu"})
             continue
-        try:
-            result = TOOLS[tool]["fn"](args)
-            result_str = json.dumps(result, ensure_ascii=False)[:1500]
-        except cancel.Cancelled:
-            db.post(role, "arrêt demandé par l'humain — fin de l'agent")
-            return {"role": role, "steps": steps, "final": "(arrêt demandé)"}
-        except Exception as e:
-            result_str = f"erreur : {e}"
+
+        refusal = None
+        if allowed_tools is not None and tool not in allowed_tools:
+            refusal = f"outil {tool} interdit par la politique de cette mission"
+        else:
+            refusal = _validate_tool_args(tool, args)
+
+        if refusal is not None:
+            result = {"refused": True, "tool": tool, "reason": refusal}
+            result_str = json.dumps(result, ensure_ascii=False)
+            db.post(role, f"refus outil {tool} : {refusal}")
+        else:
+            try:
+                result = TOOLS[tool]["fn"](args)
+                result_str = json.dumps(result, ensure_ascii=False)[:1500]
+            except cancel.Cancelled:
+                db.post(role, "arrêt demandé par l'humain — fin de l'agent")
+                return {"role": role, "steps": steps, "final": "(arrêt demandé)"}
+            except Exception as e:
+                result_str = f"erreur : {e}"
         # garde anti-boucle : si même action + même résultat répétés, demander de changer
         sig = f"{tool}:{result_str}"
         repeat = repeat + 1 if sig == last_sig else 0
         last_sig = sig
         if repeat >= 2:
+            recovery = "Change d'approche"
+            if allowed_tools is None or "ask_human" in allowed_tools:
+                recovery += ", demande à l'humain (ask_human)"
+            recovery += ", ou réponds avec « final »."
             context.append({"role": "user", "content":
-                            "Tu répètes la même action sans progrès (ex. CAPTCHA/échec). "
-                            "Change d'approche, demande à l'humain (ask_human), ou réponds avec « final »."})
+                            "Tu répètes la même action sans progrès (ex. CAPTCHA/échec). " + recovery})
             repeat = 0
-        db.post(role, f"action {tool} {json.dumps(args, ensure_ascii=False)[:90]}")
+        if refusal is None:
+            db.post(role, f"action {tool} {json.dumps(args, ensure_ascii=False)[:90]}")
         context.append({"role": "user", "content": f"Résultat de {tool} : {result_str}"})
         # La synthèse de mission doit voir assez de preuve brute pour ne pas combler les trous par invention.
         steps.append({"step": i + 1, "tool": tool, "result": result_str[:1500]})
     return {"role": role, "steps": steps, "final": "(max steps atteint)"}
 
 
-def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None = None) -> dict:
+def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None = None,
+                allowed_tools: set[str] | None = None) -> dict:
     """ORBIT planifie puis délègue aux rôles (multi-agents via le runtime)."""
+    allowed_tools = _normalize_allowed_tools(allowed_tools)
     with journal.run(_business(business), "mission", label=goal, budget_usd=deepseek.config.CYCLE_BUDGET_USD):
         with cancel.scope(), web_guard.session(), _search_cache():
-            return _run_mission(goal, max_steps_per_agent)
+            return _run_mission(goal, max_steps_per_agent, allowed_tools)
 
 
 MAX_PLAN_TASKS = 5
 
 
-def _run_mission(goal: str, max_steps_per_agent: int) -> dict:
+def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | None = None) -> dict:
     pro = deepseek.config.MODEL_PRO
     if cancel.requested():
         return {"plan": [], "results": [], "rapport": "(arrêt demandé)"}
@@ -526,7 +600,7 @@ def _run_mission(goal: str, max_steps_per_agent: int) -> dict:
             prev = "\n".join(f"- [{r['role']}] {r['task']} → {r['final']}" for r in results)
             task = f"{task}\n\nContexte des sous-tâches précédentes :\n{prev}"
         db.post(role, f"sous-tâche : {original[:80]}")
-        r = run_agent(role, task, max_steps=max_steps_per_agent)
+        r = run_agent(role, task, max_steps=max_steps_per_agent, allowed_tools=allowed_tools)
         results.append({"role": role, "task": original,
                         "final": r.get("final"), "steps": r.get("steps")})
 
