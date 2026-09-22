@@ -308,7 +308,7 @@ def test_fallback_to_next_free_model_after_failure(transport, providers_up, monk
 
 
 def test_flash_fallback_page_inspection_prefers_free_route_over_pinned_flash(
-        transport, monkeypatch):
+        transport, providers_up, monkeypatch):
     monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
     monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
 
