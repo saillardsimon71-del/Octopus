@@ -141,7 +141,7 @@ def test_agent_keeps_tool_result_context_for_mission_synthesis(monkeypatch):
         {"final": "terminé"},
     ])
     monkeypatch.setattr(deepseek, "call_json", lambda *a, **k: next(actions))
-    monkeypatch.setattr(runtime.TOOLS["resources_status"], "fn", lambda args: payload)
+    monkeypatch.setitem(runtime.TOOLS["resources_status"], "fn", lambda args: payload)
     result = runtime.run_agent("LEDGER", "observe seulement", max_steps=2, business=B)
     assert len(result["steps"][0]["result"]) > 200
     assert "site_sitequivend" in result["steps"][0]["result"]
