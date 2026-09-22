@@ -133,9 +133,21 @@ def format_items(items: list[dict]) -> str:
     if web:
         parts.append("\n".join(f"- {i['title']}\n  {i['url']}\n  {i['snippet']}" for i in web))
     if news:
-        parts.append("Actualités (Google News) :\n" + "\n".join(f"- {i['title']} ({i['source']}, {i['date']})" for i in news))
+        parts.append(
+            "Actualités (Google News) :\n"
+            + "\n".join(
+                f"- {i['title']} ({i['source']}, {i['date']})\n  {i['url']}"
+                for i in news
+            )
+        )
     if wiki:
-        parts.append("Encyclopédie (Wikipedia) :\n" + "\n".join(f"- {i['title']}\n  {i['snippet']}" for i in wiki))
+        parts.append(
+            "Encyclopédie (Wikipedia) :\n"
+            + "\n".join(
+                f"- {i['title']}\n  {i['url']}\n  {i['snippet']}"
+                for i in wiki
+            )
+        )
     return "\n\n".join(parts)
 
 
