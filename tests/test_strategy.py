@@ -1,12 +1,13 @@
 """Persistance stratégique (migration v5) : CRUD, cycles de vie, isolation business, liens, événements."""
 from __future__ import annotations
 
+import argparse
 import sqlite3
 import threading
 
 import pytest
 
-from octopus import journal, strategy, tasks
+from octopus import journal, strategy, strategy_cli, tasks, worker
 from octopus.strategy import StrategyError
 
 
@@ -19,6 +20,36 @@ def _chain(business: str = "podalux"):
     experiment = strategy.create("experiment", business, "Short relance", created_by="orbit", parent_id=hypothesis,
                                  action="Publier 3 shorts avec CTA", budget_limit=2.0, budget_currency="usd")
     return objective, hypothesis, experiment
+
+
+def test_strategy_mission_cli_passes_profile_and_budget(monkeypatch):
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+    strategy_cli.add_parser(sub)
+    args = parser.parse_args([
+        "strategy", "mission", "octopus", "collecte",
+        "--profile", "flash_fallback",
+        "--budget-usd", "0.05",
+        "--allow-tools", "search,browse",
+    ])
+
+    captured = {}
+    monkeypatch.setattr(worker, "load_handlers", lambda: {})
+    monkeypatch.setattr(strategy, "mission_context", lambda *a, **k: {
+        "objective_id": None, "hypothesis_id": None, "experiment_id": None,
+    })
+
+    def enqueue(business, kind, input, **kwargs):
+        captured.update(business=business, kind=kind, input=input, kwargs=kwargs)
+        return 42
+
+    monkeypatch.setattr(worker, "enqueue", enqueue)
+
+    assert strategy_cli.run(args) == 0
+    assert captured["kind"] == "orbit.mission"
+    assert captured["input"]["profile"] == "flash_fallback"
+    assert captured["input"]["allowed_tools"] == ["search", "browse"]
+    assert captured["kwargs"]["budget_usd"] == pytest.approx(0.05)
 
 
 # --- migration ---------------------------------------------------------------------------
