@@ -274,3 +274,24 @@ def test_mission_trace_summary_counts_equivalent_searches_and_cross_role_reuse()
     assert summary["repeated_search_queries"] == 1
     assert summary["browsed_from_search"] == ["https://example.com/preuve"]
     assert summary["cross_role_browsed_from_search"] == ["https://example.com/preuve"]
+
+
+def test_mission_llm_summary_counts_provider_failures(monkeypatch):
+    from agents.task_handlers import _mission_llm_summary
+
+    rows = [
+        {"status": "error", "error": "RateLimitError: 429 rate limit", "model": "m1", "provider": "groq", "task": "agent.react_step"},
+        {"status": "invalid", "error": "ValueError: objet JSON introuvable", "model": "m2", "provider": "kilo", "task": "agent.plan"},
+        {"status": "error", "error": "APIStatusError: 504 gateway timeout", "model": "m3", "provider": "route", "task": "agent.synthesize"},
+        {"status": "ok", "error": None, "model": "m4", "provider": "route", "task": "agent.react_step"},
+    ]
+    monkeypatch.setattr(journal, "query", lambda sql, params=(): rows)
+
+    summary = _mission_llm_summary(42)
+
+    assert summary["calls"] == 4
+    assert summary["by_status"] == {"error": 2, "invalid": 1, "ok": 1}
+    assert summary["non_ok"] == 3
+    assert summary["http_errors"] == {"429": 1, "504": 1}
+    assert len(summary["errors"]) == 3
+    assert all(len(item["error"]) <= 300 for item in summary["errors"])
