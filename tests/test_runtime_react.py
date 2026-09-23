@@ -106,6 +106,7 @@ def test_tool_gate_rejects_wrong_argument_type(monkeypatch):
     result = runtime.run_agent("LEDGER", "mémoriser", max_steps=3, allowed_tools={"remember"})
 
     assert "type attendu str, reçu list" in result["steps"][0]["result"]
+    assert "args" not in result["steps"][0]
 
 
 def test_mission_profile_is_inherited_by_all_llm_calls(monkeypatch):
