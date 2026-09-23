@@ -190,9 +190,10 @@ def test_page_text_survives_vision_gateway_failure(monkeypatch):
 
     assert seen["description"] == "Preuve textuelle déjà chargée dans la page."
     assert seen["vision_task"] == "web.inspect_page"
+    assert "NoEligibleModel" in seen["vision_error"]
 
 
-def test_page_vision_non_gateway_bug_is_not_hidden(monkeypatch):
+def test_page_vision_failure_is_reported_without_losing_dom(monkeypatch):
     tool = browser.BrowserTool.__new__(browser.BrowserTool)
     tool.screenshot = lambda: __import__("pathlib").Path("unused.jpg")
     tool.url = lambda: "https://example.com/preuve"
@@ -203,5 +204,7 @@ def test_page_vision_non_gateway_bug_is_not_hidden(monkeypatch):
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug interne")),
     )
 
-    with pytest.raises(RuntimeError, match="bug interne"):
-        tool.see(agent="SOUT")
+    tool.snapshot = lambda max_chars=4000: "DOM exploitable"
+    seen = tool.see(agent="SOUT")
+    assert seen["description"] == "DOM exploitable"
+    assert seen["vision_error"] == "RuntimeError: bug interne"
