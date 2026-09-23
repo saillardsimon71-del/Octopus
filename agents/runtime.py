@@ -572,9 +572,22 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     pro = deepseek.config.MODEL_PRO
     if cancel.requested():
         return {"plan": [], "results": [], "rapport": "(arrêt demandé)"}
+    current = journal.current_run()
+    planner_roles = GENERIC_ROLES if current is not None and current.business != DEFAULT_BUSINESS else ROLES
+    role_catalog = "\n".join(f"- {name}: {desc}" for name, desc in planner_roles.items())
     plan_sys = (
-        "Tu es ORBIT, le CEO. Décompose l'objectif en 2 à 5 sous-tâches, chacune assignée "
-        f"à UN rôle parmi {list(ROLES)}. Réponds en JSON : "
+        "Tu es ORBIT, l'orchestrateur de la mission. "
+        "Utilise les rôles comme des responsabilités spécialisées, pas comme des workers interchangeables.\n\n"
+        f"Rôles disponibles et responsabilités :\n{role_catalog}\n\n"
+        "Décompose l'objectif en 2 à 5 sous-tâches, chacune assignée à UN rôle dont la responsabilité "
+        "correspond réellement au travail demandé. N'assigne pas une tâche à un rôle seulement pour l'occuper "
+        "et ne duplique pas la même collecte chez plusieurs rôles sans nécessité. "
+        f"Chaque sous-tâche doit être réalisable en au plus {max_steps_per_agent} étapes ; si plusieurs pistes "
+        "indépendantes demandent chacune plusieurs actions, répartis-les au lieu de surcharger un seul agent. "
+        "Si une sous-tâche aval dépend de découvertes d'une sous-tâche amont, exige dans la tâche amont que son "
+        "final liste explicitement les artefacts nécessaires (par exemple URLs, identifiants ou preuves) afin "
+        "que l'agent suivant puisse poursuivre au lieu de recommencer. "
+        "Réponds en JSON : "
         '{"tasks":[{"role":"...","task":"..."}]}'
     )
     plan = deepseek.call_json("ORBIT", "planification", pro,
