@@ -122,7 +122,7 @@ def _mission_trace_summary(results) -> dict:
                 if query:
                     search_queries.append(query)
                     search_query_keys.append(query_key(query))
-                for url in re.findall(r"https?://[^\\s\\]\\[<>()\"']+", str(step.get("result") or "")):
+                for url in re.findall(r"https?://[^\s\]\[<>()\"']+", str(step.get("result") or "")):
                     search_url_roles.setdefault(url.rstrip(".,;:"), set()).add(role)
             elif tool == "browse":
                 url = str(args.get("url") or "").strip()
