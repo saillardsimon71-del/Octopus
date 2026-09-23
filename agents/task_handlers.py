@@ -5,6 +5,7 @@ cycle en étapes (write_job, tts, render...) viendra avec le module business sho
 """
 from __future__ import annotations
 
+import re
 import threading
 
 from octopus.worker import TaskCancelled, handler
@@ -100,7 +101,12 @@ def _mission_trace_summary(results) -> dict:
     totals = {"search": 0, "browse": 0}
     max_steps_roles = []
     search_queries = []
+    search_query_keys = []
+    search_url_roles = {}
     browse_urls = []
+    browsed_from_search = []
+    cross_role_browsed_from_search = []
+    from .runtime import query_key
     for subtask in results or []:
         role = str(subtask.get("role") or "")
         counts = by_role.setdefault(role, {"search": 0, "browse": 0})
@@ -114,10 +120,18 @@ def _mission_trace_summary(results) -> dict:
                 query = " ".join(str(args.get("query") or "").lower().split())
                 if query:
                     search_queries.append(query)
+                    search_query_keys.append(query_key(query))
+                for url in re.findall(r"https?://[^\s\]\[<>()\"']+", str(step.get("result") or "")):
+                    search_url_roles.setdefault(url.rstrip(".,;:"), set()).add(role)
             elif tool == "browse":
                 url = str(args.get("url") or "").strip()
                 if url:
                     browse_urls.append(url)
+                    source_roles = search_url_roles.get(url)
+                    if source_roles:
+                        browsed_from_search.append(url)
+                        if any(source_role != role for source_role in source_roles):
+                            cross_role_browsed_from_search.append(url)
         if subtask.get("final") == "(max steps atteint)":
             max_steps_roles.append(role)
     searches = totals["search"]
@@ -127,8 +141,10 @@ def _mission_trace_summary(results) -> dict:
         "by_role": by_role,
         "max_steps_roles": max_steps_roles,
         "search_queries": search_queries,
-        "repeated_search_queries": len(search_queries) - len(set(search_queries)),
+        "repeated_search_queries": len(search_query_keys) - len(set(search_query_keys)),
         "browse_urls": browse_urls,
+        "browsed_from_search": browsed_from_search,
+        "cross_role_browsed_from_search": cross_role_browsed_from_search,
     }
 
 
