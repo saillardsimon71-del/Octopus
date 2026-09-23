@@ -79,8 +79,9 @@ def _browse(args):
         final_kind = web_guard.classify(final)
         web_guard.record(final, final_kind, state)
         source = "compte connecté (lecture seule)" if final_kind == web_guard.ACCOUNT else web_guard.UNTRUSTED_NOTE
+        seen = b.see(agent=_ROLE.get())
         return {"url": final, "source": source, "texte": b.snapshot()[:1500],
-                "vision": b.see(agent=_ROLE.get())["description"]}
+                "vision": seen["description"], "vision_error": seen.get("vision_error")}
     finally:
         b.stop()
 
