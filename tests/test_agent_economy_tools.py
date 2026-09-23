@@ -170,6 +170,7 @@ def test_orbit_mission_can_return_compact_search_browse_trace(monkeypatch):
     done = worker.run_one("w", kinds=["orbit.mission"], log=lambda s: None)
 
     assert done["status"] == "done"
+    assert done["output"]["plan_trace"] == [{"role": "FORGE", "task": "collecter"}]
     assert done["output"]["tool_trace"] == [
         {"role": "FORGE", "step": 1, "tool": "search", "result": "titre\nhttps://example.com/source"},
         {"role": "FORGE", "step": 3, "tool": "browse",
@@ -190,6 +191,7 @@ def test_orbit_mission_trace_is_opt_in(monkeypatch):
     worker.enqueue(B, "orbit.mission", {"goal": "tester"})
     done = worker.run_one("w", kinds=["orbit.mission"], log=lambda s: None)
 
+    assert "plan_trace" not in done["output"]
     assert "tool_trace" not in done["output"]
 
 
