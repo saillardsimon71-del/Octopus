@@ -186,6 +186,8 @@ def test_orbit_mission_can_return_compact_search_browse_trace(monkeypatch):
         "search_queries": [],
         "repeated_search_queries": 0,
         "browse_urls": [],
+        "browsed_from_search": [],
+        "cross_role_browsed_from_search": [],
     }
     assert done["output"]["subtask_trace"] == [
         {"role": "FORGE", "task": "collecter", "final": "fini", "steps": 3}
@@ -234,3 +236,41 @@ def test_degraded_orbit_mission_preserves_results_without_strategy_evidence(monk
     assert done["output"]["results"][0]["final"] == "preuve brute"
     assert "evidence_id" not in done["output"]["strategy"]
     assert not [row for row in strategy.list_items("evidence", B) if row.get("origin_task_id") == task_id]
+
+
+def test_mission_trace_summary_counts_equivalent_searches_and_cross_role_reuse():
+    from agents.task_handlers import _mission_trace_summary
+
+    summary = _mission_trace_summary([
+        {
+            "role": "SOUT",
+            "final": "sources",
+            "steps": [
+                {
+                    "tool": "search",
+                    "args": {"query": "Retards de paiement PME France"},
+                    "result": "Source A\nhttps://example.com/preuve",
+                },
+                {
+                    "tool": "search",
+                    "args": {"query": "France PME retards paiements"},
+                    "result": "Source B\nhttps://example.com/autre",
+                },
+            ],
+        },
+        {
+            "role": "CONVERT",
+            "final": "exploité",
+            "steps": [
+                {
+                    "tool": "browse",
+                    "args": {"url": "https://example.com/preuve"},
+                    "result": "preuve ouverte",
+                },
+            ],
+        },
+    ])
+
+    assert summary["repeated_search_queries"] == 1
+    assert summary["browsed_from_search"] == ["https://example.com/preuve"]
+    assert summary["cross_role_browsed_from_search"] == ["https://example.com/preuve"]
