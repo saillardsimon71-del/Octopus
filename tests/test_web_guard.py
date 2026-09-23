@@ -7,6 +7,7 @@ import pytest
 
 from agents import browser, db, deepseek, runtime, web_guard
 from agents.web_guard import ACCOUNT, PUBLIC, BrowseRefused, BrowseState
+from octopus import llm
 
 
 @pytest.fixture(autouse=True)
@@ -177,7 +178,7 @@ def test_page_text_survives_vision_gateway_failure(monkeypatch):
         deepseek,
         "vision_text",
         lambda *a, **k: (_ for _ in ()).throw(
-            __import__("octopus").llm.NoEligibleModel(
+            llm.NoEligibleModel(
                 "web.inspect_page",
                 "zero_cost",
                 [{"model": "vision-free", "reason": "provider 400"}],
