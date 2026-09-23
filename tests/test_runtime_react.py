@@ -153,6 +153,7 @@ def test_mission_planner_receives_generic_role_contracts(monkeypatch):
     for role, description in runtime.GENERIC_ROLES.items():
         assert f"- {role}: {description}" in system
     assert "workers interchangeables" in system
+    assert "Un même rôle peut recevoir plusieurs sous-tâches distinctes" in system
     assert "au plus 5 étapes" in system
     assert "final liste explicitement les artefacts nécessaires" in system
     assert runtime.ROLES["FORGE"] not in system
