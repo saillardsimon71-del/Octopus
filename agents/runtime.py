@@ -567,6 +567,32 @@ def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None
 
 MAX_PLAN_TASKS = 5
 
+# Artefacts suffisamment petits pour circuler entre sous-agents sans recopier toute leur trace.
+# Le but est la continuité de travail : une URL/source déjà trouvée doit rester exploitable même
+# si l'agent amont termine sur son budget d'étapes avant d'avoir produit un final détaillé.
+_HANDOFF_TOOLS = {"search", "browse", "record_observation", "economy_status", "resources_status"}
+
+
+def _handoff_payload(result: dict) -> dict:
+    artifacts = []
+    for step in result.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        tool = str(step.get("tool") or "")
+        if tool not in _HANDOFF_TOOLS:
+            continue
+        artifacts.append({
+            "step": step.get("step"),
+            "tool": tool,
+            "result": str(step.get("result") or "")[:1200],
+        })
+    return {
+        "role": str(result.get("role") or ""),
+        "task": str(result.get("task") or ""),
+        "final": str(result.get("final") or ""),
+        "artifacts": artifacts,
+    }
+
 
 def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | None = None) -> dict:
     pro = deepseek.config.MODEL_PRO
@@ -586,9 +612,9 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         "ne force jamais la diversité des rôles. "
         f"Chaque sous-tâche doit être réalisable en au plus {max_steps_per_agent} étapes ; si plusieurs pistes "
         "indépendantes demandent chacune plusieurs actions, répartis-les au lieu de surcharger un seul agent. "
-        "Si une sous-tâche aval dépend de découvertes d'une sous-tâche amont, exige dans la tâche amont que son "
-        "final liste explicitement les artefacts nécessaires (par exemple URLs, identifiants ou preuves) afin "
-        "que l'agent suivant puisse poursuivre au lieu de recommencer. "
+        "Si une sous-tâche aval dépend de découvertes d'une sous-tâche amont, rends cette dépendance explicite. "
+        "Les artefacts utiles des étapes amont (recherches, pages ouvertes, observations et statuts) seront transmis "
+        "automatiquement au sous-agent suivant : il doit les réutiliser avant de recommencer une collecte équivalente. "
         "Réponds en JSON : "
         '{"tasks":[{"role":"...","task":"..."}]}'
     )
@@ -613,11 +639,17 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             role = "ORBIT"
         task = t.get("task", "")
         original = task
-        # Contexte cumulatif : chaque sous-tâche reçoit les résultats des précédentes.
-        # On stocke la tâche ORIGINALE (sans le contexte) pour éviter l'explosion du prompt.
+        # Contexte cumulatif structuré : le final seul est insuffisant quand l'agent amont
+        # atteint max_steps. On transmet donc aussi ses artefacts de preuve utiles, de façon compacte.
+        # La tâche stockée dans results reste l'ORIGINALE pour éviter une croissance récursive du prompt.
         if results:
-            prev = "\n".join(f"- [{r['role']}] {r['task']} → {r['final']}" for r in results)
-            task = f"{task}\n\nContexte des sous-tâches précédentes :\n{prev}"
+            handoff = [_handoff_payload(r) for r in results]
+            task = (
+                f"{task}\n\nContexte structuré des sous-tâches précédentes :\n"
+                "Réutilise d'abord les artefacts déjà collectés ; ne relance pas une recherche équivalente "
+                "si une URL, une page ouverte ou une observation exploitable est déjà présente.\n"
+                f"{json.dumps(handoff, ensure_ascii=False)}"
+            )
         db.post(role, f"sous-tâche : {original[:80]}")
         r = run_agent(role, task, max_steps=max_steps_per_agent, allowed_tools=allowed_tools)
         results.append({"role": role, "task": original,
