@@ -133,11 +133,11 @@
       "capabilities": ["json", "vision", "reasoning_effort"],
       "notes": "Palier gratuit Gemini."
     },
-    "kilo/ling-3.0-flash-vl-free": {
-      "provider": "kilo", "api_model": "inclusionai/ling-3.0-flash-vl:free", "cost_class": "free_quota",
-      "capabilities": ["json", "vision", "tools"],
+    "kilo/auto-free": {
+      "provider": "kilo", "api_model": "kilo-auto/free", "cost_class": "free_quota",
+      "capabilities": ["json", "tools"],
       "structured_methods": ["tool_call", "text"],
-      "notes": "Route Kilo explicitement :free. Test reel 2026-09-22 : tool call valide, cout et upstream_inference_cost a 0. response_format=json_object non valide sur cette route ; JSON generique demande en texte puis valide localement."
+      "notes": "Tier Kilo Auto Free stable ; le modele gratuit sous-jacent est choisi dynamiquement et peut changer ou etre temporairement rate-limited."
     }
   },
   "profiles": {
@@ -202,27 +202,27 @@
     "agent.react_step": {
       "needs": ["json"], "privacy": "internal", "baseline": "deepseek/flash",
       "candidates": {
-        "zero_cost": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b", "ollama/qwen3.5-4b"],
+        "zero_cost": ["kilo/auto-free", "groq/gpt-oss-120b", "ollama/qwen3.5-4b"],
         "low_cost": ["groq/gpt-oss-120b", "ollama/qwen3.5-4b", "deepseek/flash"],
-        "flash_fallback": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b", "ollama/qwen3.5-4b", "deepseek/flash"],
+        "flash_fallback": ["kilo/auto-free", "groq/gpt-oss-120b", "ollama/qwen3.5-4b", "deepseek/flash"],
         "quality_first": ["deepseek/flash"]
       }
     },
     "agent.plan": {
       "needs": ["json"], "privacy": "internal", "baseline": "deepseek/v4-pro",
       "candidates": {
-        "zero_cost": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b"],
+        "zero_cost": ["kilo/auto-free", "groq/gpt-oss-120b"],
         "low_cost": ["groq/gpt-oss-120b", "deepseek/flash", "deepseek/v4-pro"],
-        "flash_fallback": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b", "deepseek/flash"],
+        "flash_fallback": ["kilo/auto-free", "groq/gpt-oss-120b", "deepseek/flash"],
         "quality_first": ["deepseek/v4-pro"]
       }
     },
     "agent.synthesize": {
       "needs": ["json"], "privacy": "internal", "baseline": "deepseek/v4-pro",
       "candidates": {
-        "zero_cost": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b"],
+        "zero_cost": ["kilo/auto-free", "groq/gpt-oss-120b"],
         "low_cost": ["groq/gpt-oss-120b", "deepseek/flash", "deepseek/v4-pro"],
-        "flash_fallback": ["kilo/ling-3.0-flash-vl-free", "groq/gpt-oss-120b", "deepseek/flash"],
+        "flash_fallback": ["kilo/auto-free", "groq/gpt-oss-120b", "deepseek/flash"],
         "quality_first": ["deepseek/v4-pro"]
       }
     },

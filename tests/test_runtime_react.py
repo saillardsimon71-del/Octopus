@@ -6,7 +6,7 @@ import json
 import pytest
 
 from agents import deepseek, runtime, search
-from octopus import journal, llm
+from octopus import catalog, journal, llm
 
 REAL_QUERIES = [  # run ORBIT du 16/09, 14:07-14:10
     "meilleures pratiques relance factures impayées modèles email",
@@ -107,6 +107,23 @@ def test_tool_gate_rejects_wrong_argument_type(monkeypatch):
 
     assert "type attendu str, reçu list" in result["steps"][0]["result"]
     assert "args" not in result["steps"][0]
+
+
+def test_agent_profiles_have_omniroute_auto_free_fallback(monkeypatch):
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
+    cat = catalog.load()
+
+    for task_name in ("agent.react_step", "agent.plan", "agent.synthesize"):
+        task = cat.task(task_name)
+        for profile_name in ("zero_cost", "low_cost", "flash_fallback"):
+            assert task["candidates"][profile_name][:2] == [
+                "omniroute/devworker-groq",
+                "omniroute/auto-free",
+            ]
+
+    assert cat.model("kilo/auto-free")["api_model"] == "kilo-auto/free"
+    assert cat.model("kilo/ling-3.0-flash-vl-free") is None
 
 
 def test_mission_profile_is_inherited_by_all_llm_calls(monkeypatch):
