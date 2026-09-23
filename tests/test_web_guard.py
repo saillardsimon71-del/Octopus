@@ -7,6 +7,7 @@ import pytest
 
 from agents import browser, db, deepseek, runtime, web_guard
 from agents.web_guard import ACCOUNT, PUBLIC, BrowseRefused, BrowseState
+from octopus import llm
 
 
 @pytest.fixture(autouse=True)
@@ -165,3 +166,45 @@ def test_new_agent_run_starts_untainted(monkeypatch, fake_browser):
 def test_local_services_are_never_browsed(monkeypatch, fake_browser):
     result = run_actions(monkeypatch, "SOUT", [{"tool": "browse", "args": {"url": "http://127.0.0.1:4123/docs"}}])
     assert "refusée" in result["steps"][0]["result"] and fake_browser.opened == []
+
+
+def test_page_text_survives_vision_gateway_failure(monkeypatch):
+    tool = browser.BrowserTool.__new__(browser.BrowserTool)
+    tool.screenshot = lambda: __import__("pathlib").Path("unused.jpg")
+    tool.url = lambda: "https://example.com/preuve"
+    tool.snapshot = lambda max_chars=4000: "Preuve textuelle déjà chargée dans la page."
+    monkeypatch.setattr(web_guard, "classify", lambda url: PUBLIC)
+    monkeypatch.setattr(
+        deepseek,
+        "vision_text",
+        lambda *a, **k: (_ for _ in ()).throw(
+            llm.NoEligibleModel(
+                "web.inspect_page",
+                "zero_cost",
+                [{"model": "vision-free", "reason": "provider 400"}],
+            )
+        ),
+    )
+
+    seen = tool.see(agent="SOUT")
+
+    assert seen["description"] == "Preuve textuelle déjà chargée dans la page."
+    assert seen["vision_task"] == "web.inspect_page"
+    assert "NoEligibleModel" in seen["vision_error"]
+
+
+def test_page_vision_failure_is_reported_without_losing_dom(monkeypatch):
+    tool = browser.BrowserTool.__new__(browser.BrowserTool)
+    tool.screenshot = lambda: __import__("pathlib").Path("unused.jpg")
+    tool.url = lambda: "https://example.com/preuve"
+    monkeypatch.setattr(web_guard, "classify", lambda url: PUBLIC)
+    monkeypatch.setattr(
+        deepseek,
+        "vision_text",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug interne")),
+    )
+
+    tool.snapshot = lambda max_chars=4000: "DOM exploitable"
+    seen = tool.see(agent="SOUT")
+    assert seen["description"] == "DOM exploitable"
+    assert seen["vision_error"] == "RuntimeError: bug interne"

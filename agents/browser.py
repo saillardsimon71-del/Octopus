@@ -232,15 +232,17 @@ class BrowserTool:
         shot = self.screenshot()
         kind = web_guard.classify(self.url())
         task = "web.describe_page" if kind == web_guard.ACCOUNT else "web.inspect_page"
+        vision_error = None
         try:
             txt = deepseek.vision_text(agent, task, [str(shot)], prompt)
         except Exception as exc:
-            from octopus import llm
-            if isinstance(exc, llm.NoEligibleModel):
-                txt = self.snapshot(2000) or "Vision indisponible : aucun modèle vision éligible."
-            else:
-                raise
-        return {"screenshot": str(shot), "description": txt, "vision_task": task, "page_kind": kind}
+            # La vision est un enrichissement optionnel du DOM déjà chargé. Une panne provider
+            # (y compris une exception transport brute) ne doit pas transformer un BROWSE réussi
+            # en échec. L'erreur reste explicite dans le résultat pour le diagnostic H2.
+            vision_error = f"{type(exc).__name__}: {str(exc)[:300]}"
+            txt = self.snapshot(2000) or f"Vision indisponible ({vision_error})."
+        return {"screenshot": str(shot), "description": txt, "vision_task": task, "page_kind": kind,
+                "vision_error": vision_error}
 
     def handoff(self, message: str, timeout_s: int = 300) -> bool:
         ans = db.ask_human("BROWSER", "browser_handoff", message, timeout_s=timeout_s)
