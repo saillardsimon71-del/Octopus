@@ -88,9 +88,34 @@ def _mission_tool_trace(results, *, tools=("search", "browse"), result_chars=120
                 "role": role,
                 "step": step.get("step"),
                 "tool": step.get("tool"),
+                "args": step.get("args") if isinstance(step.get("args"), dict) else {},
                 "result": str(step.get("result") or "")[:result_chars],
             })
     return trace
+
+
+def _mission_trace_summary(results) -> dict:
+    """Mesures descriptives pour comparer des missions sans changer leur exécution."""
+    by_role = {}
+    totals = {"search": 0, "browse": 0}
+    max_steps_roles = []
+    for subtask in results or []:
+        role = str(subtask.get("role") or "")
+        counts = by_role.setdefault(role, {"search": 0, "browse": 0})
+        for step in subtask.get("steps") or []:
+            tool = step.get("tool")
+            if tool in totals:
+                totals[tool] += 1
+                counts[tool] += 1
+        if subtask.get("final") == "(max steps atteint)":
+            max_steps_roles.append(role)
+    searches = totals["search"]
+    return {
+        "totals": totals,
+        "browse_search_ratio": (totals["browse"] / searches) if searches else None,
+        "by_role": by_role,
+        "max_steps_roles": max_steps_roles,
+    }
 
 
 @handler("orbit.mission", resource="llm")
@@ -138,6 +163,17 @@ def orbit_mission(ctx):
             if isinstance(item, dict)
         ]
         output["tool_trace"] = _mission_tool_trace(result.get("results") or [])
+        output["trace_summary"] = _mission_trace_summary(result.get("results") or [])
+        output["subtask_trace"] = [
+            {
+                "role": str(item.get("role") or ""),
+                "task": str(item.get("task") or ""),
+                "final": str(item.get("final") or ""),
+                "steps": len(item.get("steps") or []),
+            }
+            for item in (result.get("results") or [])
+            if isinstance(item, dict)
+        ]
 
     if context:
         output["strategy"] = {k: context[k] for k in ("objective_id", "hypothesis_id", "experiment_id")}
