@@ -236,8 +236,9 @@ class BrowserTool:
             txt = deepseek.vision_text(agent, task, [str(shot)], prompt)
         except Exception as exc:
             from octopus import llm
-            if isinstance(exc, llm.NoEligibleModel):
-                txt = self.snapshot(2000) or "Vision indisponible : aucun modèle vision éligible."
+            if isinstance(exc, llm.GatewayError):
+                detail = f"{type(exc).__name__}: {str(exc)[:160]}"
+                txt = self.snapshot(2000) or f"Vision indisponible ({detail})."
             else:
                 raise
         return {"screenshot": str(shot), "description": txt, "vision_task": task, "page_kind": kind}
