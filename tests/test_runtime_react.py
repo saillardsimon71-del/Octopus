@@ -128,6 +128,37 @@ def test_mission_profile_is_inherited_by_all_llm_calls(monkeypatch):
     assert profiles == ["flash_fallback", "flash_fallback", "flash_fallback"]
 
 
+def test_mission_planner_receives_generic_role_contracts(monkeypatch):
+    calls = []
+    actions = iter([
+        {"tasks": [{"role": "SOUT", "task": "collecter une preuve"}]},
+        {"final": "preuve"},
+        {"rapport": "rapport"},
+    ])
+
+    def call_json(agent, task, model, messages, **kwargs):
+        calls.append((task, messages))
+        return next(actions)
+
+    monkeypatch.setattr(deepseek, "call_json", call_json)
+    result = runtime.run_mission(
+        "collecter des preuves économiques",
+        max_steps_per_agent=5,
+        business="octopus",
+    )
+
+    assert result["synthesis_status"] == "validated"
+    planner_messages = next(messages for task, messages in calls if task == "planification")
+    system = planner_messages[0]["content"]
+    for role, description in runtime.GENERIC_ROLES.items():
+        assert f"- {role}: {description}" in system
+    assert "workers interchangeables" in system
+    assert "Un même rôle peut recevoir plusieurs sous-tâches distinctes" in system
+    assert "au plus 5 étapes" in system
+    assert "final liste explicitement les artefacts nécessaires" in system
+    assert runtime.ROLES["FORGE"] not in system
+
+
 def test_mission_propagates_tool_allowlist_to_subagents(monkeypatch):
     called = []
     monkeypatch.setitem(runtime.TOOLS["ask_human"], "fn", lambda args: called.append(args) or "should not run")
