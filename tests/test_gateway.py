@@ -65,16 +65,16 @@ def test_zero_cost_without_evidence_never_pays(transport, providers_up, monkeypa
     assert calls() == []
 
 
-def test_kilo_ling_can_bootstrap_agent_plan_without_bench(transport, providers_up, monkeypatch):
+def test_kilo_auto_free_requires_evidence_before_zero_cost_use(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
     monkeypatch.setenv("OMNIROUTE_ENABLED", "0")
-    transport.reply('{"tasks": []}')
 
-    completion = llm.complete("agent.plan", MSG, profile="zero_cost", json_mode=True)
+    with pytest.raises(llm.NoEligibleModel) as err:
+        llm.complete("agent.plan", MSG, profile="zero_cost", json_mode=True)
 
-    assert completion.model == "kilo/ling-3.0-flash-vl-free"
-    assert transport.models == ["inclusionai/ling-3.0-flash-vl:free"]
-    assert "response_format" not in transport.calls[0][1]
+    assert transport.calls == []
+    kilo = next(item for item in err.value.considered if item["model"] == "kilo/auto-free")
+    assert "preuve insuffisante" in kilo["reason"]
 
 
 def test_structured_bad_request_retries_same_model_as_prompt_json(transport, providers_up, monkeypatch):
@@ -166,11 +166,12 @@ def test_structured_cascade_has_bounded_call_count(transport, providers_up, monk
     with pytest.raises(llm.NoEligibleModel):
         llm.complete("agent.synthesize", MSG, profile="zero_cost", json_mode=True, validate=llm.parse_json)
 
-    # OmniRoute GPT-OSS: json_object puis text. Ling: text. Groq direct: indisponible avant transport.
+    # OmniRoute GPT-OSS: json_object puis text. La route auto-free prend ensuite le relais.
+    # Kilo Auto reste ineligible en zero_cost tant qu'il n'a pas de preuve de banc.
     assert transport.models == [
         "groq/openai/gpt-oss-120b",
         "groq/openai/gpt-oss-120b",
-        "inclusionai/ling-3.0-flash-vl:free",
+        "auto/best-free",
     ]
 
 
@@ -254,28 +255,35 @@ def test_rate_limited_route_is_skipped_until_cooldown_expires(transport, provide
                 resolved_provider="groq",
                 provider_cost_usd=0.0,
             )
-        if request["model"] == "inclusionai/ling-3.0-flash-vl:free":
-            return ('{"ok": "ling"}', Usage(prompt_tokens=20, completion_tokens=5))
+        if request["model"] == "auto/best-free":
+            return llm.TransportResult(
+                text='{"ok": "auto"}',
+                usage=Usage(prompt_tokens=20, completion_tokens=5),
+                requested_model=request["model"],
+                resolved_model="free/fallback-model",
+                resolved_provider="free-provider",
+                provider_cost_usd=0.0,
+            )
         raise AssertionError(f"modele inattendu : {request['model']}")
 
     transport.handler = handler
 
     first = llm.complete("agent.react_step", MSG, profile="zero_cost",
                          json_mode=True, validate=llm.parse_json)
-    assert first.model == "kilo/ling-3.0-flash-vl-free"
+    assert first.model == "omniroute/auto-free"
     assert transport.models == [
         "groq/openai/gpt-oss-120b",
-        "inclusionai/ling-3.0-flash-vl:free",
+        "auto/best-free",
     ]
     assert "omniroute/devworker-groq" in llm._rate_limit_cooldowns
 
     second = llm.complete("agent.react_step", MSG, profile="zero_cost",
                           json_mode=True, validate=llm.parse_json)
-    assert second.model == "kilo/ling-3.0-flash-vl-free"
+    assert second.model == "omniroute/auto-free"
     assert transport.models == [
         "groq/openai/gpt-oss-120b",
-        "inclusionai/ling-3.0-flash-vl:free",
-        "inclusionai/ling-3.0-flash-vl:free",
+        "auto/best-free",
+        "auto/best-free",
     ]
 
     # Expiration simulée : la route redevient candidate et peut réussir.
@@ -352,7 +360,9 @@ def test_flash_fallback_uses_deepseek_only_after_free_routes_fail(transport, pro
     def handler(provider, request):
         if request["model"] == "groq/openai/gpt-oss-120b":
             return RateLimited("429 rate limit reached")
-        if request["model"] == "inclusionai/ling-3.0-flash-vl:free":
+        if request["model"] == "auto/best-free":
+            return RuntimeError("auto free indisponible")
+        if request["model"] == "kilo-auto/free":
             return ("pas du json", Usage(prompt_tokens=40, completion_tokens=20))
         if request["model"] == "deepseek-flash":
             return ('{"ok": "deepseek"}', Usage(prompt_tokens=400, completion_tokens=100))
@@ -366,7 +376,8 @@ def test_flash_fallback_uses_deepseek_only_after_free_routes_fail(transport, pro
     assert result.data == {"ok": "deepseek"}
     assert transport.models == [
         "groq/openai/gpt-oss-120b",
-        "inclusionai/ling-3.0-flash-vl:free",
+        "auto/best-free",
+        "kilo-auto/free",
         "deepseek-flash",
     ]
     assert result.cost_usd > 0
@@ -493,14 +504,15 @@ def test_orbit_mission_tasks_keep_their_gateway_contract(monkeypatch):
     assert cat.legacy_task("ORBIT", "action") == "agent.react_step"
     assert cat.task("agent.plan")["candidates"]["zero_cost"][:2] == [
         "omniroute/devworker-groq",
-        "kilo/ling-3.0-flash-vl-free",
+        "omniroute/auto-free",
     ]
     assert cat.task("agent.synthesize")["candidates"]["zero_cost"][:2] == [
         "omniroute/devworker-groq",
-        "kilo/ling-3.0-flash-vl-free",
+        "omniroute/auto-free",
     ]
     assert cat.model("omniroute/devworker-groq")["structured_methods"] == ["tool_call", "json_object", "text"]
-    assert cat.model("kilo/ling-3.0-flash-vl-free")["structured_methods"] == ["tool_call", "text"]
+    assert cat.model("kilo/auto-free")["structured_methods"] == ["tool_call", "text"]
+    assert cat.model("kilo/ling-3.0-flash-vl-free") is None
 
 
 # --- budgets -------------------------------------------------------------------------------
