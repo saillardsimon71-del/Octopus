@@ -183,9 +183,12 @@ def test_orbit_mission_can_return_compact_search_browse_trace(monkeypatch):
         "browse_search_ratio": 1.0,
         "by_role": {"FORGE": {"search": 1, "browse": 1}},
         "max_steps_roles": [],
+        "search_queries": [],
+        "repeated_search_queries": 0,
+        "browse_urls": [],
     }
     assert done["output"]["subtask_trace"] == [
-        {"role": "FORGE", "task": "collecter", "final": "preuve", "steps": 3}
+        {"role": "FORGE", "task": "collecter", "final": "fini", "steps": 3}
     ]
 
 
