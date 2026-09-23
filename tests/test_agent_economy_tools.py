@@ -172,9 +172,23 @@ def test_orbit_mission_can_return_compact_search_browse_trace(monkeypatch):
     assert done["status"] == "done"
     assert done["output"]["plan_trace"] == [{"role": "FORGE", "task": "collecter"}]
     assert done["output"]["tool_trace"] == [
-        {"role": "FORGE", "step": 1, "tool": "search", "result": "titre\nhttps://example.com/source"},
-        {"role": "FORGE", "step": 3, "tool": "browse",
+        {"role": "FORGE", "step": 1, "tool": "search", "args": {}, "result": "titre\nhttps://example.com/source"},
+        {"role": "FORGE", "step": 3, "tool": "browse", "args": {},
          "result": '{"url":"https://example.com/source","texte":"preuve"}'},
+    ]
+
+
+    assert done["output"]["trace_summary"] == {
+        "totals": {"search": 1, "browse": 1},
+        "browse_search_ratio": 1.0,
+        "by_role": {"FORGE": {"search": 1, "browse": 1}},
+        "max_steps_roles": [],
+        "search_queries": [],
+        "repeated_search_queries": 0,
+        "browse_urls": [],
+    }
+    assert done["output"]["subtask_trace"] == [
+        {"role": "FORGE", "task": "collecter", "final": "fini", "steps": 3}
     ]
 
 
@@ -193,6 +207,8 @@ def test_orbit_mission_trace_is_opt_in(monkeypatch):
 
     assert "plan_trace" not in done["output"]
     assert "tool_trace" not in done["output"]
+    assert "trace_summary" not in done["output"]
+    assert "subtask_trace" not in done["output"]
 
 
 def test_degraded_orbit_mission_preserves_results_without_strategy_evidence(monkeypatch):

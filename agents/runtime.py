@@ -548,7 +548,10 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
             db.post(role, f"action {tool} {json.dumps(args, ensure_ascii=False)[:90]}")
         context.append({"role": "user", "content": f"Résultat de {tool} : {result_str}"})
         # La synthèse de mission doit voir assez de preuve brute pour ne pas combler les trous par invention.
-        steps.append({"step": i + 1, "tool": tool, "result": result_str[:1500]})
+        step_record = {"step": i + 1, "tool": tool, "result": result_str[:1500]}
+        if tool in {"search", "browse"}:
+            step_record["args"] = dict(args)
+        steps.append(step_record)
     return {"role": role, "steps": steps, "final": "(max steps atteint)"}
 
 
