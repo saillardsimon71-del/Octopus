@@ -155,8 +155,54 @@ def test_mission_planner_receives_generic_role_contracts(monkeypatch):
     assert "workers interchangeables" in system
     assert "Un même rôle peut recevoir plusieurs sous-tâches distinctes" in system
     assert "au plus 5 étapes" in system
-    assert "final liste explicitement les artefacts nécessaires" in system
+    assert "artefacts utiles des étapes amont" in system
+    assert "transmis automatiquement" in system
     assert runtime.ROLES["FORGE"] not in system
+
+
+def test_mission_handoff_keeps_upstream_artifacts_when_agent_hits_max_steps(monkeypatch):
+    calls = []
+    actions = iter([
+        {
+            "tasks": [
+                {"role": "SOUT", "task": "trouver une source"},
+                {"role": "CONVERT", "task": "exploiter la source trouvée"},
+            ]
+        },
+        {"tool": "search", "args": {"query": "preuve PME France"}},
+        {"final": "source réutilisée"},
+        {"rapport": "rapport"},
+    ])
+
+    monkeypatch.setitem(
+        runtime.TOOLS["search"],
+        "fn",
+        lambda args: "Résultat utile\nhttps://example.com/preuve-pme",
+    )
+
+    def call_json(agent, task, model, messages, **kwargs):
+        calls.append((agent, task, messages))
+        return next(actions)
+
+    monkeypatch.setattr(deepseek, "call_json", call_json)
+    result = runtime.run_mission(
+        "collecter puis exploiter une preuve",
+        max_steps_per_agent=1,
+        business="octopus",
+    )
+
+    assert result["results"][0]["final"] == "(max steps atteint)"
+    downstream = next(
+        messages
+        for agent, task, messages in calls
+        if agent == "CONVERT" and task == "action"
+    )
+    objective = downstream[1]["content"]
+    assert "Contexte structuré des sous-tâches précédentes" in objective
+    assert '"role": "SOUT"' in objective
+    assert '"tool": "search"' in objective
+    assert "https://example.com/preuve-pme" in objective
+    assert "(max steps atteint)" in objective
 
 
 def test_mission_propagates_tool_allowlist_to_subagents(monkeypatch):
