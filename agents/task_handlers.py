@@ -132,6 +132,11 @@ def orbit_mission(ctx):
         output["results"] = result.get("results") or []
 
     if ctx.input.get("trace_tools"):
+        output["plan_trace"] = [
+            {"role": str(item.get("role") or ""), "task": str(item.get("task") or "")}
+            for item in (result.get("plan") or [])
+            if isinstance(item, dict)
+        ]
         output["tool_trace"] = _mission_tool_trace(result.get("results") or [])
 
     if context:
