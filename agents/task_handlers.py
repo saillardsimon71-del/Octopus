@@ -167,7 +167,7 @@ def _mission_llm_summary(root_run_id: int | None) -> dict:
         if status == "ok":
             continue
         error = str(row["error"] or "")
-        for code in re.findall(r"(?<!\\d)(4\\d\\d|5\\d\\d)(?!\\d)", error):
+        for code in re.findall(r"(?<!\d)(4\d\d|5\d\d)(?!\d)", error):
             http_errors[code] = http_errors.get(code, 0) + 1
         errors.append({
             "status": status,
