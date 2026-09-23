@@ -582,6 +582,8 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         "Décompose l'objectif en 2 à 5 sous-tâches, chacune assignée à UN rôle dont la responsabilité "
         "correspond réellement au travail demandé. N'assigne pas une tâche à un rôle seulement pour l'occuper "
         "et ne duplique pas la même collecte chez plusieurs rôles sans nécessité. "
+        "Un même rôle peut recevoir plusieurs sous-tâches distinctes si elles relèvent de sa spécialité ; "
+        "ne force jamais la diversité des rôles. "
         f"Chaque sous-tâche doit être réalisable en au plus {max_steps_per_agent} étapes ; si plusieurs pistes "
         "indépendantes demandent chacune plusieurs actions, répartis-les au lieu de surcharger un seul agent. "
         "Si une sous-tâche aval dépend de découvertes d'une sous-tâche amont, exige dans la tâche amont que son "
