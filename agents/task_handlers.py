@@ -99,6 +99,8 @@ def _mission_trace_summary(results) -> dict:
     by_role = {}
     totals = {"search": 0, "browse": 0}
     max_steps_roles = []
+    search_queries = []
+    browse_urls = []
     for subtask in results or []:
         role = str(subtask.get("role") or "")
         counts = by_role.setdefault(role, {"search": 0, "browse": 0})
@@ -107,6 +109,15 @@ def _mission_trace_summary(results) -> dict:
             if tool in totals:
                 totals[tool] += 1
                 counts[tool] += 1
+            args = step.get("args") if isinstance(step.get("args"), dict) else {}
+            if tool == "search":
+                query = " ".join(str(args.get("query") or "").lower().split())
+                if query:
+                    search_queries.append(query)
+            elif tool == "browse":
+                url = str(args.get("url") or "").strip()
+                if url:
+                    browse_urls.append(url)
         if subtask.get("final") == "(max steps atteint)":
             max_steps_roles.append(role)
     searches = totals["search"]
@@ -115,6 +126,9 @@ def _mission_trace_summary(results) -> dict:
         "browse_search_ratio": (totals["browse"] / searches) if searches else None,
         "by_role": by_role,
         "max_steps_roles": max_steps_roles,
+        "search_queries": search_queries,
+        "repeated_search_queries": len(search_queries) - len(set(search_queries)),
+        "browse_urls": browse_urls,
     }
 
 
