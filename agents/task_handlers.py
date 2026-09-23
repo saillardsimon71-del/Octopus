@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 import threading
 
+from octopus import journal
 from octopus.worker import TaskCancelled, handler
 
 from . import db
@@ -148,6 +149,42 @@ def _mission_trace_summary(results) -> dict:
     }
 
 
+def _mission_llm_summary(root_run_id: int | None) -> dict:
+    """Contrôle H2 des pannes provider/modèle dans l'arbre de run courant."""
+    if root_run_id is None:
+        return {"calls": 0, "by_status": {}, "non_ok": 0, "http_errors": {}, "errors": []}
+    rows = journal.query(
+        "SELECT status, error, model, provider, task FROM llm_calls "
+        "WHERE root_run_id=? ORDER BY id",
+        (int(root_run_id),),
+    )
+    by_status = {}
+    http_errors = {}
+    errors = []
+    for row in rows:
+        status = str(row["status"] or "")
+        by_status[status] = by_status.get(status, 0) + 1
+        if status == "ok":
+            continue
+        error = str(row["error"] or "")
+        for code in re.findall(r"(?<!\d)(4\d\d|5\d\d)(?!\d)", error):
+            http_errors[code] = http_errors.get(code, 0) + 1
+        errors.append({
+            "status": status,
+            "model": str(row["model"] or ""),
+            "provider": str(row["provider"] or ""),
+            "task": str(row["task"] or ""),
+            "error": error[:300],
+        })
+    return {
+        "calls": len(rows),
+        "by_status": by_status,
+        "non_ok": sum(count for status, count in by_status.items() if status != "ok"),
+        "http_errors": http_errors,
+        "errors": errors,
+    }
+
+
 @handler("orbit.mission", resource="llm")
 def orbit_mission(ctx):
     """Mission ORBIT pour n'importe quel business, rattachable à un objectif, une hypothèse ou une expérience.
@@ -194,6 +231,9 @@ def orbit_mission(ctx):
         ]
         output["tool_trace"] = _mission_tool_trace(result.get("results") or [])
         output["trace_summary"] = _mission_trace_summary(result.get("results") or [])
+        output["llm_trace_summary"] = _mission_llm_summary(
+            journal.current_run().root_id if journal.current_run() is not None else None
+        )
         output["subtask_trace"] = [
             {
                 "role": str(item.get("role") or ""),
