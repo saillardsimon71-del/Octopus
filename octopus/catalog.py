@@ -139,6 +139,21 @@ def _overlay_omniroute(raw: dict) -> dict:
                 candidates["flash_fallback"] = [selected_model, *current_flash]
         if raw.get("profiles", {}).get("zero_cost", {}).get("fallback"):
             task.setdefault("omniroute_bootstrap_baseline", {})["zero_cost"] = selected_model
+
+    # Les missions agentiques ne doivent pas dépendre d'une seule route Groq.
+    # Garder la route dédiée en premier, puis laisser OmniRoute choisir un autre
+    # modèle gratuit avant de tomber sur les candidats providers du catalogue.
+    for task_name in ("agent.react_step", "agent.plan", "agent.synthesize"):
+        task = raw.setdefault("tasks", {}).setdefault(task_name, {})
+        candidates = task.setdefault("candidates", {})
+        preferred = ["omniroute/devworker-groq", model_id]
+        for profile_name in ("zero_cost", "low_cost", "flash_fallback"):
+            if profile_name not in raw.get("profiles", {}):
+                continue
+            current = list(candidates.get(profile_name, []))
+            if not current and profile_name not in candidates:
+                continue
+            candidates[profile_name] = preferred + [item for item in current if item not in preferred]
     dev_task = raw.setdefault("tasks", {}).setdefault("development.step", {})
     dev_candidates = dev_task.setdefault("candidates", {})
     dedicated = [
