@@ -12,6 +12,7 @@ import json
 import re
 import time
 import unicodedata
+from datetime import date
 from contextlib import contextmanager
 from urllib.parse import urlparse
 
@@ -46,18 +47,25 @@ MODEL = deepseek.config.MODEL_FLASH
 
 # --- Outils partagés ---
 def _search(args):
-    from .search import web_search
+    from .search import effective_query, web_search
     query = str(args.get("query", ""))
-    cache, key = _SEARCHES.get(), query_key(query)
+    site = str(args.get("site") or "").strip() or None
+    effective = effective_query(query, site)
+    cache, key = _SEARCHES.get(), query_key(effective)
     if cache is not None and key in cache:  # 21 recherches quasi identiques dans un run du 16/09 (audit M2)
         previous = cache[key]
-        return {"deja_cherche": True, "requete_precedente": previous["query"],
+        return {"deja_cherche": True, "requete_precedente": previous["effective_query"],
                 "note": "Recherche équivalente déjà faite : même résultat. Change d'angle, ouvre un lien "
                         "avec browse, ou conclus avec « final ».",
                 "resultat": previous["result"][:600]}
-    result = web_search(query, 6)
+    result = web_search(query, 6, site=site)
     if cache is not None:
-        cache[key] = {"query": query, "result": result}
+        cache[key] = {
+            "query": query,
+            "site": site,
+            "effective_query": effective,
+            "result": result,
+        }
     return result
 
 
@@ -606,7 +614,7 @@ def _request_spend(args):
 
 
 TOOLS = {
-    "search": {"desc": "recherche web (liens)", "params": {"query": "str"}, "fn": _search},
+    "search": {"desc": "recherche web (liens) ; site est un domaine optionnel réellement appliqué, ex. bpifrance.fr", "params": {"query": "str", "site": "str?"}, "fn": _search},
     "browse": {"desc": "ouvre une page dans TON Chrome réel (comptes Stripe/Reddit/X/Fiverr/YouTube connectés) et la décrit", "params": {"url": "str"}, "fn": _browse},
     "render_offer": {"desc": "produit la vidéo complète d'une offre", "params": {"offer_id": "str"}, "fn": _render_offer},
     "qc": {"desc": "métriques ffmpeg d'une offre", "params": {"offer_id": "str"}, "fn": _qc},
@@ -722,6 +730,24 @@ def _group() -> str:
     return f"OCTOPUS (business {run.business})"
 
 
+def _today_iso() -> str:
+    return date.today().isoformat()
+
+
+def _freshness_context(run) -> str:
+    if run is None or run.business == DEFAULT_BUSINESS:
+        return ""
+    today = _today_iso()
+    year = today[:4]
+    return (
+        f"DATE ACTUELLE : {today}. Pour une recherche présentée comme actuelle/récente, "
+        f"privilégie {year} et les sources les plus récentes disponibles ; n'utilise pas 2023/2024/2025 "
+        "comme substitut implicite du présent sauf si l'objectif demande explicitement une période historique.\n"
+        "Pour cibler un domaine, utilise le paramètre site de search (ex. site=\"insee.fr\") "
+        "plutôt que de supposer qu'un champ non déclaré sera appliqué.\n\n"
+    )
+
+
 def build_prompts(role: str, goal: str, conversational: bool = False,
                   allowed_tools: set[str] | None = None) -> tuple[str, str, str]:
     """(prompt système, premier message, libellé de fin) de la boucle ReAct."""
@@ -729,6 +755,7 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
     roles = GENERIC_ROLES if run is not None and run.business != DEFAULT_BUSINESS else ROLES
     role_desc = roles.get(role, "")
     group = _group()
+    freshness_context = _freshness_context(run)
     proof_rule = ""
     if run is not None and run.business != DEFAULT_BUSINESS:
         proof_rule = (
@@ -749,6 +776,7 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
             f"via l'outil `browse`, qui ouvre les pages dans TON Chrome réel. Pour vérifier "
             f"un accès, utilise `browse` sur la page concernée.\n\n"
             f"Outils disponibles :\n{tools_desc(allowed_tools)}\n\n"
+            f"{freshness_context}"
             "Réponds TOUJOURS en JSON : soit {\"tool\": \"<nom>\", \"args\": {...}} pour agir, "
             "soit {\"final\": \"<ta réponse à l'humain>\"}."
         )
@@ -764,6 +792,7 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
             f"les outils disponibles. À chaque étape, choisis UNE action. "
             f"{memory_hint}\n\n"
             f"Outils disponibles :\n{tools_desc(allowed_tools)}\n\n"
+            f"{freshness_context}"
             f"{proof_rule}"
             "Réponds TOUJOURS en JSON : soit {\"tool\": \"<nom>\", \"args\": {...}} pour agir, "
             "soit {\"final\": \"<réponse>\"} quand l'objectif est atteint."
@@ -1016,8 +1045,10 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     current = journal.current_run()
     planner_roles = GENERIC_ROLES if current is not None and current.business != DEFAULT_BUSINESS else ROLES
     role_catalog = "\n".join(f"- {name}: {desc}" for name, desc in planner_roles.items())
+    planner_freshness = _freshness_context(current)
     plan_sys = (
         "Tu es ORBIT, l'orchestrateur de la mission. "
+        f"{planner_freshness}"
         "Utilise les rôles comme des responsabilités spécialisées, pas comme des workers interchangeables.\n\n"
         f"Rôles disponibles et responsabilités :\n{role_catalog}\n\n"
         "Décompose l'objectif en 2 à 5 sous-tâches, chacune assignée à UN rôle dont la responsabilité "
