@@ -78,13 +78,14 @@ class _MainTextParser(HTMLParser):
         "p", "div", "section", "article", "main", "li", "br", "h1", "h2", "h3", "h4",
         "blockquote", "table", "tr", "td", "th", "figcaption",
     }
+    VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.skip_depth = 0
         self.chrome_depth = 0
         self.main_depth = 0
-        self.main_markers: list[str] = []
+        self.element_stack: list[tuple[str, bool]] = []
         self.title_depth = 0
         self.h1_depth = 0
         self.body_parts: list[str] = []
@@ -100,9 +101,10 @@ class _MainTextParser(HTMLParser):
         if tag in self.CHROME_TAGS:
             self.chrome_depth += 1
         is_main = tag in {"main", "article"} or attrs_dict.get("role") == "main"
+        if tag not in self.VOID_TAGS:
+            self.element_stack.append((tag, is_main))
         if is_main:
             self.main_depth += 1
-            self.main_markers.append(tag)
         if tag == "title":
             self.title_depth += 1
         if tag == "h1":
@@ -118,11 +120,14 @@ class _MainTextParser(HTMLParser):
             self.h1_depth -= 1
         if tag == "title" and self.title_depth:
             self.title_depth -= 1
-        if tag in self.main_markers:
-            # Retire le marqueur le plus proche de ce tag ; couvre aussi <div role="main">.
-            idx = len(self.main_markers) - 1 - self.main_markers[::-1].index(tag)
-            self.main_markers.pop(idx)
-            self.main_depth = max(0, self.main_depth - 1)
+        # Ferme l'élément correspondant et tous les éléments implicitement fermés au-dessus.
+        # Cela évite qu'un <div> ordinaire imbriqué ferme par erreur un <div role="main">.
+        for idx in range(len(self.element_stack) - 1, -1, -1):
+            if self.element_stack[idx][0] == tag:
+                popped = self.element_stack[idx:]
+                del self.element_stack[idx:]
+                self.main_depth = max(0, self.main_depth - sum(1 for _, is_main in popped if is_main))
+                break
         if tag in self.CHROME_TAGS and self.chrome_depth:
             self.chrome_depth -= 1
         if tag in self.SKIP_TAGS and self.skip_depth:
