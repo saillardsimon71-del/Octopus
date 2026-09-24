@@ -87,14 +87,16 @@ def _mission_tool_trace(results, *, tools=("search", "browse"), result_chars=120
         for step in subtask.get("steps") or []:
             if step.get("tool") not in wanted:
                 continue
-            trace.append({
+            item = {
                 "role": role,
                 "step": step.get("step"),
                 "tool": step.get("tool"),
                 "args": step.get("args") if isinstance(step.get("args"), dict) else {},
                 "result": str(step.get("result") or "")[:result_chars],
-                "lockstep_forced": bool(step.get("lockstep_forced")),
-            })
+            }
+            if step.get("lockstep_forced"):
+                item["lockstep_forced"] = True
+            trace.append(item)
     return trace
 
 
