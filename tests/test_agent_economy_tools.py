@@ -249,7 +249,9 @@ def test_mission_trace_summary_counts_equivalent_searches_and_cross_role_reuse()
                 {
                     "tool": "search",
                     "args": {"query": "Retards de paiement PME France"},
-                    "result": "Source A\nhttps://example.com/preuve",
+                    # Runtime stocke le retour string de search via json.dumps : les sauts de ligne
+                    # sont donc échappés dans la trace réelle H2.
+                    "result": json.dumps("Source A\nhttps://example.com/preuve\nRésumé", ensure_ascii=False),
                 },
                 {
                     "tool": "search",

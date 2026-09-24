@@ -60,6 +60,21 @@ def _search(args):
     return result
 
 
+def _browser_request_allowed(url: str, state, *, account_context: bool) -> bool:
+    """Isole les sous-requêtes publiques des vrais comptes connectés.
+
+    Un navigateur public est éphémère et sans cookies : une pub/embed vers un domaine classé
+    ACCOUNT ne doit ni être chargée dans ce contexte ni marquer toute la mission account_read.
+    Le navigateur connecté conserve, lui, le garde-fou historique qui taint immédiatement la session.
+    """
+    if account_context:
+        return web_guard.allowed(url, state)
+    try:
+        return web_guard.check(url, state) == web_guard.PUBLIC
+    except web_guard.BrowseRefused:
+        return False
+
+
 def _browse(args):
     """Web public : contexte éphémère sans cookies. Comptes : profil connecté, visible, lecture seule."""
     from . import browser
@@ -67,7 +82,11 @@ def _browse(args):
     url = str(args.get("url", ""))
     kind = web_guard.check(url, state)
     account = kind == web_guard.ACCOUNT
-    b = browser.new_browser(headless=not account, account=account, guard=lambda u: web_guard.allowed(u, state))
+    b = browser.new_browser(
+        headless=not account,
+        account=account,
+        guard=lambda u: _browser_request_allowed(u, state, account_context=account),
+    )
     try:
         try:
             b.goto(url)
@@ -413,7 +432,10 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
         proof_rule = (
             "RÈGLE DE PREUVE : ne présente jamais comme observé, réel ou disponible un fait, un chiffre, "
             "un canal ou une ressource qui n'apparaît pas dans un résultat d'outil de cette exécution. "
-            "Si l'information manque, écris qu'elle est inconnue ; une hypothèse ou une inférence doit rester explicitement telle.\n\n"
+            "Si l'information manque, écris qu'elle est inconnue ; une hypothèse ou une inférence doit rester explicitement telle.\n"
+            "CONTRAT record_observation : experiment_id et channel_id sont des identifiants NUMÉRIQUES de base "
+            "de données. S'ils sont inconnus, omets ces champs ; ne mets jamais un nom de rôle comme "
+            "ORBIT, SOUT ou FORGE à leur place.\n\n"
         )
     if conversational:
         system = (

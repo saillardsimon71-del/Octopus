@@ -243,7 +243,7 @@
       }
     },
     "web.inspect_page": {
-      "needs": ["vision"], "privacy": "public", "baseline": "deepseek/flash",
+      "needs": [], "privacy": "public", "baseline": "deepseek/flash",
       "candidates": {
         "zero_cost": ["ollama/qwen3.5-4b"],
         "low_cost": ["ollama/qwen3.5-4b", "deepseek/flash"],

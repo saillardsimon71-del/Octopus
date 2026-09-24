@@ -72,6 +72,31 @@ def test_no_public_page_after_reading_an_account():
         web_guard.check("https://www.youtube.com/redirect?q=https%3A%2F%2Fexfil.example%2F%3Fd%3D1", state)
 
 
+def test_public_browser_blocks_account_subrequests_without_tainting_session():
+    state = BrowseState()
+
+    assert runtime._browser_request_allowed(
+        "https://studio.youtube.com/channel",
+        state,
+        account_context=False,
+    ) is False
+    assert state.account_read is False
+
+    assert runtime._browser_request_allowed(
+        "https://blog-exemple.fr/impayes",
+        state,
+        account_context=False,
+    ) is True
+    assert state.account_read is False
+
+    assert runtime._browser_request_allowed(
+        "https://dashboard.stripe.com/",
+        state,
+        account_context=True,
+    ) is True
+    assert state.account_read is True
+
+
 class FakeBrowser:
     """Navigateur simule : pages en memoire, redirections soumises au garde comme Playwright."""
     PAGES = {
@@ -168,7 +193,7 @@ def test_local_services_are_never_browsed(monkeypatch, fake_browser):
     assert "refusée" in result["steps"][0]["result"] and fake_browser.opened == []
 
 
-def test_page_text_survives_vision_gateway_failure(monkeypatch):
+def test_public_page_text_survives_inspection_gateway_failure(monkeypatch):
     tool = browser.BrowserTool.__new__(browser.BrowserTool)
     tool.screenshot = lambda: __import__("pathlib").Path("unused.jpg")
     tool.url = lambda: "https://example.com/preuve"
@@ -176,12 +201,12 @@ def test_page_text_survives_vision_gateway_failure(monkeypatch):
     monkeypatch.setattr(web_guard, "classify", lambda url: PUBLIC)
     monkeypatch.setattr(
         deepseek,
-        "vision_text",
+        "call",
         lambda *a, **k: (_ for _ in ()).throw(
             llm.NoEligibleModel(
                 "web.inspect_page",
                 "zero_cost",
-                [{"model": "vision-free", "reason": "provider 400"}],
+                [{"model": "text-free", "reason": "provider 400"}],
             )
         ),
     )
@@ -193,14 +218,45 @@ def test_page_text_survives_vision_gateway_failure(monkeypatch):
     assert "NoEligibleModel" in seen["vision_error"]
 
 
-def test_page_vision_failure_is_reported_without_losing_dom(monkeypatch):
+def test_public_page_inspection_uses_string_dom_content(monkeypatch):
+    tool = browser.BrowserTool.__new__(browser.BrowserTool)
+    tool.screenshot = lambda: __import__("pathlib").Path("unused.jpg")
+    tool.url = lambda: "https://example.com/preuve"
+    tool.snapshot = lambda max_chars=4000: "DOM exploitable avec chiffre 42."
+    monkeypatch.setattr(web_guard, "classify", lambda url: PUBLIC)
+
+    captured = {}
+
+    def inspect(agent, task, model, messages, **kwargs):
+        captured["task"] = task
+        captured["messages"] = messages
+        return "Résumé textuel"
+
+    monkeypatch.setattr(deepseek, "call", inspect)
+    monkeypatch.setattr(
+        deepseek,
+        "vision_text",
+        lambda *a, **k: pytest.fail("une page publique ne doit plus utiliser un message multimodal"),
+    )
+
+    seen = tool.see(agent="SOUT")
+
+    assert seen["description"] == "Résumé textuel"
+    assert seen["vision_error"] is None
+    assert captured["task"] == "web.inspect_page"
+    assert isinstance(captured["messages"][0]["content"], str)
+    assert "DOM exploitable avec chiffre 42." in captured["messages"][0]["content"]
+    assert "NON FIABLE" in captured["messages"][0]["content"]
+
+
+def test_public_page_inspection_failure_is_reported_without_losing_dom(monkeypatch):
     tool = browser.BrowserTool.__new__(browser.BrowserTool)
     tool.screenshot = lambda: __import__("pathlib").Path("unused.jpg")
     tool.url = lambda: "https://example.com/preuve"
     monkeypatch.setattr(web_guard, "classify", lambda url: PUBLIC)
     monkeypatch.setattr(
         deepseek,
-        "vision_text",
+        "call",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bug interne")),
     )
 
