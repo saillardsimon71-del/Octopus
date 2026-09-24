@@ -126,6 +126,97 @@ def test_evidence_selector_respects_explicit_site_constraint():
     assert choice is None
 
 
+
+def test_business_signal_selector_rejects_apple_collision_from_appel():
+    result = (
+        "- Apple (France)\n"
+        "  https://www.apple.com/fr/\n"
+        "  Tout l'univers Apple.\n"
+        "- App Téléphone\n"
+        "  https://apps.apple.com/fr/app/telephone/id1\n"
+        "  Pour un appel entrant, répondez sur l'iPhone.\n"
+    )
+
+    choice = runtime._select_search_browse_candidate(
+        result,
+        "appel d'offres automatisation reporting 2026",
+        selector="business_signal_relevance",
+    )
+
+    assert choice is None
+
+
+def test_business_signal_selector_rejects_mission_film_and_dictionary_noise():
+    result = (
+        "- Mission (film) — Wikipédia\n"
+        "  https://fr.wikipedia.org/wiki/Mission_(film)\n"
+        "  Film historique.\n"
+        "- Mission - Film 1986 - AlloCiné\n"
+        "  https://www.allocine.fr/film/fichefilm_gen_cfilm=2152.html\n"
+        "  Film de Roland Joffé.\n"
+        "- Définitions : mission - Larousse\n"
+        "  https://www.larousse.fr/dictionnaires/francais/mission/51785\n"
+        "  Définition générale.\n"
+    )
+
+    choice = runtime._select_search_browse_candidate(
+        result,
+        "mission freelance data analyst reporting automatisation",
+        selector="business_signal_relevance",
+    )
+
+    assert choice is None
+
+
+def test_business_signal_selector_accepts_specific_transactional_candidate():
+    result = (
+        "- Freelance Data Analyst - automatisation reporting Power BI\n"
+        "  https://example.com/jobs/data-analyst-reporting\n"
+        "  Client recherche un freelance pour automatiser le reporting Power BI et réduire le traitement manuel.\n"
+        "- Freelance marketplace\n"
+        "  https://example.net/\n"
+        "  Trouvez des freelances pour vos projets.\n"
+    )
+
+    choice = runtime._select_search_browse_candidate(
+        result,
+        "freelance data analyst automatisation reporting",
+        selector="business_signal_relevance",
+    )
+
+    assert choice["url"] == "https://example.com/jobs/data-analyst-reporting"
+    assert choice["title_overlap"] >= 2
+    assert choice["root_homepage"] is False
+
+
+def test_business_signal_focus_upgrades_evidence_selector_for_subagents(monkeypatch):
+    seen = []
+    actions = iter([
+        {"tasks": [{"role": "SOUT", "task": "collecter"}]},
+        {"rapport": "aucun signal", "business_signals": []},
+    ])
+    monkeypatch.setattr(deepseek, "call_json", lambda *a, **k: next(actions))
+
+    def fake_run_agent(role, goal, max_steps=10, conversational=False, **kwargs):
+        seen.append(kwargs.get("search_browse_selector"))
+        return {"role": role, "steps": [], "final": "aucune preuve"}
+
+    monkeypatch.setattr(runtime, "run_agent", fake_run_agent)
+
+    result = runtime.run_mission(
+        "identifier des signaux",
+        max_steps_per_agent=2,
+        business="octopus",
+        allowed_tools={"search", "browse"},
+        search_browse_lockstep=True,
+        search_browse_selector="evidence_relevance",
+        business_signal_focus=True,
+        business_signal_target=1,
+    )
+
+    assert result["synthesis_status"] == "validated"
+    assert seen == ["business_signal_relevance"]
+
 def test_lockstep_can_force_later_relevant_result(monkeypatch):
     seen_browse = []
     monkeypatch.setitem(
