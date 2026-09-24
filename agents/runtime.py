@@ -24,6 +24,8 @@ from . import cancel, db, deepseek, web_guard
 _ROLE: contextvars.ContextVar[str] = contextvars.ContextVar("podalux_role", default="RUNTIME")
 _SEARCHES: contextvars.ContextVar[dict | None] = contextvars.ContextVar("podalux_searches", default=None)
 _SEARCH_PURPOSE: contextvars.ContextVar[str] = contextvars.ContextVar("podalux_search_purpose", default="")
+_BUSINESS_SIGNAL_FOCUS: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "podalux_business_signal_focus", default=False)
 
 # Extraits plus courts quand la recherche est résumée pour un autre sous-agent.
 _SEARCH_HANDOFF_SNIPPET_CHARS = 60
@@ -50,6 +52,16 @@ def search_purpose(purpose: str):
         yield
     finally:
         _SEARCH_PURPOSE.reset(token)
+
+
+@contextmanager
+def business_signal_mode(enabled: bool):
+    """Mission business signal : les consignes de prompt doivent suivre la politique SEARCH."""
+    token = _BUSINESS_SIGNAL_FOCUS.set(bool(enabled))
+    try:
+        yield
+    finally:
+        _BUSINESS_SIGNAL_FOCUS.reset(token)
 
 
 def query_key(query: str) -> str:
@@ -879,11 +891,26 @@ def _today_iso() -> str:
     return date.today().isoformat()
 
 
-def _freshness_context(run) -> str:
+def _freshness_context(run, *, business_signal: bool = False) -> str:
+    """Contexte de date, sans jamais dicter l'écriture de la requête en mode business.
+
+    En mode business signal, la date sert à juger la fraîcheur d'une source ouverte, pas à
+    allonger la requête : « privilégie {année} » y contredirait la stratégie de recherche
+    progressive du contrat (run #63 : `... budget cloud 2026`).
+    """
     if run is None or run.business == DEFAULT_BUSINESS:
         return ""
     today = _today_iso()
     year = today[:4]
+    if business_signal:
+        return (
+            f"DATE ACTUELLE : {today}. Elle sert à juger la fraîcheur d'une source réellement ouverte, "
+            "pas à écrire la requête : n'ajoute pas l'année courante à une requête search par défaut. "
+            "N'emploie une année que si elle est discriminante ou explicitement demandée par l'objectif. "
+            "Vise des sources récentes et contrôle leur date dans la page acquise avec browse. "
+            "Le paramètre site de search reste un raffinement de deuxième intention : il ne sert pas "
+            "à cibler un domaine dès la première recherche.\n\n"
+        )
     return (
         f"DATE ACTUELLE : {today}. Pour une recherche présentée comme actuelle/récente, "
         f"privilégie {year} et les sources les plus récentes disponibles ; n'utilise pas une année antérieure "
@@ -1138,7 +1165,7 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
     group = _group()
     legacy_search = run is None or run.business == DEFAULT_BUSINESS
     tool_text = tools_desc(allowed_tools, legacy_search=legacy_search)
-    freshness_context = _freshness_context(run)
+    freshness_context = _freshness_context(run, business_signal=_BUSINESS_SIGNAL_FOCUS.get())
     proof_rule = ""
     if run is not None and run.business != DEFAULT_BUSINESS:
         proof_rule = (
@@ -1435,7 +1462,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     current = journal.current_run()
     planner_roles = GENERIC_ROLES if current is not None and current.business != DEFAULT_BUSINESS else ROLES
     role_catalog = "\n".join(f"- {name}: {desc}" for name, desc in planner_roles.items())
-    planner_freshness = _freshness_context(current)
+    planner_freshness = _freshness_context(current, business_signal=business_signal_focus)
     business_signal_context = _business_signal_contract(business_signal_target) if business_signal_focus else ""
     plan_sys = (
         "Tu es ORBIT, l'orchestrateur de la mission. "
@@ -1499,7 +1526,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         # L'intention de recherche se propage aux outils du sous-agent : elle choisit la
         # politique de providers et isole le cache. Pas de nouveau paramètre d'outil.
         purpose = (SEARCH_PURPOSE_BUSINESS if business_signal_focus else SEARCH_PURPOSE_GENERAL)
-        with search_purpose(purpose):
+        with search_purpose(purpose), business_signal_mode(business_signal_focus):
             r = run_agent(
                 role,
                 task,
