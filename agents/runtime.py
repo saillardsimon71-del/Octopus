@@ -741,7 +741,7 @@ def _freshness_context(run) -> str:
     year = today[:4]
     return (
         f"DATE ACTUELLE : {today}. Pour une recherche présentée comme actuelle/récente, "
-        f"privilégie {year} et les sources les plus récentes disponibles ; n'utilise pas 2023/2024/2025 "
+        f"privilégie {year} et les sources les plus récentes disponibles ; n'utilise pas une année antérieure "
         "comme substitut implicite du présent sauf si l'objectif demande explicitement une période historique.\n"
         "Pour cibler un domaine, utilise le paramètre site de search (ex. site=\"insee.fr\") "
         "plutôt que de supposer qu'un champ non déclaré sera appliqué.\n\n"
