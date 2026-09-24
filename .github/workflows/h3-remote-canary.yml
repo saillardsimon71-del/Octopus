@@ -45,7 +45,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p artifacts data
-          python - <<'PY' | tee artifacts/h3_console.txt
+          xvfb-run -a python - <<'PY' | tee artifacts/h3_console.txt
           import json
           import os
           from pathlib import Path
