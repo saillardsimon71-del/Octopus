@@ -218,6 +218,42 @@ def test_public_page_text_survives_inspection_gateway_failure(monkeypatch):
     assert "NoEligibleModel" in seen["vision_error"]
 
 
+def test_public_page_never_depends_on_screenshot(monkeypatch):
+    tool = browser.BrowserTool.__new__(browser.BrowserTool)
+    tool.screenshot = lambda: (_ for _ in ()).throw(RuntimeError("Page.captureScreenshot impossible"))
+    tool.url = lambda: "https://example.com/preuve"
+    tool.snapshot = lambda max_chars=4000: "DOM public exploitable " + ("x" * 200)
+    monkeypatch.setattr(web_guard, "classify", lambda url: PUBLIC)
+    monkeypatch.setattr(deepseek, "call", lambda *a, **k: "Résumé DOM")
+
+    seen = tool.see(agent="SOUT")
+
+    assert seen["description"] == "Résumé DOM"
+    assert seen["screenshot"] is None
+    assert seen["screenshot_error"] is None
+    assert seen["vision_error"] is None
+
+
+def test_account_screenshot_failure_falls_back_to_loaded_dom(monkeypatch):
+    tool = browser.BrowserTool.__new__(browser.BrowserTool)
+    tool.screenshot = lambda: (_ for _ in ()).throw(RuntimeError("capture refusée"))
+    tool.url = lambda: "https://dashboard.stripe.com/balance"
+    tool.snapshot = lambda max_chars=4000: "DOM compte déjà chargé"
+    monkeypatch.setattr(web_guard, "classify", lambda url: ACCOUNT)
+    monkeypatch.setattr(
+        deepseek,
+        "vision_text",
+        lambda *a, **k: pytest.fail("pas de vision sans capture"),
+    )
+
+    seen = tool.see(agent="LEDGER")
+
+    assert seen["description"] == "DOM compte déjà chargé"
+    assert seen["screenshot"] is None
+    assert seen["screenshot_error"] == "RuntimeError: capture refusée"
+    assert seen["vision_error"] is None
+
+
 def test_public_page_inspection_uses_string_dom_content(monkeypatch):
     tool = browser.BrowserTool.__new__(browser.BrowserTool)
     tool.screenshot = lambda: __import__("pathlib").Path("unused.jpg")
