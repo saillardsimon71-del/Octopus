@@ -14,7 +14,7 @@ import time
 import unicodedata
 from datetime import date
 from contextlib import contextmanager
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
 from octopus import journal, llm
 
@@ -781,7 +781,8 @@ def _business_signal_contract(target: int) -> str:
     target = max(1, int(target))
     return (
         "MODE BUSINESS SIGNAL — objectif : trouver des opportunités TESTABLES, pas produire une étude générale.\n"
-        f"Cible : {target} signaux commerciaux qualifiés maximum ; mieux vaut 0 signal solide que des banalités.\n"
+        f"Seuil minimal visé : {target} signaux commerciaux qualifiés ; n'invente jamais un signal pour atteindre ce seuil. "
+        "Mieux vaut rester sous le seuil avec des preuves solides que le dépasser avec des banalités.\n"
         "Un signal n'est qualifié que si TOUT est présent :\n"
         "1) un acheteur/segment identifiable ;\n"
         "2) une douleur, tâche manuelle, obligation ou demande concrète ;\n"
@@ -811,6 +812,35 @@ def _business_signal_task_context(target: int) -> str:
     )
 
 
+_TRACKING_QUERY_KEYS = {
+    "gclid", "fbclid", "msclkid", "mc_cid", "mc_eid",
+}
+
+
+def _canonical_evidence_url(url: str) -> str:
+    """Normalisation minimale pour comparer URL demandée, redirigée et URL citée par le LLM."""
+    raw = str(url or "").strip()
+    if not raw.startswith(("http://", "https://")):
+        return ""
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return ""
+    host = parts.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = re.sub(r"/+", "/", parts.path or "/")
+    if path != "/":
+        path = path.rstrip("/")
+    query = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        lowered = key.lower()
+        if lowered.startswith("utm_") or lowered in _TRACKING_QUERY_KEYS:
+            continue
+        query.append((key, value))
+    return urlunsplit((parts.scheme.lower(), host, path, urlencode(query, doseq=True), ""))
+
+
 def _verified_browse_urls(results: list[dict]) -> set[str]:
     urls = set()
     for subtask in results or []:
@@ -818,14 +848,17 @@ def _verified_browse_urls(results: list[dict]) -> set[str]:
             if step.get("tool") != "browse":
                 continue
             meta = step.get("browse_meta") if isinstance(step.get("browse_meta"), dict) else {}
-            url = str(meta.get("url") or (step.get("args") or {}).get("url") or "").strip()
-            if not url.startswith(("http://", "https://")):
-                continue
             if bool(meta.get("blocked")) or bool(meta.get("error")):
                 continue
             if meta and int(meta.get("text_chars") or 0) < 80:
                 continue
-            urls.add(url)
+
+            requested = str((step.get("args") or {}).get("url") or "").strip()
+            final = str(meta.get("url") or "").strip()
+            for candidate in (requested, final):
+                canonical = _canonical_evidence_url(candidate)
+                if canonical:
+                    urls.add(canonical)
     return urls
 
 
@@ -845,12 +878,13 @@ def _qualify_business_signals(raw_signals, results: list[dict]) -> tuple[list[di
         for key in _BUSINESS_SIGNAL_REQUIRED[1:]:
             if item[key].lower() in _BUSINESS_SIGNAL_UNKNOWN:
                 reasons.append(f"missing_{key}")
-        if item["evidence_url"] not in opened:
+        canonical_evidence_url = _canonical_evidence_url(item["evidence_url"])
+        if not canonical_evidence_url or canonical_evidence_url not in opened:
             reasons.append("evidence_url_not_opened")
         key = (
             item["buyer"].lower(),
             item["pain"].lower(),
-            item["evidence_url"],
+            canonical_evidence_url or item["evidence_url"],
         )
         if key in seen:
             reasons.append("duplicate_signal")
@@ -858,6 +892,7 @@ def _qualify_business_signals(raw_signals, results: list[dict]) -> tuple[list[di
             rejected.append({"signal": raw, "reasons": sorted(set(reasons))})
             continue
         seen.add(key)
+        item["action_fields_nature"] = "inferred"
         accepted.append(item)
     return accepted, rejected
 
