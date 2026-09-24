@@ -396,13 +396,15 @@ def orbit_mission(ctx):
         output["business_signal_result"] = {
             "metric": "qualified_business_signal_count",
             "observed": len(signals),
-            "target": target,
+            "minimum_target": target,
             "success": len(signals) >= target,
             "rejected": len(rejected),
             "scope": "semantic_gate",
             "note": (
-                "Signal qualifié = acheteur + douleur + signal monétaire/urgence + source ouverte "
-                "+ canal + offre testable + prochain test."
+                "success signifie uniquement que le seuil structurel de signaux qualifiés est atteint ; "
+                "ce n'est pas une preuve de demande, de conversion ni de revenu. "
+                "buyer/pain/money_signal/evidence_* doivent être ancrés dans la source ouverte ; "
+                "test_channel/test_offer/next_test sont des inférences proposées pour expérimentation."
             ),
         }
     flags = {}
