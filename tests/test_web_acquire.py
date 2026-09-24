@@ -258,6 +258,39 @@ def test_blocked_or_empty_public_page_is_not_marked_as_visited(monkeypatch):
         assert url not in web_guard.current().visited
 
 
+def test_public_browse_does_not_spend_an_llm_call_for_page_inspection(monkeypatch):
+    url = "https://example.com/no-llm"
+    text = "contenu principal directement extrait " * 20
+    record = browser.PublicPageRecord(
+        requested_url=url,
+        final_url=url,
+        fetched_at="2026-09-24T00:00:00+00:00",
+        http_status=200,
+        content_type="text/html",
+        title="Sans LLM",
+        extraction_method="http:html_main",
+        rendered=False,
+        blocked=False,
+        main_text=text,
+        text_chars=len(text),
+        raw_chars=len(text),
+        truncated=False,
+        error=None,
+    )
+    monkeypatch.setattr(browser, "acquire_public_page", lambda *a, **k: record)
+    monkeypatch.setattr(
+        runtime.deepseek,
+        "call",
+        lambda *a, **k: pytest.fail("browse public ne doit plus appeler web.inspect_page"),
+    )
+
+    with web_guard.session():
+        result = runtime._browse({"url": url})
+
+    assert result["page"]["extraction_method"] == "http:html_main"
+    assert result["vision"] is None
+
+
 def test_usable_public_page_is_marked_as_visited(monkeypatch):
     url = "https://example.com/usable"
     text = "preuve factuelle exploitable " * 20
