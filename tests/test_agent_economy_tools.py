@@ -464,6 +464,63 @@ def test_orbit_mission_passes_lockstep_and_reports_objective_result(monkeypatch)
     assert done["output"]["tool_trace"][0]["lockstep_forced"] is True
 
 
+def test_orbit_mission_business_signal_focus_reports_semantic_success(monkeypatch):
+    from agents import task_handlers  # noqa: F401
+
+    captured = {}
+    signal = {
+        "signal_type": "job_demand",
+        "buyer": "entreprise de plomberie multi-sites",
+        "pain": "saisie manuelle de devis et relances",
+        "money_signal": "recrutement dédié à cette tâche",
+        "evidence_url": "https://example.com/job",
+        "evidence_summary": "offre d'emploi pour gérer devis et relances",
+        "test_channel": "prospection directe d'entreprises similaires",
+        "test_offer": "automatisation légère devis + relances",
+        "next_test": "contacter 5 entreprises comparables",
+    }
+
+    def fake_run_mission(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "plan": [{"role": "SOUT", "task": "trouver des signaux"}],
+            "results": [],
+            "rapport": "signal business",
+            "synthesis_status": "validated",
+            "business_signals": [signal],
+            "business_signal_rejections": [{"signal": {}, "reasons": ["missing_buyer"]}],
+        }
+
+    monkeypatch.setattr(runtime, "run_mission", fake_run_mission)
+
+    worker.enqueue(B, "orbit.mission", {
+        "goal": "chercher une opportunité testable",
+        "business_signal_focus": True,
+        "business_signal_target": 1,
+    })
+    done = worker.run_one("w", kinds=["orbit.mission"], log=lambda s: None)
+
+    assert captured["business_signal_focus"] is True
+    assert captured["business_signal_target"] == 1
+    assert done["output"]["business_signals"] == [signal]
+    assert done["output"]["business_signal_result"] == {
+        "metric": "qualified_business_signal_count",
+        "observed": 1,
+        "target": 1,
+        "success": True,
+        "rejected": 1,
+        "scope": "semantic_gate",
+        "note": (
+            "Signal qualifié = acheteur + douleur + signal monétaire/urgence + source ouverte "
+            "+ canal + offre testable + prochain test."
+        ),
+    }
+    assert done["output"]["experiment_flags"] == {
+        "business_signal_focus": True,
+        "business_signal_target": 1,
+    }
+
+
 def test_trace_summary_exposes_lockstep_selector_rank():
     from agents.task_handlers import _mission_trace_summary
 
