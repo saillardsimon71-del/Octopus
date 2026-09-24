@@ -33,6 +33,75 @@ SEARCH_COST_CLASS_ENV = {
 }
 
 
+def normalize_site(site: str | None) -> str:
+    """Normalise une contrainte de domaine sans accepter de chemin ni opérateur arbitraire."""
+    raw = str(site or "").strip().lower()
+    if not raw:
+        return ""
+    if raw.startswith("site:"):
+        raw = raw[5:].strip()
+    if "://" in raw:
+        raw = urlparse(raw).netloc.lower()
+    raw = raw.split("/", 1)[0].strip().strip(".")
+    if raw.startswith("www."):
+        raw = raw[4:]
+    if not re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,63}", raw):
+        raise ValueError(f"site invalide : {site}")
+    return raw
+
+
+def site_constraints(query: str, site: str | None = None) -> list[str]:
+    explicit = normalize_site(site)
+    if explicit:
+        return [explicit]
+    found = []
+    for raw in re.findall(r"(?i)\bsite:([^\s()]+)", str(query or "")):
+        try:
+            domain = normalize_site(raw.rstrip(".,;:"))
+        except ValueError:
+            continue
+        if domain and domain not in found:
+            found.append(domain)
+    return found
+
+
+def effective_query(query: str, site: str | None = None) -> str:
+    q = re.sub(r"\s+", " ", str(query or "")).strip()
+    domain = normalize_site(site)
+    if domain and domain not in site_constraints(q):
+        q = f"{q} site:{domain}".strip()
+    return q
+
+
+def _url_matches_sites(url: str, sites: list[str]) -> bool:
+    if not sites:
+        return True
+    host = urlparse(str(url or "")).netloc.lower().removeprefix("www.")
+    return any(host == site or host.endswith("." + site) for site in sites)
+
+
+def _filter_sites(items: list[dict], sites: list[str]) -> list[dict]:
+    if not sites:
+        return items
+    return [item for item in items if _url_matches_sites(item.get("url", ""), sites)]
+
+
+def _merge_unique(*groups: list[dict], max_results: int) -> list[dict]:
+    out = []
+    seen = set()
+    for group in groups:
+        for item in group:
+            url = str(item.get("url") or "").strip()
+            key = url or (str(item.get("provider") or ""), str(item.get("title") or ""))
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+            if len(out) >= max_results:
+                return out
+    return out
+
+
 def _require_free_quota(provider: str) -> None:
     env_name = SEARCH_COST_CLASS_ENV[provider]
     cost_class = os.environ.get(env_name, "").strip().lower()
@@ -168,38 +237,53 @@ PROVIDERS = (("Brave", "_brave_items", lambda: bool(config.BRAVE_API_KEY)),
              ("Tavily", "_tavily_items", lambda: bool(config.TAVILY_API_KEY)))
 
 
-def search_items(query: str, max_results: int = 6) -> tuple[list[dict], list[str]]:
-    """(résultats, erreurs). Une source en panne n'arrête pas les autres mais apparaît dans les erreurs."""
+def search_items(query: str, max_results: int = 6, site: str | None = None) -> tuple[list[dict], list[str]]:
+    """Recherche stable : API si disponible, sinon Bing Web puis News, avec filtre site local."""
     errors: list[str] = []
+    q = effective_query(query, site)
+    sites = site_constraints(q, site)
 
     def attempt(name, fn_name):
         try:
-            return globals()[fn_name](query, max_results) or []
+            items = globals()[fn_name](q, max_results) or []
+            return _filter_sites(items, sites)
         except Exception as exc:
-            errors.append(f"{name} : {type(exc).__name__} {str(exc)[:80]}")
+            errors.append(f"{name} : {type(exc).__name__} {str(exc)[:160]}")
             return []
 
     for name, fn_name, available in PROVIDERS:
         if available():
             items = attempt(name, fn_name)
             if items:
-                return items, errors
-    items = attempt("Bing News", "_bing_news_items")
-    if items:
-        return items, errors
-    items = attempt("Bing Web", "_bing_web_items")
-    if items:
-        return items, errors
-    items = attempt("Google News", "_gnews_items") + attempt("Wikipedia", "_wikipedia_items")
-    return items, errors
+                return items[:max_results], errors
+
+    # Le fallback keyless ne change plus de famille selon le premier RSS non vide :
+    # Bing Web est toujours prioritaire, Bing News complète ensuite.
+    web_items = attempt("Bing Web", "_bing_web_items")
+    news_items = attempt("Bing News", "_bing_news_items")
+    direct = _merge_unique(web_items, news_items, max_results=max_results)
+    if len(direct) >= max_results or sites:
+        return direct, errors
+
+    # Wrappers Google/Wikipedia ne servent qu'à compléter une recherche non contrainte.
+    hints = attempt("Google News", "_gnews_items")
+    wiki = attempt("Wikipedia", "_wikipedia_items")
+    return _merge_unique(direct, hints, wiki, max_results=max_results), errors
 
 
 def format_items(items: list[dict]) -> str:
+    providers = []
+    for item in items:
+        provider = str(item.get("provider") or "")
+        if provider and provider not in providers:
+            providers.append(provider)
     news = [i for i in items if i["provider"] == "bing_news"]
     google_news = [i for i in items if i["provider"] == "google_news"]
     wiki = [i for i in items if i["provider"] == "wikipedia"]
     web = [i for i in items if i["provider"] not in ("bing_news", "google_news", "wikipedia")]
     parts = []
+    if providers:
+        parts.append("Fournisseurs de recherche : " + ", ".join(providers))
     if web:
         parts.append("\n".join(f"- {i['title']}\n  {i['url']}\n  {i['snippet']}" for i in web))
     if news:
@@ -229,10 +313,13 @@ def format_items(items: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-def web_search(query: str, max_results: int = 6) -> str:
-    """Recherche web en texte pour les agents. Les pannes de sources sont signalées."""
-    items, errors = search_items(query, max_results)
+def web_search(query: str, max_results: int = 6, site: str | None = None) -> str:
+    """Recherche web en texte ; requête effective et fournisseurs restent visibles pour le diagnostic."""
+    q = effective_query(query, site)
+    items, errors = search_items(query, max_results, site=site)
     text = format_items(items)
+    prefix = f"Requête effective : {q}"
+    text = prefix + ("\n\n" + text if text else "")
     if errors:
-        text = (text + "\n\n" if text else "") + "Sources en erreur : " + " ; ".join(errors)
-    return text or "(aucun résultat de recherche)"
+        text += "\n\nSources en erreur : " + " ; ".join(errors)
+    return text
