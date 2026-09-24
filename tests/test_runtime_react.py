@@ -313,7 +313,7 @@ def test_generic_agent_prompt_includes_current_date_and_search_freshness(monkeyp
 
     assert "DATE ACTUELLE : 2026-09-24" in system
     assert "privilégie 2026" in system
-    assert "n'utilise pas 2023/2024/2025 comme substitut implicite du présent" in system
+    assert "n'utilise pas une année antérieure comme substitut implicite du présent" in system
     assert 'site="insee.fr"' in system
 
 
