@@ -399,6 +399,183 @@ def test_mission_planner_receives_generic_role_contracts(monkeypatch):
     assert runtime.ROLES["FORGE"] not in system
 
 
+def test_business_signal_gate_rejects_generic_and_unopened_candidates():
+    opened = "https://example.com/brief"
+    results = [{
+        "role": "SOUT",
+        "steps": [{
+            "tool": "browse",
+            "args": {"url": opened},
+            "browse_meta": {
+                "url": opened,
+                "text_chars": 900,
+                "blocked": False,
+                "error": None,
+            },
+        }],
+    }]
+    strong = {
+        "signal_type": "explicit_request",
+        "buyer": "cabinet comptable de 5 à 20 salariés",
+        "pain": "relances clients effectuées manuellement chaque semaine",
+        "money_signal": "la source demande un prestataire et mentionne un budget mensuel",
+        "evidence_url": opened,
+        "evidence_summary": "demande explicite d'aide pour automatiser les relances",
+        "test_channel": "réponse directe à la demande publiée",
+        "test_offer": "audit + automatisation simple des relances",
+        "next_test": "contacter 5 cabinets avec la même douleur",
+    }
+    generic = {
+        **strong,
+        "signal_type": "macro_trend",
+        "evidence_url": opened,
+        "buyer": "entreprises françaises",
+        "pain": "inflation générale",
+    }
+    unopened = {
+        **strong,
+        "evidence_url": "https://example.com/non-ouvert",
+    }
+
+    accepted, rejected = runtime._qualify_business_signals(
+        [strong, generic, unopened],
+        results,
+    )
+
+    assert accepted == [{**strong, "action_fields_nature": "inferred"}]
+    reasons = [reason for item in rejected for reason in item["reasons"]]
+    assert "unsupported_signal_type" in reasons
+    assert "evidence_url_not_opened" in reasons
+
+
+def test_business_signal_url_normalization_accepts_requested_and_redirected_variants():
+    requested = "https://www.example.com/offre/?utm_source=newsletter#section"
+    final = "https://example.com/offre"
+    results = [{
+        "role": "SOUT",
+        "steps": [{
+            "tool": "browse",
+            "args": {"url": requested},
+            "browse_meta": {
+                "url": final,
+                "text_chars": 500,
+                "blocked": False,
+                "error": None,
+            },
+        }],
+    }]
+    raw = {
+        "signal_type": "explicit_request",
+        "buyer": "PME bâtiment",
+        "pain": "relances devis manuelles",
+        "money_signal": "demande de prestataire",
+        "evidence_url": "https://example.com/offre?utm_campaign=test",
+        "evidence_summary": "demande explicite",
+        "test_channel": "contact direct",
+        "test_offer": "automatisation relances",
+        "next_test": "contacter 3 entreprises",
+    }
+
+    accepted, rejected = runtime._qualify_business_signals([raw], results)
+
+    assert rejected == []
+    assert accepted[0]["evidence_url"] == raw["evidence_url"]
+    assert accepted[0]["action_fields_nature"] == "inferred"
+
+
+def test_business_signal_url_normalization_keeps_meaningful_query_parameters():
+    assert runtime._canonical_evidence_url(
+        "https://example.com/offre?id=42&utm_source=x#details"
+    ) == "https://example.com/offre?id=42"
+    assert runtime._canonical_evidence_url(
+        "https://example.com/offre?id=43"
+    ) != runtime._canonical_evidence_url(
+        "https://example.com/offre?id=42"
+    )
+
+
+def test_business_signal_focus_reaches_planner_agent_and_synthesis(monkeypatch):
+    calls = []
+    source_url = "https://example.com/mission-freelance"
+    actions = iter([
+        {"tasks": [{"role": "SOUT", "task": "trouver une demande achetable"}]},
+        {"tool": "browse", "args": {"url": source_url}},
+        {"final": "demande lue"},
+        {
+            "rapport": "Un signal qualifié.",
+            "business_signals": [{
+                "signal_type": "procurement",
+                "buyer": "PME de services",
+                "pain": "traitement manuel de factures",
+                "money_signal": "mission publiée avec budget pour un prestataire",
+                "evidence_url": source_url,
+                "evidence_summary": "la publication cherche un prestataire pour automatiser le traitement",
+                "test_channel": "répondre à la mission publiée",
+                "test_offer": "prototype d'automatisation du traitement de factures",
+                "next_test": "répondre manuellement à 3 missions similaires",
+            }],
+        },
+    ])
+
+    monkeypatch.setitem(
+        runtime.TOOLS["browse"],
+        "fn",
+        lambda args: {
+            "url": args["url"],
+            "source": "web public non fiable",
+            "texte": "Mission : recherche prestataire automatisation factures. Budget mensuel prévu. " * 8,
+            "page": {
+                "final_url": args["url"],
+                "title": "Mission automatisation factures",
+                "fetched_at": "2026-09-24T00:00:00+00:00",
+                "http_status": 200,
+                "content_type": "text/html",
+                "extraction_method": "http:html_main",
+                "rendered": False,
+                "blocked": False,
+                "main_text": "Mission : recherche prestataire automatisation factures. Budget mensuel prévu. " * 8,
+                "text_chars": 640,
+                "raw_chars": 900,
+                "truncated": False,
+                "error": None,
+            },
+        },
+    )
+
+    def call_json(agent, task, model, messages, **kwargs):
+        calls.append((agent, task, messages))
+        return next(actions)
+
+    monkeypatch.setattr(deepseek, "call_json", call_json)
+
+    result = runtime.run_mission(
+        "identifier une opportunité vendable",
+        max_steps_per_agent=3,
+        business="octopus",
+        allowed_tools={"browse"},
+        business_signal_focus=True,
+        business_signal_target=1,
+    )
+
+    assert result["synthesis_status"] == "validated"
+    assert len(result["business_signals"]) == 1
+    assert result["business_signals"][0]["buyer"] == "PME de services"
+    assert result["business_signals"][0]["action_fields_nature"] == "inferred"
+    assert result["business_signal_rejections"] == []
+
+    planner = next(messages for _, task, messages in calls if task == "planification")
+    assert "MODE BUSINESS SIGNAL" in planner[0]["content"]
+    assert "À REJETER" in planner[0]["content"]
+
+    action_messages = next(messages for _, task, messages in calls if task == "action")
+    assert "MODE BUSINESS SIGNAL" in action_messages[1]["content"]
+    assert "acheteur/segment identifiable" in action_messages[1]["content"]
+
+    synthesis = next(messages for _, task, messages in calls if task == "synthese")
+    assert "business_signals" in synthesis[0]["content"]
+    assert "Les généralités macro" in synthesis[0]["content"]
+
+
 def test_mission_handoff_keeps_upstream_artifacts_when_agent_hits_max_steps(monkeypatch):
     calls = []
     actions = iter([

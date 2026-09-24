@@ -14,7 +14,7 @@ import time
 import unicodedata
 from datetime import date
 from contextlib import contextmanager
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
 from octopus import journal, llm
 
@@ -706,7 +706,7 @@ ROLES = {
 
 # Hors Podalux, les rôles ne présupposent ni vidéo ni produit : ils décrivent des fonctions économiques.
 GENERIC_ROLES = {
-    "SOUT": "Observation du monde réel : demandes, marchés, concurrents, canaux ; cite les sources consultées (record_observation).",
+    "SOUT": "Observation du monde réel : demandes explicites, douleurs répétées, dépenses/budgets, alternatives payantes et canaux ; cite les sources consultées (record_observation).",
     "CONVERT": "Monétisation : ce qui peut être vendu, à qui, à quel prix, par quel canal ; propose des expériences mesurables.",
     "FORGE": "Production : fabrique ce que l'expérience exige (offre, contenu, produit, service, page, outil).",
     "GROWTH": "Distribution : agit sur les canaux ouverts (act_on_channel) et mesure les retours.",
@@ -749,6 +749,152 @@ def _freshness_context(run) -> str:
         "Pour cibler un domaine, utilise le paramètre site de search (ex. site=\"insee.fr\") "
         "plutôt que de supposer qu'un champ non déclaré sera appliqué.\n\n"
     )
+
+
+BUSINESS_SIGNAL_TYPES = {
+    "explicit_request",
+    "manual_work",
+    "procurement",
+    "job_demand",
+    "complaint",
+    "regulatory_deadline",
+    "paid_alternative",
+    "review_gap",
+}
+_BUSINESS_SIGNAL_REQUIRED = (
+    "signal_type",
+    "buyer",
+    "pain",
+    "money_signal",
+    "evidence_url",
+    "evidence_summary",
+    "test_channel",
+    "test_offer",
+    "next_test",
+)
+_BUSINESS_SIGNAL_UNKNOWN = {
+    "", "unknown", "inconnu", "inconnue", "non connu", "non connue", "none", "n/a", "na",
+}
+
+
+def _business_signal_contract(target: int) -> str:
+    target = max(1, int(target))
+    return (
+        "MODE BUSINESS SIGNAL — objectif : trouver des opportunités TESTABLES, pas produire une étude générale.\n"
+        f"Seuil minimal visé : {target} signaux commerciaux qualifiés ; n'invente jamais un signal pour atteindre ce seuil. "
+        "Mieux vaut rester sous le seuil avec des preuves solides que le dépasser avec des banalités.\n"
+        "Un signal n'est qualifié que si TOUT est présent :\n"
+        "1) un acheteur/segment identifiable ;\n"
+        "2) une douleur, tâche manuelle, obligation ou demande concrète ;\n"
+        "3) une source réellement ouverte pendant cette mission ;\n"
+        "4) un signal monétaire ou d'urgence (budget, prix payé, alternative payante, recrutement, appel d'offres, "
+        "coût opérationnel explicite, échéance réglementaire avec travail à réaliser) ;\n"
+        "5) un canal réaliste pour atteindre ce type d'acheteur ;\n"
+        "6) une offre minimale et un prochain test faisable rapidement.\n"
+        "Sources à PRIORISER : demandes explicites de prestataire/outil, missions freelance, offres d'emploi révélant "
+        "un travail coûteux, appels d'offres, forums/Reddit où le problème est décrit, avis négatifs, comparatifs/prix "
+        "de solutions payantes, obligations réglementaires qui créent une tâche concrète.\n"
+        "À REJETER : définitions, statistiques macro seules, inflation/chômage/logement génériques, taille de marché, "
+        "actualité générale, homepage de société, tendance sectorielle sans acheteur ni dépense, problème social large "
+        "sans action achetable identifiable.\n"
+        "Chaque recherche doit viser un signal observable, par exemple : segment + 'cherche prestataire', "
+        "segment + 'mission freelance', douleur + 'prix logiciel', douleur + 'appel d'offres', "
+        "site forum + douleur, ou obligation + segment + échéance.\n"
+        "Ne construis rien et ne recommande pas encore un business : collecte et qualifie des signaux.\n"
+    )
+
+
+def _business_signal_task_context(target: int) -> str:
+    return (
+        _business_signal_contract(target)
+        + "\nPour chaque candidat retenu, conserve précisément buyer, pain, money_signal, evidence_url, "
+          "evidence_summary, test_channel, test_offer et next_test. Si un champ manque, le candidat n'est pas qualifié."
+    )
+
+
+_TRACKING_QUERY_KEYS = {
+    "gclid", "fbclid", "msclkid", "mc_cid", "mc_eid",
+}
+
+
+def _canonical_evidence_url(url: str) -> str:
+    """Normalisation minimale pour comparer URL demandée, redirigée et URL citée par le LLM."""
+    raw = str(url or "").strip()
+    if not raw.startswith(("http://", "https://")):
+        return ""
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return ""
+    host = parts.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = re.sub(r"/+", "/", parts.path or "/")
+    if path != "/":
+        path = path.rstrip("/")
+    query = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        lowered = key.lower()
+        if lowered.startswith("utm_") or lowered in _TRACKING_QUERY_KEYS:
+            continue
+        query.append((key, value))
+    return urlunsplit((parts.scheme.lower(), host, path, urlencode(query, doseq=True), ""))
+
+
+def _verified_browse_urls(results: list[dict]) -> set[str]:
+    urls = set()
+    for subtask in results or []:
+        for step in subtask.get("steps") or []:
+            if step.get("tool") != "browse":
+                continue
+            meta = step.get("browse_meta") if isinstance(step.get("browse_meta"), dict) else {}
+            if bool(meta.get("blocked")) or bool(meta.get("error")):
+                continue
+            if meta and int(meta.get("text_chars") or 0) < 80:
+                continue
+
+            requested = str((step.get("args") or {}).get("url") or "").strip()
+            final = str(meta.get("url") or "").strip()
+            for candidate in (requested, final):
+                canonical = _canonical_evidence_url(candidate)
+                if canonical:
+                    urls.add(canonical)
+    return urls
+
+
+def _qualify_business_signals(raw_signals, results: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Gate sémantique minimal : champs business + source réellement ouverte."""
+    opened = _verified_browse_urls(results)
+    accepted, rejected = [], []
+    seen = set()
+    for raw in raw_signals if isinstance(raw_signals, list) else []:
+        if not isinstance(raw, dict):
+            rejected.append({"signal": raw, "reasons": ["signal_not_object"]})
+            continue
+        item = {key: str(raw.get(key) or "").strip() for key in _BUSINESS_SIGNAL_REQUIRED}
+        reasons = []
+        if item["signal_type"] not in BUSINESS_SIGNAL_TYPES:
+            reasons.append("unsupported_signal_type")
+        for key in _BUSINESS_SIGNAL_REQUIRED[1:]:
+            if item[key].lower() in _BUSINESS_SIGNAL_UNKNOWN:
+                reasons.append(f"missing_{key}")
+        canonical_evidence_url = _canonical_evidence_url(item["evidence_url"])
+        if not canonical_evidence_url or canonical_evidence_url not in opened:
+            reasons.append("evidence_url_not_opened")
+        key = (
+            item["buyer"].lower(),
+            item["pain"].lower(),
+            canonical_evidence_url or item["evidence_url"],
+        )
+        if key in seen:
+            reasons.append("duplicate_signal")
+        if reasons:
+            rejected.append({"signal": raw, "reasons": sorted(set(reasons))})
+            continue
+        seen.add(key)
+        item["action_fields_nature"] = "inferred"
+        accepted.append(item)
+    return accepted, rejected
 
 
 def build_prompts(role: str, goal: str, conversational: bool = False,
@@ -989,7 +1135,9 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
 def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None = None,
                 allowed_tools: set[str] | None = None, profile: str | None = None,
                 search_browse_lockstep: bool = False,
-                search_browse_selector: str = "first") -> dict:
+                search_browse_selector: str = "first",
+                business_signal_focus: bool = False,
+                business_signal_target: int = 3) -> dict:
     """ORBIT planifie puis délègue aux rôles (multi-agents via le runtime).
 
     Le profil explicite est hérité par les runs agents imbriqués via le journal.
@@ -1004,6 +1152,8 @@ def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None
                 goal, max_steps_per_agent, allowed_tools,
                 search_browse_lockstep=search_browse_lockstep,
                 search_browse_selector=search_browse_selector,
+                business_signal_focus=business_signal_focus,
+                business_signal_target=max(1, int(business_signal_target)),
             )
 
 
@@ -1043,7 +1193,9 @@ def _handoff_payload(result: dict) -> dict:
 
 def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | None = None, *,
                  search_browse_lockstep: bool = False,
-                 search_browse_selector: str = "first") -> dict:
+                 search_browse_selector: str = "first",
+                 business_signal_focus: bool = False,
+                 business_signal_target: int = 3) -> dict:
     pro = deepseek.config.MODEL_PRO
     if cancel.requested():
         return {"plan": [], "results": [], "rapport": "(arrêt demandé)"}
@@ -1051,9 +1203,11 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     planner_roles = GENERIC_ROLES if current is not None and current.business != DEFAULT_BUSINESS else ROLES
     role_catalog = "\n".join(f"- {name}: {desc}" for name, desc in planner_roles.items())
     planner_freshness = _freshness_context(current)
+    business_signal_context = _business_signal_contract(business_signal_target) if business_signal_focus else ""
     plan_sys = (
         "Tu es ORBIT, l'orchestrateur de la mission. "
         f"{planner_freshness}"
+        f"{business_signal_context}"
         "Utilise les rôles comme des responsabilités spécialisées, pas comme des workers interchangeables.\n\n"
         f"Rôles disponibles et responsabilités :\n{role_catalog}\n\n"
         "Décompose l'objectif en 2 à 5 sous-tâches, chacune assignée à UN rôle dont la responsabilité "
@@ -1090,6 +1244,8 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             role = "ORBIT"
         task = t.get("task", "")
         original = task
+        if business_signal_focus:
+            task = f"{task}\n\n{_business_signal_task_context(business_signal_target)}"
         # Contexte cumulatif structuré : le final seul est insuffisant quand l'agent amont
         # atteint max_steps. On transmet donc aussi ses artefacts de preuve utiles, de façon compacte.
         # La tâche stockée dans results reste l'ORIGINALE pour éviter une croissance récursive du prompt.
@@ -1116,13 +1272,28 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     if cancel.requested():
         db.post("ORBIT", "mission arrêtée par l'humain avant la synthèse")
         return {"plan": tasks, "results": results, "rapport": "(arrêt demandé)"}
+    signal_schema = ""
+    if business_signal_focus:
+        signal_schema = (
+            "\nMODE BUSINESS SIGNAL : ne retiens dans business_signals QUE les candidats satisfaisant tous les critères "
+            "du contrat. Les généralités macro, définitions et tendances sans acheteur/dépense doivent être absentes. "
+            "Chaque evidence_url doit être une URL effectivement ouverte dans les étapes. "
+            "Réponds en JSON avec exactement la forme : "
+            '{\"rapport\":\"...\",\"business_signals\":[{'
+            '\"signal_type\":\"explicit_request|manual_work|procurement|job_demand|complaint|regulatory_deadline|paid_alternative|review_gap\",'
+            '\"buyer\":\"...\",\"pain\":\"...\",\"money_signal\":\"...\",'
+            '\"evidence_url\":\"https://...\",\"evidence_summary\":\"...\",'
+            '\"test_channel\":\"...\",\"test_offer\":\"...\",\"next_test\":\"...\"}]}'
+        )
     syn_sys = (
         "Tu es ORBIT. Synthétise les résultats des sous-tâches en un rapport final concis. "
         "Respecte aussi toutes les contraintes de l'objectif original : une synthèse ne doit pas réintroduire "
         "une recommandation, décision, action ou autre contenu que la mission interdisait. "
         "N'introduis aucun fait, chiffre, canal, ressource ou résultat absent des sous-tâches et de leurs résultats d'outils. "
         "Si un sous-agent affirme quelque chose sans preuve visible dans ses étapes, qualifie-le de non vérifié ou d'inférence, "
-        "jamais de fait observé. Réponds en JSON : {\"rapport\":\"...\"}"
+        "jamais de fait observé. "
+        + signal_schema
+        + (" Réponds en JSON : {\"rapport\":\"...\"}" if not business_signal_focus else "")
     )
     synthesis_input = {
         "objectif_original": goal,
@@ -1156,6 +1327,20 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         }
 
     rapport = syn.get("rapport", "")
-    db.decide("ORBIT", "mission_done", {"rapport": rapport, "synthesis_status": "validated"})
+    business_signals, rejected_signals = ([], [])
+    if business_signal_focus:
+        business_signals, rejected_signals = _qualify_business_signals(
+            syn.get("business_signals"),
+            results,
+        )
+    decision_payload = {"rapport": rapport, "synthesis_status": "validated"}
+    if business_signal_focus:
+        decision_payload["business_signal_count"] = len(business_signals)
+        decision_payload["business_signal_rejected"] = len(rejected_signals)
+    db.decide("ORBIT", "mission_done", decision_payload)
     db.post("ORBIT", f"mission terminée : {rapport[:80]}")
-    return {"plan": tasks, "results": results, "rapport": rapport, "synthesis_status": "validated"}
+    output = {"plan": tasks, "results": results, "rapport": rapport, "synthesis_status": "validated"}
+    if business_signal_focus:
+        output["business_signals"] = business_signals
+        output["business_signal_rejections"] = rejected_signals
+    return output

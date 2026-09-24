@@ -346,6 +346,7 @@ def orbit_mission(ctx):
               "allowed_tools"?: ["search", ...], "profile"?: "flash_fallback",
               "search_browse_lockstep"?: bool,
               "search_browse_selector"?: "first"|"evidence_relevance",
+              "business_signal_focus"?: bool, "business_signal_target"?: int,
               "success_criterion"?: {"metric": "usable_browse_count", "gte": 4}}.
     Le rapport est une inférence du modèle : il n'est jamais écrit comme résultat mesuré d'une expérience.
     """
@@ -370,6 +371,8 @@ def orbit_mission(ctx):
         profile=ctx.input.get("profile"),
         search_browse_lockstep=bool(ctx.input.get("search_browse_lockstep", False)),
         search_browse_selector=str(ctx.input.get("search_browse_selector") or "first"),
+        business_signal_focus=bool(ctx.input.get("business_signal_focus", False)),
+        business_signal_target=max(1, int(ctx.input.get("business_signal_target", 3))),
     ))
     synthesis_status = result.get("synthesis_status", "validated")
     output = {
@@ -385,11 +388,38 @@ def orbit_mission(ctx):
     )
     if objective_result is not None:
         output["objective_result"] = objective_result
+    if ctx.input.get("business_signal_focus"):
+        target = max(1, int(ctx.input.get("business_signal_target", 3)))
+        signals = result.get("business_signals") or []
+        rejected = result.get("business_signal_rejections") or []
+        output["business_signals"] = signals
+        output["business_signal_result"] = {
+            "metric": "qualified_business_signal_count",
+            "observed": len(signals),
+            "minimum_target": target,
+            "success": len(signals) >= target,
+            "rejected": len(rejected),
+            "scope": "semantic_gate",
+            "note": (
+                "success signifie uniquement que le seuil structurel de signaux qualifiés est atteint ; "
+                "ce n'est pas une preuve de demande, de conversion ni de revenu. "
+                "buyer/pain/money_signal/evidence_* doivent être ancrés dans la source ouverte ; "
+                "test_channel/test_offer/next_test sont des inférences proposées pour expérimentation."
+            ),
+        }
+    flags = {}
     if ctx.input.get("search_browse_lockstep"):
-        output["experiment_flags"] = {
+        flags.update({
             "search_browse_lockstep": True,
             "search_browse_selector": str(ctx.input.get("search_browse_selector") or "first"),
-        }
+        })
+    if ctx.input.get("business_signal_focus"):
+        flags.update({
+            "business_signal_focus": True,
+            "business_signal_target": max(1, int(ctx.input.get("business_signal_target", 3))),
+        })
+    if flags:
+        output["experiment_flags"] = flags
     if synthesis_status == "degraded":
         # Le handler ne doit pas jeter les preuves brutes que runtime a preservees.
         output["synthesis_error"] = result.get("synthesis_error")
