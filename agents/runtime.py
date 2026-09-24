@@ -797,20 +797,46 @@ def _business_signal_contract(target: int) -> str:
         "À REJETER : définitions, statistiques macro seules, inflation/chômage/logement génériques, taille de marché, "
         "actualité générale, homepage de société, tendance sectorielle sans acheteur ni dépense, problème social large "
         "sans action achetable identifiable.\n"
-        "Chaque recherche doit viser un signal observable, par exemple : segment + 'cherche prestataire', "
-        "segment + 'mission freelance', douleur + 'prix logiciel', douleur + 'appel d'offres', "
-        "site forum + douleur, ou obligation + segment + échéance.\n"
+        "STRATÉGIE DE RECHERCHE — cherche d'abord des URL candidates, puis prouve les critères avec browse :\n"
+        "- commence par une requête courte avec 2 à 5 termes discriminants ; évite d'empiler plusieurs expressions entre "
+        "guillemets, le mot 'budget', l'année courante et une contrainte site dans la même requête ;\n"
+        "- n'exige PAS que le mot 'budget' apparaisse dans search : le signal monétaire peut être un prix, un recrutement, "
+        "un appel d'offres, une dépense existante ou une urgence visible seulement après ouverture de la page ;\n"
+        "- n'ajoute pas l'année courante par défaut à la requête ; vérifie plutôt la fraîcheur dans la source ouverte ;\n"
+        "- utilise site= en deuxième intention pour affiner un domaine déjà prometteur, pas comme réflexe sur chaque piste ;\n"
+        "- si search renvoie zéro URL exploitable ou seulement une homepage générique, élargis immédiatement : retire site, "
+        "guillemets, année et termes trop littéraux, puis change d'angle ou de segment ;\n"
+        "- dès qu'une URL candidate pertinente existe, ouvre-la avec browse avant d'essayer de satisfaire tous les critères "
+        "par une nouvelle requête. SEARCH découvre ; BROWSE vérifie ; le gate qualifie.\n"
+        f"Le seuil {target} est un objectif MINIMAL DE MISSION, pas un quota à multiplier par sous-tâche. "
+        "N'inflate pas artificiellement la collecte (par ex. demander 10 signaux quand la mission en demande 3).\n"
+        "PLANIFICATION : concentre la découverte web chez SOUT. Les rôles aval doivent d'abord exploiter les artefacts "
+        "transmis et ne refaire une recherche que pour combler un manque précis, sans dupliquer un angle déjà tenté.\n"
         "Ne construis rien et ne recommande pas encore un business : collecte et qualifie des signaux.\n"
     )
 
 
-def _business_signal_task_context(target: int) -> str:
-    return (
+def _business_signal_task_context(target: int, role: str) -> str:
+    role = str(role or "").upper()
+    base = (
         _business_signal_contract(target)
         + "\nPour chaque candidat retenu, conserve précisément buyer, pain, money_signal, evidence_url, "
           "evidence_summary, test_channel, test_offer et next_test. Si un champ manque, le candidat n'est pas qualifié."
     )
-
+    if role == "SOUT":
+        return (
+            base
+            + "\nTON RÔLE ICI : découverte. Trouve des URL candidates avec la stratégie progressive ci-dessus, "
+              "ouvre les pages prometteuses et conserve des preuves concrètes. Vise le seuil de mission, pas un quota "
+              "arbitrairement supérieur."
+        )
+    return (
+        base
+        + f"\nTON RÔLE ICI ({role or 'AVAL'}) : exploitation des preuves amont. Commence par les artefacts transmis ; "
+          "ne relance search que si un champ de preuve précis manque et qu'aucune page déjà ouverte ne permet de le vérifier. "
+          "Si aucune preuve exploitable n'existe, change d'angle avec une recherche progressive au lieu de répéter les mêmes "
+          "contraintes site/guillemets/année."
+    )
 
 _TRACKING_QUERY_KEYS = {
     "gclid", "fbclid", "msclkid", "mc_cid", "mc_eid",
@@ -1245,7 +1271,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         task = t.get("task", "")
         original = task
         if business_signal_focus:
-            task = f"{task}\n\n{_business_signal_task_context(business_signal_target)}"
+            task = f"{task}\n\n{_business_signal_task_context(business_signal_target, role)}"
         # Contexte cumulatif structuré : le final seul est insuffisant quand l'agent amont
         # atteint max_steps. On transmet donc aussi ses artefacts de preuve utiles, de façon compacte.
         # La tâche stockée dans results reste l'ORIGINALE pour éviter une croissance récursive du prompt.
