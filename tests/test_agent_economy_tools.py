@@ -188,6 +188,7 @@ def test_orbit_mission_can_return_compact_search_browse_trace(monkeypatch):
         "browse_urls": [],
         "browsed_from_search": [],
         "cross_role_browsed_from_search": [],
+        "lockstep_forced_browses": 0,
     }
     assert done["output"]["subtask_trace"] == [
         {"role": "FORGE", "task": "collecter", "final": "fini", "steps": 3}
@@ -276,6 +277,124 @@ def test_mission_trace_summary_counts_equivalent_searches_and_cross_role_reuse()
     assert summary["repeated_search_queries"] == 1
     assert summary["browsed_from_search"] == ["https://example.com/preuve"]
     assert summary["cross_role_browsed_from_search"] == ["https://example.com/preuve"]
+
+
+def test_mission_trace_summary_counts_forced_lockstep_browse():
+    from agents.task_handlers import _mission_trace_summary
+
+    summary = _mission_trace_summary([
+        {
+            "role": "SOUT",
+            "final": "fini",
+            "steps": [
+                {
+                    "tool": "search",
+                    "args": {"query": "preuve PME"},
+                    "result": json.dumps("Titre\nhttps://example.com/preuve", ensure_ascii=False),
+                },
+                {
+                    "tool": "browse",
+                    "args": {"url": "https://example.com/preuve"},
+                    "result": '{"url":"https://example.com/preuve","texte":"preuve"}',
+                    "lockstep_forced": True,
+                },
+            ],
+        },
+    ])
+
+    assert summary["lockstep_forced_browses"] == 1
+    assert summary["browsed_from_search"] == ["https://example.com/preuve"]
+
+
+def test_objective_result_counts_only_usable_non_blocked_browses():
+    from agents.task_handlers import _mission_objective_result
+
+    good_text = "Article factuel exploitable. " + ("x" * 160)
+    results = [
+        {
+            "role": "SOUT",
+            "steps": [
+                {
+                    "tool": "browse",
+                    "args": {"url": "https://example.com/good"},
+                    "result": json.dumps({
+                        "url": "https://example.com/good",
+                        "texte": good_text,
+                    }, ensure_ascii=False),
+                },
+                {
+                    "tool": "browse",
+                    "args": {"url": "https://example.com/cloudflare"},
+                    "result": json.dumps({
+                        "url": "https://example.com/cloudflare",
+                        "texte": "Performing security verification. Verify you are not a bot." + ("x" * 160),
+                    }, ensure_ascii=False),
+                },
+                {
+                    "tool": "browse",
+                    "args": {"url": "https://example.com/fail"},
+                    "result": "erreur : timeout",
+                },
+            ],
+        },
+    ]
+
+    outcome = _mission_objective_result(
+        results,
+        {"metric": "usable_browse_count", "gte": 2},
+    )
+
+    assert outcome["observed"] == 1
+    assert outcome["target"] == 2
+    assert outcome["success"] is False
+    assert outcome["usable_browse_urls"] == ["https://example.com/good"]
+    assert outcome["scope"] == "technical_proxy"
+
+
+def test_orbit_mission_passes_lockstep_and_reports_objective_result(monkeypatch):
+    from agents import task_handlers  # noqa: F401
+
+    captured = {}
+
+    def fake_run_mission(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "plan": [{"role": "SOUT", "task": "collecter"}],
+            "results": [{
+                "role": "SOUT",
+                "task": "collecter",
+                "final": "fini",
+                "steps": [{
+                    "step": 1,
+                    "tool": "browse",
+                    "args": {"url": "https://example.com/preuve"},
+                    "result": json.dumps({
+                        "url": "https://example.com/preuve",
+                        "texte": "preuve substantielle " + ("x" * 180),
+                    }, ensure_ascii=False),
+                    "lockstep_forced": True,
+                }],
+            }],
+            "rapport": "rapport",
+            "synthesis_status": "validated",
+        }
+
+    monkeypatch.setattr(runtime, "run_mission", fake_run_mission)
+
+    worker.enqueue(B, "orbit.mission", {
+        "goal": "tester",
+        "trace_tools": True,
+        "search_browse_lockstep": True,
+        "success_criterion": {"metric": "usable_browse_count", "gte": 1},
+    })
+    done = worker.run_one("w", kinds=["orbit.mission"], log=lambda s: None)
+
+    assert captured["search_browse_lockstep"] is True
+    assert done["output"]["experiment_flags"] == {"search_browse_lockstep": True}
+    assert done["output"]["objective_result"]["success"] is True
+    assert done["output"]["objective_result"]["observed"] == 1
+    assert done["output"]["trace_summary"]["lockstep_forced_browses"] == 1
+    assert done["output"]["tool_trace"][0]["lockstep_forced"] is True
 
 
 def test_mission_llm_summary_counts_provider_failures(monkeypatch):

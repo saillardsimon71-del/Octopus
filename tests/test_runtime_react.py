@@ -46,6 +46,63 @@ def test_repeated_search_is_served_from_cache(monkeypatch, web):
     assert "deja_cherche" in result["steps"][1]["result"] and "deja_cherche" in result["steps"][2]["result"]
 
 
+def test_lockstep_forces_browse_of_first_returned_search_url(monkeypatch):
+    seen_browse = []
+    monkeypatch.setitem(
+        runtime.TOOLS["search"],
+        "fn",
+        lambda args: (
+            "Source A\nhttps://example.com/preuve-a\n"
+            "Source B\nhttps://example.com/preuve-b"
+        ),
+    )
+    monkeypatch.setitem(
+        runtime.TOOLS["browse"],
+        "fn",
+        lambda args: seen_browse.append(args["url"]) or {
+            "url": args["url"],
+            "texte": "preuve exploitable " + ("x" * 200),
+        },
+    )
+    calls = scripted(monkeypatch, [
+        {"tool": "search", "args": {"query": "preuve PME France"}},
+    ])
+
+    result = runtime.run_agent(
+        "SOUT",
+        "collecter",
+        max_steps=3,
+        allowed_tools={"search", "browse"},
+        search_browse_lockstep=True,
+    )
+
+    assert seen_browse == ["https://example.com/preuve-a"]
+    assert [step["tool"] for step in result["steps"]] == ["search", "browse"]
+    assert result["steps"][1]["args"]["url"] == "https://example.com/preuve-a"
+    assert result["steps"][1]["lockstep_forced"] is True
+    # Le browse imposé ne consomme pas un appel LLM de sélection d'action.
+    assert len(calls) == 2
+
+
+def test_lockstep_does_not_invent_browse_when_search_returns_no_url(monkeypatch):
+    monkeypatch.setitem(runtime.TOOLS["search"], "fn", lambda args: "aucun résultat exploitable")
+    scripted(monkeypatch, [
+        {"tool": "search", "args": {"query": "preuve absente"}},
+        {"final": "aucune source"},
+    ])
+
+    result = runtime.run_agent(
+        "SOUT",
+        "collecter",
+        max_steps=3,
+        allowed_tools={"search", "browse"},
+        search_browse_lockstep=True,
+    )
+
+    assert [step["tool"] for step in result["steps"]] == ["search"]
+    assert "lockstep_forced" not in result["steps"][0]
+
+
 def test_mission_subagents_share_the_search_cache(monkeypatch, web):
     actions = iter([
         {"tasks": [{"role": "SOUT", "task": "a"}, {"role": "ORBIT", "task": "b"}]},
