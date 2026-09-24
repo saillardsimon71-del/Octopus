@@ -393,18 +393,23 @@ def orbit_mission(ctx):
         signals = result.get("business_signals") or []
         rejected = result.get("business_signal_rejections") or []
         output["business_signals"] = signals
+        output["business_signal_rejections"] = rejected
         output["business_signal_result"] = {
             "metric": "qualified_business_signal_count",
             "observed": len(signals),
             "minimum_target": target,
             "success": len(signals) >= target,
             "rejected": len(rejected),
-            "scope": "semantic_gate",
+            "scope": "acquired_text_gate",
+            "evaluation_status": "evaluated" if synthesis_status == "validated" else "unavailable",
             "note": (
-                "success signifie uniquement que le seuil structurel de signaux qualifiés est atteint ; "
-                "ce n'est pas une preuve de demande, de conversion ni de revenu. "
-                "buyer/pain/money_signal/evidence_* doivent être ancrés dans la source ouverte ; "
-                "test_channel/test_offer/next_test sont des inférences proposées pour expérimentation."
+                "success signifie uniquement que le seuil de signaux structurellement soutenus par une acquisition "
+                "et des citations présentes dans son texte est atteint. La présence littérale ne valide pas "
+                "l'interprétation de buyer/pain/money_signal/evidence_summary : revue humaine nécessaire. "
+                "Ce n'est pas une preuve de demande, de conversion ni de revenu. "
+                "test_channel/test_offer/next_test restent des inférences. rejected compte les propositions "
+                "refusées, pas les pages examinées ; zéro peut signifier aucune proposition. "
+                "synthesis_status=validated conserve son sens technique, pas une validation des faits."
             ),
         }
     flags = {}

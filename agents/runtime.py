@@ -241,7 +241,13 @@ def _select_search_browse_candidate(value, query: str, selector: str = "first") 
         business_noise = False
         root_homepage = False
         if selector == "business_signal_relevance":
-            business_noise = bool(_BUSINESS_SIGNAL_NOISE_TITLE_WORDS & title_words)
+            # « film » peut aussi désigner une vraie prestation audiovisuelle.
+            noise_words = _BUSINESS_SIGNAL_NOISE_TITLE_WORDS & title_words
+            film_reference = "film" in title_words and (
+                _host_matches_site(host, "allocine.fr")
+                or _host_matches_site(host, "imdb.com")
+            )
+            business_noise = bool(noise_words - {"film"}) or film_reference
             root_homepage = urlparse(url).path in {"", "/"}
             if business_noise:
                 score -= 20
@@ -267,12 +273,22 @@ def _select_search_browse_candidate(value, query: str, selector: str = "first") 
             "score": score,
             "title_overlap": title_overlap,
             "context_overlap": context_overlap,
+            "distinct_overlap": len(tokens & (title_words | context_words)),
             "official": official,
             "low_evidence": low_evidence,
             "site_match": site_match,
             "business_noise": business_noise,
             "root_homepage": root_homepage,
         })
+
+    if selector == "business_signal_relevance":
+        # Filtrer AVANT max : un mauvais top1 ne doit pas masquer une bonne URL.
+        scored = [item for item in scored if (
+            item["score"] > 0 and item["distinct_overlap"] >= 2
+            and not item["business_noise"] and not item["low_evidence"]
+            and (not required_sites or item["site_match"])
+        )]
+        return max(scored, key=lambda item: (item["score"], -item["rank"]), default=None)
 
     best = max(scored, key=lambda item: (item["score"], -item["rank"]))
     # Si un opérateur site: est demandé, ne viole jamais explicitement cette contrainte.
@@ -281,12 +297,6 @@ def _select_search_browse_candidate(value, query: str, selector: str = "first") 
     # Évite les dictionnaires/Wikipedia ou collisions lexicales sans signal de pertinence.
     if best["score"] <= 0:
         return None
-    if selector == "business_signal_relevance":
-        overlap = int(best["title_overlap"]) + int(best["context_overlap"])
-        # Un unique mot ambigu ne suffit jamais à déclencher un browse forcé.
-        # On préfère reformuler search plutôt qu'ouvrir automatiquement Apple/AlloCiné/homepages.
-        if best["business_noise"] or overlap < 2:
-            return None
     return best
 
 
@@ -804,6 +814,7 @@ _BUSINESS_SIGNAL_REQUIRED = (
     "test_offer",
     "next_test",
 )
+_BUSINESS_SIGNAL_QUOTES = ("buyer_evidence", "pain_evidence", "money_evidence", "summary_evidence")
 _BUSINESS_SIGNAL_UNKNOWN = {
     "", "unknown", "inconnu", "inconnue", "non connu", "non connue", "none", "n/a", "na",
 }
@@ -823,6 +834,10 @@ def _business_signal_contract(target: int) -> str:
         "coût opérationnel explicite, échéance réglementaire avec travail à réaliser) ;\n"
         "5) un canal réaliste pour atteindre ce type d'acheteur ;\n"
         "6) une offre minimale et un prochain test faisable rapidement.\n"
+        "Pour buyer, pain, money_signal et evidence_summary, fournis respectivement buyer_evidence, "
+        "pain_evidence, money_evidence et summary_evidence : extraits littéraux de 8 à 600 caractères "
+        "du texte acquis de la même page, jamais inventés. Ces citations prouvent leur présence, "
+        "pas la justesse de l'interprétation : revue humaine nécessaire.\n"
         "Sources à PRIORISER : demandes explicites de prestataire/outil, missions freelance, offres d'emploi révélant "
         "un travail coûteux, appels d'offres, forums/Reddit où le problème est décrit, avis négatifs, comparatifs/prix "
         "de solutions payantes, obligations réglementaires qui créent une tâche concrète.\n"
@@ -853,7 +868,8 @@ def _business_signal_task_context(target: int, role: str) -> str:
     base = (
         _business_signal_contract(target)
         + "\nPour chaque candidat retenu, conserve précisément buyer, pain, money_signal, evidence_url, "
-          "evidence_summary, test_channel, test_offer et next_test. Si un champ manque, le candidat n'est pas qualifié."
+          "evidence_summary, buyer_evidence, pain_evidence, money_evidence, summary_evidence, "
+          "test_channel, test_offer et next_test. Si un champ manque, le candidat n'est pas qualifié."
     )
     if role == "SOUT":
         return (
@@ -884,6 +900,8 @@ def _canonical_evidence_url(url: str) -> str:
         parts = urlsplit(raw)
     except ValueError:
         return ""
+    if not parts.hostname or parts.username or parts.password:
+        return ""
     host = parts.netloc.lower()
     if host.startswith("www."):
         host = host[4:]
@@ -899,37 +917,79 @@ def _canonical_evidence_url(url: str) -> str:
     return urlunsplit((parts.scheme.lower(), host, path, urlencode(query, doseq=True), ""))
 
 
-def _verified_browse_urls(results: list[dict]) -> set[str]:
-    urls = set()
+def _evidence_text(text: str) -> str:
+    """Comparaison littérale seulement : Unicode, casse et espaces, pas de synonymes."""
+    return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
+
+
+def _verified_browse_pages(results: list[dict]) -> list[dict]:
+    """Payloads d'acquisition du runtime, jamais des URLs demandées seules ou du texte LLM.
+
+    Chaque capture reste séparée : ne pas assembler des citations provenant de pages
+    ou de versions différentes. Les aliases ne valent que pour cette acquisition réussie.
+    """
+    pages = []
     for subtask in results or []:
         for step in subtask.get("steps") or []:
             if step.get("tool") != "browse":
                 continue
-            meta = step.get("browse_meta") if isinstance(step.get("browse_meta"), dict) else {}
-            if bool(meta.get("blocked")) or bool(meta.get("error")):
+            meta, data = step.get("browse_meta"), step.get("result_data")
+            if not isinstance(meta, dict) or not isinstance(data, dict) or data.get("refused"):
                 continue
-            if meta and int(meta.get("text_chars") or 0) < 80:
+            page = data.get("page")
+            if not isinstance(page, dict):
                 continue
+            if any(record.get("blocked") is not False or record.get("error") is not None
+                   or "error" not in record for record in (meta, page)):
+                continue
+            text = page.get("main_text")
+            if not isinstance(text, str) or len(_evidence_text(text)) < 100:
+                continue
+            if not all(isinstance(record.get("text_chars"), int)
+                       and record["text_chars"] >= 100 for record in (meta, page)):
+                continue
+            method = page.get("extraction_method")
+            if method not in {"http:html_main", "http:html_body", "playwright:html_main", "playwright:html_body"}:
+                continue
+            if not isinstance(page.get("fetched_at"), str) or not page["fetched_at"].strip():
+                continue
+            # Le statut conservé après rendu peut être celui du premier HTTP : en cas
+            # d'échec ambigu on préfère perdre un candidat que déclarer une acquisition.
+            status = page.get("http_status")
+            if status is not None and (type(status) is not int or not 200 <= status < 300):
+                continue
+            if status is None and not (page.get("rendered") is True and method.startswith("playwright:")):
+                continue
+            requested = _canonical_evidence_url((step.get("args") or {}).get("url", ""))
+            final = _canonical_evidence_url(page.get("final_url", ""))
+            if (not requested or not final
+                    or requested != _canonical_evidence_url(page.get("requested_url", ""))
+                    or final != _canonical_evidence_url(meta.get("url", ""))):
+                continue
+            if any(marker in text.lower() for marker in _BROWSE_BLOCK_MARKERS):
+                continue
+            pages.append({"urls": {requested, final}, "text": _evidence_text(text),
+                          "final_url": page["final_url"], "fetched_at": page["fetched_at"]})
+    return pages
 
-            requested = str((step.get("args") or {}).get("url") or "").strip()
-            final = str(meta.get("url") or "").strip()
-            for candidate in (requested, final):
-                canonical = _canonical_evidence_url(candidate)
-                if canonical:
-                    urls.add(canonical)
-    return urls
+
+def _verified_browse_urls(results: list[dict]) -> set[str]:
+    return {url for page in _verified_browse_pages(results) for url in page["urls"]}
 
 
 def _qualify_business_signals(raw_signals, results: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Gate sémantique minimal : champs business + source réellement ouverte."""
-    opened = _verified_browse_urls(results)
+    """Gate structurel : acquisition + citations littérales, pas d'entailment sémantique."""
+    pages = _verified_browse_pages(results)
     accepted, rejected = [], []
     seen = set()
-    for raw in raw_signals if isinstance(raw_signals, list) else []:
+    if not isinstance(raw_signals, list):
+        return [], [{"signal": raw_signals, "reasons": ["signals_not_list"]}]
+    for raw in raw_signals:
         if not isinstance(raw, dict):
             rejected.append({"signal": raw, "reasons": ["signal_not_object"]})
             continue
-        item = {key: str(raw.get(key) or "").strip() for key in _BUSINESS_SIGNAL_REQUIRED}
+        item = {key: raw[key].strip() if isinstance(raw.get(key), str) else ""
+                for key in (*_BUSINESS_SIGNAL_REQUIRED, *_BUSINESS_SIGNAL_QUOTES)}
         reasons = []
         if item["signal_type"] not in BUSINESS_SIGNAL_TYPES:
             reasons.append("unsupported_signal_type")
@@ -937,12 +997,23 @@ def _qualify_business_signals(raw_signals, results: list[dict]) -> tuple[list[di
             if item[key].lower() in _BUSINESS_SIGNAL_UNKNOWN:
                 reasons.append(f"missing_{key}")
         canonical_evidence_url = _canonical_evidence_url(item["evidence_url"])
-        if not canonical_evidence_url or canonical_evidence_url not in opened:
+        sources = [page for page in pages if canonical_evidence_url in page["urls"]]
+        if not canonical_evidence_url or not sources:
             reasons.append("evidence_url_not_opened")
+        quotes = {field: _evidence_text(item[field]) for field in _BUSINESS_SIGNAL_QUOTES}
+        for field, quote in quotes.items():
+            if not 8 <= len(quote) <= 600 or quote in _BUSINESS_SIGNAL_UNKNOWN:
+                reasons.append(f"invalid_{field}")
+            elif not any(quote in page["text"] for page in sources):
+                reasons.append(f"{field}_not_in_source")
+        matching = next((page for page in sources if all(
+            quote and quote in page["text"] for quote in quotes.values())), None)
+        if sources and matching is None:
+            reasons.append("quotes_not_in_same_acquisition")
         key = (
             item["buyer"].lower(),
             item["pain"].lower(),
-            canonical_evidence_url or item["evidence_url"],
+            _canonical_evidence_url(matching["final_url"]) if matching else canonical_evidence_url,
         )
         if key in seen:
             reasons.append("duplicate_signal")
@@ -951,6 +1022,9 @@ def _qualify_business_signals(raw_signals, results: list[dict]) -> tuple[list[di
             continue
         seen.add(key)
         item["action_fields_nature"] = "inferred"
+        # Provenance calculée depuis l'outil, non depuis des champs proposés par le LLM.
+        item["evidence_acquisition"] = {"final_url": matching["final_url"],
+                                        "fetched_at": matching["fetched_at"]}
         accepted.append(item)
     return accepted, rejected
 
@@ -1340,12 +1414,18 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         signal_schema = (
             "\nMODE BUSINESS SIGNAL : ne retiens dans business_signals QUE les candidats satisfaisant tous les critères "
             "du contrat. Les généralités macro, définitions et tendances sans acheteur/dépense doivent être absentes. "
-            "Chaque evidence_url doit être une URL effectivement ouverte dans les étapes. "
+            "Chaque evidence_url doit être une URL effectivement acquise dans les étapes. "
+            "Fournis buyer_evidence, pain_evidence, money_evidence et summary_evidence : "
+            "citations exactes de 8 à 600 caractères du texte de cette même acquisition, "
+            "justifiant respectivement buyer, pain, money_signal et evidence_summary. "
+            "Le contrôle est littéral, non sémantique ; revue humaine nécessaire. "
             "Réponds en JSON avec exactement la forme : "
             '{\"rapport\":\"...\",\"business_signals\":[{'
             '\"signal_type\":\"explicit_request|manual_work|procurement|job_demand|complaint|regulatory_deadline|paid_alternative|review_gap\",'
             '\"buyer\":\"...\",\"pain\":\"...\",\"money_signal\":\"...\",'
             '\"evidence_url\":\"https://...\",\"evidence_summary\":\"...\",'
+            '\"buyer_evidence\":\"...\",\"pain_evidence\":\"...\",'
+            '\"money_evidence\":\"...\",\"summary_evidence\":\"...\",'
             '\"test_channel\":\"...\",\"test_offer\":\"...\",\"next_test\":\"...\"}]}'
         )
     syn_sys = (
