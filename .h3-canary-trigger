@@ -1,1 +1,1 @@
-trigger remote H3 after #97
+trigger remote H3 after #97 - rerun with configured secrets
