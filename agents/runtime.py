@@ -291,6 +291,7 @@ def _tool_result_view(tool: str, result, max_chars: int | None = None) -> str:
         limit = 6000 if max_chars is None else max(200, int(max_chars))
         payload = {
             "url": str(page.get("final_url") or result.get("url") or ""),
+            "source": str(result.get("source") or ""),
             "title": str(page.get("title") or ""),
             "fetched_at": page.get("fetched_at"),
             "http_status": page.get("http_status"),
