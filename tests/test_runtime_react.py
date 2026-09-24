@@ -84,6 +84,88 @@ def test_lockstep_forces_browse_of_first_returned_search_url(monkeypatch):
     assert len(calls) == 2
 
 
+def test_evidence_selector_prefers_relevant_official_result_over_dictionary():
+    result = (
+        "- Définitions : problème - Dictionnaire Larousse\n"
+        "  https://www.larousse.fr/dictionnaires/francais/probleme/64046\n"
+        "  Définition générale du mot problème.\n"
+        "- Délais de paiement des PME - INSEE\n"
+        "  https://www.insee.fr/fr/statistiques/1234567\n"
+        "  Statistiques sur les délais de paiement des PME et les créances clients.\n"
+    )
+
+    choice = runtime._select_search_browse_candidate(
+        result,
+        "délais de paiement PME France statistiques officielles",
+        selector="evidence_relevance",
+    )
+
+    assert choice["url"] == "https://www.insee.fr/fr/statistiques/1234567"
+    assert choice["rank"] == 2
+    assert choice["official"] is True
+    assert choice["low_evidence"] is False
+
+
+def test_evidence_selector_respects_explicit_site_constraint():
+    result = (
+        "- Français — Wikipédia\n"
+        "  https://fr.wikipedia.org/wiki/Fran%C3%A7ais\n"
+        "  Article encyclopédique.\n"
+    )
+
+    choice = runtime._select_search_browse_candidate(
+        result,
+        "site:reddit.com difficulté freelance français clients",
+        selector="evidence_relevance",
+    )
+
+    assert choice is None
+
+
+def test_lockstep_can_force_later_relevant_result(monkeypatch):
+    seen_browse = []
+    monkeypatch.setitem(
+        runtime.TOOLS["search"],
+        "fn",
+        lambda args: (
+            "- Définitions : problème - Larousse\n"
+            "  https://www.larousse.fr/dictionnaires/francais/probleme/64046\n"
+            "  Définition générale.\n"
+            "- Retards de paiement PME - Banque de France\n"
+            "  https://www.banque-france.fr/fr/publications-et-statistiques/retards-paiement\n"
+            "  Retards de paiement, trésorerie et PME.\n"
+        ),
+    )
+    monkeypatch.setitem(
+        runtime.TOOLS["browse"],
+        "fn",
+        lambda args: seen_browse.append(args["url"]) or {
+            "url": args["url"],
+            "texte": "preuve exploitable " + ("x" * 200),
+        },
+    )
+    scripted(monkeypatch, [
+        {"tool": "search", "args": {"query": "retards de paiement PME trésorerie France"}},
+    ])
+
+    result = runtime.run_agent(
+        "SOUT",
+        "collecter",
+        max_steps=3,
+        allowed_tools={"search", "browse"},
+        search_browse_lockstep=True,
+        search_browse_selector="evidence_relevance",
+    )
+
+    assert seen_browse == [
+        "https://www.banque-france.fr/fr/publications-et-statistiques/retards-paiement"
+    ]
+    browse_step = result["steps"][1]
+    assert browse_step["lockstep_forced"] is True
+    assert browse_step["lockstep_selection"]["selector"] == "evidence_relevance"
+    assert browse_step["lockstep_selection"]["rank"] == 2
+
+
 def test_lockstep_does_not_invent_browse_when_search_returns_no_url(monkeypatch):
     monkeypatch.setitem(runtime.TOOLS["search"], "fn", lambda args: "aucun résultat exploitable")
     scripted(monkeypatch, [

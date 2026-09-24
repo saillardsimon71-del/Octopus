@@ -453,11 +453,40 @@ def test_orbit_mission_passes_lockstep_and_reports_objective_result(monkeypatch)
     done = worker.run_one("w", kinds=["orbit.mission"], log=lambda s: None)
 
     assert captured["search_browse_lockstep"] is True
-    assert done["output"]["experiment_flags"] == {"search_browse_lockstep": True}
+    assert captured["search_browse_selector"] == "first"
+    assert done["output"]["experiment_flags"] == {
+        "search_browse_lockstep": True,
+        "search_browse_selector": "first",
+    }
     assert done["output"]["objective_result"]["success"] is True
     assert done["output"]["objective_result"]["observed"] == 1
     assert done["output"]["trace_summary"]["lockstep_forced_browses"] == 1
     assert done["output"]["tool_trace"][0]["lockstep_forced"] is True
+
+
+def test_trace_summary_exposes_lockstep_selector_rank():
+    from agents.task_handlers import _mission_trace_summary
+
+    summary = _mission_trace_summary([{
+        "role": "SOUT",
+        "final": "fini",
+        "steps": [{
+            "tool": "browse",
+            "args": {"url": "https://www.insee.fr/preuve"},
+            "result": "preuve",
+            "lockstep_forced": True,
+            "lockstep_selection": {
+                "url": "https://www.insee.fr/preuve",
+                "selector": "evidence_relevance",
+                "rank": 3,
+                "score": 11,
+            },
+        }],
+    }])
+
+    assert summary["lockstep_forced_browses"] == 1
+    assert summary["lockstep_selected_ranks"] == [3]
+    assert summary["lockstep_selector_counts"] == {"evidence_relevance": 1}
 
 
 def test_mission_llm_summary_counts_provider_failures(monkeypatch):

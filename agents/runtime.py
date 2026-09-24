@@ -13,6 +13,7 @@ import re
 import time
 import unicodedata
 from contextlib import contextmanager
+from urllib.parse import urlparse
 
 from octopus import journal, llm
 
@@ -81,6 +82,172 @@ def _search_result_urls(value) -> list[str]:
         if clean not in urls:
             urls.append(clean)
     return urls
+
+
+_SEARCH_RELEVANCE_STOPWORDS = {
+    "avec", "dans", "des", "les", "pour", "sur", "une", "un", "aux", "par", "qui",
+    "que", "quoi", "plus", "moins", "france", "francais", "francaise", "francaises",
+    "probleme", "problemes", "besoin", "besoins", "client", "clients", "economique",
+    "economiques", "rapport", "source", "officiel", "officielle", "officielles",
+}
+_LOW_EVIDENCE_HOSTS = {
+    "fr.wikipedia.org",
+    "www.larousse.fr",
+    "dictionnaire.lerobert.com",
+    "www.le-dictionnaire.com",
+    "www.soutien67.fr",
+}
+_EVIDENCE_HOST_SUFFIXES = (
+    ".gouv.fr",
+    ".gov",
+    ".europa.eu",
+)
+_EVIDENCE_HOSTS = {
+    "www.insee.fr",
+    "insee.fr",
+    "www.banque-france.fr",
+    "banque-france.fr",
+    "www.bpifrance.fr",
+    "bpifrance.fr",
+    "www.service-public.fr",
+    "service-public.fr",
+    "www.urssaf.fr",
+    "urssaf.fr",
+    "www.senat.fr",
+    "senat.fr",
+    "www.assemblee-nationale.fr",
+    "assemblee-nationale.fr",
+    "www.vie-publique.fr",
+    "vie-publique.fr",
+}
+
+
+def _flatten_search_text(value) -> str:
+    parts = []
+
+    def collect(item):
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            for child in item.values():
+                collect(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                collect(child)
+
+    collect(value)
+    return "\n".join(parts)
+
+
+def _search_result_candidates(value) -> list[dict]:
+    """Parse le format texte de web_search en candidats URL + contexte compact."""
+    text = _flatten_search_text(value)
+    lines = text.splitlines()
+    candidates = []
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if not stripped.startswith("- "):
+            i += 1
+            continue
+        title = stripped[2:].strip()
+        context = []
+        url = ""
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j].strip()
+            if nxt.startswith("- "):
+                break
+            match = re.search(r"https?://[^\s\]\[<>()\"']+", nxt)
+            if match and not url:
+                url = match.group(0).rstrip(".,;:")
+            elif nxt and not nxt.lower().startswith(("actualités", "encyclopédie", "pistes google")):
+                context.append(nxt)
+            j += 1
+        if url and url not in {item["url"] for item in candidates}:
+            candidates.append({"url": url, "title": title, "context": " ".join(context)})
+        i = max(j, i + 1)
+    if not candidates:
+        return [{"url": url, "title": "", "context": ""} for url in _search_result_urls(value)]
+    return candidates
+
+
+def _norm_words(value: str) -> set[str]:
+    text = unicodedata.normalize("NFKD", str(value)).encode("ascii", "ignore").decode().lower()
+    return {w for w in re.findall(r"[a-z0-9]+", text) if len(w) > 2}
+
+
+def _search_relevance_tokens(query: str) -> set[str]:
+    words = _norm_words(re.sub(r"\b(?:site|source):\S+", " ", str(query), flags=re.I))
+    return {
+        word for word in words
+        if word not in _SEARCH_RELEVANCE_STOPWORDS and not re.fullmatch(r"20\d{2}", word)
+    }
+
+
+def _host_matches_site(host: str, site: str) -> bool:
+    host = host.lower().removeprefix("www.")
+    site = site.lower().removeprefix("www.").strip(".")
+    return host == site or host.endswith("." + site)
+
+
+def _select_search_browse_candidate(value, query: str, selector: str = "first") -> dict | None:
+    """Choisit uniquement parmi les URLs effectivement retournées par SEARCH."""
+    candidates = _search_result_candidates(value)
+    if not candidates:
+        return None
+    if selector == "first":
+        return {"url": candidates[0]["url"], "selector": "first", "rank": 1, "score": None}
+    if selector != "evidence_relevance":
+        raise ValueError(f"search_browse_selector inconnu : {selector}")
+
+    required_sites = [
+        site.rstrip(".,;:)")
+        for site in re.findall(r"\bsite:([^\s]+)", str(query), flags=re.I)
+    ]
+    tokens = _search_relevance_tokens(query)
+    scored = []
+    for rank, candidate in enumerate(candidates, start=1):
+        url = candidate["url"]
+        host = urlparse(url).netloc.lower()
+        title_words = _norm_words(candidate.get("title", ""))
+        context_words = _norm_words(candidate.get("context", ""))
+        title_overlap = len(tokens & title_words)
+        context_overlap = len(tokens & context_words)
+        score = title_overlap * 4 + context_overlap
+
+        site_match = None
+        if required_sites:
+            site_match = any(_host_matches_site(host, site) for site in required_sites)
+            score += 100 if site_match else -100
+
+        low_evidence = host in _LOW_EVIDENCE_HOSTS
+        if low_evidence:
+            score -= 20
+        official = host in _EVIDENCE_HOSTS or any(host.endswith(suffix) for suffix in _EVIDENCE_HOST_SUFFIXES)
+        if official:
+            score += 6
+
+        scored.append({
+            "url": url,
+            "selector": selector,
+            "rank": rank,
+            "score": score,
+            "title_overlap": title_overlap,
+            "context_overlap": context_overlap,
+            "official": official,
+            "low_evidence": low_evidence,
+            "site_match": site_match,
+        })
+
+    best = max(scored, key=lambda item: (item["score"], -item["rank"]))
+    # Si un opérateur site: est demandé, ne viole jamais explicitement cette contrainte.
+    if required_sites and not best["site_match"]:
+        return None
+    # Évite les dictionnaires/Wikipedia ou collisions lexicales sans signal de pertinence.
+    if best["score"] <= 0:
+        return None
+    return best
 
 
 _BROWSE_BLOCK_MARKERS = (
@@ -536,12 +703,15 @@ def _business(business: str | None) -> str:
 def run_agent(role: str, goal: str, max_steps: int = 10,
               conversational: bool = False, *, business: str | None = None,
               allowed_tools: set[str] | None = None,
-              search_browse_lockstep: bool = False) -> dict:
+              search_browse_lockstep: bool = False,
+              search_browse_selector: str = "first") -> dict:
     """Un agent (rôle) poursuit un objectif librement via la boucle ReAct.
 
     `conversational=True` → l'agent répond à un message humain (pas un objectif).
     """
     allowed_tools = _normalize_allowed_tools(allowed_tools)
+    if search_browse_selector not in {"first", "evidence_relevance"}:
+        raise ValueError(f"search_browse_selector inconnu : {search_browse_selector}")
     with journal.run(_business(business), "agent", label=f"{role} : {goal}",
                      budget_usd=deepseek.config.CYCLE_BUDGET_USD):
         token = _ROLE.set(role)
@@ -550,6 +720,7 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
                 return _run_agent(
                     role, goal, max_steps, conversational, allowed_tools,
                     search_browse_lockstep=search_browse_lockstep,
+                    search_browse_selector=search_browse_selector,
                 )
         finally:
             _ROLE.reset(token)
@@ -557,7 +728,8 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
 
 def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
                allowed_tools: set[str] | None = None, *,
-               search_browse_lockstep: bool = False) -> dict:
+               search_browse_lockstep: bool = False,
+               search_browse_selector: str = "first") -> dict:
     system, first_user, done_label = build_prompts(role, goal, conversational, allowed_tools)
     context = [{"role": "system", "content": system},
                {"role": "user", "content": first_user}]
@@ -565,6 +737,7 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
     last_sig = None
     repeat = 0
     lockstep_url = None
+    lockstep_selection = None
     for i in range(max_steps):
         if cancel.requested():
             db.post(role, "arrêt demandé par l'humain — fin de l'agent")
@@ -574,11 +747,12 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
             db.post(role, "budget dépassé — arrêt du run")
             return {"role": role, "steps": steps, "final": "(budget dépassé)"}
         forced_lockstep = lockstep_url is not None
+        forced_selection = lockstep_selection if forced_lockstep else None
         if forced_lockstep:
-            # Expérience opt-in : le premier résultat classé par SEARCH est ouvert au pas suivant.
-            # Aucun URL n'est inventé : il provient littéralement du résultat du search précédent.
+            # Expérience opt-in : l'URL choisie provient littéralement du SEARCH précédent.
             r = {"tool": "browse", "args": {"url": lockstep_url}}
             lockstep_url = None
+            lockstep_selection = None
         else:
             try:
                 r = deepseek.call_json(role, "action", MODEL, context + [
@@ -627,14 +801,28 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
             and tool == "search"
             and (allowed_tools is None or "browse" in allowed_tools)
         ):
-            urls = _search_result_urls(result)
-            if urls:
-                lockstep_url = urls[0]
+            choice = _select_search_browse_candidate(
+                result,
+                str(args.get("query") or ""),
+                selector=search_browse_selector,
+            )
+            if choice is not None:
+                lockstep_url = choice["url"]
+                lockstep_selection = choice
                 context.append({
                     "role": "user",
                     "content": (
-                        "LOCKSTEP EXPÉRIMENTAL : avant tout nouveau search, ouvre avec browse "
-                        f"une URL réellement retournée par la recherche. URL imposée : {lockstep_url}"
+                        "LOCKSTEP EXPÉRIMENTAL : avant tout nouveau search, ouvre avec browse une URL "
+                        "réellement retournée par la recherche. "
+                        f"Sélecteur={choice['selector']}, rang={choice['rank']}, URL imposée : {lockstep_url}"
+                    ),
+                })
+            elif search_browse_selector == "evidence_relevance":
+                context.append({
+                    "role": "user",
+                    "content": (
+                        "LOCKSTEP EXPÉRIMENTAL : aucun résultat suffisamment pertinent n'a été sélectionné. "
+                        "Ne browse pas une page hors sujet ; reformule la recherche ou conclus si le budget est épuisé."
                     ),
                 })
 
@@ -665,24 +853,30 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
                 step_record["browse_meta"] = browse_meta
         if forced_lockstep:
             step_record["lockstep_forced"] = True
+            if isinstance(forced_selection, dict):
+                step_record["lockstep_selection"] = dict(forced_selection)
         steps.append(step_record)
     return {"role": role, "steps": steps, "final": "(max steps atteint)"}
 
 
 def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None = None,
                 allowed_tools: set[str] | None = None, profile: str | None = None,
-                search_browse_lockstep: bool = False) -> dict:
+                search_browse_lockstep: bool = False,
+                search_browse_selector: str = "first") -> dict:
     """ORBIT planifie puis délègue aux rôles (multi-agents via le runtime).
 
     Le profil explicite est hérité par les runs agents imbriqués via le journal.
     """
     allowed_tools = _normalize_allowed_tools(allowed_tools)
+    if search_browse_selector not in {"first", "evidence_relevance"}:
+        raise ValueError(f"search_browse_selector inconnu : {search_browse_selector}")
     with journal.run(_business(business), "mission", label=goal, budget_usd=deepseek.config.CYCLE_BUDGET_USD,
                      profile=profile):
         with cancel.scope(), web_guard.session(), _search_cache():
             return _run_mission(
                 goal, max_steps_per_agent, allowed_tools,
                 search_browse_lockstep=search_browse_lockstep,
+                search_browse_selector=search_browse_selector,
             )
 
 
@@ -716,7 +910,8 @@ def _handoff_payload(result: dict) -> dict:
 
 
 def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | None = None, *,
-                 search_browse_lockstep: bool = False) -> dict:
+                 search_browse_lockstep: bool = False,
+                 search_browse_selector: str = "first") -> dict:
     pro = deepseek.config.MODEL_PRO
     if cancel.requested():
         return {"plan": [], "results": [], "rapport": "(arrêt demandé)"}
@@ -779,6 +974,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             max_steps=max_steps_per_agent,
             allowed_tools=allowed_tools,
             search_browse_lockstep=search_browse_lockstep,
+            search_browse_selector=search_browse_selector,
         )
         results.append({"role": role, "task": original,
                         "final": r.get("final"), "steps": r.get("steps")})

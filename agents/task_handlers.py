@@ -100,6 +100,8 @@ def _mission_tool_trace(results, *, tools=("search", "browse"), result_chars=120
                 item["browse_meta"] = dict(step["browse_meta"])
             if step.get("lockstep_forced"):
                 item["lockstep_forced"] = True
+            if isinstance(step.get("lockstep_selection"), dict):
+                item["lockstep_selection"] = dict(step["lockstep_selection"])
             trace.append(item)
     return trace
 
@@ -148,6 +150,8 @@ def _mission_trace_summary(results) -> dict:
     browsed_from_search = []
     cross_role_browsed_from_search = []
     lockstep_forced_browses = 0
+    lockstep_selected_ranks = []
+    lockstep_selector_counts = {}
     from .runtime import query_key
     for subtask in results or []:
         role = str(subtask.get("role") or "")
@@ -178,6 +182,14 @@ def _mission_trace_summary(results) -> dict:
                 url = str(args.get("url") or "").strip()
                 if step.get("lockstep_forced"):
                     lockstep_forced_browses += 1
+                    selection = step.get("lockstep_selection")
+                    if isinstance(selection, dict):
+                        rank = selection.get("rank")
+                        if isinstance(rank, int):
+                            lockstep_selected_ranks.append(rank)
+                        selector = str(selection.get("selector") or "")
+                        if selector:
+                            lockstep_selector_counts[selector] = lockstep_selector_counts.get(selector, 0) + 1
                 if url:
                     browse_urls.append(url)
                     source_roles = search_url_roles.get(url)
@@ -188,7 +200,7 @@ def _mission_trace_summary(results) -> dict:
         if subtask.get("final") == "(max steps atteint)":
             max_steps_roles.append(role)
     searches = totals["search"]
-    return {
+    summary = {
         "totals": totals,
         "browse_search_ratio": (totals["browse"] / searches) if searches else None,
         "by_role": by_role,
@@ -200,6 +212,11 @@ def _mission_trace_summary(results) -> dict:
         "cross_role_browsed_from_search": cross_role_browsed_from_search,
         "lockstep_forced_browses": lockstep_forced_browses,
     }
+    if lockstep_selected_ranks:
+        summary["lockstep_selected_ranks"] = lockstep_selected_ranks
+    if lockstep_selector_counts:
+        summary["lockstep_selector_counts"] = lockstep_selector_counts
+    return summary
 
 
 _BROWSE_BLOCK_MARKERS = (
@@ -326,6 +343,7 @@ def orbit_mission(ctx):
     Entrée : {"goal": "...", "objective_id"?, "hypothesis_id"?, "experiment_id"?, "max_steps"?,
               "allowed_tools"?: ["search", ...], "profile"?: "flash_fallback",
               "search_browse_lockstep"?: bool,
+              "search_browse_selector"?: "first"|"evidence_relevance",
               "success_criterion"?: {"metric": "usable_browse_count", "gte": 4}}.
     Le rapport est une inférence du modèle : il n'est jamais écrit comme résultat mesuré d'une expérience.
     """
@@ -349,6 +367,7 @@ def orbit_mission(ctx):
         allowed_tools=set(allowed_tools) if allowed_tools is not None else None,
         profile=ctx.input.get("profile"),
         search_browse_lockstep=bool(ctx.input.get("search_browse_lockstep", False)),
+        search_browse_selector=str(ctx.input.get("search_browse_selector") or "first"),
     ))
     synthesis_status = result.get("synthesis_status", "validated")
     output = {
@@ -365,7 +384,10 @@ def orbit_mission(ctx):
     if objective_result is not None:
         output["objective_result"] = objective_result
     if ctx.input.get("search_browse_lockstep"):
-        output["experiment_flags"] = {"search_browse_lockstep": True}
+        output["experiment_flags"] = {
+            "search_browse_lockstep": True,
+            "search_browse_selector": str(ctx.input.get("search_browse_selector") or "first"),
+        }
     if synthesis_status == "degraded":
         # Le handler ne doit pas jeter les preuves brutes que runtime a preservees.
         output["synthesis_error"] = result.get("synthesis_error")
