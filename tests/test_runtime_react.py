@@ -301,6 +301,31 @@ def test_record_observation_ids_are_numeric_optional_database_ids():
     assert "S'ils sont inconnus, omets ces champs" in system
 
 
+def test_generic_agent_prompt_includes_current_date_and_search_freshness(monkeypatch):
+    monkeypatch.setattr(runtime, "_today_iso", lambda: "2026-09-24")
+
+    with journal.run("octopus", "agent"):
+        system, _, _ = runtime.build_prompts(
+            "SOUT",
+            "collecter des preuves actuelles",
+            allowed_tools={"search", "browse"},
+        )
+
+    assert "DATE ACTUELLE : 2026-09-24" in system
+    assert "privilégie 2026" in system
+    assert "n'utilise pas 2023/2024/2025 comme substitut implicite du présent" in system
+    assert 'site="insee.fr"' in system
+
+
+def test_legacy_podalux_prompt_does_not_change_with_search_freshness(monkeypatch):
+    monkeypatch.setattr(runtime, "_today_iso", lambda: "2026-09-24")
+
+    with journal.run("podalux", "agent"):
+        system, _, _ = runtime.build_prompts("SOUT", "veille")
+
+    assert "DATE ACTUELLE" not in system
+
+
 def test_agent_profiles_have_omniroute_auto_free_fallback(monkeypatch):
     monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
     monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
@@ -341,6 +366,7 @@ def test_mission_profile_is_inherited_by_all_llm_calls(monkeypatch):
 
 def test_mission_planner_receives_generic_role_contracts(monkeypatch):
     calls = []
+    monkeypatch.setattr(runtime, "_today_iso", lambda: "2026-09-24")
     actions = iter([
         {"tasks": [{"role": "SOUT", "task": "collecter une preuve"}]},
         {"final": "preuve"},
@@ -368,6 +394,8 @@ def test_mission_planner_receives_generic_role_contracts(monkeypatch):
     assert "au plus 5 étapes" in system
     assert "artefacts utiles des étapes amont" in system
     assert "transmis automatiquement" in system
+    assert "DATE ACTUELLE : 2026-09-24" in system
+    assert "privilégie 2026" in system
     assert runtime.ROLES["FORGE"] not in system
 
 
@@ -623,7 +651,14 @@ def test_site_changes_search_cache_identity(monkeypatch):
 
 def test_invalid_site_is_rejected_before_network():
     with pytest.raises(ValueError, match="site invalide"):
-        search.effective_query("preuve PME", site="https://example.com/path?x=1")
+        search.effective_query("preuve PME", site="bpifrance.fr OR evil.example")
+
+
+def test_structured_site_replaces_stale_site_operator():
+    assert search.effective_query(
+        "baromètre PME site:ancien.example",
+        site="bpifrance.fr",
+    ) == "baromètre PME site:bpifrance.fr"
 
 
 def test_google_news_wrappers_are_hints_not_browsable_urls():
