@@ -1,0 +1,89 @@
+[
+  {
+    "name": "h2_wikipedia_france",
+    "query": "France 2024 rapport problème économique clients PME difficulté paiement Bpifrance INSEE",
+    "result": "- France — Wikipédia\n  https://fr.wikipedia.org/wiki/France\n  Article général sur la France.\n- France Travail\n  https://www.francetravail.fr/\n  Services publics de l'emploi.",
+    "expected_urls": [
+      "https://fr.wikipedia.org/wiki/France",
+      "https://www.francetravail.fr/"
+    ]
+  },
+  {
+    "name": "h2_bpifrance",
+    "query": "Bpifrance 2024 baromètre difficultés trésorerie PME citation chiffre officiel",
+    "result": "- Bpifrance - Servir l'Avenir\n  https://www.bpifrance.fr/\n  Banque publique d'investissement.\n- Accueil Entrepreneur | Bpifrance Création\n  https://bpifrance-creation.fr/\n  Solutions de financement.",
+    "expected_urls": [
+      "https://www.bpifrance.fr/",
+      "https://bpifrance-creation.fr/"
+    ]
+  },
+  {
+    "name": "h2_lesechos",
+    "query": "problème économique PME France chiffres 2024 site:lemonde.fr OR site:lesechos.fr OR site:businessdigest.fr",
+    "result": "- L'Europe dans le rouge, tensions sur le pétrole et les taux\n  https://investir.lesechos.fr/actu-des-valeurs/la-vie-des-actions/leurope-dans-le-rouge-tensions-sur-le-petrole-et-les-taux-2253266\n  Marchés, pétrole et taux.",
+    "expected_urls": [
+      "https://investir.lesechos.fr/actu-des-valeurs/la-vie-des-actions/leurope-dans-le-rouge-tensions-sur-le-petrole-et-les-taux-2253266"
+    ]
+  },
+  {
+    "name": "h2_humanite",
+    "query": "crise du logement France PME loyer pénurie 2024 source:lemonde.fr",
+    "result": "- Face à la crise du logement social, agissons ensemble !\n  https://www.humanite.fr/societe/elus/face-a-la-crise-du-logement-social-agissons-ensemble\n  Tribune sur le logement social.",
+    "expected_urls": [
+      "https://www.humanite.fr/societe/elus/face-a-la-crise-du-logement-social-agissons-ensemble"
+    ]
+  },
+  {
+    "name": "h2_pagesjaunes_collision",
+    "query": "problèmes des petites entreprises France 2024 besoins non résolus automatisation",
+    "result": "- Centre Cosem - 16 rue Louis Braille 42000 Saint Etienne\n  https://www.pagesjaunes.fr/pros/62446164\n  Centre médico-social.\n- Centre Cosem\n  https://fr.mappy.com/poi/64e827a0b2d7ce2c4a67f12a\n  Adresse et plan.",
+    "expected_urls": [
+      "https://www.pagesjaunes.fr/pros/62446164",
+      "https://fr.mappy.com/poi/64e827a0b2d7ce2c4a67f12a"
+    ]
+  },
+  {
+    "name": "h2_freelance",
+    "query": "freelance France 2024 difficultés trouver clients facturation devis automatisation besoin",
+    "result": "- Freelance.com\n  https://www.freelance.com/\n  Talent as a service, sourcing et portage.",
+    "expected_urls": [
+      "https://www.freelance.com/"
+    ]
+  },
+  {
+    "name": "h2_dictionary_collision",
+    "query": "problèmes économiques France 2024 micro-entreprise besoins clients non satisfaits statistiques officielles INSEE",
+    "result": "Encyclopédie (Wikipedia) :\n- Problème\n  https://fr.wikipedia.org/wiki/Probl%C3%A8me\n  Notion générale.\n- Définitions : problème - Larousse\n  https://www.larousse.fr/dictionnaires/francais/probl%C3%A8me/64046\n  Définition lexicale.\n- problème - Le Robert\n  https://dictionnaire.lerobert.com/definition/probleme\n  Définition du mot.",
+    "expected_urls": [
+      "https://fr.wikipedia.org/wiki/Probl%C3%A8me",
+      "https://www.larousse.fr/dictionnaires/francais/probl%C3%A8me/64046",
+      "https://dictionnaire.lerobert.com/definition/probleme"
+    ]
+  },
+  {
+    "name": "h2_payment_delays",
+    "query": "délais de paiement grandes entreprises PME France 2025 fournisseurs",
+    "result": "- Délais de paiement : les collectivités progressent en 2024\n  https://www.lagazettedescommunes.com/994306/delais-de-paiement-les-collectivites-progressent-en-2024/\n  Collectivités et délais de paiement.\n- Délais de paiement : plus de la moitié des grandes entreprises paient après 60 jours\n  https://www.latribune.fr/article/economie/49049326390447/delais-de-paiement-plus-de-la-moitie-des-grandes-entreprises-paient-apres-60-jours\n  Entreprises et retards.",
+    "expected_urls": [
+      "https://www.lagazettedescommunes.com/994306/delais-de-paiement-les-collectivites-progressent-en-2024/",
+      "https://www.latribune.fr/article/economie/49049326390447/delais-de-paiement-plus-de-la-moitie-des-grandes-entreprises-paient-apres-60-jours"
+    ]
+  },
+  {
+    "name": "h2_inflation",
+    "query": "inflation coût de la vie France artisans PME 2026",
+    "result": "- Définition : inflation - Larousse\n  https://www.larousse.fr/dictionnaires/francais/inflation/42907\n  Définition.\n- Inflation : les prix à la consommation dopés par ceux du pétrole\n  https://www.liberation.fr/economie/inflation-en-france-les-prix-a-la-consommation-dopes-par-ceux-du-petrole-en-mars-en-hausse-de-1-sur-le-mois-20260415_YF5U4ALQK5GXHET7XFGJOC45SA/\n  Article économique.",
+    "expected_urls": [
+      "https://www.larousse.fr/dictionnaires/francais/inflation/42907",
+      "https://www.liberation.fr/economie/inflation-en-france-les-prix-a-la-consommation-dopes-par-ceux-du-petrole-en-mars-en-hausse-de-1-sur-le-mois-20260415_YF5U4ALQK5GXHET7XFGJOC45SA/"
+    ]
+  },
+  {
+    "name": "h2_facturation_electronique",
+    "query": "facturation électronique artisans microentreprises France 2026 obligation source",
+    "result": "- Facturation électronique obligatoire au 1er septembre : beaucoup d'artisans n'en ont jamais entendu parler\n  https://www.midilibre.fr/2026/05/05/facturation-electronique-obligatoire-au-1er-septembre-beaucoup-dartisans-nen-ont-jamais-entendu-parler-13339929.php\n  Article du 5 mai 2026.",
+    "expected_urls": [
+      "https://www.midilibre.fr/2026/05/05/facturation-electronique-obligatoire-au-1er-septembre-beaucoup-dartisans-nen-ont-jamais-entendu-parler-13339929.php"
+    ]
+  }
+]
