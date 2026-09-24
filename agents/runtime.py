@@ -13,6 +13,7 @@ import re
 import time
 import unicodedata
 from contextlib import contextmanager
+from urllib.parse import urlparse
 
 from octopus import journal, llm
 
@@ -81,6 +82,172 @@ def _search_result_urls(value) -> list[str]:
         if clean not in urls:
             urls.append(clean)
     return urls
+
+
+_SEARCH_RELEVANCE_STOPWORDS = {
+    "avec", "dans", "des", "les", "pour", "sur", "une", "un", "aux", "par", "qui",
+    "que", "quoi", "plus", "moins", "france", "francais", "francaise", "francaises",
+    "probleme", "problemes", "besoin", "besoins", "client", "clients", "economique",
+    "economiques", "rapport", "source", "officiel", "officielle", "officielles",
+}
+_LOW_EVIDENCE_HOSTS = {
+    "fr.wikipedia.org",
+    "www.larousse.fr",
+    "dictionnaire.lerobert.com",
+    "www.le-dictionnaire.com",
+    "www.soutien67.fr",
+}
+_EVIDENCE_HOST_SUFFIXES = (
+    ".gouv.fr",
+    ".gov",
+    ".europa.eu",
+)
+_EVIDENCE_HOSTS = {
+    "www.insee.fr",
+    "insee.fr",
+    "www.banque-france.fr",
+    "banque-france.fr",
+    "www.bpifrance.fr",
+    "bpifrance.fr",
+    "www.service-public.fr",
+    "service-public.fr",
+    "www.urssaf.fr",
+    "urssaf.fr",
+    "www.senat.fr",
+    "senat.fr",
+    "www.assemblee-nationale.fr",
+    "assemblee-nationale.fr",
+    "www.vie-publique.fr",
+    "vie-publique.fr",
+}
+
+
+def _flatten_search_text(value) -> str:
+    parts = []
+
+    def collect(item):
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            for child in item.values():
+                collect(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                collect(child)
+
+    collect(value)
+    return "\n".join(parts)
+
+
+def _search_result_candidates(value) -> list[dict]:
+    """Parse le format texte de web_search en candidats URL + contexte compact."""
+    text = _flatten_search_text(value)
+    lines = text.splitlines()
+    candidates = []
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if not stripped.startswith("- "):
+            i += 1
+            continue
+        title = stripped[2:].strip()
+        context = []
+        url = ""
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j].strip()
+            if nxt.startswith("- "):
+                break
+            match = re.search(r"https?://[^\s\]\[<>()\"']+", nxt)
+            if match and not url:
+                url = match.group(0).rstrip(".,;:")
+            elif nxt and not nxt.lower().startswith(("actualités", "encyclopédie", "pistes google")):
+                context.append(nxt)
+            j += 1
+        if url and url not in {item["url"] for item in candidates}:
+            candidates.append({"url": url, "title": title, "context": " ".join(context)})
+        i = max(j, i + 1)
+    if not candidates:
+        return [{"url": url, "title": "", "context": ""} for url in _search_result_urls(value)]
+    return candidates
+
+
+def _norm_words(value: str) -> set[str]:
+    text = unicodedata.normalize("NFKD", str(value)).encode("ascii", "ignore").decode().lower()
+    return {w for w in re.findall(r"[a-z0-9]+", text) if len(w) > 2}
+
+
+def _search_relevance_tokens(query: str) -> set[str]:
+    words = _norm_words(re.sub(r"\b(?:site|source):\S+", " ", str(query), flags=re.I))
+    return {
+        word for word in words
+        if word not in _SEARCH_RELEVANCE_STOPWORDS and not re.fullmatch(r"20\d{2}", word)
+    }
+
+
+def _host_matches_site(host: str, site: str) -> bool:
+    host = host.lower().removeprefix("www.")
+    site = site.lower().removeprefix("www.").strip(".")
+    return host == site or host.endswith("." + site)
+
+
+def _select_search_browse_candidate(value, query: str, selector: str = "first") -> dict | None:
+    """Choisit uniquement parmi les URLs effectivement retournées par SEARCH."""
+    candidates = _search_result_candidates(value)
+    if not candidates:
+        return None
+    if selector == "first":
+        return {"url": candidates[0]["url"], "selector": "first", "rank": 1, "score": None}
+    if selector != "evidence_relevance":
+        raise ValueError(f"search_browse_selector inconnu : {selector}")
+
+    required_sites = [
+        site.rstrip(".,;:)")
+        for site in re.findall(r"\bsite:([^\s]+)", str(query), flags=re.I)
+    ]
+    tokens = _search_relevance_tokens(query)
+    scored = []
+    for rank, candidate in enumerate(candidates, start=1):
+        url = candidate["url"]
+        host = urlparse(url).netloc.lower()
+        title_words = _norm_words(candidate.get("title", ""))
+        context_words = _norm_words(candidate.get("context", ""))
+        title_overlap = len(tokens & title_words)
+        context_overlap = len(tokens & context_words)
+        score = title_overlap * 4 + context_overlap
+
+        site_match = None
+        if required_sites:
+            site_match = any(_host_matches_site(host, site) for site in required_sites)
+            score += 100 if site_match else -100
+
+        low_evidence = host in _LOW_EVIDENCE_HOSTS
+        if low_evidence:
+            score -= 20
+        official = host in _EVIDENCE_HOSTS or any(host.endswith(suffix) for suffix in _EVIDENCE_HOST_SUFFIXES)
+        if official:
+            score += 6
+
+        scored.append({
+            "url": url,
+            "selector": selector,
+            "rank": rank,
+            "score": score,
+            "title_overlap": title_overlap,
+            "context_overlap": context_overlap,
+            "official": official,
+            "low_evidence": low_evidence,
+            "site_match": site_match,
+        })
+
+    best = max(scored, key=lambda item: (item["score"], -item["rank"]))
+    # Si un opérateur site: est demandé, ne viole jamais explicitement cette contrainte.
+    if required_sites and not best["site_match"]:
+        return None
+    # Évite les dictionnaires/Wikipedia ou collisions lexicales sans signal de pertinence.
+    if best["score"] <= 0:
+        return None
+    return best
 
 
 _BROWSE_BLOCK_MARKERS = (
