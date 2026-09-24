@@ -229,14 +229,30 @@ class BrowserTool:
         return path
 
     def see(self, prompt: str = "Décris cette page et ce qu'on peut y faire.", agent: str = "SOUT") -> dict:
-        shot = self.screenshot()
         kind = web_guard.classify(self.url())
         task = "web.describe_page" if kind == web_guard.ACCOUNT else "web.inspect_page"
+        shot = None
+        screenshot_error = None
         vision_error = None
+
+        # Le web public est jugé d'abord sur son DOM. Une capture d'écran n'apporte rien à
+        # web.inspect_page et ne doit donc jamais pouvoir faire échouer un browse public.
+        if kind == web_guard.ACCOUNT:
+            try:
+                shot = self.screenshot()
+            except Exception as exc:
+                screenshot_error = f"{type(exc).__name__}: {str(exc)[:300]}"
+
         try:
             if kind == web_guard.ACCOUNT:
-                # Les comptes connectés restent isolés et décrits par le chemin vision local/sensible.
-                txt = deepseek.vision_text(agent, task, [str(shot)], prompt)
+                # Les comptes connectés restent isolés. Si Chromium refuse la capture,
+                # on conserve quand même le DOM déjà chargé au lieu de perdre le browse.
+                if shot is None:
+                    txt = self.snapshot(6000) or (
+                        f"Capture indisponible ({screenshot_error or 'erreur inconnue'})."
+                    )
+                else:
+                    txt = deepseek.vision_text(agent, task, [str(shot)], prompt)
             else:
                 # Pour le web public, le DOM est déjà la preuve primaire. Le passer comme contenu texte
                 # évite d'envoyer un message multimodal à une route OmniRoute qui peut résoudre vers un
@@ -261,8 +277,14 @@ class BrowserTool:
             # en échec. L'erreur reste explicite dans le résultat pour le diagnostic H2.
             vision_error = f"{type(exc).__name__}: {str(exc)[:300]}"
             txt = self.snapshot(2000) or f"Inspection indisponible ({vision_error})."
-        return {"screenshot": str(shot), "description": txt, "vision_task": task, "page_kind": kind,
-                "vision_error": vision_error}
+        return {
+            "screenshot": str(shot) if shot is not None else None,
+            "screenshot_error": screenshot_error,
+            "description": txt,
+            "vision_task": task,
+            "page_kind": kind,
+            "vision_error": vision_error,
+        }
 
     def handoff(self, message: str, timeout_s: int = 300) -> bool:
         ans = db.ask_human("BROWSER", "browser_handoff", message, timeout_s=timeout_s)
