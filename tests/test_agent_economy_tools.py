@@ -464,7 +464,7 @@ def test_orbit_mission_passes_lockstep_and_reports_objective_result(monkeypatch)
     assert done["output"]["tool_trace"][0]["lockstep_forced"] is True
 
 
-def test_orbit_mission_business_signal_focus_reports_semantic_success(monkeypatch):
+def test_orbit_mission_business_signal_focus_reports_structural_success(monkeypatch):
     from agents import task_handlers  # noqa: F401
 
     captured = {}
@@ -509,12 +509,16 @@ def test_orbit_mission_business_signal_focus_reports_semantic_success(monkeypatc
         "minimum_target": 1,
         "success": True,
         "rejected": 1,
-        "scope": "semantic_gate",
+        "scope": "acquired_text_gate",
+        "evaluation_status": "evaluated",
         "note": (
-            "success signifie uniquement que le seuil structurel de signaux qualifiés est atteint ; "
-            "ce n'est pas une preuve de demande, de conversion ni de revenu. "
-            "buyer/pain/money_signal/evidence_* doivent être ancrés dans la source ouverte ; "
-            "test_channel/test_offer/next_test sont des inférences proposées pour expérimentation."
+            "success signifie uniquement que le seuil de signaux structurellement soutenus par une acquisition "
+            "et des citations présentes dans son texte est atteint. La présence littérale ne valide pas "
+            "l'interprétation de buyer/pain/money_signal/evidence_summary : revue humaine nécessaire. "
+            "Ce n'est pas une preuve de demande, de conversion ni de revenu. "
+            "test_channel/test_offer/next_test restent des inférences. rejected compte les propositions "
+            "refusées, pas les pages examinées ; zéro peut signifier aucune proposition. "
+            "synthesis_status=validated conserve son sens technique, pas une validation des faits."
         ),
     }
     assert done["output"]["experiment_flags"] == {
@@ -567,3 +571,20 @@ def test_mission_llm_summary_counts_provider_failures(monkeypatch):
     assert summary["http_errors"] == {"429": 1, "504": 1}
     assert len(summary["errors"]) == 3
     assert all(len(item["error"]) <= 300 for item in summary["errors"])
+
+
+def test_business_signal_unavailable_is_not_an_evaluated_empty_list(monkeypatch):
+    from agents import task_handlers  # noqa: F401
+
+    monkeypatch.setattr(runtime, "run_mission", lambda *a, **k: {
+        "plan": [], "results": [], "rapport": "Synthèse indisponible",
+        "synthesis_status": "degraded", "synthesis_error": "offline failure",
+    })
+    worker.enqueue(B, "orbit.mission", {
+        "goal": "read only", "business_signal_focus": True,
+    })
+    done = worker.run_one("w", kinds=["orbit.mission"], log=lambda s: None)
+    result = done["output"]["business_signal_result"]
+    assert result["evaluation_status"] == "unavailable"
+    assert result["observed"] == 0 and not result["success"]
+    assert done["output"]["business_signal_rejections"] == []

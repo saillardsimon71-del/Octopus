@@ -515,21 +515,23 @@ def test_business_signal_task_context_separates_discovery_from_downstream_analys
     assert "Commence par les artefacts transmis" in convert
     assert "ne relance search que si un champ de preuve précis manque" in convert
 
+
+def _acquired_signal_step(requested, final, text):
+    """Une URL/meta seule n'est plus une preuve : fixture d'acquisition complète."""
+    page = {"requested_url": requested, "final_url": final, "main_text": text,
+            "text_chars": len(text), "blocked": False, "error": None,
+            "http_status": 200, "extraction_method": "http:html_main", "rendered": False,
+            "fetched_at": "2026-09-24T00:00:00+00:00"}
+    data = {"url": final, "page": page}
+    return {"tool": "browse", "args": {"url": requested}, "result_data": data,
+            "browse_meta": runtime._browse_result_meta(data)}
+
+
 def test_business_signal_gate_rejects_generic_and_unopened_candidates():
     opened = "https://example.com/brief"
-    results = [{
-        "role": "SOUT",
-        "steps": [{
-            "tool": "browse",
-            "args": {"url": opened},
-            "browse_meta": {
-                "url": opened,
-                "text_chars": 900,
-                "blocked": False,
-                "error": None,
-            },
-        }],
-    }]
+    text = ("Cabinet comptable de 5 à 20 salariés : relances clients effectuées manuellement chaque semaine. "
+            "Nous cherchons un prestataire pour automatiser les relances, avec un budget mensuel.")
+    results = [{"role": "SOUT", "steps": [_acquired_signal_step(opened, opened, text)]}]
     strong = {
         "signal_type": "explicit_request",
         "buyer": "cabinet comptable de 5 à 20 salariés",
@@ -541,6 +543,10 @@ def test_business_signal_gate_rejects_generic_and_unopened_candidates():
         "test_offer": "audit + automatisation simple des relances",
         "next_test": "contacter 5 cabinets avec la même douleur",
     }
+    strong.update(buyer_evidence="Cabinet comptable de 5 à 20 salariés",
+                  pain_evidence="relances clients effectuées manuellement chaque semaine",
+                  money_evidence="avec un budget mensuel",
+                  summary_evidence="Nous cherchons un prestataire pour automatiser les relances")
     generic = {
         **strong,
         "signal_type": "macro_trend",
@@ -558,7 +564,9 @@ def test_business_signal_gate_rejects_generic_and_unopened_candidates():
         results,
     )
 
-    assert accepted == [{**strong, "action_fields_nature": "inferred"}]
+    assert accepted == [{**strong, "action_fields_nature": "inferred",
+                         "evidence_acquisition": {"final_url": opened,
+                                                  "fetched_at": "2026-09-24T00:00:00+00:00"}}]
     reasons = [reason for item in rejected for reason in item["reasons"]]
     assert "unsupported_signal_type" in reasons
     assert "evidence_url_not_opened" in reasons
@@ -567,19 +575,9 @@ def test_business_signal_gate_rejects_generic_and_unopened_candidates():
 def test_business_signal_url_normalization_accepts_requested_and_redirected_variants():
     requested = "https://www.example.com/offre/?utm_source=newsletter#section"
     final = "https://example.com/offre"
-    results = [{
-        "role": "SOUT",
-        "steps": [{
-            "tool": "browse",
-            "args": {"url": requested},
-            "browse_meta": {
-                "url": final,
-                "text_chars": 500,
-                "blocked": False,
-                "error": None,
-            },
-        }],
-    }]
+    text = ("PME bâtiment : relances devis manuelles chaque semaine, nous publions cette demande explicite "
+            "de prestataire pour automatiser notre travail administratif.")
+    results = [{"role": "SOUT", "steps": [_acquired_signal_step(requested, final, text)]}]
     raw = {
         "signal_type": "explicit_request",
         "buyer": "PME bâtiment",
@@ -591,6 +589,10 @@ def test_business_signal_url_normalization_accepts_requested_and_redirected_vari
         "test_offer": "automatisation relances",
         "next_test": "contacter 3 entreprises",
     }
+
+    raw.update(buyer_evidence="PME bâtiment", pain_evidence="relances devis manuelles",
+               money_evidence="demande explicite de prestataire",
+               summary_evidence="pour automatiser notre travail administratif")
 
     accepted, rejected = runtime._qualify_business_signals([raw], results)
 
@@ -622,6 +624,10 @@ def test_business_signal_focus_reaches_planner_agent_and_synthesis(monkeypatch):
             "business_signals": [{
                 "signal_type": "procurement",
                 "buyer": "PME de services",
+                "buyer_evidence": "PME de services",
+                "pain_evidence": "traitement manuel de factures",
+                "money_evidence": "Budget mensuel prévu",
+                "summary_evidence": "recherche prestataire automatisation factures",
                 "pain": "traitement manuel de factures",
                 "money_signal": "mission publiée avec budget pour un prestataire",
                 "evidence_url": source_url,
@@ -639,8 +645,9 @@ def test_business_signal_focus_reaches_planner_agent_and_synthesis(monkeypatch):
         lambda args: {
             "url": args["url"],
             "source": "web public non fiable",
-            "texte": "Mission : recherche prestataire automatisation factures. Budget mensuel prévu. " * 8,
+            "texte": "PME de services : traitement manuel de factures ; recherche prestataire automatisation factures. Budget mensuel prévu. " * 8,
             "page": {
+                "requested_url": args["url"],
                 "final_url": args["url"],
                 "title": "Mission automatisation factures",
                 "fetched_at": "2026-09-24T00:00:00+00:00",
@@ -649,7 +656,7 @@ def test_business_signal_focus_reaches_planner_agent_and_synthesis(monkeypatch):
                 "extraction_method": "http:html_main",
                 "rendered": False,
                 "blocked": False,
-                "main_text": "Mission : recherche prestataire automatisation factures. Budget mensuel prévu. " * 8,
+                "main_text": "PME de services : traitement manuel de factures ; recherche prestataire automatisation factures. Budget mensuel prévu. " * 8,
                 "text_chars": 640,
                 "raw_chars": 900,
                 "truncated": False,
