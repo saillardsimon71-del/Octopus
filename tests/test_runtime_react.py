@@ -399,6 +399,31 @@ def test_mission_planner_receives_generic_role_contracts(monkeypatch):
     assert runtime.ROLES["FORGE"] not in system
 
 
+
+def test_business_signal_contract_uses_progressive_search_and_realistic_target():
+    contract = runtime._business_signal_contract(3)
+
+    assert "cherche d'abord des URL candidates" in contract
+    assert "n'exige PAS que le mot 'budget' apparaisse dans search" in contract
+    assert "n'ajoute pas l'année courante par défaut" in contract
+    assert "utilise site= en deuxième intention" in contract
+    assert "zéro URL exploitable ou seulement une homepage générique" in contract
+    assert "SEARCH découvre ; BROWSE vérifie ; le gate qualifie" in contract
+    assert "objectif MINIMAL DE MISSION" in contract
+    assert "demander 10 signaux quand la mission en demande 3" in contract
+    assert "concentre la découverte web chez SOUT" in contract
+
+
+def test_business_signal_task_context_separates_discovery_from_downstream_analysis():
+    sout = runtime._business_signal_task_context(3, "SOUT")
+    convert = runtime._business_signal_task_context(3, "CONVERT")
+
+    assert "TON RÔLE ICI : découverte" in sout
+    assert "Vise le seuil de mission" in sout
+    assert "TON RÔLE ICI (CONVERT) : exploitation des preuves amont" in convert
+    assert "Commence par les artefacts transmis" in convert
+    assert "ne relance search que si un champ de preuve précis manque" in convert
+
 def test_business_signal_gate_rejects_generic_and_unopened_candidates():
     opened = "https://example.com/brief"
     results = [{
