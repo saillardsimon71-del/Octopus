@@ -83,6 +83,34 @@ def _search_result_urls(value) -> list[str]:
     return urls
 
 
+_BROWSE_BLOCK_MARKERS = (
+    "performing security verification",
+    "verify you are not a bot",
+    "security service to protect against malicious bots",
+    "just a moment",
+    "access denied",
+    "403 error",
+    "request blocked",
+    "captcha",
+    "chrome-error://",
+)
+
+
+def _browse_result_meta(value) -> dict | None:
+    """Métadonnées compactes calculées AVANT toute troncature de trace."""
+    if not isinstance(value, dict):
+        return None
+    url = str(value.get("url") or "").strip()
+    text = str(value.get("texte") or "")
+    lowered = f"{url}\n{text}".lower()
+    return {
+        "url": url,
+        "text_chars": len(text),
+        "blocked": any(marker in lowered for marker in _BROWSE_BLOCK_MARKERS),
+        "vision_error": bool(value.get("vision_error")),
+    }
+
+
 def _browser_request_allowed(url: str, state, *, account_context: bool) -> bool:
     """Isole les sous-requêtes publiques des vrais comptes connectés.
 
@@ -578,6 +606,7 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         else:
             refusal = _validate_tool_args(tool, args)
 
+        result = None
         if refusal is not None:
             result = {"refused": True, "tool": tool, "reason": refusal}
             result_str = json.dumps(result, ensure_ascii=False)
@@ -594,6 +623,7 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         if (
             search_browse_lockstep
             and refusal is None
+            and result is not None
             and tool == "search"
             and (allowed_tools is None or "browse" in allowed_tools)
         ):
@@ -627,6 +657,12 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         step_record = {"step": i + 1, "tool": tool, "result": result_str[:1500]}
         if tool in {"search", "browse"}:
             step_record["args"] = dict(args)
+        if tool == "search" and result is not None:
+            step_record["result_urls"] = _search_result_urls(result)
+        elif tool == "browse" and result is not None:
+            browse_meta = _browse_result_meta(result)
+            if browse_meta is not None:
+                step_record["browse_meta"] = browse_meta
         if forced_lockstep:
             step_record["lockstep_forced"] = True
         steps.append(step_record)
