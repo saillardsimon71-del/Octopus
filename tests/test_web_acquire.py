@@ -15,10 +15,22 @@ from agents import browser, runtime, web_guard
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "web_pages.json"
+SEARCH_FIXTURES = Path(__file__).parent / "fixtures" / "search_results.json"
 
 
 def _cases():
     return json.loads(FIXTURES.read_text(encoding="utf-8"))
+
+
+def _search_cases():
+    return json.loads(SEARCH_FIXTURES.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("case", _search_cases(), ids=lambda case: case["name"])
+def test_reduced_h2_search_results_keep_returned_urls(case):
+    assert runtime._search_result_urls(case["result"]) == case["expected_urls"]
+    candidates = runtime._search_result_candidates(case["result"])
+    assert [item["url"] for item in candidates] == case["expected_urls"]
 
 
 @pytest.mark.parametrize("case", _cases(), ids=lambda case: case["name"])
