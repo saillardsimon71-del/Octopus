@@ -245,6 +245,7 @@ def _usable_browse_urls(results) -> list[str]:
                 url = str(meta.get("url") or (step.get("args") or {}).get("url") or "").strip()
                 text_chars = int(meta.get("text_chars") or 0)
                 blocked = bool(meta.get("blocked"))
+                failed = bool(meta.get("error"))
             else:
                 # Compatibilité avec les anciennes traces qui ne contiennent pas encore browse_meta.
                 raw = str(step.get("result") or "").strip()
@@ -261,8 +262,9 @@ def _usable_browse_urls(results) -> list[str]:
                 lowered = f"{url}\n{text}".lower()
                 text_chars = len(text)
                 blocked = any(marker in lowered for marker in _BROWSE_BLOCK_MARKERS)
+                failed = False
 
-            if not url.startswith(("http://", "https://")) or text_chars < 80 or blocked:
+            if not url.startswith(("http://", "https://")) or text_chars < 80 or blocked or failed:
                 continue
             if url not in usable:
                 usable.append(url)
