@@ -22,12 +22,21 @@ def test_equivalent_queries_share_a_key():
 
 @pytest.fixture
 def web(monkeypatch):
+    """SEARCH est structuré : le seam de test est l'enveloppe, plus le texte."""
     calls = []
-    monkeypatch.setattr(
-        search,
-        "web_search",
-        lambda q, n=6, site=None: calls.append(q if site is None else f"{q} site:{site}") or f"- resultat pour {q}",
-    )
+
+    def fake_envelope(query, max_results=6, site=None, purpose="general"):
+        calls.append(query if site is None else f"{query} site:{site}")
+        return {
+            "query": query,
+            "effective_query": query if site is None else f"{query} site:{site}",
+            "purpose": purpose,
+            "items": [{"title": f"resultat pour {query}", "url": "https://example.com/preuve",
+                       "source": "Bing Web", "date": "", "snippet": "extrait", "provider": "bing_web"}],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(search, "search_envelope", fake_envelope)
     return calls
 
 
@@ -931,27 +940,37 @@ def test_embedded_site_operator_is_enforced_locally(monkeypatch):
 def test_runtime_search_declares_and_forwards_site(monkeypatch):
     calls = []
 
-    def fake_search(query, n=6, site=None):
+    def fake_envelope(query, max_results=6, site=None, purpose="general"):
         calls.append((query, site))
-        return f"Requête effective : {query} site:{site}\n- preuve\n  https://{site}/preuve"
+        return {
+            "query": query,
+            "effective_query": f"{query} site:{site}",
+            "purpose": purpose,
+            "items": [{"title": "preuve", "url": f"https://{site}/preuve", "source": "Bing Web",
+                       "date": "", "snippet": "extrait", "provider": "bing_web"}],
+            "errors": [],
+        }
 
-    monkeypatch.setattr(search, "web_search", fake_search)
+    monkeypatch.setattr(search, "search_envelope", fake_envelope)
 
     with runtime._search_cache():
         result = runtime._search({"query": "baromètre trésorerie PME", "site": "bpifrance.fr"})
 
     assert calls == [("baromètre trésorerie PME", "bpifrance.fr")]
-    assert "site:bpifrance.fr" in result
+    assert result["effective_query"] == "baromètre trésorerie PME site:bpifrance.fr"
+    assert [item["url"] for item in result["items"]] == ["https://bpifrance.fr/preuve"]
     assert runtime.TOOLS["search"]["params"]["site"] == "str?"
 
 
 def test_site_changes_search_cache_identity(monkeypatch):
     calls = []
-    monkeypatch.setattr(
-        search,
-        "web_search",
-        lambda q, n=6, site=None: calls.append((q, site)) or f"- {site}",
-    )
+
+    def fake_envelope(query, max_results=6, site=None, purpose="general"):
+        calls.append((query, site))
+        return {"query": query, "effective_query": f"{query} site:{site}", "purpose": purpose,
+                "items": [], "errors": []}
+
+    monkeypatch.setattr(search, "search_envelope", fake_envelope)
 
     with runtime._search_cache():
         runtime._search({"query": "baromètre PME", "site": "bpifrance.fr"})

@@ -8,8 +8,12 @@ On contourne avec des sources bot-friendly :
 - Google News RSS : piste titre/source uniquement quand aucune URL directe n'est trouvée.
 - Wikipedia : encyclopédie (API MediaWiki, keyless).
 
-`search_items` renvoie des résultats structurés (titre, URL, source, date, extrait) pour les
-traitements qui doivent citer leurs sources ; `web_search` les met en texte pour les agents.
+`search_envelope` renvoie la sortie MACHINE : une enveloppe structurée (requête, intention,
+items à six champs, erreurs de provider). `search_items` n'en expose que les items ; `web_search`
+et `render_envelope` produisent des VUES texte bornées pour les agents et l'humain.
+
+Règle de la frontière : STRUCTURE -> TEXTE est une vue, jamais un aller-retour. Le chemin
+machine ne refait pas STRUCTURE -> TEXTE -> REGEX -> STRUCTURE.
 """
 from __future__ import annotations
 
@@ -31,6 +35,22 @@ SEARCH_COST_CLASS_ENV = {
     "brave": "OCTOPUS_SEARCH_BRAVE_COST_CLASS",
     "tavily": "OCTOPUS_SEARCH_TAVILY_COST_CLASS",
 }
+
+# --- Frontière SEARCH ---
+# Une recherche produit UNE enveloppe structurée. Le texte n'est qu'une vue bornée
+# de cette enveloppe, destinée au LLM et à l'humain : aucun chemin machine ne doit
+# faire STRUCTURE -> TEXTE -> REGEX -> STRUCTURE.
+SEARCH_PURPOSE_GENERAL = "general"
+SEARCH_PURPOSE_BUSINESS = "business_signal"
+SEARCH_PURPOSES = (SEARCH_PURPOSE_GENERAL, SEARCH_PURPOSE_BUSINESS)
+
+# Deux politiques de complément keyless : `general` garde l'historique (Bing Web, Bing News,
+# puis Google News/Wikipédia sur une recherche non contrainte), `business_signal` s'arrête
+# après Bing Web. Une encyclopédie ou une actualité générale complète le bruit, pas un
+# signal d'affaires.
+
+# Bornes des VUES texte. La structure, elle, garde l'extrait complet.
+VIEW_SNIPPET_CHARS = 300
 
 
 def normalize_site(site: str | None) -> str:
@@ -125,6 +145,50 @@ def _strip_html(s: str) -> str:
 def _item(provider: str, title: str, url: str = "", source: str = "", date: str = "", snippet: str = "") -> dict:
     return {"provider": provider, "title": title.strip(), "url": url.strip(), "source": source.strip(),
             "date": date.strip(), "snippet": snippet.strip()}
+
+
+def _clean_text(value) -> str:
+    """Texte compact : espaces et sauts de ligne repliés, aucune perte de mot."""
+    return re.sub(r"\s+", " ", str(value or "").replace("\r", " ")).strip()
+
+
+def _clean_url(value) -> str:
+    """URL réellement navigable, ou vide. Les identifiants embarqués ne sont jamais conservés."""
+    url = str(value or "").strip()
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+        return ""
+    if parsed.username or parsed.password:
+        return ""
+    if any(char.isspace() or ord(char) < 0x20 for char in url):
+        return ""  # artefact de parsing, pas une URL navigable
+    return url
+
+
+def coerce_item(raw) -> dict | None:
+    """Item normalisé à six champs, ou None si le provider livre un objet inexploitable.
+
+    Un item sans URL navigable n'est pas un résultat : il ne doit pas devenir une piste
+    de browse reconstruite à partir d'un extrait ou d'un message d'erreur.
+    """
+    if not isinstance(raw, dict):
+        return None
+    url = _clean_url(raw.get("url"))
+    if not url:
+        return None
+    return {
+        "title": _clean_text(raw.get("title")),
+        "url": url,
+        "source": _clean_text(raw.get("source")),
+        "date": _clean_text(raw.get("date")),
+        "snippet": str(raw.get("snippet") or "").strip(),
+        "provider": _clean_text(raw.get("provider")),
+    }
 
 
 def _brave_items(query: str, max_results: int) -> list[dict]:
@@ -241,25 +305,46 @@ PROVIDERS = (("Brave", "_brave_items", lambda: bool(config.BRAVE_API_KEY)),
              ("Tavily", "_tavily_items", lambda: bool(config.TAVILY_API_KEY)))
 
 
-def search_items(query: str, max_results: int = 6, site: str | None = None) -> tuple[list[dict], list[str]]:
-    """Recherche stable : API si disponible, sinon Bing Web puis News, avec filtre site local."""
+def _envelope(query, effective, purpose: str, items: list[dict], errors: list[str]) -> dict:
+    """Sortie machine unique de SEARCH : six champs par item, erreurs séparées des résultats."""
+    return {
+        "query": str(query or ""),
+        "effective_query": effective,
+        "purpose": purpose,
+        "items": list(items),
+        "errors": list(errors),
+    }
+
+
+def search_envelope(query: str, max_results: int = 6, site: str | None = None,
+                    purpose: str = SEARCH_PURPOSE_GENERAL) -> dict:
+    """Recherche structurée : items validés + erreurs de provider, jamais un bloc de texte."""
+    if purpose not in SEARCH_PURPOSES:
+        raise ValueError(f"purpose de recherche inconnu : {purpose}")
     errors: list[str] = []
     q = effective_query(query, site)
     sites = site_constraints(q, site)
 
     def attempt(name, fn_name):
         try:
-            items = globals()[fn_name](q, max_results) or []
-            return _filter_sites(items, sites)
+            raw_items = globals()[fn_name](q, max_results) or []
         except Exception as exc:
             errors.append(f"{name} : {type(exc).__name__} {str(exc)[:160]}")
             return []
+        kept = [coerce_item(raw) for raw in raw_items]
+        return _filter_sites([item for item in kept if item is not None], sites)
 
     for name, fn_name, available in PROVIDERS:
         if available():
             items = attempt(name, fn_name)
             if items:
-                return items[:max_results], errors
+                return _envelope(query, q, purpose, _merge_unique(items, max_results=max_results), errors)
+
+    if purpose == SEARCH_PURPOSE_BUSINESS:
+        # Politique business : Bing Web keyless puis arrêt. Pas de complément
+        # encyclopédique ni d'actualité générale : ce ne sont pas des signaux d'affaires.
+        web = attempt("Bing Web", "_bing_web_items")
+        return _envelope(query, q, purpose, _merge_unique(web, max_results=max_results), errors)
 
     # Le fallback keyless ne change plus de famille selon le premier RSS non vide :
     # Bing Web est toujours prioritaire, Bing News complète ensuite.
@@ -267,12 +352,19 @@ def search_items(query: str, max_results: int = 6, site: str | None = None) -> t
     news_items = attempt("Bing News", "_bing_news_items")
     direct = _merge_unique(web_items, news_items, max_results=max_results)
     if len(direct) >= max_results or sites:
-        return direct, errors
+        return _envelope(query, q, purpose, direct, errors)
 
     # Wrappers Google/Wikipedia ne servent qu'à compléter une recherche non contrainte.
     hints = attempt("Google News", "_gnews_items")
     wiki = attempt("Wikipedia", "_wikipedia_items")
-    return _merge_unique(direct, hints, wiki, max_results=max_results), errors
+    return _envelope(query, q, purpose, _merge_unique(direct, hints, wiki, max_results=max_results), errors)
+
+
+def search_items(query: str, max_results: int = 6, site: str | None = None,
+                 purpose: str = SEARCH_PURPOSE_GENERAL) -> tuple[list[dict], list[str]]:
+    """Recherche stable : API si disponible, sinon Bing Web puis News, avec filtre site local."""
+    envelope = search_envelope(query, max_results=max_results, site=site, purpose=purpose)
+    return envelope["items"], envelope["errors"]
 
 
 def format_items(items: list[dict]) -> str:
@@ -317,13 +409,77 @@ def format_items(items: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+def _envelope_items(envelope) -> list[dict]:
+    if not isinstance(envelope, dict):
+        return []
+    items = envelope.get("items")
+    if not isinstance(items, list):
+        return []
+    return [item for item in items
+            if isinstance(item, dict) and str(item.get("url") or "").strip()]
+
+
+def render_items(items, *, max_items: int | None = None,
+                 max_snippet_chars: int | None = None) -> str:
+    """Vue texte d'items déjà structurés : extraits bornés, URL intacte."""
+    limit = VIEW_SNIPPET_CHARS if max_snippet_chars is None else max_snippet_chars
+    kept = items if max_items is None else list(items)[:max_items]
+    blocks = []
+    for item in kept:
+        if not isinstance(item, dict):
+            continue
+        lines = [f"- {item.get('title') or '(sans titre)'}", f"  {item.get('url')}"]
+        meta = " ; ".join(str(item.get(field) or "") for field in ("source", "date", "provider")
+                          if item.get(field))
+        if meta:
+            lines.append(f"  {meta}")
+        snippet = _clean_text(item.get("snippet"))[:limit]
+        if snippet:
+            lines.append(f"  {snippet}")
+        blocks.append("\n".join(lines))
+    return "\n".join(blocks)
+
+
+def render_envelope(envelope, *, max_items: int | None = None,
+                    max_snippet_chars: int | None = None) -> str:
+    """Vue texte bornée d'une enveloppe structurée : LLM et humain, jamais une source à reparsing.
+
+    Zéro résultat et erreur provider sont deux phrases distinctes : une panne n'est pas
+    un marché vide, et l'inverse n'est pas vrai non plus.
+    """
+    if not isinstance(envelope, dict):
+        return ""
+    items = _envelope_items(envelope)
+    parts = [f"Requête effective : {envelope.get('effective_query') or envelope.get('query') or ''}"]
+    providers = []
+    for item in items:
+        provider = str(item.get("provider") or "")
+        if provider and provider not in providers:
+            providers.append(provider)
+    if providers:
+        parts.append("Fournisseurs de recherche : " + ", ".join(providers))
+    body = render_items(items, max_items=max_items, max_snippet_chars=max_snippet_chars)
+    if body:
+        parts.append(body)
+    else:
+        parts.append("Aucun résultat exploitable.")
+    errors = envelope.get("errors")
+    if isinstance(errors, str):
+        errors = [errors] if errors.strip() else []
+    elif not isinstance(errors, (list, tuple)):
+        errors = []
+    if errors:
+        parts.append("Sources en erreur : " + " ; ".join(str(err) for err in errors))
+    return "\n\n".join(parts)
+
+
 def web_search(query: str, max_results: int = 6, site: str | None = None) -> str:
     """Recherche web en texte ; requête effective et fournisseurs restent visibles pour le diagnostic."""
     q = effective_query(query, site)
-    items, errors = search_items(query, max_results, site=site)
-    text = format_items(items)
+    envelope = search_envelope(query, max_results=max_results, site=site)
+    text = format_items(envelope["items"])
     prefix = f"Requête effective : {q}"
     text = prefix + ("\n\n" + text if text else "")
-    if errors:
-        text += "\n\nSources en erreur : " + " ; ".join(errors)
+    if envelope["errors"]:
+        text += "\n\nSources en erreur : " + " ; ".join(envelope["errors"])
     return text

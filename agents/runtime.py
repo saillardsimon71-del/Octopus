@@ -8,6 +8,7 @@ pas un nouvel agent ni un chantier.
 from __future__ import annotations
 
 import contextvars
+import copy
 import json
 import re
 import time
@@ -22,6 +23,10 @@ from . import cancel, db, deepseek, web_guard
 
 _ROLE: contextvars.ContextVar[str] = contextvars.ContextVar("podalux_role", default="RUNTIME")
 _SEARCHES: contextvars.ContextVar[dict | None] = contextvars.ContextVar("podalux_searches", default=None)
+_SEARCH_PURPOSE: contextvars.ContextVar[str] = contextvars.ContextVar("podalux_search_purpose", default="")
+
+# Extraits plus courts quand la recherche est résumée pour un autre sous-agent.
+_SEARCH_HANDOFF_SNIPPET_CHARS = 60
 
 
 @contextmanager
@@ -37,6 +42,16 @@ def _search_cache():
         _SEARCHES.reset(token)
 
 
+@contextmanager
+def search_purpose(purpose: str):
+    """Intention de recherche de l'exécution : elle isole aussi le cache par mode."""
+    token = _SEARCH_PURPOSE.set(purpose)
+    try:
+        yield
+    finally:
+        _SEARCH_PURPOSE.reset(token)
+
+
 def query_key(query: str) -> str:
     """Requêtes équivalentes : casse, accents, ordre des mots, pluriels et mots courts ignorés."""
     text = unicodedata.normalize("NFKD", str(query)).encode("ascii", "ignore").decode().lower()
@@ -46,31 +61,75 @@ MODEL = deepseek.config.MODEL_FLASH
 
 
 # --- Outils partagés ---
+def _search_cache_key(effective: str, purpose: str) -> str:
+    """Cache isolé par intention : une recherche business ne réutilise pas un cache général."""
+    return f"{purpose}|{query_key(effective)}"
+
+
 def _search(args):
-    from .search import effective_query, web_search
+    """SEARCH reste structuré : l'enveloppe du provider descend jusqu'au selector.
+
+    Le texte n'est produit qu'ensuite, comme vue bornée pour le LLM. Aucun chemin machine
+    ne repasse par STRUCTURE -> TEXTE -> REGEX -> STRUCTURE.
+    """
+    from .search import SEARCH_PURPOSE_GENERAL, effective_query, render_envelope, search_envelope
     query = str(args.get("query", ""))
     site = str(args.get("site") or "").strip() or None
+    purpose = _SEARCH_PURPOSE.get() or SEARCH_PURPOSE_GENERAL
     effective = effective_query(query, site)
-    cache, key = _SEARCHES.get(), query_key(effective)
+    cache, key = _SEARCHES.get(), _search_cache_key(effective, purpose)
     if cache is not None and key in cache:  # 21 recherches quasi identiques dans un run du 16/09 (audit M2)
         previous = cache[key]
+        cached = previous["envelope"]
         return {"deja_cherche": True, "requete_precedente": previous["effective_query"],
                 "note": "Recherche équivalente déjà faite : même résultat. Change d'angle, ouvre un lien "
                         "avec browse, ou conclus avec « final ».",
-                "resultat": previous["result"][:600]}
-    result = web_search(query, 6, site=site)
+                "query": cached["query"], "effective_query": cached["effective_query"],
+                "purpose": cached["purpose"], "errors": list(cached["errors"]),
+                "items": copy.deepcopy(cached["items"]),
+                "resultat": render_envelope(cached, max_items=2, max_snippet_chars=160)}
+    # Le cache garde la donnée structurée COMPLÈTE ; le consommateur reçoit une copie.
+    envelope = search_envelope(query, 6, site=site, purpose=purpose)
     if cache is not None:
         cache[key] = {
             "query": query,
             "site": site,
             "effective_query": effective,
-            "result": result,
+            "purpose": purpose,
+            "envelope": copy.deepcopy(envelope),
         }
-    return result
+    return copy.deepcopy(envelope)
+
+
+def _structured_search_items(value) -> list[dict] | None:
+    """Items natifs d'une recherche structurée, ou None pour une valeur d'ancien format.
+
+    Reconnaître l'enveloppe permet de ne jamais extraire une URL d'un extrait, d'un titre
+    ou d'un message d'erreur : seuls les items du provider sont des résultats.
+    """
+    if not isinstance(value, dict):
+        return None
+    items = value.get("items")
+    if not isinstance(items, list):
+        return None
+    return [item for item in items
+            if isinstance(item, dict) and str(item.get("url") or "").strip()]
 
 
 def _search_result_urls(value) -> list[str]:
-    """URLs HTTP(S) réellement présentes dans le résultat d'un search, ordre conservé."""
+    """URLs réellement retournées par SEARCH, ordre conservé.
+
+    Enveloppe structurée : lecture directe des items. Ancien format texte : parsing
+    historique conservé pour la compatibilité des traces et des consommateurs hérités.
+    """
+    structured = _structured_search_items(value)
+    if structured is not None:
+        urls = []
+        for item in structured:
+            url = str(item.get("url") or "").strip()
+            if url and url not in urls:
+                urls.append(url)
+        return urls
     parts = []
 
     def collect(item):
@@ -155,7 +214,22 @@ def _flatten_search_text(value) -> str:
 
 
 def _search_result_candidates(value) -> list[dict]:
-    """Parse le format texte de web_search en candidats URL + contexte compact."""
+    """Candidats URL + contexte : items natifs de l'enveloppe, texte seulement en repli."""
+    structured = _structured_search_items(value)
+    if structured is not None:
+        return [{"url": str(item.get("url") or "").strip(),
+                 "title": str(item.get("title") or ""),
+                 "context": str(item.get("snippet") or "")}
+                for item in structured]
+    return _search_result_candidates_from_text(value)
+
+
+def _search_result_candidates_from_text(value) -> list[dict]:
+    """Parsing historique du format texte : repli pour les valeurs non structurées.
+
+    Réservé aux anciennes traces et aux consommateurs hérités. Le parcours natif ne
+    doit jamais en dépendre (cf. tests/test_search_structured.py).
+    """
     text = _flatten_search_text(value)
     lines = text.splitlines()
     candidates = []
@@ -354,9 +428,35 @@ def _tool_result_view(tool: str, result, max_chars: int | None = None) -> str:
         }
         return json.dumps(payload, ensure_ascii=False)
 
+    if tool == "search":
+        view = _search_view(result, max_chars=max_chars)
+        if view is not None:
+            return view
+
     raw = json.dumps(result, ensure_ascii=False)
     limit = max_chars if max_chars is not None else (6000 if tool == "search" else 1500)
     return raw[:int(limit)]
+
+
+def _search_view(result, max_chars: int | None = None) -> str | None:
+    """Vue texte bornée d'une recherche structurée ; None si la valeur n'est pas structurée.
+
+    La structure reste la source ; cette vue ne sert qu'au prompt. Les URL ne sont pas
+    raccourcies : seuls les extraits sont bornés.
+    """
+    items = _structured_search_items(result)
+    if items is None:
+        return None
+    from .search import render_envelope
+    view = render_envelope(result, max_snippet_chars=(
+        None if max_chars is None else _SEARCH_HANDOFF_SNIPPET_CHARS))
+    if isinstance(result, dict) and result.get("deja_cherche"):
+        # Le signal de cache doit rester lisible par le LLM dans la vue texte.
+        previous = str(result.get("requete_precedente") or "").strip()
+        view = "[deja_cherche] " + previous + "\n\n" + view
+    if max_chars is not None and len(view) > max_chars:
+        view = view[:max_chars]  # filet : les URL des premiers items restent lisibles
+    return view
 
 
 def _mission_prompt_results(results: list[dict]) -> list[dict]:
@@ -529,7 +629,7 @@ def _seen_this_session(source: str) -> bool:
         return False
     if source in web_guard.current().visited:
         return True
-    return any(source in str(entry.get("result", "")) for entry in (_SEARCHES.get() or {}).values())
+    return any(source in str(entry.get("envelope", "")) for entry in (_SEARCHES.get() or {}).values())
 
 
 def _ids(args, keys) -> dict:
@@ -1328,6 +1428,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                  search_browse_selector: str = "first",
                  business_signal_focus: bool = False,
                  business_signal_target: int = 3) -> dict:
+    from .search import SEARCH_PURPOSE_BUSINESS, SEARCH_PURPOSE_GENERAL
     pro = deepseek.config.MODEL_PRO
     if cancel.requested():
         return {"plan": [], "results": [], "rapport": "(arrêt demandé)"}
@@ -1395,14 +1496,18 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             if business_signal_focus and search_browse_selector == "evidence_relevance"
             else search_browse_selector
         )
-        r = run_agent(
-            role,
-            task,
-            max_steps=max_steps_per_agent,
-            allowed_tools=allowed_tools,
-            search_browse_lockstep=search_browse_lockstep,
-            search_browse_selector=effective_selector,
-        )
+        # L'intention de recherche se propage aux outils du sous-agent : elle choisit la
+        # politique de providers et isole le cache. Pas de nouveau paramètre d'outil.
+        purpose = (SEARCH_PURPOSE_BUSINESS if business_signal_focus else SEARCH_PURPOSE_GENERAL)
+        with search_purpose(purpose):
+            r = run_agent(
+                role,
+                task,
+                max_steps=max_steps_per_agent,
+                allowed_tools=allowed_tools,
+                search_browse_lockstep=search_browse_lockstep,
+                search_browse_selector=effective_selector,
+            )
         results.append({"role": role, "task": original,
                         "final": r.get("final"), "steps": r.get("steps")})
 
