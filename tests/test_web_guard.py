@@ -122,8 +122,8 @@ class FakeBrowser:
     def url(self):
         return self._url
 
-    def snapshot(self):
-        return self.PAGES.get(self._url, "")
+    def snapshot(self, max_chars=4000):
+        return self.PAGES.get(self._url, "")[:max_chars]
 
     def see(self, agent="SOUT"):
         return {"description": "capture"}
@@ -137,6 +137,24 @@ def fake_browser(monkeypatch):
     FakeBrowser.opened = []
     monkeypatch.setattr(browser, "new_browser", lambda headless=False, account=False, guard=None:
                         FakeBrowser(headless, account, guard))
+
+    def acquire_public(url, guard=None):
+        if guard is not None and not guard(url):
+            return browser.PublicPageRecord(
+                requested_url=url, final_url=url, fetched_at="2026-09-24T00:00:00+00:00",
+                http_status=None, content_type="", title="", extraction_method="test",
+                rendered=False, blocked=True, main_text="", text_chars=0, raw_chars=0,
+                truncated=False, error="refusé",
+            )
+        text = FakeBrowser.PAGES.get(url, "")
+        return browser.PublicPageRecord(
+            requested_url=url, final_url=url, fetched_at="2026-09-24T00:00:00+00:00",
+            http_status=200, content_type="text/html", title="fixture", extraction_method="test",
+            rendered=False, blocked=False, main_text=text, text_chars=len(text), raw_chars=len(text),
+            truncated=False, error=None,
+        )
+
+    monkeypatch.setattr(browser, "acquire_public_page", acquire_public)
     return FakeBrowser
 
 
@@ -156,7 +174,7 @@ def test_injection_scenario_from_the_audit_is_blocked(monkeypatch, fake_browser)
     assert "NON FIABLE" in steps[0]["result"]
     assert "compte connecté" in steps[1]["result"]
     assert "déjà lu un compte" in steps[2]["result"]
-    assert [(b.account, b.headless) for b in fake_browser.opened] == [(False, True), (True, False)]
+    assert [(b.account, b.headless) for b in fake_browser.opened] == [(True, False)]
     assert not any(b.url().startswith("https://exfil.example") for b in fake_browser.opened)
 
 

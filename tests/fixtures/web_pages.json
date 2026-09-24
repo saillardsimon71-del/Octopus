@@ -1,0 +1,82 @@
+[
+  {
+    "name": "wikipedia_france",
+    "source_url": "https://fr.wikipedia.org/wiki/France",
+    "html": "<!doctype html><html><head><title>France — Wikipédia</title></head><body><header>Menu principal Rechercher Faire un don</header><main id=\"content\"><h1>France</h1><p>La France est un État souverain transcontinental dont le territoire métropolitain est situé en Europe de l'Ouest.</p><p>Sa capitale est Paris et sa population est répartie sur le territoire métropolitain et ultramarin.</p></main><footer>Politique de confidentialité</footer></body></html>",
+    "expected_text": "La France est un État souverain transcontinental",
+    "forbidden_text": "Menu principal",
+    "expected_method": "html_main"
+  },
+  {
+    "name": "humanite_article",
+    "source_url": "https://www.humanite.fr/societe/elus/face-a-la-crise-du-logement-social-agissons-ensemble",
+    "html": "<!doctype html><html><head><title>Face à la crise du logement social, agissons ensemble !</title></head><body><nav>Se connecter Je m'abonne Podcasts Vidéos</nav><article><h1>Face à la crise du logement social, agissons ensemble !</h1><p>Publié le 6 septembre 2026.</p><p>Plus d’un million de Franciliens sont en attente d’un logement social et l’attente peut durer plusieurs années.</p></article><footer>Abonnements</footer></body></html>",
+    "expected_text": "Plus d’un million de Franciliens",
+    "forbidden_text": "Je m'abonne",
+    "expected_method": "html_main"
+  },
+  {
+    "name": "freelance_home",
+    "source_url": "https://www.freelance.com/",
+    "html": "<!doctype html><html><head><title>Freelance.com</title></head><body><header>ENTREPRISE FREELANCE PARTENAIRE RESSOURCES À PROPOS</header><main><h1>Talent as a service</h1><p>Nous connectons les grandes entreprises avec des talents externes.</p><p>Freelances, TPE et PME peuvent accéder à des services de sourcing, portage et gestion administrative.</p></main><footer>Contact Mentions légales</footer></body></html>",
+    "expected_text": "Nous connectons les grandes entreprises",
+    "forbidden_text": "MENTIONS",
+    "expected_method": "html_main"
+  },
+  {
+    "name": "larousse_definition",
+    "source_url": "https://www.larousse.fr/dictionnaires/francais/probl%C3%A8me/64046",
+    "html": "<!doctype html><html><head><title>Définitions : problème - Dictionnaire de français Larousse</title></head><body><nav>Dictionnaires Français Anglais Conjugateur</nav><main role=\"main\"><h1>problème</h1><p>Question à résoudre par des méthodes rationnelles dans un domaine donné.</p><p>Difficulté mettant dans une situation pénible.</p></main><footer>Larousse</footer></body></html>",
+    "expected_text": "Question à résoudre par des méthodes rationnelles",
+    "forbidden_text": "Conjugateur",
+    "expected_method": "html_main"
+  },
+  {
+    "name": "service_public_article",
+    "source_url": "https://entreprendre.service-public.fr/actualites/A17401",
+    "html": "<!doctype html><html><head><title>Facturation électronique entre entreprises</title></head><body><header>Service-Public.fr Entreprendre</header><main><article><h1>Facturation électronique entre entreprises</h1><p>La réforme prévoit une généralisation progressive de la facturation électronique pour les entreprises assujetties à la TVA.</p><p>Les entreprises doivent vérifier leur calendrier d’entrée en vigueur et les obligations applicables.</p></article></main><footer>République Française</footer></body></html>",
+    "expected_text": "La réforme prévoit une généralisation progressive",
+    "forbidden_text": "Service-Public.fr Entreprendre",
+    "expected_method": "html_main"
+  },
+  {
+    "name": "insee_article",
+    "source_url": "https://www.insee.fr/fr/statistiques/serie/010539365",
+    "html": "<!doctype html><html><head><title>Indicateur économique - Insee</title></head><body><header>Institut national de la statistique et des études économiques</header><main><article><h1>Indicateur économique</h1><p>Cette série présente un indicateur économique publié par l’Insee avec sa période de référence.</p><p>Les données sont accompagnées de métadonnées décrivant le champ et la méthode.</p></article></main><footer>Plan du site</footer></body></html>",
+    "expected_text": "Cette série présente un indicateur économique",
+    "forbidden_text": "Plan du site",
+    "expected_method": "html_main"
+  },
+  {
+    "name": "liberation_shell",
+    "source_url": "https://www.liberation.fr/economie/exemple/",
+    "html": "<!doctype html><html><head><title>Libération - Économie</title></head><body><header>Libération Politique International Société</header><main><div id=\"__next\"></div></main><footer>Abonnez-vous</footer><script>window.__DATA__={};</script></body></html>",
+    "expected_text": "",
+    "forbidden_text": "Libération Politique",
+    "expected_method": "html_body"
+  },
+  {
+    "name": "gazette_shell",
+    "source_url": "https://www.lagazettedescommunes.com/exemple/",
+    "html": "<!doctype html><html><head><title>La Gazette des Communes</title></head><body><nav>Actualité Club Ressources</nav><main><div class=\"article-container\"></div></main><footer>Mentions légales</footer><script src=\"/bundle.js\"></script></body></html>",
+    "expected_text": "",
+    "forbidden_text": "Actualité Club",
+    "expected_method": "html_body"
+  },
+  {
+    "name": "cloudfront_block",
+    "source_url": "https://www.bpifrance.fr/",
+    "html": "<!doctype html><html><head><title>ERROR: The request could not be satisfied</title></head><body><main><h1>403 ERROR</h1><p>The request could not be satisfied. Request blocked. Generated by cloudfront.</p></main></body></html>",
+    "expected_text": "Request blocked",
+    "forbidden_text": "",
+    "expected_method": "html_body"
+  },
+  {
+    "name": "akamai_block",
+    "source_url": "https://investir.lesechos.fr/exemple/",
+    "html": "<!doctype html><html><head><title>Access Denied</title></head><body><main><h1>Access Denied</h1><p>You don't have permission to access this resource. Reference errors.edgesuite.net.</p></main></body></html>",
+    "expected_text": "Access Denied",
+    "forbidden_text": "",
+    "expected_method": "html_body"
+  }
+]
