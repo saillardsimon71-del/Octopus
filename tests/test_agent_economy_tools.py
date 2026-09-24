@@ -306,6 +306,69 @@ def test_mission_trace_summary_counts_forced_lockstep_browse():
     assert summary["browsed_from_search"] == ["https://example.com/preuve"]
 
 
+def test_trace_summary_prefers_pre_truncation_search_urls():
+    from agents.task_handlers import _mission_trace_summary
+
+    summary = _mission_trace_summary([
+        {
+            "role": "SOUT",
+            "final": "fini",
+            "steps": [
+                {
+                    "tool": "search",
+                    "args": {"query": "preuve PME"},
+                    # Reproduit H2 : JSON tronqué donc impossible à reparsing.
+                    "result": '"Titre\\nhttps://example.com/preuve\\n' + ("x" * 1400),
+                    "result_urls": ["https://example.com/preuve"],
+                },
+                {
+                    "tool": "browse",
+                    "args": {"url": "https://example.com/preuve"},
+                    "result": '{"url":"https://example.com/preuve","texte":"tronqué',
+                    "browse_meta": {
+                        "url": "https://example.com/preuve",
+                        "text_chars": 900,
+                        "blocked": False,
+                        "vision_error": False,
+                    },
+                    "lockstep_forced": True,
+                },
+            ],
+        },
+    ])
+
+    assert summary["browsed_from_search"] == ["https://example.com/preuve"]
+    assert summary["lockstep_forced_browses"] == 1
+
+
+def test_objective_result_counts_metadata_even_when_result_is_truncated():
+    from agents.task_handlers import _mission_objective_result
+
+    results = [{
+        "role": "SOUT",
+        "steps": [{
+            "tool": "browse",
+            "args": {"url": "https://example.com/long"},
+            "result": '{"url":"https://example.com/long","texte":"' + ("x" * 1450),
+            "browse_meta": {
+                "url": "https://example.com/long",
+                "text_chars": 1500,
+                "blocked": False,
+                "vision_error": False,
+            },
+        }],
+    }]
+
+    outcome = _mission_objective_result(
+        results,
+        {"metric": "usable_browse_count", "gte": 1},
+    )
+
+    assert outcome["observed"] == 1
+    assert outcome["success"] is True
+    assert outcome["usable_browse_urls"] == ["https://example.com/long"]
+
+
 def test_objective_result_counts_only_usable_non_blocked_browses():
     from agents.task_handlers import _mission_objective_result
 
