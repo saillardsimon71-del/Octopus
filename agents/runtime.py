@@ -8,6 +8,7 @@ pas un nouvel agent ni un chantier.
 from __future__ import annotations
 
 import contextvars
+import copy
 import json
 import re
 import time
@@ -22,6 +23,10 @@ from . import cancel, db, deepseek, web_guard
 
 _ROLE: contextvars.ContextVar[str] = contextvars.ContextVar("podalux_role", default="RUNTIME")
 _SEARCHES: contextvars.ContextVar[dict | None] = contextvars.ContextVar("podalux_searches", default=None)
+_SEARCH_PURPOSE: contextvars.ContextVar[str] = contextvars.ContextVar("podalux_search_purpose", default="")
+
+# Extraits plus courts quand la recherche est résumée pour un autre sous-agent.
+_SEARCH_HANDOFF_SNIPPET_CHARS = 60
 
 
 @contextmanager
@@ -37,6 +42,16 @@ def _search_cache():
         _SEARCHES.reset(token)
 
 
+@contextmanager
+def search_purpose(purpose: str):
+    """Intention de recherche de l'exécution : elle isole aussi le cache par mode."""
+    token = _SEARCH_PURPOSE.set(purpose)
+    try:
+        yield
+    finally:
+        _SEARCH_PURPOSE.reset(token)
+
+
 def query_key(query: str) -> str:
     """Requêtes équivalentes : casse, accents, ordre des mots, pluriels et mots courts ignorés."""
     text = unicodedata.normalize("NFKD", str(query)).encode("ascii", "ignore").decode().lower()
@@ -46,31 +61,75 @@ MODEL = deepseek.config.MODEL_FLASH
 
 
 # --- Outils partagés ---
+def _search_cache_key(effective: str, purpose: str) -> str:
+    """Cache isolé par intention : une recherche business ne réutilise pas un cache général."""
+    return f"{purpose}|{query_key(effective)}"
+
+
 def _search(args):
-    from .search import effective_query, web_search
+    """SEARCH reste structuré : l'enveloppe du provider descend jusqu'au selector.
+
+    Le texte n'est produit qu'ensuite, comme vue bornée pour le LLM. Aucun chemin machine
+    ne repasse par STRUCTURE -> TEXTE -> REGEX -> STRUCTURE.
+    """
+    from .search import SEARCH_PURPOSE_GENERAL, effective_query, render_envelope, search_envelope
     query = str(args.get("query", ""))
     site = str(args.get("site") or "").strip() or None
+    purpose = _SEARCH_PURPOSE.get() or SEARCH_PURPOSE_GENERAL
     effective = effective_query(query, site)
-    cache, key = _SEARCHES.get(), query_key(effective)
+    cache, key = _SEARCHES.get(), _search_cache_key(effective, purpose)
     if cache is not None and key in cache:  # 21 recherches quasi identiques dans un run du 16/09 (audit M2)
         previous = cache[key]
+        cached = previous["envelope"]
         return {"deja_cherche": True, "requete_precedente": previous["effective_query"],
                 "note": "Recherche équivalente déjà faite : même résultat. Change d'angle, ouvre un lien "
                         "avec browse, ou conclus avec « final ».",
-                "resultat": previous["result"][:600]}
-    result = web_search(query, 6, site=site)
+                "query": cached["query"], "effective_query": cached["effective_query"],
+                "purpose": cached["purpose"], "errors": list(cached["errors"]),
+                "items": copy.deepcopy(cached["items"]),
+                "resultat": render_envelope(cached, max_items=2, max_snippet_chars=160)}
+    # Le cache garde la donnée structurée COMPLÈTE ; le consommateur reçoit une copie.
+    envelope = search_envelope(query, 6, site=site, purpose=purpose)
     if cache is not None:
         cache[key] = {
             "query": query,
             "site": site,
             "effective_query": effective,
-            "result": result,
+            "purpose": purpose,
+            "envelope": copy.deepcopy(envelope),
         }
-    return result
+    return copy.deepcopy(envelope)
+
+
+def _structured_search_items(value) -> list[dict] | None:
+    """Items natifs d'une recherche structurée, ou None pour une valeur d'ancien format.
+
+    Reconnaître l'enveloppe permet de ne jamais extraire une URL d'un extrait, d'un titre
+    ou d'un message d'erreur : seuls les items du provider sont des résultats.
+    """
+    if not isinstance(value, dict):
+        return None
+    items = value.get("items")
+    if not isinstance(items, list):
+        return None
+    return [item for item in items
+            if isinstance(item, dict) and str(item.get("url") or "").strip()]
 
 
 def _search_result_urls(value) -> list[str]:
-    """URLs HTTP(S) réellement présentes dans le résultat d'un search, ordre conservé."""
+    """URLs réellement retournées par SEARCH, ordre conservé.
+
+    Enveloppe structurée : lecture directe des items. Ancien format texte : parsing
+    historique conservé pour la compatibilité des traces et des consommateurs hérités.
+    """
+    structured = _structured_search_items(value)
+    if structured is not None:
+        urls = []
+        for item in structured:
+            url = str(item.get("url") or "").strip()
+            if url and url not in urls:
+                urls.append(url)
+        return urls
     parts = []
 
     def collect(item):
@@ -92,48 +151,12 @@ def _search_result_urls(value) -> list[str]:
     return urls
 
 
-_SEARCH_RELEVANCE_STOPWORDS = {
-    "avec", "dans", "des", "les", "pour", "sur", "une", "un", "aux", "par", "qui",
-    "que", "quoi", "plus", "moins", "france", "francais", "francaise", "francaises",
-    "probleme", "problemes", "besoin", "besoins", "client", "clients", "economique",
-    "economiques", "rapport", "source", "officiel", "officielle", "officielles",
-}
-_BUSINESS_SIGNAL_RELEVANCE_STOPWORDS = {
-    "appel", "mission", "free", "work",
-}
-_BUSINESS_SIGNAL_NOISE_TITLE_WORDS = {
-    "definition", "definitions", "dictionnaire", "film", "wikipedia", "wiktionnaire",
-}
-
-_LOW_EVIDENCE_HOSTS = {
-    "fr.wikipedia.org",
-    "www.larousse.fr",
-    "dictionnaire.lerobert.com",
-    "www.le-dictionnaire.com",
-    "www.soutien67.fr",
-}
-_EVIDENCE_HOST_SUFFIXES = (
-    ".gouv.fr",
-    ".gov",
-    ".europa.eu",
-)
-_EVIDENCE_HOSTS = {
-    "www.insee.fr",
-    "insee.fr",
-    "www.banque-france.fr",
-    "banque-france.fr",
-    "www.bpifrance.fr",
-    "bpifrance.fr",
-    "www.service-public.fr",
-    "service-public.fr",
-    "www.urssaf.fr",
-    "urssaf.fr",
-    "www.senat.fr",
-    "senat.fr",
-    "www.assemblee-nationale.fr",
-    "assemblee-nationale.fr",
-    "www.vie-publique.fr",
-    "vie-publique.fr",
+# Hôtes qui ne servent jamais la page de l'éditeur : une acquisition là-bas récupère une
+# redirection, pas du contenu. C'est une propriété de l'outil browse, pas un jugement métier.
+_WRAPPER_HOSTS = {
+    "www.bing.com",
+    "bing.com",
+    "news.google.com",
 }
 
 
@@ -155,7 +178,22 @@ def _flatten_search_text(value) -> str:
 
 
 def _search_result_candidates(value) -> list[dict]:
-    """Parse le format texte de web_search en candidats URL + contexte compact."""
+    """Candidats URL + contexte : items natifs de l'enveloppe, texte seulement en repli."""
+    structured = _structured_search_items(value)
+    if structured is not None:
+        return [{"url": str(item.get("url") or "").strip(),
+                 "title": str(item.get("title") or ""),
+                 "context": str(item.get("snippet") or "")}
+                for item in structured]
+    return _search_result_candidates_from_text(value)
+
+
+def _search_result_candidates_from_text(value) -> list[dict]:
+    """Parsing historique du format texte : repli pour les valeurs non structurées.
+
+    Réservé aux anciennes traces et aux consommateurs hérités. Le parcours natif ne
+    doit jamais en dépendre (cf. tests/test_search_structured.py).
+    """
     text = _flatten_search_text(value)
     lines = text.splitlines()
     candidates = []
@@ -192,16 +230,13 @@ def _norm_words(value: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]+", text) if len(w) > 2}
 
 
-def _search_relevance_tokens(query: str) -> set[str]:
-    words = _norm_words(re.sub(r"\b(?:site|source):\S+", " ", str(query), flags=re.I))
-    return {
-        word for word in words
-        if word not in _SEARCH_RELEVANCE_STOPWORDS and not re.fullmatch(r"20\d{2}", word)
-    }
+def _query_tokens(query: str) -> set[str]:
+    """Mots discriminants d'une requête, opérateur `site:` retiré.
 
-
-def _business_signal_relevance_tokens(query: str) -> set[str]:
-    return _search_relevance_tokens(query) - _BUSINESS_SIGNAL_RELEVANCE_STOPWORDS
+    Aucune liste de vocabulaire métier : juger si un titre ou un extrait est pertinent
+    appartient au LLM, pas à un dictionnaire codé dans OCTOPUS.
+    """
+    return _norm_words(re.sub(r"(?i)\bsite:\S+", " ", str(query)))
 
 
 def _host_matches_site(host: str, site: str) -> bool:
@@ -211,7 +246,22 @@ def _host_matches_site(host: str, site: str) -> bool:
 
 
 def _select_search_browse_candidate(value, query: str, selector: str = "first") -> dict | None:
-    """Choisit uniquement parmi les URLs effectivement retournées par SEARCH."""
+    """Choisit une URL à ouvrir, uniquement parmi celles effectivement retournées par SEARCH.
+
+    Responsabilité minimale (contrat d'outil, pas jugement métier) :
+      * `first` : le premier résultat, tel quel ;
+      * sinon le meilleur résultat ADMISSIBLE — URL http(S) du provider, qui n'est pas un
+        hôte de redirection, et qui respecte une contrainte `site:` explicite.
+
+    Un plancher de pertinence lexicale générale évite de forcer l'ouverture d'une page ne
+    partageant qu'un seul mot avec la requête (collisions « appel »/Apple, « mission »/film).
+    EXPERIMENTAL / BUDGET PROTECTION : ce plancher est temporaire, il protège le budget de
+    browse du lockstep expérimental ; ce n'est pas un invariant architectural et rien de
+    plus ne doit être construit autour.
+
+    Le sélecteur ne décide PAS si une page est une bonne opportunité d'affaires. Il voit
+    title/snippet/URL ; juger leur utilité appartient au LLM.
+    """
     candidates = _search_result_candidates(value)
     if not candidates:
         return None
@@ -224,80 +274,35 @@ def _select_search_browse_candidate(value, query: str, selector: str = "first") 
         site.rstrip(".,;:)")
         for site in re.findall(r"\bsite:([^\s]+)", str(query), flags=re.I)
     ]
-    tokens = (
-        _business_signal_relevance_tokens(query)
-        if selector == "business_signal_relevance"
-        else _search_relevance_tokens(query)
-    )
+    tokens = _query_tokens(query)
     scored = []
     for rank, candidate in enumerate(candidates, start=1):
         url = candidate["url"]
         host = urlparse(url).netloc.lower()
-        title_words = _norm_words(candidate.get("title", ""))
-        context_words = _norm_words(candidate.get("context", ""))
-        title_overlap = len(tokens & title_words)
-        context_overlap = len(tokens & context_words)
-        score = title_overlap * 4 + context_overlap
-        business_noise = False
-        root_homepage = False
-        if selector == "business_signal_relevance":
-            # « film » peut aussi désigner une vraie prestation audiovisuelle.
-            noise_words = _BUSINESS_SIGNAL_NOISE_TITLE_WORDS & title_words
-            film_reference = "film" in title_words and (
-                _host_matches_site(host, "allocine.fr")
-                or _host_matches_site(host, "imdb.com")
-            )
-            business_noise = bool(noise_words - {"film"}) or film_reference
-            root_homepage = urlparse(url).path in {"", "/"}
-            if business_noise:
-                score -= 20
-            if root_homepage:
-                score -= 3
-
+        if host in _WRAPPER_HOSTS:
+            continue
         site_match = None
         if required_sites:
             site_match = any(_host_matches_site(host, site) for site in required_sites)
-            score += 100 if site_match else -100
-
-        low_evidence = host in _LOW_EVIDENCE_HOSTS
-        if low_evidence:
-            score -= 20
-        official = host in _EVIDENCE_HOSTS or any(host.endswith(suffix) for suffix in _EVIDENCE_HOST_SUFFIXES)
-        if official:
-            score += 6
-
+            if not site_match:
+                continue
+        title_words = _norm_words(candidate.get("title", ""))
+        context_words = _norm_words(candidate.get("context", ""))
         scored.append({
             "url": url,
             "selector": selector,
             "rank": rank,
-            "score": score,
-            "title_overlap": title_overlap,
-            "context_overlap": context_overlap,
+            "score": len(tokens & title_words) * 4 + len(tokens & context_words),
+            "title_overlap": len(tokens & title_words),
+            "context_overlap": len(tokens & context_words),
             "distinct_overlap": len(tokens & (title_words | context_words)),
-            "official": official,
-            "low_evidence": low_evidence,
             "site_match": site_match,
-            "business_noise": business_noise,
-            "root_homepage": root_homepage,
         })
 
-    if selector == "business_signal_relevance":
-        # Filtrer AVANT max : un mauvais top1 ne doit pas masquer une bonne URL.
-        scored = [item for item in scored if (
-            item["score"] > 0 and item["distinct_overlap"] >= 2
-            and not item["business_noise"] and not item["low_evidence"]
-            and (not required_sites or item["site_match"])
-        )]
-        return max(scored, key=lambda item: (item["score"], -item["rank"]), default=None)
-
-    best = max(scored, key=lambda item: (item["score"], -item["rank"]))
-    # Si un opérateur site: est demandé, ne viole jamais explicitement cette contrainte.
-    if required_sites and not best["site_match"]:
-        return None
-    # Évite les dictionnaires/Wikipedia ou collisions lexicales sans signal de pertinence.
-    if best["score"] <= 0:
-        return None
-    return best
+    # EXPERIMENTAL / BUDGET PROTECTION (temporaire, pas un invariant) : un seul mot partagé
+    # ne suffit pas à forcer une ouverture. Aucune liste lexicale métier n'intervient ici.
+    scored = [item for item in scored if item["score"] > 0 and item["distinct_overlap"] >= 2]
+    return max(scored, key=lambda item: (item["score"], -item["rank"]), default=None)
 
 
 _BROWSE_BLOCK_MARKERS = (
@@ -354,9 +359,35 @@ def _tool_result_view(tool: str, result, max_chars: int | None = None) -> str:
         }
         return json.dumps(payload, ensure_ascii=False)
 
+    if tool == "search":
+        view = _search_view(result, max_chars=max_chars)
+        if view is not None:
+            return view
+
     raw = json.dumps(result, ensure_ascii=False)
     limit = max_chars if max_chars is not None else (6000 if tool == "search" else 1500)
     return raw[:int(limit)]
+
+
+def _search_view(result, max_chars: int | None = None) -> str | None:
+    """Vue texte bornée d'une recherche structurée ; None si la valeur n'est pas structurée.
+
+    La structure reste la source ; cette vue ne sert qu'au prompt. Les URL ne sont pas
+    raccourcies : seuls les extraits sont bornés.
+    """
+    items = _structured_search_items(result)
+    if items is None:
+        return None
+    from .search import render_envelope
+    view = render_envelope(result, max_snippet_chars=(
+        None if max_chars is None else _SEARCH_HANDOFF_SNIPPET_CHARS))
+    if isinstance(result, dict) and result.get("deja_cherche"):
+        # Le signal de cache doit rester lisible par le LLM dans la vue texte.
+        previous = str(result.get("requete_precedente") or "").strip()
+        view = "[deja_cherche] " + previous + "\n\n" + view
+    if max_chars is not None and len(view) > max_chars:
+        view = view[:max_chars]  # filet : les URL des premiers items restent lisibles
+    return view
 
 
 def _mission_prompt_results(results: list[dict]) -> list[dict]:
@@ -529,7 +560,7 @@ def _seen_this_session(source: str) -> bool:
         return False
     if source in web_guard.current().visited:
         return True
-    return any(source in str(entry.get("result", "")) for entry in (_SEARCHES.get() or {}).values())
+    return any(source in str(entry.get("envelope", "")) for entry in (_SEARCHES.get() or {}).values())
 
 
 def _ids(args, keys) -> dict:
@@ -780,17 +811,16 @@ def _today_iso() -> str:
 
 
 def _freshness_context(run) -> str:
+    """La date est un FAIT connu du système, pas une consigne d'écriture de requête.
+
+    L'ancienne formulation (« privilégie {année} ») dictait au LLM comment rédiger une
+    recherche et contredisait le contrat business (« n'ajoute pas l'année par défaut ») —
+    run #63 : `2026 freelance request data migration budget cloud`. La date reste fournie ;
+    décider si et comment s'en servir appartient au raisonnement.
+    """
     if run is None or run.business == DEFAULT_BUSINESS:
         return ""
-    today = _today_iso()
-    year = today[:4]
-    return (
-        f"DATE ACTUELLE : {today}. Pour une recherche présentée comme actuelle/récente, "
-        f"privilégie {year} et les sources les plus récentes disponibles ; n'utilise pas une année antérieure "
-        "comme substitut implicite du présent sauf si l'objectif demande explicitement une période historique.\n"
-        "Pour cibler un domaine, utilise le paramètre site de search (ex. site=\"insee.fr\") "
-        "plutôt que de supposer qu'un champ non déclaré sera appliqué.\n\n"
-    )
+    return f"DATE ACTUELLE : {_today_iso()}.\n\n"
 
 
 BUSINESS_SIGNAL_TYPES = {
@@ -821,69 +851,61 @@ _BUSINESS_SIGNAL_UNKNOWN = {
 
 
 def _business_signal_contract(target: int) -> str:
+    """Objectif et critères de RÉSULTAT d'une mission business signal.
+
+    Ce contrat décrit ce qu'OCTOPUS cherche, pas comment chercher. Aucune procédure de
+    requête (nombre de termes, année, `site:`, guillemets, séquence de reformulation) :
+    un LLM moderne sait déjà chercher, et lui dicter une méthode l'empêche de s'adapter.
+    """
     target = max(1, int(target))
     return (
-        "MODE BUSINESS SIGNAL — objectif : trouver des opportunités TESTABLES, pas produire une étude générale.\n"
-        f"Seuil minimal visé : {target} signaux commerciaux qualifiés ; n'invente jamais un signal pour atteindre ce seuil. "
-        "Mieux vaut rester sous le seuil avec des preuves solides que le dépasser avec des banalités.\n"
+        "MODE BUSINESS SIGNAL — objectif : identifier des opportunités économiques TESTABLES, "
+        "pas produire une étude générale.\n"
+        f"Seuil minimal visé : {target} signaux qualifiés. N'invente jamais un signal pour "
+        "atteindre ce seuil : mieux vaut rester en dessous avec des preuves solides que le "
+        "dépasser avec des banalités. Le seuil est un minimum de mission, pas un quota par piste.\n"
         "Un signal n'est qualifié que si TOUT est présent :\n"
         "1) un acheteur/segment identifiable ;\n"
         "2) une douleur, tâche manuelle, obligation ou demande concrète ;\n"
         "3) une source réellement ouverte pendant cette mission ;\n"
-        "4) un signal monétaire ou d'urgence (budget, prix payé, alternative payante, recrutement, appel d'offres, "
-        "coût opérationnel explicite, échéance réglementaire avec travail à réaliser) ;\n"
+        "4) un signal monétaire ou d'urgence (prix payé, alternative payante, recrutement, "
+        "appel d'offres, dépense existante, échéance réglementaire créant du travail) ;\n"
         "5) un canal réaliste pour atteindre ce type d'acheteur ;\n"
         "6) une offre minimale et un prochain test faisable rapidement.\n"
         "Pour buyer, pain, money_signal et evidence_summary, fournis respectivement buyer_evidence, "
         "pain_evidence, money_evidence et summary_evidence : extraits littéraux de 8 à 600 caractères "
         "du texte acquis de la même page, jamais inventés. Ces citations prouvent leur présence, "
         "pas la justesse de l'interprétation : revue humaine nécessaire.\n"
-        "Sources à PRIORISER : demandes explicites de prestataire/outil, missions freelance, offres d'emploi révélant "
-        "un travail coûteux, appels d'offres, forums/Reddit où le problème est décrit, avis négatifs, comparatifs/prix "
-        "de solutions payantes, obligations réglementaires qui créent une tâche concrète.\n"
-        "À REJETER : définitions, statistiques macro seules, inflation/chômage/logement génériques, taille de marché, "
-        "actualité générale, homepage de société, tendance sectorielle sans acheteur ni dépense, problème social large "
+        "Sources à PRIORISER : demandes explicites de prestataire ou d'outil, missions freelance, "
+        "offres d'emploi révélant un travail coûteux, appels d'offres, forums où le problème est "
+        "décrit, avis négatifs, comparatifs et prix de solutions payantes, obligations "
+        "réglementaires qui créent une tâche concrète.\n"
+        "À REJETER : définitions, statistiques macro seules, actualité générale, taille de marché, "
+        "homepage de société, tendance sectorielle sans acheteur ni dépense, problème social large "
         "sans action achetable identifiable.\n"
-        "STRATÉGIE DE RECHERCHE — cherche d'abord des URL candidates, puis prouve les critères avec browse :\n"
-        "- commence par une requête courte avec 2 à 5 termes discriminants ; évite d'empiler plusieurs expressions entre "
-        "guillemets, le mot 'budget', l'année courante et une contrainte site dans la même requête ;\n"
-        "- n'exige PAS que le mot 'budget' apparaisse dans search : le signal monétaire peut être un prix, un recrutement, "
-        "un appel d'offres, une dépense existante ou une urgence visible seulement après ouverture de la page ;\n"
-        "- n'ajoute pas l'année courante par défaut à la requête ; vérifie plutôt la fraîcheur dans la source ouverte ;\n"
-        "- utilise site= en deuxième intention pour affiner un domaine déjà prometteur, pas comme réflexe sur chaque piste ;\n"
-        "- si search renvoie zéro URL exploitable ou seulement une homepage générique, élargis immédiatement : retire site, "
-        "guillemets, année et termes trop littéraux, puis change d'angle ou de segment ;\n"
-        "- dès qu'une URL candidate pertinente existe, ouvre-la avec browse avant d'essayer de satisfaire tous les critères "
-        "par une nouvelle requête. SEARCH découvre ; BROWSE vérifie ; le gate qualifie.\n"
-        f"Le seuil {target} est un objectif MINIMAL DE MISSION, pas un quota à multiplier par sous-tâche. "
-        "N'inflate pas artificiellement la collecte (par ex. demander 10 signaux quand la mission en demande 3).\n"
-        "PLANIFICATION : concentre la découverte web chez SOUT. Les rôles aval doivent d'abord exploiter les artefacts "
-        "transmis et ne refaire une recherche que pour combler un manque précis, sans dupliquer un angle déjà tenté.\n"
+        "Cherche librement des preuves concrètes, adapte ton approche aux résultats, et ouvre les "
+        "sources importantes avec browse avant de conclure. Distingue ce que tu observes de ce que "
+        "tu infères ; n'invente aucune preuve.\n"
         "Ne construis rien et ne recommande pas encore un business : collecte et qualifie des signaux.\n"
     )
 
 
 def _business_signal_task_context(target: int, role: str) -> str:
+    """Contrat de mission + rappel des champs obligatoires, pour une sous-tâche."""
     role = str(role or "").upper()
     base = (
         _business_signal_contract(target)
-        + "\nPour chaque candidat retenu, conserve précisément buyer, pain, money_signal, evidence_url, "
-          "evidence_summary, buyer_evidence, pain_evidence, money_evidence, summary_evidence, "
-          "test_channel, test_offer et next_test. Si un champ manque, le candidat n'est pas qualifié."
+        + "\nPour chaque candidat retenu, conserve précisément buyer, pain, money_signal, "
+          "evidence_url, evidence_summary, buyer_evidence, pain_evidence, money_evidence, "
+          "summary_evidence, test_channel, test_offer et next_test. Si un champ manque, "
+          "le candidat n'est pas qualifié."
     )
     if role == "SOUT":
-        return (
-            base
-            + "\nTON RÔLE ICI : découverte. Trouve des URL candidates avec la stratégie progressive ci-dessus, "
-              "ouvre les pages prometteuses et conserve des preuves concrètes. Vise le seuil de mission, pas un quota "
-              "arbitrairement supérieur."
-        )
-    return (
-        base
-        + f"\nTON RÔLE ICI ({role or 'AVAL'}) : exploitation des preuves amont. Commence par les artefacts transmis ; "
-          "ne relance search que si un champ de preuve précis manque et qu'aucune page déjà ouverte ne permet de le vérifier. "
-          "Si aucune preuve exploitable n'existe, change d'angle avec une recherche progressive au lieu de répéter les mêmes "
-          "contraintes site/guillemets/année."
+        return base + ("\nTON RÔLE ICI : découverte. Ouvre les pages prometteuses et conserve "
+                       "des preuves concrètes.")
+    return base + (
+        f"\nTON RÔLE ICI ({role or 'AVAL'}) : exploitation des preuves amont. Réutilise d'abord "
+        "les artefacts transmis ; ne recherche que ce qui manque réellement."
     )
 
 _TRACKING_QUERY_KEYS = {
@@ -1197,6 +1219,10 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
             and tool == "search"
             and (allowed_tools is None or "browse" in allowed_tools)
         ):
+            # EXPERIMENTAL CONTROL — pas un principe architectural. Le lockstep force
+            # l'acquisition d'une URL réellement retournée par SEARCH (jamais inventée) afin
+            # de mesurer une chaîne de preuve. Il n'impose PAS une séquence cognitive : hors
+            # lockstep, l'agent reste libre d'ouvrir n'importe quelle URL quand il le juge bon.
             choice = _select_search_browse_candidate(
                 result,
                 str(args.get("query") or ""),
@@ -1328,6 +1354,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                  search_browse_selector: str = "first",
                  business_signal_focus: bool = False,
                  business_signal_target: int = 3) -> dict:
+    from .search import SEARCH_PURPOSE_BUSINESS, SEARCH_PURPOSE_GENERAL
     pro = deepseek.config.MODEL_PRO
     if cancel.requested():
         return {"plan": [], "results": [], "rapport": "(arrêt demandé)"}
@@ -1342,14 +1369,15 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         f"{business_signal_context}"
         "Utilise les rôles comme des responsabilités spécialisées, pas comme des workers interchangeables.\n\n"
         f"Rôles disponibles et responsabilités :\n{role_catalog}\n\n"
-        "Décompose l'objectif en 2 à 5 sous-tâches, chacune assignée à UN rôle dont la responsabilité "
+        "Décompose l'objectif en quelques sous-tâches, chacune assignée à UN rôle dont la responsabilité "
         "correspond réellement au travail demandé. N'assigne pas une tâche à un rôle seulement pour l'occuper "
         "et ne duplique pas la même collecte chez plusieurs rôles sans nécessité. "
         "Un même rôle peut recevoir plusieurs sous-tâches distinctes si elles relèvent de sa spécialité ; "
         "ne force jamais la diversité des rôles. "
         f"Chaque sous-tâche doit être réalisable en au plus {max_steps_per_agent} étapes ; si plusieurs pistes "
         "indépendantes demandent chacune plusieurs actions, répartis-les au lieu de surcharger un seul agent. "
-        "Si une sous-tâche aval dépend de découvertes d'une sous-tâche amont, rends cette dépendance explicite. "
+        "N'ajoute une tâche aval (offre, production, diffusion) que si un artefact amont exploitable existe "
+        "ou va exister : une mission sans preuve ne doit pas passer à la construction. "
         "Les artefacts utiles des étapes amont (recherches, pages ouvertes, observations et statuts) seront transmis "
         "automatiquement au sous-agent suivant : il doit les réutiliser avant de recommencer une collecte équivalente. "
         "Réponds en JSON : "
@@ -1360,7 +1388,8 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                                {"role": "user", "content": goal}],
                               reasoning="high")
     proposed = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
-    # Le prompt demande 2 à 5 sous-tâches : au-delà, chaque sous-tâche coûte une boucle ReAct complète.
+    # Garde-fou budgétaire, pas une consigne du prompt : au-delà de 5, chaque
+    # sous-tâche coûte une boucle ReAct complète de plus.
     tasks = [t for t in proposed if isinstance(t, dict)][:MAX_PLAN_TASKS]
     if len(proposed) > len(tasks):
         db.post("ORBIT", f"plan tronqué : {len(proposed)} sous-tâches proposées, {len(tasks)} gardées")
@@ -1395,14 +1424,18 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             if business_signal_focus and search_browse_selector == "evidence_relevance"
             else search_browse_selector
         )
-        r = run_agent(
-            role,
-            task,
-            max_steps=max_steps_per_agent,
-            allowed_tools=allowed_tools,
-            search_browse_lockstep=search_browse_lockstep,
-            search_browse_selector=effective_selector,
-        )
+        # L'intention de recherche se propage aux outils du sous-agent : elle choisit la
+        # politique de providers et isole le cache. Pas de nouveau paramètre d'outil.
+        purpose = (SEARCH_PURPOSE_BUSINESS if business_signal_focus else SEARCH_PURPOSE_GENERAL)
+        with search_purpose(purpose):
+            r = run_agent(
+                role,
+                task,
+                max_steps=max_steps_per_agent,
+                allowed_tools=allowed_tools,
+                search_browse_lockstep=search_browse_lockstep,
+                search_browse_selector=effective_selector,
+            )
         results.append({"role": role, "task": original,
                         "final": r.get("final"), "steps": r.get("steps")})
 
@@ -1412,13 +1445,11 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     signal_schema = ""
     if business_signal_focus:
         signal_schema = (
-            "\nMODE BUSINESS SIGNAL : ne retiens dans business_signals QUE les candidats satisfaisant tous les critères "
-            "du contrat. Les généralités macro, définitions et tendances sans acheteur/dépense doivent être absentes. "
-            "Chaque evidence_url doit être une URL effectivement acquise dans les étapes. "
-            "Fournis buyer_evidence, pain_evidence, money_evidence et summary_evidence : "
-            "citations exactes de 8 à 600 caractères du texte de cette même acquisition, "
-            "justifiant respectivement buyer, pain, money_signal et evidence_summary. "
-            "Le contrôle est littéral, non sémantique ; revue humaine nécessaire. "
+            "\nMODE BUSINESS SIGNAL : ne retiens dans business_signals QUE les candidats satisfaisant "
+            "tous les critères du contrat ci-dessus. Chaque evidence_url doit être une URL effectivement "
+            "acquise dans les étapes. Fournis buyer_evidence, pain_evidence, money_evidence et "
+            "summary_evidence : citations exactes de 8 à 600 caractères du texte de cette même "
+            "acquisition. Le contrôle est littéral, non sémantique ; revue humaine nécessaire.\n"
             "Réponds en JSON avec exactement la forme : "
             '{\"rapport\":\"...\",\"business_signals\":[{'
             '\"signal_type\":\"explicit_request|manual_work|procurement|job_demand|complaint|regulatory_deadline|paid_alternative|review_gap\",'
@@ -1435,6 +1466,8 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         "N'introduis aucun fait, chiffre, canal, ressource ou résultat absent des sous-tâches et de leurs résultats d'outils. "
         "Si un sous-agent affirme quelque chose sans preuve visible dans ses étapes, qualifie-le de non vérifié ou d'inférence, "
         "jamais de fait observé. "
+        # Source unique des critères : le contrat n'est pas recopié dans le schéma de sortie.
+        + (f"\n{_business_signal_contract(business_signal_target)}\n" if business_signal_focus else "")
         + signal_schema
         + (" Réponds en JSON : {\"rapport\":\"...\"}" if not business_signal_focus else "")
     )

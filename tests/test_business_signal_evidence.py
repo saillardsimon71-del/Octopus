@@ -223,11 +223,28 @@ def test_business_selector_site_constraint_and_ties():
     assert choice["distinct_overlap"] == 2
 
 
-def test_business_selector_does_not_override_dictionary_protection():
+def test_business_selector_honours_explicit_site_even_for_a_dictionary():
+    """Une contrainte `site:` explicite du LLM est respectée, jamais vetée par une liste d'hôtes.
+
+    L'ancienne règle `_LOW_EVIDENCE_HOSTS` pouvait refuser d'ouvrir un domaine que l'agent
+    avait explicitement demandé. La pertinence d'une page est jugée par le LLM ; le sélecteur
+    ne garde que la contrainte de domaine, qui est un contrat d'outil.
+    """
     result = ("- Automatisation factures\n  https://www.larousse.fr/dictionnaires/1\n"
               "  Automatisation factures")
+    choice = runtime._select_search_browse_candidate(
+        result, "automatisation factures site:larousse.fr", "business_signal_relevance")
+    assert choice is not None
+    assert choice["url"] == "https://www.larousse.fr/dictionnaires/1"
+    assert choice["site_match"] is True
+
+
+def test_business_selector_refuses_wrapper_hosts():
+    """Un hôte de redirection ne sert jamais la page de l'éditeur : invariants de browse."""
+    result = ("- Actualité automatisation factures\n  https://news.google.com/rss/articles/x\n"
+              "  Les PME automatisent leurs factures")
     assert runtime._select_search_browse_candidate(
-        result, "automatisation factures site:larousse.fr", "business_signal_relevance") is None
+        result, "automatisation factures PME", "business_signal_relevance") is None
 
 
 def test_gate_reads_full_acquisition_not_truncated_prompt():
