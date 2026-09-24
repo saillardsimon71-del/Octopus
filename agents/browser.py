@@ -141,6 +141,7 @@ class _MainTextParser(HTMLParser):
             return
         if self.title_depth:
             self.title_parts.append(text)
+            return
         if self.h1_depth:
             self.h1_parts.append(text)
         if not self.chrome_depth:
