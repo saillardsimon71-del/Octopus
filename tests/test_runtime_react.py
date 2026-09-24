@@ -614,6 +614,20 @@ def test_search_site_parameter_is_applied_and_filtered(monkeypatch):
     assert [item["url"] for item in items] == ["https://www.bpifrance.fr/barometre"]
 
 
+def test_embedded_site_operator_is_enforced_locally(monkeypatch):
+    monkeypatch.setattr(search.config, "BRAVE_API_KEY", "")
+    monkeypatch.setattr(search.config, "TAVILY_API_KEY", "")
+    monkeypatch.setattr(search, "_bing_web_items", lambda q, n: [
+        search._item("bing_web", "Cible", "https://stats.insee.fr/preuve", "Bing Web", "", "preuve"),
+        search._item("bing_web", "Hors cible", "https://example.com/bruit", "Bing Web", "", "bruit"),
+    ])
+    monkeypatch.setattr(search, "_bing_news_items", lambda q, n: [])
+
+    items, _ = search.search_items("chômage France site:insee.fr")
+
+    assert [item["url"] for item in items] == ["https://stats.insee.fr/preuve"]
+
+
 def test_runtime_search_declares_and_forwards_site(monkeypatch):
     calls = []
 
