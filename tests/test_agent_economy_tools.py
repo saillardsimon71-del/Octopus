@@ -506,13 +506,15 @@ def test_orbit_mission_business_signal_focus_reports_semantic_success(monkeypatc
     assert done["output"]["business_signal_result"] == {
         "metric": "qualified_business_signal_count",
         "observed": 1,
-        "target": 1,
+        "minimum_target": 1,
         "success": True,
         "rejected": 1,
         "scope": "semantic_gate",
         "note": (
-            "Signal qualifié = acheteur + douleur + signal monétaire/urgence + source ouverte "
-            "+ canal + offre testable + prochain test."
+            "success signifie uniquement que le seuil structurel de signaux qualifiés est atteint ; "
+            "ce n'est pas une preuve de demande, de conversion ni de revenu. "
+            "buyer/pain/money_signal/evidence_* doivent être ancrés dans la source ouverte ; "
+            "test_channel/test_offer/next_test sont des inférences proposées pour expérimentation."
         ),
     }
     assert done["output"]["experiment_flags"] == {
