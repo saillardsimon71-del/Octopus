@@ -109,6 +109,29 @@ def test_tool_gate_rejects_wrong_argument_type(monkeypatch):
     assert "args" not in result["steps"][0]
 
 
+def test_record_observation_ids_are_numeric_optional_database_ids():
+    invalid = runtime._validate_tool_args(
+        "record_observation",
+        {
+            "summary": "Contexte",
+            "observation": "Fait",
+            "experiment_id": "ORBIT",
+            "channel_id": "FORGE",
+        },
+    )
+    assert "argument experiment_id : type attendu int, reçu str" in invalid
+
+    valid = runtime._validate_tool_args(
+        "record_observation",
+        {"summary": "Contexte", "observation": "Fait"},
+    )
+    assert valid is None
+
+    desc = runtime.TOOLS["record_observation"]["desc"]
+    assert "identifiants NUMÉRIQUES" in desc
+    assert "s'ils sont inconnus, omets-les" in desc
+
+
 def test_agent_profiles_have_omniroute_auto_free_fallback(monkeypatch):
     monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
     monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
@@ -124,6 +147,7 @@ def test_agent_profiles_have_omniroute_auto_free_fallback(monkeypatch):
 
     assert cat.model("kilo/auto-free")["api_model"] == "kilo-auto/free"
     assert cat.model("kilo/ling-3.0-flash-vl-free") is None
+    assert cat.task("web.inspect_page")["needs"] == []
 
 
 def test_mission_profile_is_inherited_by_all_llm_calls(monkeypatch):
