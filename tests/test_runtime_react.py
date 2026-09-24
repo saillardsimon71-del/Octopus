@@ -88,7 +88,12 @@ def test_lockstep_forces_browse_of_first_returned_search_url(monkeypatch):
     assert len(calls) == 2
 
 
-def test_evidence_selector_prefers_relevant_official_result_over_dictionary():
+def test_evidence_selector_prefers_relevant_result_over_dictionary():
+    """Le sélecteur classe par recouvrement lexical, pas par liste d'hôtes privilégiés.
+
+    Le dictionnaire perd simplement parce qu'il ne partage aucun mot avec la requête :
+    aucun bonus de source officielle n'est nécessaire pour obtenir ce classement.
+    """
     result = (
         "- Définitions : problème - Dictionnaire Larousse\n"
         "  https://www.larousse.fr/dictionnaires/francais/probleme/64046\n"
@@ -106,8 +111,7 @@ def test_evidence_selector_prefers_relevant_official_result_over_dictionary():
 
     assert choice["url"] == "https://www.insee.fr/fr/statistiques/1234567"
     assert choice["rank"] == 2
-    assert choice["official"] is True
-    assert choice["low_evidence"] is False
+    assert choice["score"] > 0
 
 
 def test_evidence_selector_respects_explicit_site_constraint():
@@ -186,7 +190,6 @@ def test_business_signal_selector_accepts_specific_transactional_candidate():
 
     assert choice["url"] == "https://example.com/jobs/data-analyst-reporting"
     assert choice["title_overlap"] >= 2
-    assert choice["root_homepage"] is False
 
 
 def test_business_signal_focus_upgrades_evidence_selector_for_subagents(monkeypatch):
@@ -392,7 +395,12 @@ def test_record_observation_ids_are_numeric_optional_database_ids():
     assert "S'ils sont inconnus, omets ces champs" in system
 
 
-def test_generic_agent_prompt_includes_current_date_and_search_freshness(monkeypatch):
+def test_generic_agent_prompt_states_the_date_without_engineering_the_query(monkeypatch):
+    """La date est connue du système ; elle ne dicte plus l'écriture de la requête.
+
+    L'ancienne consigne « privilégie {année} » contredisait le contrat business
+    (« n'ajoute pas l'année par défaut ») et a produit les requêtes du run #63.
+    """
     monkeypatch.setattr(runtime, "_today_iso", lambda: "2026-09-24")
 
     with journal.run("octopus", "agent"):
@@ -403,9 +411,10 @@ def test_generic_agent_prompt_includes_current_date_and_search_freshness(monkeyp
         )
 
     assert "DATE ACTUELLE : 2026-09-24" in system
-    assert "privilégie 2026" in system
-    assert "n'utilise pas une année antérieure comme substitut implicite du présent" in system
-    assert 'site="insee.fr"' in system
+    # Aucune prescription de rédaction de requête n'est déduite de la date.
+    assert "privilégie" not in system
+    assert "substitut implicite du présent" not in system
+    assert "site=" not in system
 
 
 def test_legacy_podalux_prompt_does_not_change_with_search_freshness(monkeypatch):
@@ -486,23 +495,45 @@ def test_mission_planner_receives_generic_role_contracts(monkeypatch):
     assert "artefacts utiles des étapes amont" in system
     assert "transmis automatiquement" in system
     assert "DATE ACTUELLE : 2026-09-24" in system
-    assert "privilégie 2026" in system
+    assert "privilégie" not in system
     assert runtime.ROLES["FORGE"] not in system
 
 
 
-def test_business_signal_contract_uses_progressive_search_and_realistic_target():
+def test_business_signal_contract_states_objectives_not_search_procedure():
+    """Le contrat dit QUOI chercher, jamais COMMENT formuler une requête.
+
+    Ces assertions protègent la frontière : un prompt qui réapprend à chercher au LLM
+    (nombre de termes, année, `site:`, guillemets, séquence de reformulation) est une
+    régression d'architecture, pas une amélioration.
+    """
     contract = runtime._business_signal_contract(3)
 
-    assert "cherche d'abord des URL candidates" in contract
-    assert "n'exige PAS que le mot 'budget' apparaisse dans search" in contract
-    assert "n'ajoute pas l'année courante par défaut" in contract
-    assert "utilise site= en deuxième intention" in contract
-    assert "zéro URL exploitable ou seulement une homepage générique" in contract
-    assert "SEARCH découvre ; BROWSE vérifie ; le gate qualifie" in contract
-    assert "objectif MINIMAL DE MISSION" in contract
-    assert "demander 10 signaux quand la mission en demande 3" in contract
-    assert "concentre la découverte web chez SOUT" in contract
+    # Critères de résultat conservés.
+    assert "acheteur/segment identifiable" in contract
+    assert "signal monétaire ou d'urgence" in contract
+    assert "canal réaliste" in contract
+    assert "prochain test faisable rapidement" in contract
+    assert "extraits littéraux de 8 à 600 caractères" in contract
+    assert "revue humaine nécessaire" in contract
+    assert "Distingue ce que tu observes de ce que tu infères" in contract
+    assert "Seuil minimal visé : 3 signaux qualifiés" in contract
+
+    # Micro-management cognitif interdit.
+    for prescription in (
+        "2 à 5 termes",           # longueur de requête
+        "budget",                 # mot imposé / interdit
+        "année courante",         # année ajoutée ou retirée
+        "deuxième intention",     # quand utiliser site:
+        "guillemets",             # ponctuation de requête
+        "retire site",            # séquence conditionnelle de reformulation
+        "change d'angle",         # séquence conditionnelle de reformulation
+        "SEARCH découvre",        # séquence cognitive figée
+        "commence par une requête",
+        "élargis immédiatement",
+        "concentre la découverte web chez SOUT",
+    ):
+        assert prescription not in contract, f"prescription de recherche reintroduite : {prescription}"
 
 
 def test_business_signal_task_context_separates_discovery_from_downstream_analysis():
@@ -510,10 +541,12 @@ def test_business_signal_task_context_separates_discovery_from_downstream_analys
     convert = runtime._business_signal_task_context(3, "CONVERT")
 
     assert "TON RÔLE ICI : découverte" in sout
-    assert "Vise le seuil de mission" in sout
     assert "TON RÔLE ICI (CONVERT) : exploitation des preuves amont" in convert
-    assert "Commence par les artefacts transmis" in convert
-    assert "ne relance search que si un champ de preuve précis manque" in convert
+    # Le rappel porte sur la réutilisation des artefacts, pas sur une méthode de recherche.
+    assert "Réutilise d'abord" in convert
+    assert "ne recherche que ce qui manque réellement" in convert
+    for prescription in ("2 à 5 termes", "année", "site:", "guillemets"):
+        assert prescription not in sout + convert
 
 
 def _acquired_signal_step(requested, final, text):
@@ -696,7 +729,9 @@ def test_business_signal_focus_reaches_planner_agent_and_synthesis(monkeypatch):
 
     synthesis = next(messages for _, task, messages in calls if task == "synthese")
     assert "business_signals" in synthesis[0]["content"]
-    assert "Les généralités macro" in synthesis[0]["content"]
+    # La synthèse reçoit le contrat lui-même (source unique), pas une recopie de ses critères.
+    assert "acheteur/segment identifiable" in synthesis[0]["content"]
+    assert "À REJETER" in synthesis[0]["content"]
 
 
 def test_mission_handoff_keeps_upstream_artifacts_when_agent_hits_max_steps(monkeypatch):
