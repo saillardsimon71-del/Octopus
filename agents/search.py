@@ -68,7 +68,11 @@ def site_constraints(query: str, site: str | None = None) -> list[str]:
 def effective_query(query: str, site: str | None = None) -> str:
     q = re.sub(r"\s+", " ", str(query or "")).strip()
     domain = normalize_site(site)
-    if domain and domain not in site_constraints(q):
+    if domain:
+        # Le champ structuré site est autoritaire : évite "site:a site:b" si le LLM
+        # a laissé un ancien opérateur dans query.
+        q = re.sub(r"(?i)\bsite:[^\s()]+", " ", q)
+        q = re.sub(r"\s+", " ", q).strip()
         q = f"{q} site:{domain}".strip()
     return q
 
