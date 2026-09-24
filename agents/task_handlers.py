@@ -94,6 +94,10 @@ def _mission_tool_trace(results, *, tools=("search", "browse"), result_chars=120
                 "args": step.get("args") if isinstance(step.get("args"), dict) else {},
                 "result": str(step.get("result") or "")[:result_chars],
             }
+            if isinstance(step.get("result_urls"), list):
+                item["result_urls"] = list(step["result_urls"])
+            if isinstance(step.get("browse_meta"), dict):
+                item["browse_meta"] = dict(step["browse_meta"])
             if step.get("lockstep_forced"):
                 item["lockstep_forced"] = True
             trace.append(item)
@@ -159,9 +163,17 @@ def _mission_trace_summary(results) -> dict:
                 if query:
                     search_queries.append(query)
                     search_query_keys.append(query_key(query))
-                result_text = _trace_result_text(step.get("result"))
-                for url in re.findall(r"https?://[^\s\]\[<>()\"']+", result_text):
-                    search_url_roles.setdefault(url.rstrip(".,;:"), set()).add(role)
+                explicit_urls = step.get("result_urls")
+                if isinstance(explicit_urls, list):
+                    urls = [str(url).strip() for url in explicit_urls if str(url).strip()]
+                else:
+                    result_text = _trace_result_text(step.get("result"))
+                    urls = [
+                        url.rstrip(".,;:")
+                        for url in re.findall(r"https?://[^\s\]\[<>()\"']+", result_text)
+                    ]
+                for url in urls:
+                    search_url_roles.setdefault(url, set()).add(role)
             elif tool == "browse":
                 url = str(args.get("url") or "").strip()
                 if step.get("lockstep_forced"):
@@ -196,6 +208,8 @@ _BROWSE_BLOCK_MARKERS = (
     "security service to protect against malicious bots",
     "just a moment",
     "access denied",
+    "403 error",
+    "request blocked",
     "captcha",
     "chrome-error://",
 )
@@ -208,21 +222,30 @@ def _usable_browse_urls(results) -> list[str]:
         for step in subtask.get("steps") or []:
             if step.get("tool") != "browse":
                 continue
-            raw = str(step.get("result") or "").strip()
-            if not raw or raw.lower().startswith("erreur :"):
-                continue
-            try:
-                payload = json.loads(raw)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            url = str(payload.get("url") or (step.get("args") or {}).get("url") or "").strip()
-            text = str(payload.get("texte") or "").strip()
-            lowered = f"{url}\n{text}".lower()
-            if not url.startswith(("http://", "https://")) or len(text) < 80:
-                continue
-            if any(marker in lowered for marker in _BROWSE_BLOCK_MARKERS):
+
+            meta = step.get("browse_meta")
+            if isinstance(meta, dict):
+                url = str(meta.get("url") or (step.get("args") or {}).get("url") or "").strip()
+                text_chars = int(meta.get("text_chars") or 0)
+                blocked = bool(meta.get("blocked"))
+            else:
+                # Compatibilité avec les anciennes traces qui ne contiennent pas encore browse_meta.
+                raw = str(step.get("result") or "").strip()
+                if not raw or raw.lower().startswith("erreur :"):
+                    continue
+                try:
+                    payload = json.loads(raw)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                url = str(payload.get("url") or (step.get("args") or {}).get("url") or "").strip()
+                text = str(payload.get("texte") or "").strip()
+                lowered = f"{url}\n{text}".lower()
+                text_chars = len(text)
+                blocked = any(marker in lowered for marker in _BROWSE_BLOCK_MARKERS)
+
+            if not url.startswith(("http://", "https://")) or text_chars < 80 or blocked:
                 continue
             if url not in usable:
                 usable.append(url)

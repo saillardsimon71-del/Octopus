@@ -103,6 +103,30 @@ def test_lockstep_does_not_invent_browse_when_search_returns_no_url(monkeypatch)
     assert "lockstep_forced" not in result["steps"][0]
 
 
+def test_lockstep_search_failure_does_not_reuse_stale_result(monkeypatch):
+    def fail(args):
+        raise RuntimeError("moteur indisponible")
+
+    monkeypatch.setitem(runtime.TOOLS["search"], "fn", fail)
+    scripted(monkeypatch, [
+        {"tool": "search", "args": {"query": "preuve"}},
+        {"final": "échec explicite"},
+    ])
+
+    result = runtime.run_agent(
+        "SOUT",
+        "collecter",
+        max_steps=3,
+        allowed_tools={"search", "browse"},
+        search_browse_lockstep=True,
+    )
+
+    assert result["steps"][0]["tool"] == "search"
+    assert "moteur indisponible" in result["steps"][0]["result"]
+    assert result["steps"][0]["result_urls"] == []
+    assert all(step["tool"] != "browse" for step in result["steps"])
+
+
 def test_mission_subagents_share_the_search_cache(monkeypatch, web):
     actions = iter([
         {"tasks": [{"role": "SOUT", "task": "a"}, {"role": "ORBIT", "task": "b"}]},
