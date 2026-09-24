@@ -484,13 +484,19 @@ class BrowserTool:
         return self._page.url
 
     def wait_for_public_render(self, min_chars: int = PUBLIC_MIN_TEXT_CHARS, timeout_ms: int = 5000) -> None:
-        """Attend brièvement le rendu utile, sans exiger networkidle (souvent jamais atteint)."""
+        """Attend brièvement le contenu principal, pas seulement un menu déjà présent au DOMContentLoaded."""
         try:
+            self._page.wait_for_timeout(min(350, int(timeout_ms)))
             self._page.wait_for_function(
-                "(minChars) => document.body && document.body.innerText.trim().length >= minChars",
+                """(minChars) => {
+                    const primary = document.querySelector('main, article, [role="main"]');
+                    const node = primary || document.body;
+                    return !!node && node.innerText.trim().length >= minChars;
+                }""",
                 arg=int(min_chars),
-                timeout=int(timeout_ms),
+                timeout=max(250, int(timeout_ms) - 350),
             )
+            self._page.wait_for_timeout(150)
         except Exception:
             try:
                 self._page.wait_for_timeout(min(750, int(timeout_ms)))
