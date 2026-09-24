@@ -200,7 +200,7 @@ def _mission_trace_summary(results) -> dict:
         if subtask.get("final") == "(max steps atteint)":
             max_steps_roles.append(role)
     searches = totals["search"]
-    return {
+    summary = {
         "totals": totals,
         "browse_search_ratio": (totals["browse"] / searches) if searches else None,
         "by_role": by_role,
@@ -211,9 +211,12 @@ def _mission_trace_summary(results) -> dict:
         "browsed_from_search": browsed_from_search,
         "cross_role_browsed_from_search": cross_role_browsed_from_search,
         "lockstep_forced_browses": lockstep_forced_browses,
-        "lockstep_selected_ranks": lockstep_selected_ranks,
-        "lockstep_selector_counts": lockstep_selector_counts,
     }
+    if lockstep_selected_ranks:
+        summary["lockstep_selected_ranks"] = lockstep_selected_ranks
+    if lockstep_selector_counts:
+        summary["lockstep_selector_counts"] = lockstep_selector_counts
+    return summary
 
 
 _BROWSE_BLOCK_MARKERS = (
