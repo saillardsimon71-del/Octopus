@@ -122,8 +122,8 @@ class FakeBrowser:
     def url(self):
         return self._url
 
-    def snapshot(self):
-        return self.PAGES.get(self._url, "")
+    def snapshot(self, max_chars=4000):
+        return self.PAGES.get(self._url, "")[:max_chars]
 
     def see(self, agent="SOUT"):
         return {"description": "capture"}
