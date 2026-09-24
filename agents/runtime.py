@@ -930,7 +930,14 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         if tool in {"search", "browse"}:
             step_record["args"] = dict(args)
             if result is not None:
-                step_record["result_data"] = result
+                if tool == "browse" and isinstance(result, dict) and isinstance(result.get("page"), dict):
+                    step_record["result_data"] = {
+                        "url": result.get("url"),
+                        "source": result.get("source"),
+                        "page": result["page"],
+                    }
+                else:
+                    step_record["result_data"] = result
         if tool == "search":
             step_record["result_urls"] = _search_result_urls(result)
         elif tool == "browse" and result is not None:
