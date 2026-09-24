@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from agents import browser, runtime
+from agents import browser, runtime, web_guard
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "web_pages.json"
@@ -201,6 +201,58 @@ def test_structured_page_record_survives_agent_step_while_prompt_is_compact(monk
     assert step["browse_meta"]["text_chars"] == len(text)
     assert len(step["result"]) < len(text)
     assert "extraction_method" in step["result"]
+
+
+def test_blocked_or_empty_public_page_is_not_marked_as_visited(monkeypatch):
+    url = "https://example.com/blocked"
+    blocked = browser.PublicPageRecord(
+        requested_url=url,
+        final_url=url,
+        fetched_at="2026-09-24T00:00:00+00:00",
+        http_status=403,
+        content_type="text/html",
+        title="Access denied",
+        extraction_method="http:html_body",
+        rendered=False,
+        blocked=True,
+        main_text="Request blocked",
+        text_chars=len("Request blocked"),
+        raw_chars=200,
+        truncated=False,
+        error="http_status_403",
+    )
+    monkeypatch.setattr(browser, "acquire_public_page", lambda *a, **k: blocked)
+
+    with web_guard.session():
+        result = runtime._browse({"url": url})
+        assert result["page"]["blocked"] is True
+        assert url not in web_guard.current().visited
+
+
+def test_usable_public_page_is_marked_as_visited(monkeypatch):
+    url = "https://example.com/usable"
+    text = "preuve factuelle exploitable " * 20
+    usable = browser.PublicPageRecord(
+        requested_url=url,
+        final_url=url,
+        fetched_at="2026-09-24T00:00:00+00:00",
+        http_status=200,
+        content_type="text/html",
+        title="Preuve",
+        extraction_method="http:html_main",
+        rendered=False,
+        blocked=False,
+        main_text=text,
+        text_chars=len(text),
+        raw_chars=len(text),
+        truncated=False,
+        error=None,
+    )
+    monkeypatch.setattr(browser, "acquire_public_page", lambda *a, **k: usable)
+
+    with web_guard.session():
+        runtime._browse({"url": url})
+        assert url in web_guard.current().visited
 
 
 def test_synthesis_projection_drops_full_structured_payload():
