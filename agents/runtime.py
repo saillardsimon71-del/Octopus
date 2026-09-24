@@ -98,6 +98,13 @@ _SEARCH_RELEVANCE_STOPWORDS = {
     "probleme", "problemes", "besoin", "besoins", "client", "clients", "economique",
     "economiques", "rapport", "source", "officiel", "officielle", "officielles",
 }
+_BUSINESS_SIGNAL_RELEVANCE_STOPWORDS = {
+    "appel", "mission", "free", "work",
+}
+_BUSINESS_SIGNAL_NOISE_TITLE_WORDS = {
+    "definition", "definitions", "dictionnaire", "film", "wikipedia", "wiktionnaire",
+}
+
 _LOW_EVIDENCE_HOSTS = {
     "fr.wikipedia.org",
     "www.larousse.fr",
@@ -193,6 +200,10 @@ def _search_relevance_tokens(query: str) -> set[str]:
     }
 
 
+def _business_signal_relevance_tokens(query: str) -> set[str]:
+    return _search_relevance_tokens(query) - _BUSINESS_SIGNAL_RELEVANCE_STOPWORDS
+
+
 def _host_matches_site(host: str, site: str) -> bool:
     host = host.lower().removeprefix("www.")
     site = site.lower().removeprefix("www.").strip(".")
@@ -206,14 +217,18 @@ def _select_search_browse_candidate(value, query: str, selector: str = "first") 
         return None
     if selector == "first":
         return {"url": candidates[0]["url"], "selector": "first", "rank": 1, "score": None}
-    if selector != "evidence_relevance":
+    if selector not in {"evidence_relevance", "business_signal_relevance"}:
         raise ValueError(f"search_browse_selector inconnu : {selector}")
 
     required_sites = [
         site.rstrip(".,;:)")
         for site in re.findall(r"\bsite:([^\s]+)", str(query), flags=re.I)
     ]
-    tokens = _search_relevance_tokens(query)
+    tokens = (
+        _business_signal_relevance_tokens(query)
+        if selector == "business_signal_relevance"
+        else _search_relevance_tokens(query)
+    )
     scored = []
     for rank, candidate in enumerate(candidates, start=1):
         url = candidate["url"]
@@ -223,6 +238,15 @@ def _select_search_browse_candidate(value, query: str, selector: str = "first") 
         title_overlap = len(tokens & title_words)
         context_overlap = len(tokens & context_words)
         score = title_overlap * 4 + context_overlap
+        business_noise = False
+        root_homepage = False
+        if selector == "business_signal_relevance":
+            business_noise = bool(_BUSINESS_SIGNAL_NOISE_TITLE_WORDS & title_words)
+            root_homepage = urlparse(url).path in {"", "/"}
+            if business_noise:
+                score -= 20
+            if root_homepage:
+                score -= 3
 
         site_match = None
         if required_sites:
@@ -246,6 +270,8 @@ def _select_search_browse_candidate(value, query: str, selector: str = "first") 
             "official": official,
             "low_evidence": low_evidence,
             "site_match": site_match,
+            "business_noise": business_noise,
+            "root_homepage": root_homepage,
         })
 
     best = max(scored, key=lambda item: (item["score"], -item["rank"]))
@@ -255,6 +281,12 @@ def _select_search_browse_candidate(value, query: str, selector: str = "first") 
     # Évite les dictionnaires/Wikipedia ou collisions lexicales sans signal de pertinence.
     if best["score"] <= 0:
         return None
+    if selector == "business_signal_relevance":
+        overlap = int(best["title_overlap"]) + int(best["context_overlap"])
+        # Un unique mot ambigu ne suffit jamais à déclencher un browse forcé.
+        # On préfère reformuler search plutôt qu'ouvrir automatiquement Apple/AlloCiné/homepages.
+        if best["business_noise"] or overlap < 2:
+            return None
     return best
 
 
@@ -1000,7 +1032,7 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
     `conversational=True` → l'agent répond à un message humain (pas un objectif).
     """
     allowed_tools = _normalize_allowed_tools(allowed_tools)
-    if search_browse_selector not in {"first", "evidence_relevance"}:
+    if search_browse_selector not in {"first", "evidence_relevance", "business_signal_relevance"}:
         raise ValueError(f"search_browse_selector inconnu : {search_browse_selector}")
     with journal.run(_business(business), "agent", label=f"{role} : {goal}",
                      budget_usd=deepseek.config.CYCLE_BUDGET_USD):
@@ -1107,7 +1139,7 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
                         f"Sélecteur={choice['selector']}, rang={choice['rank']}, URL imposée : {lockstep_url}"
                     ),
                 })
-            elif search_browse_selector == "evidence_relevance":
+            elif search_browse_selector in {"evidence_relevance", "business_signal_relevance"}:
                 context.append({
                     "role": "user",
                     "content": (
@@ -1169,7 +1201,7 @@ def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None
     Le profil explicite est hérité par les runs agents imbriqués via le journal.
     """
     allowed_tools = _normalize_allowed_tools(allowed_tools)
-    if search_browse_selector not in {"first", "evidence_relevance"}:
+    if search_browse_selector not in {"first", "evidence_relevance", "business_signal_relevance"}:
         raise ValueError(f"search_browse_selector inconnu : {search_browse_selector}")
     with journal.run(_business(business), "mission", label=goal, budget_usd=deepseek.config.CYCLE_BUDGET_USD,
                      profile=profile):
@@ -1284,13 +1316,18 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                 f"{json.dumps(handoff, ensure_ascii=False)}"
             )
         db.post(role, f"sous-tâche : {original[:80]}")
+        effective_selector = (
+            "business_signal_relevance"
+            if business_signal_focus and search_browse_selector == "evidence_relevance"
+            else search_browse_selector
+        )
         r = run_agent(
             role,
             task,
             max_steps=max_steps_per_agent,
             allowed_tools=allowed_tools,
             search_browse_lockstep=search_browse_lockstep,
-            search_browse_selector=search_browse_selector,
+            search_browse_selector=effective_selector,
         )
         results.append({"role": role, "task": original,
                         "final": r.get("final"), "steps": r.get("steps")})
