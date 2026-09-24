@@ -264,18 +264,75 @@ _BROWSE_BLOCK_MARKERS = (
 
 
 def _browse_result_meta(value) -> dict | None:
-    """Métadonnées compactes calculées AVANT toute troncature de trace."""
+    """Métadonnées compactes issues de l'objet de page structuré, jamais d'un JSON tronqué."""
     if not isinstance(value, dict):
         return None
-    url = str(value.get("url") or "").strip()
-    text = str(value.get("texte") or "")
+    page = value.get("page") if isinstance(value.get("page"), dict) else value
+    url = str(page.get("final_url") or value.get("url") or "").strip()
+    text = str(page.get("main_text") or value.get("texte") or "")
     lowered = f"{url}\n{text}".lower()
     return {
         "url": url,
-        "text_chars": len(text),
-        "blocked": any(marker in lowered for marker in _BROWSE_BLOCK_MARKERS),
+        "text_chars": int(page.get("text_chars") or len(text)),
+        "blocked": bool(page.get("blocked")) or any(marker in lowered for marker in _BROWSE_BLOCK_MARKERS),
         "vision_error": bool(value.get("vision_error")),
+        "extraction_method": str(page.get("extraction_method") or ""),
+        "rendered": bool(page.get("rendered")),
+        "http_status": page.get("http_status"),
+        "error": page.get("error"),
     }
+
+
+def _tool_result_view(tool: str, result, max_chars: int | None = None) -> str:
+    """Vue courte destinée au prompt ; l'objet structuré source reste intact à côté."""
+    if tool == "browse" and isinstance(result, dict):
+        page = result.get("page") if isinstance(result.get("page"), dict) else result
+        text = str(page.get("main_text") or result.get("texte") or "")
+        limit = 6000 if max_chars is None else max(200, int(max_chars))
+        payload = {
+            "url": str(page.get("final_url") or result.get("url") or ""),
+            "title": str(page.get("title") or ""),
+            "fetched_at": page.get("fetched_at"),
+            "http_status": page.get("http_status"),
+            "extraction_method": page.get("extraction_method"),
+            "rendered": bool(page.get("rendered")),
+            "blocked": bool(page.get("blocked")),
+            "error": page.get("error"),
+            "text_chars": int(page.get("text_chars") or len(text)),
+            "texte": text[:limit],
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    raw = json.dumps(result, ensure_ascii=False)
+    limit = max_chars if max_chars is not None else (6000 if tool == "search" else 1500)
+    return raw[:int(limit)]
+
+
+def _mission_prompt_results(results: list[dict]) -> list[dict]:
+    """Projection bornée pour la synthèse : jamais les payloads structurés complets."""
+    projected = []
+    for subtask in results or []:
+        steps = []
+        for step in subtask.get("steps") or []:
+            item = {
+                "step": step.get("step"),
+                "tool": step.get("tool"),
+                "result": str(step.get("result") or ""),
+            }
+            if isinstance(step.get("args"), dict):
+                item["args"] = dict(step["args"])
+            if isinstance(step.get("browse_meta"), dict):
+                item["browse_meta"] = dict(step["browse_meta"])
+            if isinstance(step.get("result_urls"), list):
+                item["result_urls"] = list(step["result_urls"])
+            steps.append(item)
+        projected.append({
+            "role": subtask.get("role"),
+            "task": subtask.get("task"),
+            "final": subtask.get("final"),
+            "steps": steps,
+        })
+    return projected
 
 
 def _browser_request_allowed(url: str, state, *, account_context: bool) -> bool:
@@ -294,16 +351,38 @@ def _browser_request_allowed(url: str, state, *, account_context: bool) -> bool:
 
 
 def _browse(args):
-    """Web public : contexte éphémère sans cookies. Comptes : profil connecté, visible, lecture seule."""
+    """Public : HTTP-first + extraction ; comptes : Chromium connecté, lecture seule."""
     from . import browser
     state = web_guard.current()
     url = str(args.get("url", ""))
     kind = web_guard.check(url, state)
     account = kind == web_guard.ACCOUNT
+
+    if not account:
+        record = browser.acquire_public_page(
+            url,
+            guard=lambda u: _browser_request_allowed(u, state, account_context=False),
+        ).as_dict()
+        final = str(record.get("final_url") or url)
+        if (
+            not record.get("blocked")
+            and not record.get("error")
+            and int(record.get("text_chars") or 0) >= browser.PUBLIC_MIN_TEXT_CHARS
+        ):
+            web_guard.record(final, web_guard.PUBLIC, state)
+        return {
+            "url": final,
+            "source": web_guard.UNTRUSTED_NOTE,
+            "texte": str(record.get("main_text") or ""),
+            "page": record,
+            "vision": None,
+            "vision_error": None,
+        }
+
     b = browser.new_browser(
-        headless=not account,
-        account=account,
-        guard=lambda u: _browser_request_allowed(u, state, account_context=account),
+        headless=False,
+        account=True,
+        guard=lambda u: _browser_request_allowed(u, state, account_context=True),
     )
     try:
         try:
@@ -315,10 +394,14 @@ def _browse(args):
         final = b.url()
         final_kind = web_guard.classify(final)
         web_guard.record(final, final_kind, state)
-        source = "compte connecté (lecture seule)" if final_kind == web_guard.ACCOUNT else web_guard.UNTRUSTED_NOTE
         seen = b.see(agent=_ROLE.get())
-        return {"url": final, "source": source, "texte": b.snapshot()[:1500],
-                "vision": seen["description"], "vision_error": seen.get("vision_error")}
+        return {
+            "url": final,
+            "source": "compte connecté (lecture seule)",
+            "texte": b.snapshot(6000),
+            "vision": seen["description"],
+            "vision_error": seen.get("vision_error"),
+        }
     finally:
         b.stop()
 
@@ -783,12 +866,12 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         result = None
         if refusal is not None:
             result = {"refused": True, "tool": tool, "reason": refusal}
-            result_str = json.dumps(result, ensure_ascii=False)
+            result_str = _tool_result_view(tool, result)
             db.post(role, f"refus outil {tool} : {refusal}")
         else:
             try:
                 result = TOOLS[tool]["fn"](args)
-                result_str = json.dumps(result, ensure_ascii=False)[:1500]
+                result_str = _tool_result_view(tool, result)
             except cancel.Cancelled:
                 db.post(role, "arrêt demandé par l'humain — fin de l'agent")
                 return {"role": role, "steps": steps, "final": "(arrêt demandé)"}
@@ -841,10 +924,12 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         if refusal is None:
             db.post(role, f"action {tool} {json.dumps(args, ensure_ascii=False)[:90]}")
         context.append({"role": "user", "content": f"Résultat de {tool} : {result_str}"})
-        # La synthèse de mission doit voir assez de preuve brute pour ne pas combler les trous par invention.
-        step_record = {"step": i + 1, "tool": tool, "result": result_str[:1500]}
+        # Le résultat structuré reste intact ; result n'est qu'une vue de prompt bornée.
+        step_record = {"step": i + 1, "tool": tool, "result": result_str}
         if tool in {"search", "browse"}:
             step_record["args"] = dict(args)
+            if result is not None:
+                step_record["result_data"] = result
         if tool == "search":
             step_record["result_urls"] = _search_result_urls(result)
         elif tool == "browse" and result is not None:
@@ -896,10 +981,15 @@ def _handoff_payload(result: dict) -> dict:
         tool = str(step.get("tool") or "")
         if tool not in _HANDOFF_TOOLS:
             continue
+        data = step.get("result_data")
         artifacts.append({
             "step": step.get("step"),
             "tool": tool,
-            "result": str(step.get("result") or "")[:1200],
+            "result": (
+                _tool_result_view(tool, data, max_chars=1200)
+                if data is not None
+                else str(step.get("result") or "")[:1200]
+            ),
         })
     return {
         "role": str(result.get("role") or ""),
@@ -992,7 +1082,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     )
     synthesis_input = {
         "objectif_original": goal,
-        "resultats_sous_taches": results,
+        "resultats_sous_taches": _mission_prompt_results(results),
     }
     try:
         syn = deepseek.call_json("ORBIT", "synthese", pro,
