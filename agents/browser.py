@@ -681,6 +681,40 @@ def new_browser(headless: bool = False, account: bool = False, guard=None) -> Br
     return BrowserTool(headless=headless, persistent=account, guard=guard).start()
 
 
+def _persistent_context_cookies(url: str, profile_dir: Path) -> list:
+    """Cookies que le profil connecté persistant enverrait à `url` (lecture sans navigation)."""
+    from playwright.sync_api import sync_playwright
+    pw = sync_playwright().start()
+    try:
+        context = pw.chromium.launch_persistent_context(
+            str(profile_dir), headless=True,
+            viewport={"width": 1280, "height": 800}, service_workers="block")
+        try:
+            return list(context.cookies(url))
+        finally:
+            context.close()
+    finally:
+        pw.stop()
+
+
+def profile_has_cookies(url: str, profile_dir: Path | None = None) -> bool:
+    """Vrai si le profil connecté persistant détient des cookies pour l'origine de `url`.
+
+    Frontière entre « domaine capable d'héberger un compte » et « acquisition réellement
+    authentifiée » : sans cookie pour une origine, aucun serveur ne peut rattacher la
+    requête à un compte — l'acquisition est alors anonyme par construction et ne doit pas
+    tainter la mission. Fail-closed : si la vérification est impossible (profil verrouillé,
+    Chromium absent), on suppose une session et le comportement historique s'applique.
+    """
+    profile_dir = profile_dir or (config.DATA_DIR / "browser_profile")
+    if not profile_dir.exists():
+        return False  # profil jamais créé : preuve solide d'absence de session
+    try:
+        return bool(_persistent_context_cookies(str(url), profile_dir))
+    except Exception:
+        return True
+
+
 _shared: BrowserTool | None = None
 
 

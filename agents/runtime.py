@@ -19,7 +19,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
 from octopus import journal, llm
 
-from . import cancel, db, deepseek, web_guard
+from . import cancel, config, db, deepseek, web_guard
 
 _ROLE: contextvars.ContextVar[str] = contextvars.ContextVar("podalux_role", default="RUNTIME")
 _SEARCHES: contextvars.ContextVar[dict | None] = contextvars.ContextVar("podalux_searches", default=None)
@@ -417,19 +417,30 @@ def _mission_prompt_results(results: list[dict]) -> list[dict]:
     return projected
 
 
-def _browser_request_allowed(url: str, state, *, account_context: bool) -> bool:
+def _browser_request_allowed(url: str, state, *, account_context: bool,
+                             anonymous_account_domains=()) -> bool:
     """Isole les sous-requêtes publiques des vrais comptes connectés.
 
     Un navigateur public est éphémère et sans cookies : une pub/embed vers un domaine classé
     ACCOUNT ne doit ni être chargée dans ce contexte ni marquer toute la mission account_read.
     Le navigateur connecté conserve, lui, le garde-fou historique qui taint immédiatement la session.
+    `anonymous_account_domains` couvre le cas où le document principal demandé est un domaine
+    de compte dont l'absence de session a été prouvée (aucun cookie persisté pour l'origine) :
+    la navigation y est anonyme par construction, jamais un taint. Dès qu'une vraie lecture de
+    compte a eu lieu, le garde anti-fuite historique reprend sans exception.
     """
     if account_context:
         return web_guard.allowed(url, state)
     try:
-        return web_guard.check(url, state) == web_guard.PUBLIC
+        kind = web_guard.check(url, state)
     except web_guard.BrowseRefused:
         return False
+    if kind == web_guard.PUBLIC:
+        return True
+    if state.account_read or not anonymous_account_domains:
+        return False
+    host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    return any(host == d or host.endswith("." + d) for d in anonymous_account_domains)
 
 
 def _browse(args):
@@ -439,11 +450,23 @@ def _browse(args):
     url = str(args.get("url", ""))
     kind = web_guard.check(url, state)
     account = kind == web_guard.ACCOUNT
+    anonymous_account_domains: tuple = ()
+    if account and not state.account_read and not browser.profile_has_cookies(url):
+        # Domaine capable d'héberger un compte, mais le profil connecté ne détient aucun
+        # cookie pour cette origine : le serveur ne peut rattacher la requête à un compte.
+        # L'acquisition est anonyme par construction (HTTP sans session ou contexte
+        # éphémère) et ne doit pas tainter la mission comme la lecture d'un compte.
+        account = False
+        host = (urlsplit(url).hostname or "").lower().rstrip(".")
+        anonymous_account_domains = tuple(
+            d for d in config.ACCOUNT_DOMAINS if host == d or host.endswith("." + d))
 
     if not account:
         record = browser.acquire_public_page(
             url,
-            guard=lambda u: _browser_request_allowed(u, state, account_context=False),
+            guard=lambda u: _browser_request_allowed(
+                u, state, account_context=False,
+                anonymous_account_domains=anonymous_account_domains),
         ).as_dict()
         final = str(record.get("final_url") or url)
         if (
