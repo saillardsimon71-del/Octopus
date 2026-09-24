@@ -27,7 +27,7 @@ from . import config, db, deepseek, web_guard
 
 PUBLIC_FETCH_MAX_BYTES = 3_000_000
 PUBLIC_MAIN_TEXT_MAX_CHARS = 40_000
-PUBLIC_MIN_TEXT_CHARS = 180
+PUBLIC_MIN_TEXT_CHARS = 100
 PUBLIC_REDIRECTS = 8
 PUBLIC_BLOCK_MARKERS = (
     "performing security verification",
