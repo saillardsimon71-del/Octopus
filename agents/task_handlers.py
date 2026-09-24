@@ -224,6 +224,7 @@ _BROWSE_BLOCK_MARKERS = (
     "verify you are not a bot",
     "security service to protect against malicious bots",
     "just a moment",
+    "verification successful. waiting",
     "access denied",
     "403 error",
     "request blocked",
@@ -233,38 +234,45 @@ _BROWSE_BLOCK_MARKERS = (
 
 
 def _usable_browse_urls(results) -> list[str]:
-    """Proxy technique conservateur : pages réellement ouvertes avec DOM substantiel et non bloqué."""
+    """Proxy technique conservateur : acquisitions publiques textuelles réellement exploitables."""
+    from . import browser
     usable = []
     for subtask in results or []:
         for step in subtask.get("steps") or []:
             if step.get("tool") != "browse":
                 continue
 
-            meta = step.get("browse_meta")
-            if isinstance(meta, dict):
-                url = str(meta.get("url") or (step.get("args") or {}).get("url") or "").strip()
-                text_chars = int(meta.get("text_chars") or 0)
-                blocked = bool(meta.get("blocked"))
-                failed = bool(meta.get("error"))
+            data = step.get("result_data")
+            page = data.get("page") if isinstance(data, dict) and isinstance(data.get("page"), dict) else None
+            if page is not None:
+                url = str(page.get("final_url") or (step.get("args") or {}).get("url") or "").strip()
+                is_usable = browser.is_public_text_acquisition(page)
             else:
-                # Compatibilité avec les anciennes traces qui ne contiennent pas encore browse_meta.
-                raw = str(step.get("result") or "").strip()
-                if not raw or raw.lower().startswith("erreur :"):
-                    continue
-                try:
-                    payload = json.loads(raw)
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                url = str(payload.get("url") or (step.get("args") or {}).get("url") or "").strip()
-                text = str(payload.get("texte") or "").strip()
-                lowered = f"{url}\n{text}".lower()
-                text_chars = len(text)
-                blocked = any(marker in lowered for marker in _BROWSE_BLOCK_MARKERS)
-                failed = False
+                meta = step.get("browse_meta")
+                if isinstance(meta, dict):
+                    url = str(meta.get("url") or (step.get("args") or {}).get("url") or "").strip()
+                    is_usable = browser.is_public_text_acquisition_meta(meta)
+                else:
+                    # Compatibilité avec les anciennes traces qui ne contiennent pas encore browse_meta.
+                    raw = str(step.get("result") or "").strip()
+                    if not raw or raw.lower().startswith("erreur :"):
+                        continue
+                    try:
+                        payload = json.loads(raw)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    url = str(payload.get("url") or (step.get("args") or {}).get("url") or "").strip()
+                    text = str(payload.get("texte") or "").strip()
+                    lowered = f"{url}\n{text}".lower()
+                    is_usable = (
+                        len(text) >= browser.PUBLIC_MIN_TEXT_CHARS
+                        and not text.lstrip("\ufeff\x00\t\r\n ").startswith("%PDF-")
+                        and not any(marker in lowered for marker in browser.PUBLIC_BLOCK_MARKERS)
+                    )
 
-            if not url.startswith(("http://", "https://")) or text_chars < 80 or blocked or failed:
+            if not url.startswith(("http://", "https://")) or not is_usable:
                 continue
             if url not in usable:
                 usable.append(url)
@@ -296,8 +304,9 @@ def _mission_objective_result(results, criterion) -> dict | None:
         "usable_browse_urls": urls,
         "scope": "technical_proxy",
         "note": (
-            "Compte les URLs distinctes ouvertes avec un DOM substantiel et sans blocage technique évident. "
-            "Ne garantit pas à lui seul la pertinence sémantique ni la distinction entre voies économiques."
+            "Compte les URLs distinctes avec une acquisition textuelle publique substantielle, "
+            "sans blocage technique ni erreur d'extraction. Ne garantit pas à lui seul la "
+            "pertinence sémantique ni la distinction entre voies économiques."
         ),
     }
 
