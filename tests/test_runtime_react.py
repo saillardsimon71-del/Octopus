@@ -442,10 +442,56 @@ def test_business_signal_gate_rejects_generic_and_unopened_candidates():
         results,
     )
 
-    assert accepted == [strong]
+    assert accepted == [{**strong, "action_fields_nature": "inferred"}]
     reasons = [reason for item in rejected for reason in item["reasons"]]
     assert "unsupported_signal_type" in reasons
     assert "evidence_url_not_opened" in reasons
+
+
+def test_business_signal_url_normalization_accepts_requested_and_redirected_variants():
+    requested = "https://www.example.com/offre/?utm_source=newsletter#section"
+    final = "https://example.com/offre"
+    results = [{
+        "role": "SOUT",
+        "steps": [{
+            "tool": "browse",
+            "args": {"url": requested},
+            "browse_meta": {
+                "url": final,
+                "text_chars": 500,
+                "blocked": False,
+                "error": None,
+            },
+        }],
+    }]
+    raw = {
+        "signal_type": "explicit_request",
+        "buyer": "PME bâtiment",
+        "pain": "relances devis manuelles",
+        "money_signal": "demande de prestataire",
+        "evidence_url": "https://example.com/offre?utm_campaign=test",
+        "evidence_summary": "demande explicite",
+        "test_channel": "contact direct",
+        "test_offer": "automatisation relances",
+        "next_test": "contacter 3 entreprises",
+    }
+
+    accepted, rejected = runtime._qualify_business_signals([raw], results)
+
+    assert rejected == []
+    assert accepted[0]["evidence_url"] == raw["evidence_url"]
+    assert accepted[0]["action_fields_nature"] == "inferred"
+
+
+def test_business_signal_url_normalization_keeps_meaningful_query_parameters():
+    assert runtime._canonical_evidence_url(
+        "https://example.com/offre?id=42&utm_source=x#details"
+    ) == "https://example.com/offre?id=42"
+    assert runtime._canonical_evidence_url(
+        "https://example.com/offre?id=43"
+    ) != runtime._canonical_evidence_url(
+        "https://example.com/offre?id=42"
+    )
 
 
 def test_business_signal_focus_reaches_planner_agent_and_synthesis(monkeypatch):
@@ -514,6 +560,7 @@ def test_business_signal_focus_reaches_planner_agent_and_synthesis(monkeypatch):
     assert result["synthesis_status"] == "validated"
     assert len(result["business_signals"]) == 1
     assert result["business_signals"][0]["buyer"] == "PME de services"
+    assert result["business_signals"][0]["action_fields_nature"] == "inferred"
     assert result["business_signal_rejections"] == []
 
     planner = next(messages for _, task, messages in calls if task == "planification")
