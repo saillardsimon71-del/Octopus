@@ -657,7 +657,7 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         step_record = {"step": i + 1, "tool": tool, "result": result_str[:1500]}
         if tool in {"search", "browse"}:
             step_record["args"] = dict(args)
-        if tool == "search" and result is not None:
+        if tool == "search":
             step_record["result_urls"] = _search_result_urls(result)
         elif tool == "browse" and result is not None:
             browse_meta = _browse_result_meta(result)
