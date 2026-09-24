@@ -84,6 +84,7 @@ class _MainTextParser(HTMLParser):
         self.skip_depth = 0
         self.chrome_depth = 0
         self.main_depth = 0
+        self.main_markers: list[str] = []
         self.title_depth = 0
         self.h1_depth = 0
         self.body_parts: list[str] = []
@@ -101,6 +102,7 @@ class _MainTextParser(HTMLParser):
         is_main = tag in {"main", "article"} or attrs_dict.get("role") == "main"
         if is_main:
             self.main_depth += 1
+            self.main_markers.append(tag)
         if tag == "title":
             self.title_depth += 1
         if tag == "h1":
@@ -116,8 +118,11 @@ class _MainTextParser(HTMLParser):
             self.h1_depth -= 1
         if tag == "title" and self.title_depth:
             self.title_depth -= 1
-        if tag in {"main", "article"} and self.main_depth:
-            self.main_depth -= 1
+        if tag in self.main_markers:
+            # Retire le marqueur le plus proche de ce tag ; couvre aussi <div role="main">.
+            idx = len(self.main_markers) - 1 - self.main_markers[::-1].index(tag)
+            self.main_markers.pop(idx)
+            self.main_depth = max(0, self.main_depth - 1)
         if tag in self.CHROME_TAGS and self.chrome_depth:
             self.chrome_depth -= 1
         if tag in self.SKIP_TAGS and self.skip_depth:
