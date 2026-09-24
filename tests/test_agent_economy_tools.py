@@ -355,6 +355,10 @@ def test_objective_result_counts_metadata_even_when_result_is_truncated():
                 "text_chars": 1500,
                 "blocked": False,
                 "vision_error": False,
+                "extraction_method": "http:html_main",
+                "rendered": False,
+                "http_status": 200,
+                "error": None,
             },
         }],
     }]

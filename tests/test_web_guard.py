@@ -156,14 +156,14 @@ def fake_browser(monkeypatch):
         if guard is not None and not guard(url):
             return browser.PublicPageRecord(
                 requested_url=url, final_url=url, fetched_at="2026-09-24T00:00:00+00:00",
-                http_status=None, content_type="", title="", extraction_method="test",
+                http_status=None, content_type="", title="", extraction_method="http:html_body",
                 rendered=False, blocked=True, main_text="", text_chars=0, raw_chars=0,
                 truncated=False, error="refusé",
             )
         text = FakeBrowser.PAGES.get(url, "")
         return browser.PublicPageRecord(
             requested_url=url, final_url=url, fetched_at="2026-09-24T00:00:00+00:00",
-            http_status=200, content_type="text/html", title="fixture", extraction_method="test",
+            http_status=200, content_type="text/html", title="fixture", extraction_method="http:html_main",
             rendered=False, blocked=False, main_text=text, text_chars=len(text), raw_chars=len(text),
             truncated=False, error=None,
         )

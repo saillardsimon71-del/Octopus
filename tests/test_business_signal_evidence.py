@@ -273,3 +273,72 @@ def test_native_http_acquisition_flows_to_gate(monkeypatch):
     signal, _ = evidence_case()
     accepted, rejected = runtime._qualify_business_signals([signal], [result])
     assert not rejected and len(accepted) == 1
+
+
+def _as_tavily_acquisition(results, *, text=TEXT, requested=URL, final=URL, error=None):
+    step = results[0]["steps"][0]
+    page = step["result_data"]["page"]
+    page.update({
+        "requested_url": requested,
+        "final_url": final,
+        "main_text": text,
+        "text_chars": len(text),
+        "raw_chars": len(text),
+        "content_type": "application/pdf",
+        "extraction_method": "tavily:extract_basic",
+        "blocked": False,
+        "error": error,
+        "http_status": 200,
+    })
+    step["args"] = {"url": requested}
+    step["result_data"]["url"] = final
+    step["browse_meta"] = runtime._browse_result_meta(step["result_data"])
+    return step
+
+
+def test_gate_94_accepts_literal_evidence_from_tavily_extract():
+    signal, results = evidence_case()
+    _as_tavily_acquisition(results)
+
+    accepted, rejected = runtime._qualify_business_signals([signal], results)
+
+    assert not rejected
+    assert len(accepted) == 1
+    assert accepted[0]["evidence_acquisition"] == {
+        "final_url": URL, "fetched_at": "2026-09-24T12:00:00+00:00"}
+
+
+def test_gate_94_rejects_tavily_quote_absent_from_acquisition_even_if_search_snippet_has_it():
+    signal, results = evidence_case(text="Texte extrait sans les citations demandées. " * 10)
+    _as_tavily_acquisition(results, text="Texte extrait sans les citations demandées. " * 10)
+    search_step = {
+        "tool": "search",
+        "result": "Cabinet comptable Acme. Relances de factures effectuées manuellement chaque semaine. "
+                  "Nous recrutons un prestataire pour automatiser les relances.",
+        "result_urls": [URL],
+    }
+    results[0]["steps"].insert(0, search_step)
+
+    accepted, rejected = runtime._qualify_business_signals([signal], results)
+
+    assert accepted == []
+    assert any("buyer_evidence_not_in_source" in item["reasons"] for item in rejected)
+
+
+def test_gate_94_rejects_tavily_url_mismatch_and_failed_extraction():
+    signal, mismatch_results = evidence_case()
+    _as_tavily_acquisition(
+        mismatch_results,
+        text="Document PDF public détecté. Extraction textuelle indisponible.",
+        error="document_pdf_text_unavailable: Tavily Extract failed: url_mismatch",
+    )
+
+    failed_signal, failed_results = evidence_case()
+    _as_tavily_acquisition(
+        failed_results,
+        text="Document PDF public détecté. Extraction textuelle indisponible.",
+        error="document_pdf_text_unavailable: Tavily Extract failed: failed_results",
+    )
+
+    assert runtime._qualify_business_signals([signal], mismatch_results)[0] == []
+    assert runtime._qualify_business_signals([failed_signal], failed_results)[0] == []

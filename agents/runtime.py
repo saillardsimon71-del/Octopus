@@ -310,6 +310,7 @@ _BROWSE_BLOCK_MARKERS = (
     "verify you are not a bot",
     "security service to protect against malicious bots",
     "just a moment",
+    "verification successful. waiting",
     "access denied",
     "403 error",
     "request blocked",
@@ -322,20 +323,24 @@ def _browse_result_meta(value) -> dict | None:
     """Métadonnées compactes issues de l'objet de page structuré, jamais d'un JSON tronqué."""
     if not isinstance(value, dict):
         return None
+    from . import browser
     page = value.get("page") if isinstance(value.get("page"), dict) else value
     url = str(page.get("final_url") or value.get("url") or "").strip()
     text = str(page.get("main_text") or value.get("texte") or "")
     lowered = f"{url}\n{text}".lower()
-    return {
+    markers = getattr(browser, "PUBLIC_BLOCK_MARKERS", _BROWSE_BLOCK_MARKERS)
+    meta = {
         "url": url,
         "text_chars": int(page.get("text_chars") or len(text)),
-        "blocked": bool(page.get("blocked")) or any(marker in lowered for marker in _BROWSE_BLOCK_MARKERS),
+        "blocked": bool(page.get("blocked")) or any(marker in lowered for marker in markers),
         "vision_error": bool(value.get("vision_error")),
         "extraction_method": str(page.get("extraction_method") or ""),
         "rendered": bool(page.get("rendered")),
         "http_status": page.get("http_status"),
         "error": page.get("error"),
     }
+    meta["usable"] = browser.is_public_text_acquisition(page)
+    return meta
 
 
 def _tool_result_view(tool: str, result, max_chars: int | None = None) -> str:
@@ -469,11 +474,7 @@ def _browse(args):
                 anonymous_account_domains=anonymous_account_domains),
         ).as_dict()
         final = str(record.get("final_url") or url)
-        if (
-            not record.get("blocked")
-            and not record.get("error")
-            and int(record.get("text_chars") or 0) >= browser.PUBLIC_MIN_TEXT_CHARS
-        ):
+        if browser.is_public_text_acquisition(record):
             web_guard.record(final, web_guard.PUBLIC, state)
         return {
             "url": final,
@@ -973,6 +974,7 @@ def _verified_browse_pages(results: list[dict]) -> list[dict]:
     Chaque capture reste séparée : ne pas assembler des citations provenant de pages
     ou de versions différentes. Les aliases ne valent que pour cette acquisition réussie.
     """
+    from . import browser
     pages = []
     for subtask in results or []:
         for step in subtask.get("steps") or []:
@@ -984,26 +986,13 @@ def _verified_browse_pages(results: list[dict]) -> list[dict]:
             page = data.get("page")
             if not isinstance(page, dict):
                 continue
-            if any(record.get("blocked") is not False or record.get("error") is not None
-                   or "error" not in record for record in (meta, page)):
+            if (
+                not browser.is_public_text_acquisition(page)
+                or not browser.is_public_text_acquisition_meta(meta)
+            ):
                 continue
             text = page.get("main_text")
             if not isinstance(text, str) or len(_evidence_text(text)) < 100:
-                continue
-            if not all(isinstance(record.get("text_chars"), int)
-                       and record["text_chars"] >= 100 for record in (meta, page)):
-                continue
-            method = page.get("extraction_method")
-            if method not in {"http:html_main", "http:html_body", "playwright:html_main", "playwright:html_body"}:
-                continue
-            if not isinstance(page.get("fetched_at"), str) or not page["fetched_at"].strip():
-                continue
-            # Le statut conservé après rendu peut être celui du premier HTTP : en cas
-            # d'échec ambigu on préfère perdre un candidat que déclarer une acquisition.
-            status = page.get("http_status")
-            if status is not None and (type(status) is not int or not 200 <= status < 300):
-                continue
-            if status is None and not (page.get("rendered") is True and method.startswith("playwright:")):
                 continue
             requested = _canonical_evidence_url((step.get("args") or {}).get("url", ""))
             final = _canonical_evidence_url(page.get("final_url", ""))
@@ -1011,7 +1000,7 @@ def _verified_browse_pages(results: list[dict]) -> list[dict]:
                     or requested != _canonical_evidence_url(page.get("requested_url", ""))
                     or final != _canonical_evidence_url(meta.get("url", ""))):
                 continue
-            if any(marker in text.lower() for marker in _BROWSE_BLOCK_MARKERS):
+            if any(marker in text.lower() for marker in browser.PUBLIC_BLOCK_MARKERS):
                 continue
             pages.append({"urls": {requested, final}, "text": _evidence_text(text),
                           "final_url": page["final_url"], "fetched_at": page["fetched_at"]})
