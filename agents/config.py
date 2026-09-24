@@ -99,8 +99,11 @@ BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "").strip()
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "").strip()
 
 # --- Navigateur ---
-# Domaines ouverts avec le profil connecté (lecture seule). Tout le reste : contexte éphémère sans
-# cookies. Après lecture d'un de ces comptes, l'agent ne peut plus ouvrir de page publique (agents/web_guard.py).
+# Domaines CAPABLES d'héberger un compte. Le profil connecté (lecture seule) n'est utilisé que
+# si une session existe réellement pour l'origine demandée (cookies persistés — voir
+# browser.profile_has_cookies) ; sinon l'acquisition est anonyme et ne taint pas la session.
+# Tout le reste : contexte éphémère sans cookies. Après lecture réelle d'un de ces comptes,
+# l'agent ne peut plus ouvrir de page publique (agents/web_guard.py).
 ACCOUNT_DOMAINS = (
     "stripe.com", "youtube.com", "mail.google.com", "accounts.google.com", "myaccount.google.com",
     "fiverr.com", "reddit.com", "x.com", "twitter.com", "linkedin.com", "gumroad.com",
