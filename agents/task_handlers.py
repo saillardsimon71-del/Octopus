@@ -93,6 +93,7 @@ def _mission_tool_trace(results, *, tools=("search", "browse"), result_chars=120
                 "tool": step.get("tool"),
                 "args": step.get("args") if isinstance(step.get("args"), dict) else {},
                 "result": str(step.get("result") or "")[:result_chars],
+                "lockstep_forced": bool(step.get("lockstep_forced")),
             })
     return trace
 
@@ -140,6 +141,7 @@ def _mission_trace_summary(results) -> dict:
     browse_urls = []
     browsed_from_search = []
     cross_role_browsed_from_search = []
+    lockstep_forced_browses = 0
     from .runtime import query_key
     for subtask in results or []:
         role = str(subtask.get("role") or "")
@@ -160,6 +162,8 @@ def _mission_trace_summary(results) -> dict:
                     search_url_roles.setdefault(url.rstrip(".,;:"), set()).add(role)
             elif tool == "browse":
                 url = str(args.get("url") or "").strip()
+                if step.get("lockstep_forced"):
+                    lockstep_forced_browses += 1
                 if url:
                     browse_urls.append(url)
                     source_roles = search_url_roles.get(url)
@@ -180,6 +184,77 @@ def _mission_trace_summary(results) -> dict:
         "browse_urls": browse_urls,
         "browsed_from_search": browsed_from_search,
         "cross_role_browsed_from_search": cross_role_browsed_from_search,
+        "lockstep_forced_browses": lockstep_forced_browses,
+    }
+
+
+_BROWSE_BLOCK_MARKERS = (
+    "performing security verification",
+    "verify you are not a bot",
+    "security service to protect against malicious bots",
+    "just a moment",
+    "access denied",
+    "captcha",
+    "chrome-error://",
+)
+
+
+def _usable_browse_urls(results) -> list[str]:
+    """Proxy technique conservateur : pages réellement ouvertes avec DOM substantiel et non bloqué."""
+    usable = []
+    for subtask in results or []:
+        for step in subtask.get("steps") or []:
+            if step.get("tool") != "browse":
+                continue
+            raw = str(step.get("result") or "").strip()
+            if not raw or raw.lower().startswith("erreur :"):
+                continue
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            url = str(payload.get("url") or (step.get("args") or {}).get("url") or "").strip()
+            text = str(payload.get("texte") or "").strip()
+            lowered = f"{url}\n{text}".lower()
+            if not url.startswith(("http://", "https://")) or len(text) < 80:
+                continue
+            if any(marker in lowered for marker in _BROWSE_BLOCK_MARKERS):
+                continue
+            if url not in usable:
+                usable.append(url)
+    return usable
+
+
+def _mission_objective_result(results, criterion) -> dict | None:
+    """Évalue un critère post-run sans influencer le comportement des agents."""
+    if criterion in (None, {}):
+        return None
+    if not isinstance(criterion, dict):
+        raise ValueError("success_criterion doit être un objet")
+    metric = str(criterion.get("metric") or "")
+    if metric != "usable_browse_count":
+        raise ValueError(f"success_criterion.metric non supporté : {metric or '(vide)'}")
+    try:
+        target = int(criterion["gte"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("success_criterion.gte doit être un entier positif") from exc
+    if target <= 0:
+        raise ValueError("success_criterion.gte doit être un entier positif")
+    urls = _usable_browse_urls(results)
+    observed = len(urls)
+    return {
+        "metric": metric,
+        "observed": observed,
+        "target": target,
+        "success": observed >= target,
+        "usable_browse_urls": urls,
+        "scope": "technical_proxy",
+        "note": (
+            "Compte les URLs distinctes ouvertes avec un DOM substantiel et sans blocage technique évident. "
+            "Ne garantit pas à lui seul la pertinence sémantique ni la distinction entre voies économiques."
+        ),
     }
 
 
@@ -224,7 +299,9 @@ def orbit_mission(ctx):
     """Mission ORBIT pour n'importe quel business, rattachable à un objectif, une hypothèse ou une expérience.
 
     Entrée : {"goal": "...", "objective_id"?, "hypothesis_id"?, "experiment_id"?, "max_steps"?,
-              "allowed_tools"?: ["search", ...], "profile"?: "flash_fallback"}.
+              "allowed_tools"?: ["search", ...], "profile"?: "flash_fallback",
+              "search_browse_lockstep"?: bool,
+              "success_criterion"?: {"metric": "usable_browse_count", "gte": 4}}.
     Le rapport est une inférence du modèle : il n'est jamais écrit comme résultat mesuré d'une expérience.
     """
     from octopus import strategy
@@ -240,10 +317,14 @@ def orbit_mission(ctx):
                 strategy.link(ctx.business, kind, context[f"{kind}_id"], "task", ctx.id, "executed_by")
         goal = f"{context['brief']}\n\n{goal}"
     allowed_tools = ctx.input.get("allowed_tools")
-    result = _run(ctx, lambda: run_mission(goal, max_steps_per_agent=int(ctx.input.get("max_steps", 8)),
-                                           business=ctx.business,
-                                           allowed_tools=set(allowed_tools) if allowed_tools is not None else None,
-                                           profile=ctx.input.get("profile")))
+    result = _run(ctx, lambda: run_mission(
+        goal,
+        max_steps_per_agent=int(ctx.input.get("max_steps", 8)),
+        business=ctx.business,
+        allowed_tools=set(allowed_tools) if allowed_tools is not None else None,
+        profile=ctx.input.get("profile"),
+        search_browse_lockstep=bool(ctx.input.get("search_browse_lockstep", False)),
+    ))
     synthesis_status = result.get("synthesis_status", "validated")
     output = {
         "business": ctx.business,
@@ -252,6 +333,14 @@ def orbit_mission(ctx):
         "subtasks": len(result.get("plan") or []),
         "synthesis_status": synthesis_status,
     }
+    objective_result = _mission_objective_result(
+        result.get("results") or [],
+        ctx.input.get("success_criterion"),
+    )
+    if objective_result is not None:
+        output["objective_result"] = objective_result
+    if ctx.input.get("search_browse_lockstep"):
+        output["experiment_flags"] = {"search_browse_lockstep": True}
     if synthesis_status == "degraded":
         # Le handler ne doit pas jeter les preuves brutes que runtime a preservees.
         output["synthesis_error"] = result.get("synthesis_error")
