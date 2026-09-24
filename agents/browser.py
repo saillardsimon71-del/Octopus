@@ -264,7 +264,23 @@ def fetch_public_http(url: str, guard=None, timeout_s: float = 15.0) -> PublicPa
             continue
 
         content_type = str(response.headers.get("content-type") or "").lower()
-        html = _decode_body(response)
+        try:
+            html = _decode_body(response)
+        except Exception as exc:
+            response.close()
+            return _page_record(
+                requested_url=requested,
+                final_url=current,
+                status=status,
+                content_type=content_type,
+                title="",
+                method="http",
+                rendered=False,
+                blocked=False,
+                text="",
+                raw_chars=0,
+                error=f"{type(exc).__name__}: {str(exc)[:300]}",
+            )
         response.close()
         title, text, extraction_method = extract_public_html(html)
         lowered = f"{title}\n{text}\n{html[:4000]}".lower()
