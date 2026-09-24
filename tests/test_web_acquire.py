@@ -35,6 +35,23 @@ def test_reduced_real_world_pages_extract_expected_content(case):
     assert isinstance(title, str)
 
 
+def test_nested_div_does_not_close_role_main_early():
+    html = """<html><body>
+    <div role="main">
+      <div><span>Introduction utile.</span></div>
+      <p>FAIT_APRES_DIV_IMBRIQUE : ce contenu doit rester dans la zone principale.</p>
+      <p>Une seconde phrase allonge suffisamment le contenu principal pour l'extraction.</p>
+    </div>
+    <div>bruit hors contenu principal</div>
+    </body></html>"""
+
+    _, text, method = browser.extract_public_html(html)
+
+    assert method == "html_main"
+    assert "FAIT_APRES_DIV_IMBRIQUE" in text
+    assert "bruit hors contenu principal" not in text
+
+
 def test_block_pages_are_detected_from_http_content(monkeypatch):
     case = next(item for item in _cases() if item["name"] == "cloudfront_block")
 
