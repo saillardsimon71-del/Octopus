@@ -636,14 +636,17 @@ TOOLS = {
 }
 
 
-def tools_desc(allowed_tools: set[str] | None = None) -> str:
+def tools_desc(allowed_tools: set[str] | None = None, *, legacy_search: bool = False) -> str:
     items = TOOLS.items() if allowed_tools is None else (
         (name, spec) for name, spec in TOOLS.items() if name in allowed_tools
     )
-    return "\n".join(
-        f"- {name}({', '.join(spec['params'])}) : {spec['desc']}"
-        for name, spec in items
-    )
+    lines = []
+    for name, spec in items:
+        if legacy_search and name == "search":
+            lines.append("- search(query) : recherche web (liens)")
+        else:
+            lines.append(f"- {name}({', '.join(spec['params'])}) : {spec['desc']}")
+    return "\n".join(lines)
 
 
 def _matches_tool_type(value, token: str) -> bool:
@@ -755,6 +758,8 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
     roles = GENERIC_ROLES if run is not None and run.business != DEFAULT_BUSINESS else ROLES
     role_desc = roles.get(role, "")
     group = _group()
+    legacy_search = run is None or run.business == DEFAULT_BUSINESS
+    tool_text = tools_desc(allowed_tools, legacy_search=legacy_search)
     freshness_context = _freshness_context(run)
     proof_rule = ""
     if run is not None and run.business != DEFAULT_BUSINESS:
@@ -775,7 +780,7 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
             f"IMPORTANT : tu es connecté à tes comptes (Stripe, Reddit, X, Fiverr, YouTube…) "
             f"via l'outil `browse`, qui ouvre les pages dans TON Chrome réel. Pour vérifier "
             f"un accès, utilise `browse` sur la page concernée.\n\n"
-            f"Outils disponibles :\n{tools_desc(allowed_tools)}\n\n"
+            f"Outils disponibles :\n{tool_text}\n\n"
             f"{freshness_context}"
             "Réponds TOUJOURS en JSON : soit {\"tool\": \"<nom>\", \"args\": {...}} pour agir, "
             "soit {\"final\": \"<ta réponse à l'humain>\"}."
@@ -791,7 +796,7 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
             f"Poursuis l'objectif en utilisant "
             f"les outils disponibles. À chaque étape, choisis UNE action. "
             f"{memory_hint}\n\n"
-            f"Outils disponibles :\n{tools_desc(allowed_tools)}\n\n"
+            f"Outils disponibles :\n{tool_text}\n\n"
             f"{freshness_context}"
             f"{proof_rule}"
             "Réponds TOUJOURS en JSON : soit {\"tool\": \"<nom>\", \"args\": {...}} pour agir, "
