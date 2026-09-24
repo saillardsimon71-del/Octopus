@@ -1388,7 +1388,8 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                                {"role": "user", "content": goal}],
                               reasoning="high")
     proposed = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
-    # Le prompt demande 2 à 5 sous-tâches : au-delà, chaque sous-tâche coûte une boucle ReAct complète.
+    # Garde-fou budgétaire, pas une consigne du prompt : au-delà de 5, chaque
+    # sous-tâche coûte une boucle ReAct complète de plus.
     tasks = [t for t in proposed if isinstance(t, dict)][:MAX_PLAN_TASKS]
     if len(proposed) > len(tasks):
         db.post("ORBIT", f"plan tronqué : {len(proposed)} sous-tâches proposées, {len(tasks)} gardées")
