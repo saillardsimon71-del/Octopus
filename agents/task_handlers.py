@@ -5,6 +5,7 @@ cycle en étapes (write_job, tts, render...) viendra avec le module business sho
 """
 from __future__ import annotations
 
+import json
 import re
 import threading
 
@@ -96,6 +97,38 @@ def _mission_tool_trace(results, *, tools=("search", "browse"), result_chars=120
     return trace
 
 
+def _trace_result_text(value) -> str:
+    """Texte brut d'un résultat de trace, y compris quand runtime l'a JSON-encodé.
+
+    Les résultats de search sont stockés via json.dumps(str), donc leurs sauts de ligne
+    deviennent littéralement "\\n". Les décoder avant l'extraction d'URL évite de mesurer
+    des pseudo-URL du type "https://site.tld\\n...".
+    """
+    text = str(value or "")
+    try:
+        decoded = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return text
+
+    def flatten(item):
+        if isinstance(item, str):
+            return [item]
+        if isinstance(item, dict):
+            out = []
+            for child in item.values():
+                out.extend(flatten(child))
+            return out
+        if isinstance(item, (list, tuple)):
+            out = []
+            for child in item:
+                out.extend(flatten(child))
+            return out
+        return []
+
+    parts = flatten(decoded)
+    return "\n".join(parts) if parts else text
+
+
 def _mission_trace_summary(results) -> dict:
     """Mesures descriptives pour comparer des missions sans changer leur exécution."""
     by_role = {}
@@ -122,7 +155,8 @@ def _mission_trace_summary(results) -> dict:
                 if query:
                     search_queries.append(query)
                     search_query_keys.append(query_key(query))
-                for url in re.findall(r"https?://[^\s\]\[<>()\"']+", str(step.get("result") or "")):
+                result_text = _trace_result_text(step.get("result"))
+                for url in re.findall(r"https?://[^\s\]\[<>()\"']+", result_text):
                     search_url_roles.setdefault(url.rstrip(".,;:"), set()).add(role)
             elif tool == "browse":
                 url = str(args.get("url") or "").strip()
