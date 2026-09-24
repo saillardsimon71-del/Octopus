@@ -508,7 +508,10 @@ def test_selector_reads_native_items_not_a_rendered_text(monkeypatch):
         structured, "délais de paiement PME France statistiques", selector="evidence_relevance")
 
     assert choice["url"] == "https://www.insee.fr/fr/statistiques/1234567"
-    assert choice["rank"] == 2 and choice["official"] is True and choice["low_evidence"] is False
+    # Le selector ne priorise ni ne pénalise aucun hôte : il classe par recouvrement
+    # lexical avec la requête, rien de plus (cf. docs/ARCHITECTURE_BOUNDARY.md).
+    assert choice["rank"] == 2 and choice["score"] > 0
+    assert "official" not in choice and "low_evidence" not in choice
 
 
 def test_selector_keeps_a_parenthesised_url_intact(monkeypatch):
@@ -521,13 +524,43 @@ def test_selector_keeps_a_parenthesised_url_intact(monkeypatch):
     assert choice["url"] == url
 
 
-def test_business_selector_rejects_encyclopaedic_results(monkeypatch):
+def test_selector_does_not_blacklist_business_ambiguous_items(monkeypatch):
+    """Le selector ne juge pas la nature d'une source : c'est le travail du LLM.
+
+    Un temps, le selector portait des listes (hôtes encyclopédiques, mots de bruit
+    « film », « dictionnaire »). Elles sont supprimées : un résultat qui partage les
+    mots de la requête reste sélectionnable, et son inutilité économique est jugée par
+    le LLM au moment de conclure. La vraie défense est du côté des providers : la
+    purpose `business_signal` ne complète jamais avec Wikipédia ou Google News
+    (cf. test_business_purpose_stops_after_bing_web).
+    """
     monkeypatch.setattr(runtime, "_search_result_candidates_from_text", blow_up("parser texte legacy"))
     structured = envelope([item("https://fr.wikipedia.org/wiki/Micro-entrepreneur",
                                 title="Micro-entrepreneur — Wikipédia", snippet="Régime français.")])
 
     choice = runtime._select_search_browse_candidate(
         structured, "micro entrepreneur facturation", selector="business_signal_relevance")
+
+    assert choice is not None
+    assert choice["url"] == "https://fr.wikipedia.org/wiki/Micro-entrepreneur"
+
+    # Mot jadis « ambigu » : « appel » au sens appel d'offres reste sélectionnable,
+    # sans aucune liste lexicale pour le autoriser.
+    ao = envelope([item("https://example.org/ao/(42)", title="Appel d'offres automatisation reporting",
+                        snippet="Marché public d'automatisation du reporting data, budget annexé.")])
+    choice = runtime._select_search_browse_candidate(
+        ao, "appel d'offres automatisation reporting", selector="business_signal_relevance")
+    assert choice is not None and choice["url"] == "https://example.org/ao/(42)"
+
+
+def test_business_selector_rejects_wrapper_hosts_on_native_items(monkeypatch):
+    """Propriété de l'outil, pas jugement métier : un hôte de redirection ne sert pas la page."""
+    monkeypatch.setattr(runtime, "_search_result_candidates_from_text", blow_up("parser texte legacy"))
+    structured = envelope([item("https://news.google.com/rss/articles/x", title="Actualité automatisation",
+                                snippet="Les PME automatisent leurs factures et relances.")])
+
+    choice = runtime._select_search_browse_candidate(
+        structured, "automatisation factures PME", selector="business_signal_relevance")
 
     assert choice is None
 

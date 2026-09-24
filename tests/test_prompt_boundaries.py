@@ -24,13 +24,21 @@ TODAY = "2026-09-24"
 
 @pytest.fixture
 def web(monkeypatch):
+    """SEARCH est structuré : le seam de test est l'enveloppe, pas le texte."""
     calls = []
-    monkeypatch.setattr(
-        search,
-        "web_search",
-        lambda q, n=6, site=None: calls.append(q if site is None else f"{q} site:{site}")
-        or f"- resultat pour {q}",
-    )
+
+    def fake_envelope(query, max_results=6, site=None, purpose="general"):
+        calls.append(query if site is None else f"{query} site:{site}")
+        return {
+            "query": query,
+            "effective_query": query if site is None else f"{query} site:{site}",
+            "purpose": purpose,
+            "items": [{"title": f"resultat pour {query}", "url": "https://example.com/preuve",
+                       "source": "Bing Web", "date": "", "snippet": "extrait", "provider": "bing_web"}],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(search, "search_envelope", fake_envelope)
     return calls
 
 
@@ -259,8 +267,12 @@ def test_search_cost_class_still_blocks_paid_quota(monkeypatch):
 def test_search_accepts_any_free_query(monkeypatch, query):
     """SEARCH ne valide ni la longueur, ni les mots, ni l'année : c'est un outil, pas un tuteur."""
     seen = []
-    monkeypatch.setattr(search, "web_search",
-                        lambda q, n=6, site=None: seen.append(q) or "- resultat")
+
+    def fake_envelope(q, max_results=6, site=None, purpose="general"):
+        seen.append(q)
+        return {"query": q, "effective_query": q, "purpose": purpose, "items": [], "errors": []}
+
+    monkeypatch.setattr(search, "search_envelope", fake_envelope)
     with runtime._search_cache():
         runtime._search({"query": query})
     assert seen == [query]
@@ -331,9 +343,13 @@ def test_agent_can_change_angle_without_any_coded_transition(monkeypatch, web):
 # D. COMPATIBILITÉ — LES CHEMINS EXISTANTS FONCTIONNENT
 # ─────────────────────────────────────────────────────────────────────────────
 def test_search_tool_contract_returns_structured_items(monkeypatch):
+    """La vue texte de l'outil garde URL et requête effective ; la structure garde six champs."""
     items = [{"provider": "brave", "title": "T", "url": "https://example.org/a",
               "source": "S", "date": "2026-09-24", "snippet": "extrait"}]
-    monkeypatch.setattr(search, "search_items", lambda *a, **k: (items, []))
+    monkeypatch.setattr(
+        search, "search_envelope",
+        lambda q, max_results=6, site=None, purpose="general": {
+            "query": q, "effective_query": q, "purpose": purpose, "items": items, "errors": []})
     text = search.web_search("requete", 6)
     assert "https://example.org/a" in text
     assert "Requête effective : requete" in text

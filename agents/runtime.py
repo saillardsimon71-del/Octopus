@@ -254,8 +254,10 @@ def _select_search_browse_candidate(value, query: str, selector: str = "first") 
         hôte de redirection, et qui respecte une contrainte `site:` explicite.
 
     Un plancher de pertinence lexicale générale évite de forcer l'ouverture d'une page ne
-    partageant qu'un seul mot avec la requête (collisions « appel »/Apple, « mission »/film) :
-    c'est une protection de budget, pas une liste de mots interdits.
+    partageant qu'un seul mot avec la requête (collisions « appel »/Apple, « mission »/film).
+    EXPERIMENTAL / BUDGET PROTECTION : ce plancher est temporaire, il protège le budget de
+    browse du lockstep expérimental ; ce n'est pas un invariant architectural et rien de
+    plus ne doit être construit autour.
 
     Le sélecteur ne décide PAS si une page est une bonne opportunité d'affaires. Il voit
     title/snippet/URL ; juger leur utilité appartient au LLM.
@@ -297,6 +299,8 @@ def _select_search_browse_candidate(value, query: str, selector: str = "first") 
             "site_match": site_match,
         })
 
+    # EXPERIMENTAL / BUDGET PROTECTION (temporaire, pas un invariant) : un seul mot partagé
+    # ne suffit pas à forcer une ouverture. Aucune liste lexicale métier n'intervient ici.
     scored = [item for item in scored if item["score"] > 0 and item["distinct_overlap"] >= 2]
     return max(scored, key=lambda item: (item["score"], -item["rank"]), default=None)
 

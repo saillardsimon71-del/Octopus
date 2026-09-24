@@ -78,12 +78,13 @@ Un signal d'affaires n'existe qu'après les trois. Le gate reste intangible :
 
 * aucune amélioration de pertinence mesurée ;
 * aucun nouveau provider, aucun framework multi-provider ;
-* aucune modification du gate de qualification ;
-* aucun changement de `max_steps`, de scoring lexical ou de stopwords.
+* aucune modification du gate de qualification.
 
 Il prétend : préserver la donnée structurée, supprimer le reparsing destructif,
 réduire les compléments non business, et rendre un futur changement de provider
-localisé à `agents/search.py`.
+localisé à `agents/search.py`. Le selector, dans le même esprit, ne garde que sa
+responsabilité technique minimale : aucune liste lexicale métier, aucun bonus ni
+pénalité d'hôte (voir `docs/ARCHITECTURE_BOUNDARY.md`).
 
 ## 6. État connu
 
