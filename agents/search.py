@@ -3,8 +3,8 @@
 Le problème des moteurs classiques (DuckDuckGo, Bing HTML) est le blocage anti-bot.
 On contourne avec des sources bot-friendly :
 - Brave / Tavily : vraie recherche web (clé gratuite requise).
-- Bing News RSS : actualités avec URL éditeur directe quand disponible.
-- Bing Web RSS : recherche web keyless, utilisée avant les wrappers Google News.
+- Bing Web RSS : recherche web keyless, priorité stable du fallback sans clé.
+- Bing News RSS : actualités avec URL éditeur directe, utilisées en complément.
 - Google News RSS : piste titre/source uniquement quand aucune URL directe n'est trouvée.
 - Wikipedia : encyclopédie (API MediaWiki, keyless).
 
