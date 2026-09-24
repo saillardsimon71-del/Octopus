@@ -23,7 +23,11 @@ def test_equivalent_queries_share_a_key():
 @pytest.fixture
 def web(monkeypatch):
     calls = []
-    monkeypatch.setattr(search, "web_search", lambda q, n=6: calls.append(q) or f"- resultat pour {q}")
+    monkeypatch.setattr(
+        search,
+        "web_search",
+        lambda q, n=6, site=None: calls.append(q if site is None else f"{q} site:{site}") or f"- resultat pour {q}",
+    )
     return calls
 
 
@@ -297,6 +301,31 @@ def test_record_observation_ids_are_numeric_optional_database_ids():
     assert "S'ils sont inconnus, omets ces champs" in system
 
 
+def test_generic_agent_prompt_includes_current_date_and_search_freshness(monkeypatch):
+    monkeypatch.setattr(runtime, "_today_iso", lambda: "2026-09-24")
+
+    with journal.run("octopus", "agent"):
+        system, _, _ = runtime.build_prompts(
+            "SOUT",
+            "collecter des preuves actuelles",
+            allowed_tools={"search", "browse"},
+        )
+
+    assert "DATE ACTUELLE : 2026-09-24" in system
+    assert "privilégie 2026" in system
+    assert "n'utilise pas une année antérieure comme substitut implicite du présent" in system
+    assert 'site="insee.fr"' in system
+
+
+def test_legacy_podalux_prompt_does_not_change_with_search_freshness(monkeypatch):
+    monkeypatch.setattr(runtime, "_today_iso", lambda: "2026-09-24")
+
+    with journal.run("podalux", "agent"):
+        system, _, _ = runtime.build_prompts("SOUT", "veille")
+
+    assert "DATE ACTUELLE" not in system
+
+
 def test_agent_profiles_have_omniroute_auto_free_fallback(monkeypatch):
     monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
     monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
@@ -337,6 +366,7 @@ def test_mission_profile_is_inherited_by_all_llm_calls(monkeypatch):
 
 def test_mission_planner_receives_generic_role_contracts(monkeypatch):
     calls = []
+    monkeypatch.setattr(runtime, "_today_iso", lambda: "2026-09-24")
     actions = iter([
         {"tasks": [{"role": "SOUT", "task": "collecter une preuve"}]},
         {"final": "preuve"},
@@ -364,6 +394,8 @@ def test_mission_planner_receives_generic_role_contracts(monkeypatch):
     assert "au plus 5 étapes" in system
     assert "artefacts utiles des étapes amont" in system
     assert "transmis automatiquement" in system
+    assert "DATE ACTUELLE : 2026-09-24" in system
+    assert "privilégie 2026" in system
     assert runtime.ROLES["FORGE"] not in system
 
 
@@ -490,20 +522,27 @@ def test_bing_news_unwraps_publisher_url(monkeypatch):
     assert items[0]["date"] == "Tue, 22 Sep 2026 08:00:00 GMT"
 
 
-def test_keyless_search_prefers_bing_direct_results(monkeypatch):
+def test_keyless_search_is_stable_web_then_news(monkeypatch):
     monkeypatch.setattr(search.config, "BRAVE_API_KEY", "")
     monkeypatch.setattr(search.config, "TAVILY_API_KEY", "")
-    monkeypatch.setattr(search, "_bing_news_items", lambda q, n: [
-        search._item("bing_news", "Titre", "https://example.com/article", "Exemple", "2026-09-22", "preuve")
+    calls = []
+    monkeypatch.setattr(search, "_bing_web_items", lambda q, n: calls.append("web") or [
+        search._item("bing_web", "Web", "https://example.com/web", "Bing Web", "", "preuve web")
     ])
-    monkeypatch.setattr(search, "_bing_web_items", lambda *a, **k: pytest.fail("Bing Web ne doit pas être consulté"))
-    monkeypatch.setattr(search, "_gnews_items", lambda *a, **k: pytest.fail("Google News ne doit pas être consulté"))
-    monkeypatch.setattr(search, "_wikipedia_items", lambda *a, **k: pytest.fail("Wikipedia ne doit pas être consulté"))
+    monkeypatch.setattr(search, "_bing_news_items", lambda q, n: calls.append("news") or [
+        search._item("bing_news", "News", "https://example.com/news", "Exemple", "2026-09-22", "preuve news")
+    ])
+    monkeypatch.setattr(search, "_gnews_items", lambda q, n: [])
+    monkeypatch.setattr(search, "_wikipedia_items", lambda q, n: [])
 
-    out = search.web_search("besoin PME")
+    items, errors = search.search_items("besoin PME", max_results=6)
 
-    assert "https://example.com/article" in out
-    assert "Exemple" in out
+    assert errors == []
+    assert calls[:2] == ["web", "news"]
+    assert [item["url"] for item in items[:2]] == [
+        "https://example.com/web",
+        "https://example.com/news",
+    ]
 
 
 def test_bing_web_rss_keeps_only_direct_external_urls(monkeypatch):
@@ -534,19 +573,106 @@ def test_bing_web_rss_keeps_only_direct_external_urls(monkeypatch):
     assert items[0]["url"] == "https://example.com/retards-paiement"
 
 
-def test_keyless_search_uses_bing_web_before_google_wrappers(monkeypatch):
+def test_keyless_search_uses_direct_results_before_google_wrappers(monkeypatch):
     monkeypatch.setattr(search.config, "BRAVE_API_KEY", "")
     monkeypatch.setattr(search.config, "TAVILY_API_KEY", "")
     monkeypatch.setattr(search, "_bing_news_items", lambda q, n: [])
     monkeypatch.setattr(search, "_bing_web_items", lambda q, n: [
-        search._item("bing_web", "Titre", "https://example.com/direct", "Bing Web", "", "preuve")
+        search._item("bing_web", f"Titre {i}", f"https://example.com/direct-{i}", "Bing Web", "", "preuve")
+        for i in range(6)
     ])
     monkeypatch.setattr(search, "_gnews_items", lambda *a, **k: pytest.fail("Google News ne doit pas être consulté"))
     monkeypatch.setattr(search, "_wikipedia_items", lambda *a, **k: pytest.fail("Wikipedia ne doit pas être consulté"))
 
     out = search.web_search("besoin PME")
 
-    assert "https://example.com/direct" in out
+    assert "https://example.com/direct-0" in out
+    assert "Fournisseurs de recherche : bing_web" in out
+
+
+def test_search_site_parameter_is_applied_and_filtered(monkeypatch):
+    monkeypatch.setattr(search.config, "BRAVE_API_KEY", "")
+    monkeypatch.setattr(search.config, "TAVILY_API_KEY", "")
+    seen_queries = []
+
+    def web_items(q, n):
+        seen_queries.append(q)
+        return [
+            search._item("bing_web", "Bpifrance", "https://www.bpifrance.fr/barometre", "Bing Web", "", "preuve"),
+            search._item("bing_web", "Hors site", "https://example.com/barometre", "Bing Web", "", "bruit"),
+        ]
+
+    monkeypatch.setattr(search, "_bing_web_items", web_items)
+    monkeypatch.setattr(search, "_bing_news_items", lambda q, n: [])
+    monkeypatch.setattr(search, "_gnews_items", lambda *a, **k: pytest.fail("pas de fallback sous contrainte site"))
+    monkeypatch.setattr(search, "_wikipedia_items", lambda *a, **k: pytest.fail("pas de Wikipedia sous contrainte site"))
+
+    items, errors = search.search_items("baromètre trésorerie PME", site="bpifrance.fr")
+
+    assert errors == []
+    assert seen_queries == ["baromètre trésorerie PME site:bpifrance.fr"]
+    assert [item["url"] for item in items] == ["https://www.bpifrance.fr/barometre"]
+
+
+def test_embedded_site_operator_is_enforced_locally(monkeypatch):
+    monkeypatch.setattr(search.config, "BRAVE_API_KEY", "")
+    monkeypatch.setattr(search.config, "TAVILY_API_KEY", "")
+    monkeypatch.setattr(search, "_bing_web_items", lambda q, n: [
+        search._item("bing_web", "Cible", "https://stats.insee.fr/preuve", "Bing Web", "", "preuve"),
+        search._item("bing_web", "Hors cible", "https://example.com/bruit", "Bing Web", "", "bruit"),
+    ])
+    monkeypatch.setattr(search, "_bing_news_items", lambda q, n: [])
+
+    items, _ = search.search_items("chômage France site:insee.fr")
+
+    assert [item["url"] for item in items] == ["https://stats.insee.fr/preuve"]
+
+
+def test_runtime_search_declares_and_forwards_site(monkeypatch):
+    calls = []
+
+    def fake_search(query, n=6, site=None):
+        calls.append((query, site))
+        return f"Requête effective : {query} site:{site}\n- preuve\n  https://{site}/preuve"
+
+    monkeypatch.setattr(search, "web_search", fake_search)
+
+    with runtime._search_cache():
+        result = runtime._search({"query": "baromètre trésorerie PME", "site": "bpifrance.fr"})
+
+    assert calls == [("baromètre trésorerie PME", "bpifrance.fr")]
+    assert "site:bpifrance.fr" in result
+    assert runtime.TOOLS["search"]["params"]["site"] == "str?"
+
+
+def test_site_changes_search_cache_identity(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        search,
+        "web_search",
+        lambda q, n=6, site=None: calls.append((q, site)) or f"- {site}",
+    )
+
+    with runtime._search_cache():
+        runtime._search({"query": "baromètre PME", "site": "bpifrance.fr"})
+        runtime._search({"query": "baromètre PME", "site": "insee.fr"})
+
+    assert calls == [
+        ("baromètre PME", "bpifrance.fr"),
+        ("baromètre PME", "insee.fr"),
+    ]
+
+
+def test_invalid_site_is_rejected_before_network():
+    with pytest.raises(ValueError, match="site invalide"):
+        search.effective_query("preuve PME", site="bpifrance.fr OR evil.example")
+
+
+def test_structured_site_replaces_stale_site_operator():
+    assert search.effective_query(
+        "baromètre PME site:ancien.example",
+        site="bpifrance.fr",
+    ) == "baromètre PME site:bpifrance.fr"
 
 
 def test_google_news_wrappers_are_hints_not_browsable_urls():
