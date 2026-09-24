@@ -127,9 +127,11 @@ def test_record_observation_ids_are_numeric_optional_database_ids():
     )
     assert valid is None
 
-    desc = runtime.TOOLS["record_observation"]["desc"]
-    assert "identifiants NUMÉRIQUES" in desc
-    assert "s'ils sont inconnus, omets-les" in desc
+    with journal.run("octopus", "agent"):
+        system, _, _ = runtime.build_prompts("SOUT", "collecter une preuve")
+    assert "CONTRAT record_observation" in system
+    assert "identifiants NUMÉRIQUES" in system
+    assert "S'ils sont inconnus, omets ces champs" in system
 
 
 def test_agent_profiles_have_omniroute_auto_free_fallback(monkeypatch):
