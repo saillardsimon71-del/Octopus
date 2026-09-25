@@ -5,6 +5,28 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Invoke-NativeCapture([string]$FilePath, [string[]]$Arguments) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.Arguments = ($Arguments | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+    }) -join ' '
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    [pscustomobject]@{
+        ExitCode = $proc.ExitCode
+        Output = (($stdout + [Environment]::NewLine + $stderr).Trim())
+    }
+}
+
 $repo = (git rev-parse --show-toplevel 2>$null | Out-String).Trim()
 if (-not $repo) { throw "Run this script from inside the OCTOPUS repository." }
 $repo = [System.IO.Path]::GetFullPath($repo).TrimEnd("\")
@@ -39,6 +61,15 @@ if (Test-Path -LiteralPath $configPath -PathType Leaf) {
 }
 [System.IO.File]::WriteAllText($configPath, $managed, (New-Object System.Text.UTF8Encoding($false)))
 
+# This dedicated home is intentionally minimal. Codex may have materialized
+# bundled/system skills during an earlier failed launch. They are generated
+# content, not user data, and are disabled for OCTOPUS.
+$generatedSkills = Join-Path $CodexHome "skills"
+if (Test-Path -LiteralPath $generatedSkills -PathType Container) {
+    Remove-Item -LiteralPath $generatedSkills -Recurse -Force
+    Write-Host ("[OK] Removed generated bundled skills from dedicated home: " + $generatedSkills) -ForegroundColor Green
+}
+
 Write-Host "[OK] CODEX_HOME: $CodexHome" -ForegroundColor Green
 Write-Host "[OK] Project marked trusted in dedicated home: $repo" -ForegroundColor Green
 
@@ -54,36 +85,22 @@ if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
 }
 
 if (-not $SkipLogin) {
-    # Windows PowerShell 5.1 can promote native stderr to a terminating
-    # NativeCommandError when ErrorActionPreference=Stop. "Not logged in" is
-    # an expected status here, so temporarily allow native stderr through.
-    $savedPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    $status = (& codex login status 2>$null | Out-String).Trim()
-    $statusCode = $LASTEXITCODE
-    $ErrorActionPreference = $savedPreference
+    $codexExe = (Get-Command codex -ErrorAction Stop).Source
+    $statusResult = Invoke-NativeCapture -FilePath $codexExe -Arguments @("login", "status")
+    $status = $statusResult.Output
 
-    if (($statusCode -ne 0) -or ($status -notmatch "(?i)Logged in using ChatGPT")) {
+    if (($statusResult.ExitCode -ne 0) -or ($status -notmatch "(?i)Logged in using ChatGPT")) {
         Write-Host "Dedicated OCTOPUS Codex home is not logged in with ChatGPT yet." -ForegroundColor Yellow
         Write-Host "Starting ChatGPT login now..."
-
-        $savedPreference = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
         & codex login
-        $loginCode = $LASTEXITCODE
-        $ErrorActionPreference = $savedPreference
+        if ($LASTEXITCODE -ne 0) { throw "codex login failed." }
 
-        if ($loginCode -ne 0) { throw "codex login failed." }
-
-        $savedPreference = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        $status = (& codex login status 2>&1 | Out-String).Trim()
-        $statusCode = $LASTEXITCODE
-        $ErrorActionPreference = $savedPreference
+        $statusResult = Invoke-NativeCapture -FilePath $codexExe -Arguments @("login", "status")
+        $status = $statusResult.Output
     }
 
-    if (($statusCode -ne 0) -or ($status -notmatch "(?i)Logged in using ChatGPT")) {
-        throw "Dedicated OCTOPUS Codex home is not confirmed as ChatGPT-authenticated."
+    if (($statusResult.ExitCode -ne 0) -or ($status -notmatch "(?i)Logged in using ChatGPT")) {
+        throw ("Dedicated OCTOPUS Codex home is not confirmed as ChatGPT-authenticated. Status: " + $status)
     }
     Write-Host ("[OK] " + $status) -ForegroundColor Green
 }
