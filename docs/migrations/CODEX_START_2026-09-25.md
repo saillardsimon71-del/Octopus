@@ -130,7 +130,7 @@ Commit this phase separately before the next one.
 
 Use `AGNES_VIDEO_REPLACEMENT.md`.
 
-The engine is **not** to be rebuilt in OCTOPUS. Use the pinned MIT upstream:
+The engine is **not** to be rebuilt in OCTOPUS. Fetch it with `scripts/fetch_pinned_upstreams.ps1 agnes`, then use the pinned MIT upstream:
 `lcy362/agnes-video-generator@a87162d6df73ffe72186838ca0ae9d461e68589b`.
 
 Treat Agnes as an independently running local service and build only the narrow OCTOPUS HTTP adapter/probe required by the current workflow. The upstream service already owns video API protocol, rate limiting/retries, media pipelines, TTS/subtitles/composition and UI.
@@ -141,11 +141,11 @@ Astra should write/commit deterministic adapter tests before delegating bounded 
 
 Do not perform a live generation during tests. A real smoke test requires explicit human authorization and a configured Agnes key.
 
-Keep `AGNES_API_KEY` in the Agnes process environment; never store it in OCTOPUS Git or send it to an OCTOPUS browser UI.
+Keep `AGNES_API_KEY` in the Agnes process environment; never store it in OCTOPUS Git or send it to an OCTOPUS browser UI. Force the Agnes service to `HOST=127.0.0.1`; the pinned upstream defaults to `0.0.0.0`, which is not acceptable for this local secret-bearing service.
 
 ### D — Hermes P0, one replacement at a time
 
-Pinned source:
+Pinned source (fetch with `scripts/fetch_pinned_upstreams.ps1 hermes`):
 `NousResearch/hermes-agent@59004a62356f3a4697ab0fe8ad5086d2b405e2a6`.
 
 Verified upstream files at that exact pin:
