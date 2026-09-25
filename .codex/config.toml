@@ -26,6 +26,19 @@ network_access = true
 enabled = false
 
 [features]
+# Keep this session single-root and explicitly turn off every Codex-native
+# continuation/delegation mechanism that could consume allowance behind the
+# OCTOPUS worker boundary.
+multi_agent = false
+goals = false
+memories = false
+fast_mode = false
+
 # Do not let a skill silently install missing MCP dependencies.
 skill_mcp_dependency_install = false
 shell_tool = true
+
+[memories]
+# Defense in depth: even if the memories feature is enabled by another layer,
+# do not inject prior Codex memories into this project session.
+use_memories = false
