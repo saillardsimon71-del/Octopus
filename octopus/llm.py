@@ -113,7 +113,9 @@ def secret(name: str) -> str:
 
 _health: dict[str, tuple[float, bool, str]] = {}
 _rate_limit_cooldowns: dict[str, tuple[float, str]] = {}
+_provider_cooldowns: dict[str, tuple[float, str]] = {}
 _DEFAULT_RATE_LIMIT_COOLDOWN_S = 30.0
+_DEFAULT_PROVIDER_COOLDOWN_S = 60.0
 
 
 def _rate_limit_delay(exc: Exception) -> float | None:
@@ -184,6 +186,60 @@ def _rate_limit_cooldown_reason(model_id: str) -> str | None:
     remaining = until - time.monotonic()
     if remaining <= 0:
         _rate_limit_cooldowns.pop(model_id, None)
+        return None
+    return f"{reason} ({remaining:.1f}s restantes)"
+
+
+def _is_provider_connection_error(exc: Exception) -> bool:
+    """Vrai seulement pour une panne de connectivité partagée par le provider.
+
+    Le run H3 #66 a observé des `APIConnectionError` répétés sur plusieurs modèles
+    OmniRoute partageant le même gateway. On reste volontairement conservateur :
+    un read timeout, un 429, une erreur d'auth ou une sortie invalide ne prouvent
+    pas que le provider entier est injoignable.
+    """
+    connection_types = {
+        "APIConnectionError",
+        "ConnectionError",
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "ConnectionAbortedError",
+        "ConnectError",
+        "ConnectTimeout",
+        "gaierror",
+    }
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    for _ in range(4):
+        if current is None or id(current) in seen:
+            break
+        seen.add(id(current))
+        if type(current).__name__ in connection_types:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _set_provider_cooldown(provider_name: str, exc: Exception) -> float | None:
+    """Met temporairement hors circuit un provider dont le transport est injoignable."""
+    if not _is_provider_connection_error(exc):
+        return None
+    delay = _DEFAULT_PROVIDER_COOLDOWN_S
+    _provider_cooldowns[provider_name] = (
+        time.monotonic() + delay,
+        f"provider injoignable ({type(exc).__name__}); cooldown {delay:g}s",
+    )
+    return delay
+
+
+def _provider_cooldown_reason(provider_name: str) -> str | None:
+    entry = _provider_cooldowns.get(provider_name)
+    if entry is None:
+        return None
+    until, reason = entry
+    remaining = until - time.monotonic()
+    if remaining <= 0:
+        _provider_cooldowns.pop(provider_name, None)
         return None
     return f"{reason} ({remaining:.1f}s restantes)"
 
@@ -394,6 +450,9 @@ def _ineligibility(cat, profile_name: str, profile: dict, task: str, task_def: d
     if (profile_name in {"zero_cost", "flash_fallback"} and model["provider"] == "omniroute"
             and model.get("zero_cost_attestation") != "free_only"):
         return "pool OmniRoute : attestation free_only absente"
+    provider_cooldown = _provider_cooldown_reason(model["provider"])
+    if provider_cooldown:
+        return provider_cooldown
     cooldown = _rate_limit_cooldown_reason(model_id)
     if cooldown:
         return cooldown
@@ -692,11 +751,14 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 method_name = structured_method or "none"
                 failure = f"echec [{method_name}] : {type(exc).__name__}: {str(exc)[:160]}"
                 cooldown_delay = _set_rate_limit_cooldown(model_id, exc)
+                provider_cooldown_delay = _set_provider_cooldown(model["provider"], exc)
                 considered.append({"model": model_id, "eligible": True, "reason": failure})
                 justification = _justify(profile_name, task, model_id, model, considered, pinned)
                 justification["structured_method"] = structured_method
                 if cooldown_delay is not None:
                     justification["rate_limit_cooldown_s"] = cooldown_delay
+                if provider_cooldown_delay is not None:
+                    justification["provider_cooldown_s"] = provider_cooldown_delay
                 journal.record_llm_call({**base, "status": "error", "error": failure,
                                          "duration_ms": int((time.perf_counter() - started) * 1000),
                                          "justification": json.dumps(justification, ensure_ascii=False)})
@@ -709,6 +771,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 raise
 
             _rate_limit_cooldowns.pop(model_id, None)
+            _provider_cooldowns.pop(model["provider"], None)
             duration_ms = int((time.perf_counter() - started) * 1000)
             cost = (result.provider_cost_usd if result.provider_cost_usd is not None
                     else pricing.call_cost(model.get("price"), usage, peak))
