@@ -88,8 +88,8 @@ Pour la session Hermes + Agnes actuelle, l'opérateur humain a explicitement fix
 
 La suppression d'un moteur legacy et le remplacement d'une duplication par une primitive plus petite ne sont pas une généralisation économique. Toute capacité Hermes réellement nouvelle reste soumise aux critères de remplacement/besoin borné du fichier de session.
 
-Lire ce fichier, `docs/VISION.md`, `docs/CURRENT_STATE.md`, puis `docs/HANDOFF_WORK.md`.
-Git réel prime sur les snapshots documentaires. Les plans spécialisés ne fixent pas les priorités.
+Pour la fenêtre de maintenance 2026-09-25, `docs/migrations/CODEX_START_2026-09-25.md` est le routeur de session. Ne précharger ni `VISION.md`, ni `CURRENT_STATE.md`, ni `HANDOFF_WORK.md` sauf si la tâche en cours touche réellement leur domaine. Hors de cette fenêtre, consulter ces documents uniquement lorsqu'ils sont pertinents à la modification demandée.
+Git réel prime sur les snapshots documentaires.
 Vérifier branche, HEAD de main, arbre et historique avant modification ; préserver le travail inconnu.
 Branche dédiée et revue avant fusion ; ne jamais merger main automatiquement.
 Tester chaque changement puis les frontières partagées ; aucune ressource payante dans les tests.
