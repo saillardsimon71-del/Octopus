@@ -105,7 +105,9 @@ Do not waste time fighting these intentional gates:
 - product tickets require an explicit acceptance contract, Docker test sandbox, baseline oracle, radius limits and no declarative fallback;
 - worker changes land in isolated task/night-shift worktrees and local commits; they are not automatically merged into the current branch;
 - review/cherry-pick only after inspecting the produced commit;
-- do not poll Kilo from Astra. Launch the blocking local command, let it finish, then review once.
+- never launch Kilo/night-shift from Astra's model shell. Codex shell execution on Windows yields long-running processes and supervising them would require extra model turns;
+- for every Step delegation, write the one-ticket plan under `cache/astra-tickets/`, print the external PowerShell runner command, end the turn with `WAITING_FOR_EXTERNAL_WORKER`, and wait for the human to return with `WORKER_FINISHED`;
+- do not call `write_stdin`/wait repeatedly for a worker, do not use `/goal`, and do not use Codex `/review`; root Astra reviews the completed worker diff directly;
 
 Kill switch:
 `python -m octopus night-stop`
@@ -113,6 +115,16 @@ Resume:
 `python -m octopus night-resume`
 
 For broad deletions that require changing/removing tests, workflows and many exact paths, Astra should perform the surgery directly rather than forcing it through `product_ticket`.
+
+External worker command template (human runs this, never Astra):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_external_dev_ticket.ps1 -Plan cache\astra-tickets\<ticket>.json
+```
+
+When delegation is prepared, Astra's final line for that turn must be exactly:
+
+`WAITING_FOR_EXTERNAL_WORKER`
 
 ## Execution order
 
