@@ -26,14 +26,14 @@ jobs:
       max-parallel: 4
       matrix:
         include:
+          - id: step-3-7-flash
+            model: "kilo/stepfun/step-3.7-flash:free"
           - id: nex-n2-5-pro
-            model: "nex-agi/nex-n2.5-pro:free"
+            model: "kilo/nex-agi/nex-n2.5-pro:free"
           - id: minimax-m3
-            model: "minimax/minimax-m3:free"
+            model: "kilo/minimax/minimax-m3:free"
           - id: hy3
-            model: "tencent/hy3:free"
-          - id: laguna-s-2-1
-            model: "poolside/laguna-s-2.1:free"
+            model: "kilo/tencent/hy3:free"
 
     steps:
       - name: Checkout benchmark branch without push credentials
@@ -47,15 +47,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Set up Node 22
+      - name: Set up Node 24
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: Install OCTOPUS test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements-local.txt
+          python -m pip install             "openai>=1.99,<2"             "requests>=2.32,<3"             "Pillow>=10,<13"             "playwright>=1.55,<2"             "mcp>=1.30,<2"             "numpy>=1.26,<3"             "pytest>=9.0.3,<10"
 
       - name: Install and verify Kilo CLI
         run: |
@@ -66,6 +66,7 @@ jobs:
         env:
           BENCHMARK_MODEL: "${{ matrix.model }}"
         run: |
+          unset KILO_API_KEY KILOCODE_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY DEEPSEEK_API_KEY || true
           python benchmarks/free_worker/run_benchmark.py --model "$BENCHMARK_MODEL"
 
       - name: Publish benchmark summary
@@ -75,7 +76,7 @@ jobs:
 
       - name: Upload raw benchmark evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: "free-worker-${{ matrix.id }}"
           path: benchmark-results/
