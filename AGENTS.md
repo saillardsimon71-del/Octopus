@@ -90,6 +90,8 @@ La suppression d'un moteur legacy et le remplacement d'une duplication par une p
 
 Pendant cette fenêtre, un worker Kilo/Step long ne doit jamais être lancé depuis le shell piloté par Astra. La délégation suit obligatoirement le protocole externe de `CODEX_START_2026-09-25.md` : Astra prépare puis rend la main, l'humain lance le worker dans un PowerShell séparé, Astra ne revient qu'après achèvement pour relire le diff.
 
+Pendant cette même fenêtre, ne jamais poursuivre sous Luna Reserve ou un autre fallback Codex. Si le modèle actif quitte GPT-6 Astra ou si le quota Astra ordinaire est épuisé, arrêter la session de construction; ne pas échanger de qualité contre de la continuité.
+
 Pour la fenêtre de maintenance 2026-09-25, `docs/migrations/CODEX_START_2026-09-25.md` est le routeur de session. Ne précharger ni `VISION.md`, ni `CURRENT_STATE.md`, ni `HANDOFF_WORK.md` sauf si la tâche en cours touche réellement leur domaine. Hors de cette fenêtre, consulter ces documents uniquement lorsqu'ils sont pertinents à la modification demandée.
 Git réel prime sur les snapshots documentaires.
 Vérifier branche, HEAD de main, arbre et historique avant modification ; préserver le travail inconnu.
