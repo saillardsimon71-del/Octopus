@@ -134,7 +134,29 @@ The benchmark branch is evidence, not a runtime dependency.
 
 ## Execution mechanics that Astra must know before delegating
 
-- Do not poll a running Kilo task from Astra. Use the blocking OCTOPUS command and resume reasoning only after it returns.
+### Hard boundary: long workers run outside the Codex model loop
+
+On Windows, Codex's model-driven shell yields a still-running process after a short bounded wait (currently at most about 30 seconds for the unified exec path). A 5–10 minute Kilo task launched by Astra would therefore require additional model/tool turns to supervise or poll it.
+
+**Astra must never launch Kilo or `octopus night-shift` from its own shell.**
+
+The project exec policy in `.codex/rules/no-model-worker.rules` forbids the direct worker commands as defense in depth.
+
+Delegation protocol:
+
+1. Astra designs the bounded task and, when needed, writes/commits the deterministic oracle first.
+2. Astra writes a one-ticket `product_ticket` plan under ignored `cache/astra-tickets/<ticket>.json`.
+3. Astra validates the plan statically, prints exactly one human command:
+   `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_external_dev_ticket.ps1 -Plan cache\astra-tickets\<ticket>.json`
+4. Astra ends the turn with `WAITING_FOR_EXTERNAL_WORKER`. It does not call the runner, Kilo, night-shift, `write_stdin`, `/goal`, or any polling mechanism.
+5. The human runs that command in a separate PowerShell. Step/Kilo then consumes no Astra model turns while it works.
+6. When the terminal finishes, the human sends `WORKER_FINISHED` (or the full failure output) in the same Codex thread.
+7. Astra performs one review pass over the report, produced commit, actual diff and tests. It either integrates the reviewed commit, requests one new bounded external ticket, or takes the task back itself.
+
+Do not use Codex `/review` for this review; root Astra reviews the diff directly so a reviewer subagent is not introduced.
+
+This out-of-band boundary is the quota guarantee. "Do not poll" as a prompt instruction alone is not sufficient.
+
 - `night-shift` preflight requires a clean source repository.
 - Real product-code delegation uses `policy: product_ticket`.
 - A product ticket cannot modify tests or protected trust-boundary files. New deterministic tests must therefore be written and committed by Astra first.
@@ -142,4 +164,4 @@ The benchmark branch is evidence, not a runtime dependency.
 - The worker produces isolated local commits/worktrees; nothing is automatically merged into the active branch.
 - No worker output is accepted without one Astra diff review.
 
-This is intentionally not a resident supervisor loop. The expensive model plans once, the cheap worker executes, the expensive model reviews once.
+This is intentionally not a resident supervisor loop. The expensive model plans once and yields to the human; the cheap worker executes in a separate process; the expensive model is invoked again only after completion for one review.
