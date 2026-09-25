@@ -54,18 +54,38 @@ if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
 }
 
 if (-not $SkipLogin) {
+    # Windows PowerShell 5.1 can promote native stderr to a terminating
+    # NativeCommandError when ErrorActionPreference=Stop. "Not logged in" is
+    # an expected status here, so temporarily allow native stderr through.
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     $status = (& codex login status 2>&1 | Out-String).Trim()
-    if ($status -notmatch "(?i)Logged in using ChatGPT") {
+    $statusCode = $LASTEXITCODE
+    $ErrorActionPreference = $savedPreference
+
+    if (($statusCode -ne 0) -or ($status -notmatch "(?i)Logged in using ChatGPT")) {
         Write-Host "Dedicated OCTOPUS Codex home is not logged in with ChatGPT yet." -ForegroundColor Yellow
         Write-Host "Starting ChatGPT login now..."
+
+        $savedPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         & codex login
-        if ($LASTEXITCODE -ne 0) { throw "codex login failed." }
+        $loginCode = $LASTEXITCODE
+        $ErrorActionPreference = $savedPreference
+
+        if ($loginCode -ne 0) { throw "codex login failed." }
+
+        $savedPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         $status = (& codex login status 2>&1 | Out-String).Trim()
+        $statusCode = $LASTEXITCODE
+        $ErrorActionPreference = $savedPreference
     }
-    if ($status -notmatch "(?i)Logged in using ChatGPT") {
+
+    if (($statusCode -ne 0) -or ($status -notmatch "(?i)Logged in using ChatGPT")) {
         throw "Dedicated OCTOPUS Codex home is not confirmed as ChatGPT-authenticated."
     }
-    Write-Host "[OK] $status" -ForegroundColor Green
+    Write-Host ("[OK] " + $status) -ForegroundColor Green
 }
 
 Write-Host ""
