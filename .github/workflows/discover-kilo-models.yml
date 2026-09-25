@@ -1,0 +1,31 @@
+name: discover-live-kilo-free-models
+
+on:
+  push:
+    branches:
+      - bench/free-workers-20260925
+    paths:
+      - ".github/workflows/discover-kilo-models.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install Kilo CLI
+        run: |
+          curl -fsSL https://kilo.ai/cli/install | bash
+          echo "$HOME/.kilo/bin" >> "$GITHUB_PATH"
+      - name: Show live candidate model identifiers
+        run: |
+          kilo --version
+          echo "=== candidate matches from live CLI catalog ==="
+          kilo models 2>&1 | grep -Ei 'step-3\.7|nex-n2\.5|minimax-m3|hy3|laguna-s-2\.1|nemotron-3-ultra|north-mini-code' || true
+          echo "=== kilo provider ==="
+          kilo models kilo 2>&1 | grep -Ei 'step-3\.7|nex-n2\.5|minimax-m3|hy3|laguna-s-2\.1|nemotron-3-ultra|north-mini-code' || true
+          echo "=== kilocode provider ==="
+          kilo models kilocode 2>&1 | grep -Ei 'step-3\.7|nex-n2\.5|minimax-m3|hy3|laguna-s-2\.1|nemotron-3-ultra|north-mini-code' || true
