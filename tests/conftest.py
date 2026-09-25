@@ -99,6 +99,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(pricing, "is_peak", lambda ts, windows: False)
     llm._health.clear()
     llm._rate_limit_cooldowns.clear()
+    llm._provider_cooldowns.clear()
     llm._clients.clear()
     fake = FakeTransport()
     monkeypatch.setattr(llm, "_transport_override", fake)
