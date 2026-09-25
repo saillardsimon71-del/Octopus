@@ -57,9 +57,18 @@ if (-not (Test-Path -LiteralPath $rulesPath -PathType Leaf)) {
     )
     $missingBlocks = @($requiredWorkerBlocks | Where-Object { -not $rulesRaw.Contains($_) })
     if ($missingBlocks.Count -eq 0) {
-        Ok "Codex execpolicy blocks direct model-shell worker launches"
+        Ok "Codex worker-block execpolicy file present"
     } else {
         Fail ("worker execpolicy incomplete: " + ($missingBlocks -join ", "))
+    }
+
+    if (Command-Exists "codex") {
+        $policyResult = (& codex execpolicy check --rules $rulesPath kilo run 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $policyResult -match '"decision"\s*:\s*"forbidden"') {
+            Ok "Codex execpolicy parser confirms Kilo is forbidden in model shell"
+        } else {
+            Fail ("Codex execpolicy did not confirm forbidden Kilo launch: " + $policyResult)
+        }
     }
 }
 
@@ -224,4 +233,5 @@ if ($failures.Count -gt 0) {
 
 Write-Host "READY FOR CODEX / GPT-6 ASTRA" -ForegroundColor Green
 Write-Host "Launch from this repository root with: codex"
+Write-Host "If Codex asks whether to trust this project, approve the repository BEFORE sending the first prompt."
 Write-Host "Then run /status before the first task and use a normal prompt, not /goal."
