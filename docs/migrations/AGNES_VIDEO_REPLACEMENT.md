@@ -1,232 +1,227 @@
-# Atelier vidéo Agnes — contrat de remplacement
+# Agnes Video Generator — replacement contract
 
-Source normative pour cette migration: document de transfert fourni par l'utilisateur le 2026-09-25.
+Date: 2026-09-25
 
-IMPORTANT: les endpoints, limites RPM et comportements Agnes ci-dessous sont recopiés comme exigences du projet. Ils n'ont pas été revalidés extérieurement dans ce document.
+## Source of truth
 
-## But
+The replacement engine is the existing open-source project:
 
-Application web autonome grand public:
-- un unique fichier `index.html`;
-- HTML/CSS/JS uniquement;
-- aucune dépendance externe/CDN/framework;
-- upload multiple d'images depuis téléphone;
-- génération d'une vidéo IA par image;
-- Android + iOS;
-- anti-veille pendant les longues générations.
+- repository: `lcy362/agnes-video-generator`
+- upstream branch observed: `master`
+- pinned source for this migration: `a87162d6df73ffe72186838ca0ae9d461e68589b`
+- license: MIT, Copyright (c) 2026 lcy362
 
-Chemin cible:
-`apps/agnes-video/index.html`
+Do **not** rebuild Agnes inside OCTOPUS.
 
-L'application est indépendante du moteur OCTOPUS. OCTOPUS peut éventuellement la lancer/servir plus tard, mais ne doit pas réintroduire Remotion/TTS/RunPod pour elle.
+The previous plan for a hand-written `apps/agnes-video/index.html` is superseded by this document.
 
-## API Agnes fournie
+## Why this changes the architecture
 
-Créer:
-```
-POST https://apihub.agnes-ai.com/v1/videos
-```
+The upstream project already provides:
 
-Poll:
-```
-GET https://apihub.agnes-ai.com/agnesapi?video_id=<ID>&model_name=agnes-video-v2.0
-```
+- Python/FastAPI backend;
+- Agnes video API client;
+- text-to-video, image-to-video and keyframe modes;
+- multi-scene pipelines;
+- retries and rate limiting;
+- persisted task state and resume/stop;
+- FFmpeg/moviepy composition;
+- Edge TTS and subtitles;
+- Vue UI;
+- extensive tests;
+- Agnes 2.0 and 2.5 model adaptation.
 
-Modèle:
-`agnes-video-v2.0`
+Reimplementing these facilities in OCTOPUS would recreate the legacy-video problem we are trying to remove.
 
-Payload validé par le document source:
+## Target architecture
 
-```js
-{
-  model: "agnes-video-v2.0",
-  prompt: "...prompt en anglais...",
-  image: "<data-uri-complet>",
-  num_frames: 153,
-  frame_rate: 24
-}
-```
-
-Contraintes source:
-- ne pas utiliser `first_frame`;
-- ne pas utiliser `mode: "keyframes"`;
-- conserver le préfixe `data:image/...;base64,`;
-- `image` au niveau racine;
-- créations vidéo: 1/minute effective;
-- polling parallèle autorisé.
-
-## Durées
-
-```
-121 frames = 5.0 s
-153 frames = 6.4 s recommandé
-241 frames = 10.0 s
-441 frames = 18.4 s max
+```text
+OCTOPUS economic/control plane
+        |
+        | minimal explicit adapter
+        v
+Agnes Video Generator local service
+(pinned external application)
+        |
+        v
+Agnes AI + its own media pipeline
 ```
 
-`num_frames = 8n + 1`, max 441.
+Ownership:
 
-## Pipeline
+OCTOPUS owns:
+- economic decision to request video work;
+- task/experiment/evidence references;
+- permission to trigger an external action;
+- cost/time/result bookkeeping;
+- verification of the returned artifact.
 
-```
-T=0s    create image 1 -> poll 1
-T=62s   create image 2 -> poll 2
-T=124s  create image 3 -> poll 3
-...
-```
+Agnes Video Generator owns:
+- video-generation workflow;
+- Agnes API protocol;
+- rate limiting/retries;
+- images/video/TTS/subtitles/composition;
+- video-specific task state;
+- video UI.
 
-Les créations sont espacées; les pollers restent parallèles.
+Do not copy Agnes's internal task manager, retry engine, model registry or media pipeline into OCTOPUS.
 
-## Anti-429 adaptatif
+## Integration boundary
 
-Intervalle:
-- nominal: 62 s;
-- sur 429: +8 s jusqu'à 90 s;
-- après 3 succès consécutifs: -4 s progressivement jusqu'à 62 s.
+Prefer a local HTTP adapter against the upstream FastAPI API.
 
-Backoff source:
+Upstream documented endpoints at the pinned revision include:
 
-```
-429:     15,30,45,60,90,120,180 s
-503:     5,10,15,20,30,45 s
-network: 3,5,8,12,20,30 s
-```
+- `POST /api/tasks/simple`
+- `POST /api/tasks/creative`
+- `POST /api/tasks/manuscript`
+- `POST /api/tasks/poetry`
+- `POST /api/tasks/anchor`
+- `GET /api/tasks/{task_id}` for progress polling
+- `POST /api/tasks/{task_id}/stop`
+- `POST /api/tasks/{task_id}/resume`
+- `GET /api/video/{task_id}` for the final video
+- `GET /api/tasks/{task_id}/artifacts`
 
-Toute réponse HTTP non OK doit être traitée avant parsing JSON.
+Default service URL documented upstream: `http://localhost:8765`.
 
-## Cache timing local
+First OCTOPUS integration should use the smallest subset needed by the current product path.
+Do not expose all Agnes modes merely because they exist.
 
-Clé:
-`agnes_timing_cache_v10`
+## Deployment rule
 
-Forme:
-```json
-{"121":[62340,58900],"153":[75200]}
-```
+Keep Agnes as an external/pinned application, not as a second OCTOPUS core.
 
-- 10 derniers échantillons par durée;
-- médiane;
-- premier poll vers 80% de l'estimation.
+**Bind it to loopback only.** At the pinned revision Agnes defaults its FastAPI host to `0.0.0.0`, while its local configuration endpoints can persist API keys. For the OCTOPUS workstation launch it with `HOST=127.0.0.1` (and port 8765 unless deliberately changed). Do not expose this service to the LAN/Internet.
 
-## Prompt final
+Preferred first setup:
+- obtain the exact pin with `scripts/fetch_pinned_upstreams.ps1 agnes` into ignored `cache/upstreams/`;
+- prefer building a local Docker image **from that pinned source** rather than running upstream `start.bat` on the host or pulling an unverified moving image;
+- publish container port 8765 only as `127.0.0.1:8765:8765`;
+- inject `AGNES_API_KEY` at container/process runtime, never into Git and preferably not through the persisted Web config;
+- health/probe the service from OCTOPUS;
+- communicate only through the narrow adapter.
 
-Ordre:
-1. instruction continuité ou transformation;
-2. effet visuel;
-3. prompt utilisateur, priorité haute;
-4. cadrage;
-5. intensité;
-6. action aléatoire;
-7. mouvement caméra aléatoire;
-8. éclairage aléatoire;
-9. sound design minimal foley, no music;
-10. portrait 9:16, 24fps, no text, no watermarks.
+If Docker is unavailable and native execution is deliberately chosen, use an isolated virtual environment and force `HOST=127.0.0.1`.
 
-### Catégorie A — ambiance / continuité
-12 effets:
-- Cinématique
-- Golden Hour
-- Noir & Blanc
-- Pastel Rêveur
-- Néon Urbain
-- Vintage Super 8
-- Contraste Dramatique
-- Brume Mystique
-- Chiaroscuro
-- Tropical Saturé
-- Clair de Lune
-- Aube Douce
+Reproducibility limitation: the pinned upstream source is fixed, but its Dockerfile/requirements use version ranges and an unpinned `python:3.11-slim` base. Treat dependency resolution as a remaining supply-chain variable; do not claim a bit-reproducible build.
 
-Instruction de base:
-`Preserve the exact subject identity, face, pose, and clothing`
+Do not vendor the entire Agnes repository into OCTOPUS in the first migration.
+Do not add a Git submodule unless a concrete deployment constraint requires it.
+Do not fork upstream code before a real incompatibility is observed.
 
-### Catégorie B — transformations
-12 effets:
-- Simpson
-- Ghibli
-- Manga N&B
-- Polar
-- Cyberpunk
-- Pixar
-- BD franco-belge
-- Aquarelle
-- Peinture à l'huile
-- Claymation
-- Vaporwave
-- Surréaliste
+If upstream source code is copied or substantially derived later, preserve its MIT notice.
 
-Instruction:
-`Transform the entire image into this style`
+## Security
 
-## Interface
+The Agnes API key belongs to the Agnes process.
 
-Un seul `index.html` contenant:
-- CSS;
-- header;
-- info banner;
-- clé API + sauvegarde + statut;
-- contrôle wake lock;
-- upload multiple;
-- thumbnails;
-- prompt principal;
-- 7 presets;
-- choix effet;
-- durée/cadrage/intensité;
-- Créer;
-- Arrêter;
-- queue + progression + ETA;
-- galerie vidéo;
-- status bar;
-- toast;
-- canvas/video cachés anti-veille;
-- logique JS complète.
+OCTOPUS should not persist or display it.
+Browser/UI code in OCTOPUS should not receive it.
 
-## Anti-veille
+The upstream service already keeps its generation calls server-side; preserve that architecture.
 
-Niveau 1:
-```js
-wakeLockSentinel = await navigator.wakeLock.request('screen');
-```
+Do not make real generation calls in the OCTOPUS test suite.
 
-Niveau 2:
-- canvas 2x2;
-- alternance très légère;
-- `captureStream(1)`;
-- vidéo muette;
-- relance à `visibilitychange`;
-- préférence `agnes_wakelock_enabled`.
+## Model/protocol ownership
 
-## Performance images
+Do not reproduce Agnes model protocol in OCTOPUS.
 
-Pour 50+ images:
-- ne pas laisser toutes les Data URIs originales dans le DOM;
-- thumbnails ~200 px;
-- `loading="lazy"`;
-- conserver les originaux seulement dans l'état JS nécessaire aux requêtes.
+At the pinned revision, upstream already supports:
+- default `agnes-video-v2.0`;
+- Agnes 2.5 model branches;
+- v2.0 image resolution including hosted-URL upload with Base64 fallback;
+- submit retry/rate limiting;
+- polling and returned video URL handling.
 
-## Critères d'acceptation
+Therefore the earlier OCTOPUS-side assumptions about exact Data URI behavior, 2.0 payload details and adaptive polling are no longer an OCTOPUS implementation concern. They belong to the pinned Agnes engine.
 
-- fichier unique;
-- aucune dépendance/CDN;
-- clé API sauvegardable avec feedback;
-- multi-upload mobile;
-- queue stable;
-- une création Agnes à la fois par fenêtre ~62 s;
-- pollers parallèles;
-- backoff adaptatif;
-- bouton Arrêter fonctionnel;
-- wake lock + fallback;
-- cache timing;
-- effets A préservent la continuité par prompt;
-- effets B assument transformation;
-- vidéos affichées/téléchargeables lorsqu'elles sont prêtes;
-- aucun ancien moteur vidéo OCTOPUS requis.
+## Replacement sequence
 
-## Hors scope initial
+1. Remove OCTOPUS legacy video runtime according to `VIDEO_ENGINE_REMOVAL.md`.
+2. Confirm shared OCTOPUS tests are green.
+3. Validate the pinned Agnes project can start independently on this Windows machine.
+4. Add one minimal OCTOPUS adapter/probe for the local Agnes service.
+5. Add deterministic adapter tests with mocked HTTP responses.
+6. Run one explicit human-authorized live smoke test only after the key/service is configured.
+7. Record returned artifact evidence in OCTOPUS without importing Agnes internal state.
 
-- ffmpeg.wasm;
-- montage final concaténé;
-- TTS externe;
-- collaboration;
-- backend serveur;
-- historique IndexedDB avancé.
+## Acceptance criteria
+
+The migration succeeds when:
+
+- legacy OCTOPUS Remotion/RunPod/TTS/B-roll code is no longer required;
+- Agnes runs independently from its pinned upstream source;
+- OCTOPUS does not contain a second video-generation pipeline;
+- OCTOPUS can submit only the required Agnes job type through a narrow adapter;
+- OCTOPUS can query status, stop a task and obtain the completed video/artifact reference;
+- no Agnes secret is stored in OCTOPUS Git;
+- deterministic tests make no external generation call;
+- external side effects remain governed by OCTOPUS policy;
+- upstream version/pin is visible and upgradeable deliberately.
+
+## Not part of this migration
+
+- rewriting Agnes UI;
+- copying Agnes's pipeline into OCTOPUS;
+- porting all six Agnes task types;
+- changing Agnes's default video model;
+- improving Agnes itself;
+- merging its persistence with OCTOPUS SQLite;
+- automatic upstream updates.
+
+## Phase C implementation — 2026-09-25
+
+`octopus.agnes` implements the pinned local HTTP boundary with Python's standard
+library. It exposes `probe()`, `status(task_id)` and `video_reference(task_id)`;
+each accepts an explicit loopback service URL (default `http://127.0.0.1:8765`).
+Proxy environment settings and redirects are disabled. No Agnes credentials are
+read, sent or persisted. The health response does not attest the deployed version:
+`expected_pin` is the required source pin, not an observed server revision.
+
+Mutations require explicit `agnes.register()` and the existing `actions.propose`
+path. The channel kind is `agnes_video`, its locator is the service origin, and
+the human must grant active `act` access. Capabilities are `agnes_submit` and
+`agnes_stop`. Registration alone grants neither access nor budget.
+
+- `submit`: payload exactly `{"prompt": "..."}`; calls `/api/tasks/simple` as a
+  form with `mode=t2v`, leaving model, duration and media settings to Agnes.
+  Requires a stable mission idempotency key, declared spend amount/currency and
+  an existing allowance. No image upload, resume or alternative modes.
+- `stop`: payload exactly `{"task_id": "<12 lowercase hex characters>"}`;
+  requires its own stable idempotency key. A stop acknowledgement does not prove
+  cancellation or absence of charges and does not release generation spend.
+- A successful submission records the returned task ID and service reference in
+  the existing action journal. Its evidence describes an HTTP acknowledgement,
+  never completion, delivery, customer acceptance or an observed charge.
+- `video_reference` requires a service-reported `completed` simple task and
+  returns the fixed `/api/video/{task_id}` reference with `verified=False`.
+  The pinned simple pipeline writes `final_video.mp4`; its `/artifacts` manifest
+  has no simple-task definitions. No remote URLs or filesystem paths from the
+  response are followed. Download, integrity and delivery checks remain human
+  workflow responsibilities; this adapter does not claim artifact verification.
+
+`actions.AmbiguousAction` preserves the existing spend reservation when a
+mutation times out, returns an uncertain HTTP error or has an invalid response.
+No retry is performed. The reservation is linked to the action before HTTP, so
+a crash during submission retains both identity and budget. Reusing the same
+key returns the journaled action, including after process restart; no new call
+is made. A crash before acknowledgement persistence can leave status `proposed`
+and no Agnes task ID. Reconcile in the independent service before any new key
+or spend release; upstream creation has no client idempotency facility.
+
+The declared reservation is not an upstream billing cap: Agnes owns model
+configuration and its internal retries. Before live authorization the human must
+bound those costs and later reconcile the observed charge through
+`economy.record_cash(..., spend_request_id=...)`, or release a reservation only
+with evidence that no charge occurred. There is no second ledger or automatic
+settlement. Blocked identities are retained too; a newly authorized attempt
+needs a new key only after reviewing the prior action.
+
+Tests in `tests/test_agnes.py` mock HTTP and exercise the pinned wire contract,
+permission/budget refusals, durable deduplication, concurrent identical requests,
+crash and ambiguous outcomes, loopback restrictions, and status/video references.
+No independent service launch or live generation was performed in phase C.
+Next operational observation: verify the pinned service starts on loopback;
+only after explicit human authorization, observe a real task and verify its
+artifact and actual charge. Deployment and economic acceptance remain unproven.
