@@ -160,6 +160,33 @@ if (($residualPaths.Count -eq 0) -and -not $policyHit) {
     Ok "no active Astra Flash Orchestrator residue detected"
 }
 
+# Purity checks: global instructions are concatenated into project context, and
+# user-level MCP servers can remain available independently of Apps/Plugins.
+$globalInstructionFiles = @(
+    (Join-Path $codexHome "AGENTS.md"),
+    (Join-Path $codexHome "AGENTS.override.md")
+)
+foreach ($path in $globalInstructionFiles) {
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $body = [System.IO.File]::ReadAllText($path).Trim()
+        if ($body.Length -gt 0) {
+            Fail "non-empty global Codex instructions detected at $path; review/remove them for the purified OCTOPUS session"
+        }
+    }
+}
+
+$globalConfig = Join-Path $codexHome "config.toml"
+if (Test-Path -LiteralPath $globalConfig -PathType Leaf) {
+    $mcpDefs = @(Select-String -LiteralPath $globalConfig -Pattern '^\s*\[mcp_servers\.' -AllMatches -ErrorAction SilentlyContinue)
+    if ($mcpDefs.Count -gt 0) {
+        Fail "user-level MCP server definitions detected in $globalConfig; explicitly disable/review them before the purified OCTOPUS session"
+    } else {
+        Ok "no user-level MCP server definitions detected"
+    }
+} else {
+    Ok "no user-level Codex config.toml MCP definitions detected"
+}
+
 Write-Host ""
 if ($failures.Count -gt 0) {
     Write-Host ("NOT READY — " + $failures.Count + " blocking issue(s).") -ForegroundColor Red
