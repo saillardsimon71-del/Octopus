@@ -1,23 +1,12 @@
-# Agnes Video App
+# Agnes Video integration
 
-V1 is a local/private operator tool. Do not deploy it publicly with a personal Agnes API key embedded or persisted in client-side code.
+OCTOPUS does not implement its own Agnes video engine here.
 
-Target application replacing the legacy OCTOPUS video engine.
-
-Implementation target:
-- `apps/agnes-video/index.html`
-- single self-contained HTML file;
-- no framework;
-- no CDN;
-- no backend;
-- no Remotion;
-- no RunPod;
-- no TTS/B-roll pipeline dependency.
-
-Normative project contract:
+Canonical replacement plan:
 - `../../docs/migrations/AGNES_VIDEO_REPLACEMENT.md`
 
-Migration/removal plan:
-- `../../docs/migrations/VIDEO_ENGINE_REMOVAL.md`
+Pinned upstream:
+- `lcy362/agnes-video-generator@a87162d6df73ffe72186838ca0ae9d461e68589b`
+- MIT license
 
-Do not couple this app back into the OCTOPUS core during the first migration phase.
+The first integration is a thin local HTTP adapter to the independently running Agnes Video Generator service. Do not vendor or rebuild the upstream application in this directory unless a later, explicit deployment decision requires it.
