@@ -19,7 +19,7 @@ if ($CodexHome -eq [System.IO.Path]::GetFullPath((Join-Path $HOME ".codex")).Tri
 New-Item -ItemType Directory -Force -Path $CodexHome | Out-Null
 $env:CODEX_HOME = $CodexHome
 
-$escapedRepo = $repo.Replace("\", "\\").Replace(""", "\"")
+$escapedRepo = $repo.Replace("\", "\\")
 $configPath = Join-Path $CodexHome "config.toml"
 $managed = @(
     "# Managed by OCTOPUS setup_octopus_codex_home.ps1",
