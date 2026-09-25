@@ -81,6 +81,16 @@ if (Command-Exists "codex") {
     Fail "codex CLI not found in PATH"
 }
 
+if (Command-Exists "codex") {
+    $loginStatus = (& codex login status 2>&1 | Out-String).Trim()
+    Info ("Codex auth: " + $loginStatus)
+    if ($loginStatus -match '(?i)chatgpt') {
+        Ok "Codex is using ChatGPT sign-in (plan allowance path)"
+    } else {
+        Fail "Codex is not confirmed as ChatGPT-authenticated; do not start Astra until 'codex login status' confirms ChatGPT sign-in"
+    }
+}
+
 if (Command-Exists "kilo") {
     $kiloVersion = (& kilo --version 2>&1 | Out-String).Trim()
     Ok ("Kilo CLI present" + $(if ($kiloVersion) { ": $kiloVersion" } else { "" }))
@@ -89,6 +99,18 @@ if (Command-Exists "kilo") {
     Ok ("Kilo CLI present" + $(if ($kiloVersion) { ": $kiloVersion" } else { "" }))
 } else {
     Fail "Kilo CLI not found; bounded free worker cannot run"
+}
+
+$kiloCmd = if (Command-Exists "kilo") { "kilo" } elseif (Command-Exists "kilo.cmd") { "kilo.cmd" } else { $null }
+if ($kiloCmd) {
+    $expectedRoute = "kilo/stepfun/step-3.7-flash:free"
+    $catalog = (& $kiloCmd models kilo 2>&1 | Out-String)
+    $routes = @($catalog -split "\r?\n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($routes -contains $expectedRoute) {
+        Ok "exact free Kilo route available: $expectedRoute"
+    } else {
+        Fail "expected free Kilo route absent from live catalog: $expectedRoute"
+    }
 }
 
 if (Command-Exists "python") {
