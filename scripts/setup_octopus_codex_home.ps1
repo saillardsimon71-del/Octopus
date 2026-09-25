@@ -59,7 +59,7 @@ if (-not $SkipLogin) {
     # an expected status here, so temporarily allow native stderr through.
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    $status = (& codex login status 2>&1 | Out-String).Trim()
+    $status = (& codex login status 2>$null | Out-String).Trim()
     $statusCode = $LASTEXITCODE
     $ErrorActionPreference = $savedPreference
 
