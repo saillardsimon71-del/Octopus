@@ -105,7 +105,7 @@ if ($kind -eq "working_tree") {
     & git -C $Repo add -A -- @wanted
     if ($LASTEXITCODE -ne 0) { throw "Host git add failed for checkpoint $requestId." }
 
-    $staged = @((Invoke-Git @("diff", "--cached", "--name-only", "--relative", "--")) | Where-Object { $_ } | Sort-Object -Unique)
+    $staged = @((Invoke-Git @("diff", "--no-renames", "--cached", "--name-only", "--relative", "--")) | Where-Object { $_ } | Sort-Object -Unique)
     $stagedDifference = @(Compare-Object -ReferenceObject $wanted -DifferenceObject $staged)
     if ($stagedDifference.Count -gt 0) { throw "Staged paths differ from the checkpoint request." }
 
@@ -127,7 +127,7 @@ if ($kind -eq "working_tree") {
     $workerMessage = ((Invoke-Git @("log", "-1", "--format=%s", $sourceCommit)) -join "").Trim()
     if ($workerMessage -ne $message) { throw "Worker checkpoint message does not match the reviewed commit subject." }
 
-    $workerPaths = @((Invoke-Git @("diff", "--name-only", "--relative", $head, $sourceCommit, "--")) | Where-Object { $_ } | Sort-Object -Unique)
+    $workerPaths = @((Invoke-Git @("diff", "--no-renames", "--name-only", "--relative", $head, $sourceCommit, "--")) | Where-Object { $_ } | Sort-Object -Unique)
     $workerDifference = @(Compare-Object -ReferenceObject $wanted -DifferenceObject $workerPaths)
     if ($workerDifference.Count -gt 0) {
         throw "Worker commit paths do not exactly match the reviewed checkpoint paths."

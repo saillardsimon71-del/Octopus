@@ -1,8 +1,10 @@
 param(
     [string]$CodexHome = "",
+    [ValidateSet("B", "C", "D")]
+    [string]$Phase = "B",
     [int]$MaxAstraTurns = 4,
     [int]$MaxRelayCycles = 6,
-    [int]$MaxResumeInputTokens = 250000,
+    [int]$MaxResumeInputTokens = 120000,
     [switch]$SkipFetch,
     [switch]$NewSession,
     [switch]$ResumeFailed,
@@ -71,6 +73,27 @@ if ($MaxRelayCycles -lt 0 -or $MaxRelayCycles -gt 20) {
 }
 if ($MaxResumeInputTokens -lt 10000) {
     throw "MaxResumeInputTokens must be at least 10000."
+}
+
+$phaseSpec = switch ($Phase) {
+    "B" {
+        [ordered]@{
+            documents = "docs/migrations/VIDEO_ENGINE_REMOVAL.md"
+            mission = "Remove the legacy video engine while preserving shared consumers."
+        }
+    }
+    "C" {
+        [ordered]@{
+            documents = "docs/migrations/AGNES_VIDEO_REPLACEMENT.md"
+            mission = "Implement the bounded Agnes video adapter and its deterministic mocked HTTP tests. Never perform a live generation or use paid credentials."
+        }
+    }
+    "D" {
+        [ordered]@{
+            documents = "docs/migrations/OCTOPUS_HERMES_REPLACEMENT_MATRIX.md and docs/migrations/HERMES_COMPONENT_EXTRACTION.md"
+            mission = "Implement the Hermes P0 tool-registry replacement only. Preserve OCTOPUS policies and do not introduce a second registry or broad plugin discovery."
+        }
+    }
 }
 
 $setup = Join-Path $repo "scripts\setup_octopus_codex_home.ps1"
@@ -208,6 +231,10 @@ if ($existingSession -and $existingStatus -eq "failed" -and -not $NewSession -an
 }
 
 if ($existingSession -and -not $NewSession -and (-not $existingStatus -or $existingStatus -eq "active" -or ($existingStatus -eq "failed" -and $ResumeFailed))) {
+    $existingPhase = if ($existingSession.phase) { [string]$existingSession.phase } else { "B" }
+    if ($existingPhase -ne $Phase) {
+        throw "The resumable Astra session belongs to phase $existingPhase. Use -NewSession for phase $Phase."
+    }
     $candidateThread = [string]$existingSession.thread_id
     if ($candidateThread) {
         $matchingLogs = @(Get-ChildItem -LiteralPath $turnLogRoot -Filter "*.jsonl" -File | Where-Object {
@@ -236,6 +263,7 @@ function Save-SessionState([string]$Status) {
     Write-JsonAtomic -Path $sessionStatePath -Value ([ordered]@{
         version = 2
         status = $Status
+        phase = $Phase
         thread_id = $script:threadId
         codex_home = $CodexHome
         current_head = (git rev-parse HEAD | Out-String).Trim()
@@ -384,7 +412,7 @@ if ($baselineBrief.Length -gt 1800) { $baselineBrief = $baselineBrief.Substring(
 
 $initialPrompt = @"
 You are the GPT-6 Astra root constructor for the bounded OCTOPUS maintenance window.
-Read root AGENTS.md (already injected) and docs/migrations/CODEX_START_2026-09-25.md once. Start at phase B. Do not rediscover the roadmap or rerun the baseline.
+Read root AGENTS.md (already injected) and $($phaseSpec.documents) once. Work on phase $Phase only. Do not rediscover the roadmap or rerun the baseline.
 
 The deterministic host already validated Git, auth, sandbox, pinned upstreams, and ran the full Python baseline outside the model loop:
 - head=$head
@@ -392,7 +420,9 @@ The deterministic host already validated Git, auth, sandbox, pinned upstreams, a
 - log=$($baseline.log_path)
 - tail=$baselineBrief
 
-Read only VIDEO_ENGINE_REMOVAL.md and files directly needed for phase B. Use targeted searches and bounded reads. Run targeted tests while editing; run the full suite only once after the phase changes are complete.
+Mission: $($phaseSpec.mission)
+
+Read only the named phase document(s) and files directly needed for phase $Phase. Use rg, Git summaries, and bounded excerpts. Never dump a complete large diff, test log, generated file, lockfile, or file over 100 KB into model context. Redirect full test output to a log and inspect only its concise tail. Run targeted tests while editing; run the full suite only once after the phase changes are complete.
 
 Windows boundary: use PowerShell only. Read-only Git inspection is allowed. Never create/switch branches or run Git operations that write .git. For a tested phase, atomically publish checkpoint.json with version=2, request_id, base_head, message, and exact changed paths, then end the turn. The host commits those exact paths and resumes this exact thread.
 
@@ -424,7 +454,7 @@ while ($true) {
             "message=$commitMessage",
             "",
             "The deterministic parent supervisor committed your tested workspace changes outside the Codex sandbox.",
-            "Do not attempt Git metadata writes. Continue the authorized mission from exactly where you stopped.",
+            "Do not attempt Git metadata writes. Continue phase $Phase from exactly where you stopped. Do not start another phase.",
             "If direct changes reach another coherent tested checkpoint, publish checkpoint.json again. If a bounded Step task is justified, only publish request.json from a clean source tree."
         ) -join [Environment]::NewLine
 
@@ -502,7 +532,7 @@ while ($true) {
             "",
             "Resume the authorized maintenance from the exact prior state. Do not repeat repository discovery, broad reads, or the full baseline.",
             "The host now owns all Git metadata writes. Use checkpoint schema version 2 with base_head and exact changed paths.",
-            "Continue phase B with targeted reads and tests. Never poll or launch Kilo/night-shift yourself."
+            "Continue phase $Phase with targeted reads and tests. Never poll or launch Kilo/night-shift yourself."
         ) -join [Environment]::NewLine
         $next = Invoke-AstraTurn -Prompt $resumePrompt -ExistingThreadId $threadId
         $threadId = $next.thread_id

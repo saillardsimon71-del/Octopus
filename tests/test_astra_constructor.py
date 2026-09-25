@@ -115,6 +115,34 @@ def test_host_checkpoint_rejects_undeclared_changes(tmp_path: Path):
     assert git(repo, "diff", "--cached", "--name-only") == ""
 
 
+def test_host_checkpoint_accepts_rename_with_both_declared_paths(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    (repo / "renamed.txt").write_text("before\n", encoding="utf-8")
+    (repo / "product.txt").unlink()
+    request = checkpoint(repo, ["product.txt", "renamed.txt"], request_id="rename-1")
+
+    result = run(
+        POWERSHELL,
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(ROOT / "scripts" / "commit_astra_checkpoint.ps1"),
+        "-Repo",
+        str(repo),
+        "-CheckpointPath",
+        str(request),
+        cwd=repo,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert git(repo, "status", "--porcelain") == ""
+    assert git(repo, "diff", "--no-renames", "--name-only", "HEAD^").splitlines() == [
+        "product.txt",
+        "renamed.txt",
+    ]
+
+
 def test_host_checkpoint_fast_forwards_reviewed_worker_commit(tmp_path: Path):
     repo = init_repo(tmp_path)
     base = git(repo, "rev-parse", "HEAD")
@@ -174,8 +202,16 @@ def test_constructor_powershell_parses_and_disables_shell_snapshot():
 
     config = (ROOT / ".codex" / "config.toml").read_text(encoding="utf-8")
     assert "shell_snapshot = false" in config
+    assert 'model_reasoning_effort = "medium"' in config
+    assert 'model_verbosity = "low"' in config
+    assert "model_auto_compact_token_limit = 120000" in config
     launcher = (ROOT / "scripts" / "start_octopus_astra.ps1").read_text(encoding="utf-8")
     assert "[switch]$ValidateOnly" in launcher
+    assert '[ValidateSet("B", "C", "D")]' in launcher
+    assert '[string]$Phase = "B"' in launcher
+    assert "MaxResumeInputTokens = 120000" in launcher
+    assert "AGNES_VIDEO_REPLACEMENT.md" in launcher
+    assert "OCTOPUS_HERMES_REPLACEMENT_MATRIX.md" in launcher
 
 
 def test_codex_stream_keeps_stderr_out_of_json_and_saves_thread_early(tmp_path: Path):
