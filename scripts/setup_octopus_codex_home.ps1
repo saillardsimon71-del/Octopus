@@ -43,7 +43,14 @@ Write-Host "[OK] CODEX_HOME: $CodexHome" -ForegroundColor Green
 Write-Host "[OK] Project marked trusted in dedicated home: $repo" -ForegroundColor Green
 
 if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
-    throw "codex CLI not found in PATH."
+    $OfficialBin = Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\Codex\bin'
+    $OfficialExe = Join-Path $OfficialBin 'codex.exe'
+    if (Test-Path -LiteralPath $OfficialExe -PathType Leaf) {
+        $env:PATH = $OfficialBin + [System.IO.Path]::PathSeparator + $env:PATH
+        Write-Host ('[OK] Added official Codex standalone bin to this process PATH: ' + $OfficialBin) -ForegroundColor Green
+    } else {
+        throw 'codex CLI not found. Install the official Windows standalone CLI first: powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"'
+    }
 }
 
 if (-not $SkipLogin) {
