@@ -54,7 +54,9 @@ Cible OCTOPUS:
 - une capability stable `computer`;
 - aucune dépendance au loop Hermes;
 - backend initial: cua-driver/MCP;
-- policy/approval OCTOPUS autour des actions à conséquences.
+- policy/approval OCTOPUS autour des actions à conséquences;
+- préserver les propriétés du pin Hermes: MCP/stdio, environnement enfant assaini pour ne pas transmettre les secrets provider, télémétrie cua-driver désactivée par défaut;
+- aucun auto-installer cua-driver déclenché implicitement par OCTOPUS.
 
 Décision: PORTER/ADAPTER.
 
