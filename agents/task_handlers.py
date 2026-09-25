@@ -421,6 +421,17 @@ def orbit_mission(ctx):
                 "synthesis_status=validated conserve son sens technique, pas une validation des faits."
             ),
         }
+        # Couche de MESURE après #94, exposée séparément : le gate structurel ci-dessus
+        # conserve exactement qualified_business_signal_count. business_signal_reviews
+        # rapporte, pour chaque signal structurellement valide, la lecture indépendante
+        # de son actionnabilité ; actionable_business_signal_count ne compte que les
+        # revues classées actionable_now. Si la revue est dégradée, la classification
+        # reste nulle : rien n'est inventé pour préserver le comptage.
+        output["business_signal_reviews"] = result.get("business_signal_reviews") or []
+        output["actionable_business_signal_count"] = int(
+            result.get("actionable_business_signal_count") or 0)
+        output["business_signal_review_status"] = result.get(
+            "business_signal_review_status", "unavailable")
     flags = {}
     if ctx.input.get("search_browse_lockstep"):
         flags.update({

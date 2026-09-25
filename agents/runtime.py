@@ -1136,6 +1136,97 @@ def _qualify_business_signals(raw_signals, results: list[dict]) -> tuple[list[di
     return accepted, rejected
 
 
+# --- Revue d'actionnabilité : couche de MESURE posée après le gate #94 ---
+#
+# Le gate #94 prouve la structure (acquisition réelle + citations littérales), pas
+# l'actionnabilité économique actuelle. La revue ci-dessous mesure ce second aspect,
+# signal par signal, sans jamais filtrer, corriger ni compléter les signaux.
+
+_BUSINESS_SIGNAL_REVIEW_CLASSES = (
+    "actionable_now",
+    "market_evidence",
+    "historical_or_closed",
+    "unsupported",
+    "uncertain",
+)
+# Borne de coût de la mesure : les citations complètes voyagent déjà dans le signal.
+_BUSINESS_SIGNAL_REVIEW_TEXT_CHARS = 8000
+
+
+def _validate_business_signal_review(data: dict) -> dict:
+    """Sortie structurée du reviewer : exactement une classification connue + justification.
+
+    Toute sortie hors de ce contrat est rejetée en amont (InvalidOutput côté passerelle) ;
+    cette normalisation garantit aussi qu'aucun champ supplémentaire n'est stocké.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("revue_non_objet")
+    classification = str(data.get("classification") or "").strip()
+    if classification not in _BUSINESS_SIGNAL_REVIEW_CLASSES:
+        raise ValueError("classification_inconnue")
+    justification = str(data.get("justification") or "").strip()
+    if not justification:
+        raise ValueError("justification_manquante")
+    return {"classification": classification, "justification": justification[:600]}
+
+
+def _business_signal_review_messages(signal: dict, acquisition_text: str) -> list[dict]:
+    """Prompt du reviewer : uniquement le signal proposé et le texte de son acquisition.
+
+    Le reviewer ne reçoit ni l'objectif de mission, ni le rapport de synthèse, ni les
+    autres signaux : sa lecture est indépendante de l'appel de synthèse qui a rédigé
+    le signal. La consigne reste conceptuelle (pas de règles métier codées).
+    """
+    system = (
+        "Voici un signal économique proposé et sa preuve source.\n"
+        "Évalue indépendamment si cette preuve démontre une opportunité économique "
+        "actuellement testable.\n"
+        "Ne complète aucune information manquante et ne corrige pas le signal.\n"
+        "Réponds en JSON avec exactement UNE classification parmi : "
+        '"actionable_now", "market_evidence", "historical_or_closed", "unsupported", '
+        '"uncertain" ; et une justification courte. '
+        'Forme : {"classification": "...", "justification": "..."}'
+    )
+    payload = {
+        "signal_propose": signal,
+        "preuve_source": acquisition_text[:_BUSINESS_SIGNAL_REVIEW_TEXT_CHARS],
+    }
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+
+
+def _review_business_signals(business_signals: list[dict], results: list[dict]) -> list[dict]:
+    """Revue LLM indépendante de chaque signal structurellement valide (mesure seule).
+
+    Une entrée par signal, quoi qu'il arrive. Une panne du reviewer (passerelle, sortie
+    invalide) dégrade uniquement la revue concernée : la mission, le gate #94 et le
+    comptage structurel restent intacts, et aucune classification n'est inventée.
+    """
+    pages = _verified_browse_pages(results)
+    by_acquisition = {(p["final_url"], p["fetched_at"]): p for p in pages}
+    reviews = []
+    for index, signal in enumerate(business_signals or []):
+        acquisition = signal.get("evidence_acquisition") or {}
+        # Présence garantie par le gate sur les mêmes results ; sinon bug, à ne pas masquer.
+        page = by_acquisition[(acquisition.get("final_url"), acquisition.get("fetched_at"))]
+        entry = {"signal_index": index, "evidence_url": signal.get("evidence_url", "")}
+        messages = _business_signal_review_messages(signal, page["text"])
+        try:
+            verdict = deepseek.call_json(
+                "REVUE", "revue_signal", deepseek.config.MODEL_FLASH, messages,
+                max_tokens=1000, validate=_validate_business_signal_review)
+        except llm.GatewayError as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            db.post("REVUE", f"revue d'actionnabilité dégradée : {error[:120]}")
+            entry.update({"status": "degraded", "classification": None, "justification": None,
+                          "error": error[:1500]})
+        else:
+            entry.update({"status": "reviewed", "classification": verdict["classification"],
+                          "justification": verdict["justification"]})
+        reviews.append(entry)
+    return reviews
+
+
 def build_prompts(role: str, goal: str, conversational: bool = False,
                   allowed_tools: set[str] | None = None) -> tuple[str, str, str]:
     """(prompt système, premier message, libellé de fin) de la boucle ReAct."""
@@ -1624,19 +1715,40 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
 
     rapport = syn.get("rapport", "")
     business_signals, rejected_signals = ([], [])
+    business_signal_reviews = []
     if business_signal_focus:
         business_signals, rejected_signals = _qualify_business_signals(
             syn.get("business_signals"),
             results,
         )
+        # Couche de MESURE après #94 : la revue ne filtre ni ne modifie les signaux ;
+        # elle ajoute une lecture indépendante de leur actionnabilité actuelle.
+        business_signal_reviews = _review_business_signals(business_signals, results)
+    actionable_business_signal_count = sum(
+        1 for review in business_signal_reviews
+        if review.get("classification") == "actionable_now"
+    )
+    if not business_signal_reviews:
+        business_signal_review_status = "no_signals"
+    elif any(review.get("status") == "degraded" for review in business_signal_reviews):
+        business_signal_review_status = "degraded"
+    else:
+        business_signal_review_status = "reviewed"
     decision_payload = {"rapport": rapport, "synthesis_status": "validated"}
     if business_signal_focus:
         decision_payload["business_signal_count"] = len(business_signals)
         decision_payload["business_signal_rejected"] = len(rejected_signals)
+        # Mesure séparée du gate structurel : qualified_business_signal_count reste la
+        # métrique #94 ; seule la classification actionable_now alimente ce compteur.
+        decision_payload["actionable_business_signal_count"] = actionable_business_signal_count
+        decision_payload["business_signal_review_status"] = business_signal_review_status
     db.decide("ORBIT", "mission_done", decision_payload)
     db.post("ORBIT", f"mission terminée : {rapport[:80]}")
     output = {"plan": tasks, "results": results, "rapport": rapport, "synthesis_status": "validated"}
     if business_signal_focus:
         output["business_signals"] = business_signals
         output["business_signal_rejections"] = rejected_signals
+        output["business_signal_reviews"] = business_signal_reviews
+        output["actionable_business_signal_count"] = actionable_business_signal_count
+        output["business_signal_review_status"] = business_signal_review_status
     return output
