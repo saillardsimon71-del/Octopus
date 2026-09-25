@@ -27,13 +27,13 @@ jobs:
       matrix:
         include:
           - id: nex-n2-5-pro
-            model: "kilo/nex-agi/nex-n2.5-pro:free"
+            model: "nex-agi/nex-n2.5-pro:free"
           - id: minimax-m3
-            model: "kilo/minimax/minimax-m3:free"
+            model: "minimax/minimax-m3:free"
           - id: hy3
-            model: "kilo/tencent/hy3:free"
+            model: "tencent/hy3:free"
           - id: laguna-s-2-1
-            model: "kilo/poolside/laguna-s-2.1:free"
+            model: "poolside/laguna-s-2.1:free"
 
     steps:
       - name: Checkout benchmark branch without push credentials
