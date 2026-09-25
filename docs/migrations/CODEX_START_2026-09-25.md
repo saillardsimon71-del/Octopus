@@ -1,24 +1,27 @@
 # CODEX START — 2026-09-25
 
-This is the single router for the current GPT-6 Astra maintenance session.
+Single execution router for the current OCTOPUS construction window.
 
-## 0. Gate before spending Astra quota
+## 0. How this session is launched
 
-The human runs, from the OCTOPUS root:
+The supported entry point is:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex_preflight.ps1
-```
+\`scripts/start_octopus_astra.ps1\`
 
-Do not begin work unless it ends with:
+It uses a dedicated \`CODEX_HOME\`, runs the local preflight, launches GPT-6 Astra through \`codex exec --json --strict-config --model gpt-6-astra\`, captures the exact Codex \`thread_id\`, and resumes that same thread after bounded external workers.
 
-`READY FOR CODEX / GPT-6 ASTRA`
+Do not replace this with an ad-hoc interactive Codex session for the current migration.
 
-The gate checks Git cleanliness/main ancestry, fetches/verifies the exact pinned Hermes + Agnes sources, validates effective project Codex feature state, Codex CLI >= 0.153.0 (the official minimum client version currently advertised for GPT-6 Astra), ChatGPT authentication, worker execpolicy, the exact live free Step route, Python/Docker and hidden global Codex context.
+Current supervisor defaults:
+- max Astra turns: 8;
+- max Step relay cycles: 6;
+- exact thread-id verification on every resume;
+- any non-zero Codex exit stops the supervisor;
+- any worker result is reviewed by root Astra before integration.
 
-If the repo is not trusted yet, Codex may ignore project `.codex/` config/rules. Approve the trust prompt before the first task, exit, and rerun preflight.
+\`codex exec\` is deliberately useful here: in the audited client it is non-interactive and forces approval policy \`never\`, so sandbox/escalation failures are returned to Astra instead of opening hidden approval/reviewer loops.
 
-## 1. Current human directive
+## 1. Current directive
 
 For this bounded maintenance window:
 
@@ -31,135 +34,233 @@ For this bounded maintenance window:
 This directive overrides older "next action" prose in snapshots. It does **not** weaken OCTOPUS evidence, secret, cost, permission, external-action or promotion boundaries.
 
 Reference at preparation time:
-- `main@ae4d98dc9692aa10ba15051381a36809e25377df`;
-- branch `prep/astra-local-orchestration`, prepared from that main with zero commits behind;
-- `bench/free-workers-20260925` is evidence only, never a branch to merge into this work.
+- protected reference: \`main@ae4d98dc9692aa10ba15051381a36809e25377df\`;
+- working branch: \`prep/astra-local-orchestration\`;
+- benchmark branch \`bench/free-workers-20260925\` is evidence only and is never merged as a dependency.
 
-Git reality always wins. If `main` moved, reconcile before product changes.
+Git reality wins. If main moved materially, stop/reconcile before product changes.
 
 ## 2. Context budget
 
 At startup use only:
-- injected root `AGENTS.md`;
+- injected root \`AGENTS.md\`;
 - this file.
 
-Load phase documentation only when entering that phase:
-- video removal → `VIDEO_ENGINE_REMOVAL.md`;
-- Agnes → `AGNES_VIDEO_REPLACEMENT.md`;
-- Hermes → `OCTOPUS_HERMES_REPLACEMENT_MATRIX.md`, then `HERMES_COMPONENT_EXTRACTION.md` only for the component being touched.
+Load phase documents only on entry to that phase:
+- video removal → \`VIDEO_ENGINE_REMOVAL.md\`;
+- Agnes → \`AGNES_VIDEO_REPLACEMENT.md\`;
+- Hermes → \`OCTOPUS_HERMES_REPLACEMENT_MATRIX.md\`, then only the relevant section of \`HERMES_COMPONENT_EXTRACTION.md\`.
 
-Do not preload `VISION.md`, `CURRENT_STATE.md`, `HANDOFF_WORK.md` or `CODEX_18H_HANDOFF.md`. Read a relevant section only if a concrete change reaches its semantic boundary.
+Do not preload \`VISION.md\`, \`CURRENT_STATE.md\`, \`HANDOFF_WORK.md\` or \`CODEX_18H_HANDOFF.md\`.
+Read a relevant section only if a concrete modification reaches that semantic boundary.
 
 Do not:
-- broad-audit the repository again;
+- broad-audit the repo again;
 - enumerate historical branches;
 - re-benchmark free models;
 - revisit Astra Flash Orchestrator;
 - redesign OCTOPUS.
 
-Inspect only code needed by the current phase. Nested `AGENTS.md` instructions still apply to files in their scope.
+Inspect only code needed by the current phase. Nested \`AGENTS.md\` still applies to files in its scope.
 
-## 3. Astra vs worker
+## 3. Astra vs Step
 
-### No quality fallback
+GPT-6 Astra owns:
+- architecture and scope;
+- interfaces/contracts;
+- permissions/security/trust boundaries;
+- oracle/test design;
+- ambiguous failures;
+- final diff/evidence review.
 
-Codex may offer/automatically enter **Luna Reserve** after regular usage is exhausted on eligible accounts. There is no project config switch in the audited 0.157.0 client that reliably disables this backend-authorized fallback.
+Current bounded implementation worker:
 
-Before each major phase, use the local `/status` surface and confirm the active model is GPT-6 Astra and regular usage is available.
+\`kilo/stepfun/step-3.7-flash:free\`
 
-If Codex displays `Luna Reserve`, `Automatically switched to`, changes the active model away from GPT-6 Astra, or reports that regular Astra usage is exhausted: **stop the session immediately and do not continue OCTOPUS work in that thread until Astra is available again.** Do not accept a lower-quality reserve/fallback for architecture, integration or review.
+Step is not an architecture authority.
 
-Astra owns architecture, scope, permissions/security, contracts/oracles, ambiguous failures and final diff review.
+Delegate only when:
+- contract and acceptance criteria are already fixed by Astra;
+- exact writable paths are small and explicit;
+- deterministic relevant tests exist;
+- protected trust boundaries are not being modified;
+- a wrong implementation is detectable by tests + Astra review.
 
-The only current cheap implementation candidate is the existing OCTOPUS DevWorker route:
+No fallback cascade.
+If Step fails, drifts, times out, changes wrong scope or returns ambiguous evidence, the task returns to Astra.
+No implicit paid fallback.
+Keep \`allow_declarative_fallback=false\`.
 
-`kilo/stepfun/step-3.7-flash:free`
+Broad surgery that must remove tests/workflows or cross protected paths is done directly by Astra instead of weakening DevWorker protections.
 
-Use it only for bounded implementation with explicit exact `allowed_paths`, deterministic tests and acceptance criteria. It is not an architecture authority.
+## 4. Automatic quota-safe relay
 
-No fallback cascade. If Step fails, drifts, produces ambiguous evidence or an untrusted diff, the task returns to Astra. No paid fallback without explicit human authorization. For OCTOPUS self-development keep `allow_declarative_fallback=false`.
+Astra must **never** launch Kilo, \`night-shift\`, or the external worker runner itself from its model shell.
 
-Broad surgery that must remove tests/workflows or cross protected boundaries is done directly by Astra rather than weakening DevWorker guards.
+The project execpolicy blocks the direct common commands as defense in depth. It is not treated as an absolute security boundary; the canonical boundary is architectural: only the deterministic parent supervisor launches Step.
 
-## 4. HARD quota boundary — worker is out-of-band
+When Astra wants to delegate:
 
-Astra must **never** launch Kilo or `python -m octopus night-shift` from its own model-driven shell. Project execpolicy forbids the direct commands.
+1. Fix the contract.
+2. If a new oracle is needed, write/run/commit it first so the source repo is clean.
+3. Write exactly one \`policy: "product_ticket"\` plan under:
+   \`cache/astra-tickets/<ticket>.json\`
+4. Atomically publish:
+   \`cache/astra-relay/request.json\`
+5. End the current Astra turn immediately.
 
-Reason: Codex shell/background-process supervision can require later tool/model cycles. We do not base quota safety on how long a shell call happens to block.
+Relay request schema:
 
-Delegation protocol:
+\`\`\`json
+{
+  "version": 1,
+  "request_id": "short-unique-id",
+  "plan_path": "cache/astra-tickets/example.json",
+  "hours": 1.0
+}
+\`\`\`
 
-1. Astra fixes the contract.
-2. If a new oracle is required, Astra writes/runs/commits it first.
-3. Astra writes exactly one `policy: "product_ticket"` plan to ignored `cache/astra-tickets/<ticket>.json`.
-4. Astra validates the plan, prints this command with the real path, then ends its turn:
+Publish atomically: write a temporary file in the same directory, then rename/move it to \`request.json\`. Never partially edit a live request.
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_external_dev_ticket.ps1 -Plan cache\astra-tickets\<ticket>.json
-```
+The deterministic supervisor then:
 
-Final line must be exactly:
+\`\`\`text
+Astra turn ends
+  -> consumes request.json
+  -> runs run_external_dev_ticket.ps1
+  -> OCTOPUS night-shift / DevWorker
+  -> Step 3.7 works + OCTOPUS tests/acceptance
+  -> receipt/result written
+  -> one codex exec resume <EXACT_THREAD_ID>
+  -> root Astra reviews
+\`\`\`
 
-`WAITING_FOR_EXTERNAL_WORKER`
+While Step works there are **zero Astra model turns**.
 
-5. The **human** runs the command in a separate PowerShell. Astra is not active while Step works.
-6. The human returns `WORKER_FINISHED` or the complete failure output.
-7. Root Astra reviews once: report, produced commit, actual diff, changed paths and tests. Only then may it integrate, issue one new bounded ticket, or take the task back.
+The supervisor never decides architecture or correctness. It only:
+- validates/consumes a request;
+- runs the bounded worker;
+- records exit/result;
+- resumes the exact recorded Astra thread once.
 
-Never use `/goal`, Codex native subagents, auto-review, `/review`, or repeated `write_stdin`/wait calls to supervise Step.
+It refuses accidental replay of the same plan by SHA-256 receipt unless an operator explicitly overrides it.
 
-DevWorker constraints are intentional: clean source repo, exact paths, Docker sandbox, baseline oracle, acceptance contract, radius limits, protected paths/tests and local isolated commits. Do not weaken them to make a ticket fit.
+A resumed Astra turn must inspect:
+- worker result receipt;
+- night-shift report/log;
+- produced commit/worktree;
+- actual diff;
+- changed paths;
+- tests and acceptance evidence.
 
-Kill switch from another terminal:
-`python -m octopus night-stop`
+Then Astra either:
+- integrates the reviewed result;
+- takes the task back itself;
+- emits one new bounded relay request;
+- or completes/stops at a human boundary.
 
-## 5. Execution
+Do not use:
+- Codex native subagents;
+- Goals;
+- \`/review\`;
+- auto-review;
+- model-side sleep/polling;
+- repeated \`write_stdin\` waits;
+- direct worker execution.
+
+## 5. Model/quality fail-closed behavior
+
+The constructor is launched with exact \`--model gpt-6-astra\` and project config also pins \`gpt-6-astra\`.
+
+The audited Luna Reserve automatic-switch path is implemented in the interactive TUI; this constructor uses non-interactive \`codex exec\` instead. Do not add a fallback model to the supervisor.
+
+If a Codex exec/resume call is rejected, rate-limited or exits non-zero, the supervisor stops. It must never compensate by selecting Luna, another Codex model or an API-billed provider.
+
+The dedicated Codex home is ChatGPT-authenticated and the preflight rejects OpenAI API/provider overrides.
+
+## 6. Execution phases
 
 ### A — Baseline
-Verify branch/HEAD/status/merge-base and run the existing relevant/full Python suite once. Record environmental failures. No architecture rediscovery.
+
+Verify branch/HEAD/status/merge-base and run the existing relevant/full Python suite once.
+Record environmental failures truthfully.
+No architecture rediscovery.
 
 ### B — Remove legacy video
-Read `VIDEO_ENGINE_REMOVAL.md`. Disconnect runtime hooks, delete the identified Remotion/RunPod/TTS/B-roll/video-worker surfaces, preserve non-video economic jobs, repair references and run the full relevant regression suite. Commit this phase separately.
+
+Read \`VIDEO_ENGINE_REMOVAL.md\`.
+
+Disconnect runtime hooks, delete the identified Remotion/RunPod/TTS/B-roll/video-worker surfaces, preserve non-video economic jobs, repair references and run the relevant/full regression suite.
+
+This is broad surgery; Astra may do it directly.
+
+Commit the phase separately.
 
 ### C — Agnes
-Read `AGNES_VIDEO_REPLACEMENT.md`.
 
-Source pin:
-`lcy362/agnes-video-generator@a87162d6df73ffe72186838ca0ae9d461e68589b`
+Read \`AGNES_VIDEO_REPLACEMENT.md\`.
 
-The preflight has already fetched the exact pin under `cache/upstreams/agnes-video-generator`. Do not rebuild/vendor/fork its media pipeline. Agnes runs independently; OCTOPUS gets only the narrow adapter/probe needed by the current workflow. Keep `AGNES_API_KEY` in the Agnes process, bind the local service to loopback, and make repository tests deterministic/no-live-generation. A real smoke test requires explicit human authorization.
+Pinned source:
+\`lcy362/agnes-video-generator@a87162d6df73ffe72186838ca0ae9d461e68589b\`
+
+Preflight has already fetched it under:
+\`cache/upstreams/agnes-video-generator\`
+
+Do not rebuild/vendor/fork its media pipeline.
+Agnes remains an independent local service; OCTOPUS gets only the narrow adapter/probe needed by the current workflow.
+
+Keep \`AGNES_API_KEY\` inside the Agnes process/container.
+Bind the service to loopback.
+Repository tests are deterministic and make no live generation call.
+A real generation smoke test requires explicit human authorization.
 
 ### D — Hermes P0
+
 Read the replacement matrix, then only the needed extraction section.
 
-Source pin:
-`NousResearch/hermes-agent@59004a62356f3a4697ab0fe8ad5086d2b405e2a6`
+Pinned source:
+\`NousResearch/hermes-agent@59004a62356f3a4697ab0fe8ad5086d2b405e2a6\`
 
-The preflight has already fetched the exact pin under `cache/upstreams/hermes-agent`. Start with the tool registry because it has a concrete replacement target. For every port require: exact code replaced or bounded missing capability, preserved interface, tests, permission consequences, attribution if derived, and net complexity reduction.
+Preflight has already fetched it under:
+\`cache/upstreams/hermes-agent\`
 
-Do not import Hermes loop, planner, persona, memory, LLM router or full orchestration. Do not create a second planner/router/journal/permission/evidence authority. P1 work is out of scope unless the human explicitly extends scope after P0 is clean.
+Start with tool registry because it has a concrete replacement target.
 
-## 6. Stop conditions
+For every Hermes component require:
+1. exact OCTOPUS code replaced or concrete bounded missing capability;
+2. stable interface;
+3. tests;
+4. permission/security consequences;
+5. attribution if substantially derived;
+6. net complexity reduction.
 
-Stop and ask the human rather than exploring when:
+Do not import Hermes loop, planner, persona, general memory, LLM router or full orchestration.
+Do not create a second planner/router/journal/permission/evidence authority.
+
+P1 work stays out of scope unless P0 is clean and the human explicitly extends scope.
+
+## 7. Stop conditions
+
+Stop rather than explore when:
 - a required credential/account capability is absent;
 - a live call would spend money or create an unapproved external effect;
 - tests cannot distinguish correctness;
 - an upstream pin materially contradicts the prepared contract;
-- a Hermes port creates a parallel authority instead of replacing/bridging one;
-- main moved in a way that changes the prepared scope.
+- a Hermes port creates parallel authority rather than replacement/bridge;
+- main moved materially;
+- Codex/Astra is rate-limited or returns non-zero.
 
-## 7. Done
+## 8. Done
 
 Prefer a smaller correct result over a sprawling migration.
 
-Minimum useful session result:
-- legacy OCTOPUS video runtime removed without shared-core regression;
+Minimum useful result:
+- legacy video runtime removed without shared-core regression;
 - pinned Agnes service boundary + minimal tested OCTOPUS integration;
-- first useful Hermes P0 replacement integrated, **or** code-based proof that keeping OCTOPUS is simpler;
+- first useful Hermes P0 replacement integrated, or code-based proof current OCTOPUS is simpler;
 - executed test evidence;
-- reviewed diff;
-- truthful current-state docs;
-- no automatic merge to `main`.
+- Astra-reviewed diff;
+- truthful state docs;
+- no automatic merge to \`main\`.
 
 Never equate infrastructure completion with economic success.
