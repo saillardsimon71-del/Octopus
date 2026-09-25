@@ -1,12 +1,18 @@
 # Atelier vidéo Agnes — contrat de remplacement
 
-Source normative pour cette migration: document de transfert fourni par l'utilisateur le 2026-09-25.
+Source normative fonctionnelle pour cette migration: document de transfert fourni par l'utilisateur le 2026-09-25.
 
-IMPORTANT: les endpoints, limites RPM et comportements Agnes ci-dessous sont recopiés comme exigences du projet. Ils n'ont pas été revalidés extérieurement dans ce document.
+Validation publique complémentaire effectuée le 2026-09-25: le gateway Agnes documente toujours `POST /v1/videos`, l'authentification Bearer, le polling recommandé par `video_id`, et le protocole legacy `agnes-video-v2.0`. Agnes propose aussi des modèles vidéo 2.5 plus récents; **cette migration reste volontairement sur v2.0** afin de ne pas changer de contrat pendant le remplacement.
+
+Les limites peuvent dépendre du compte. Le 1 RPM ci-dessous est une référence publique, pas une garantie d'entitlement pour la clé de l'opérateur.
 
 ## But
 
-Application web autonome grand public:
+Application web autonome **locale/privée pour l'opérateur dans cette V1**:
+
+> Sécurité: la documentation Agnes recommande de garder les clés API côté serveur. Une application réellement publique/multi-utilisateur ne doit donc pas embarquer une clé personnelle persistante dans le client. Le choix « fichier HTML unique, sans backend » est conservé aujourd'hui uniquement comme outil local. Ne pas présenter cette V1 comme un déploiement public sécurisé.
+
+Caractéristiques:
 - un unique fichier `index.html`;
 - HTML/CSS/JS uniquement;
 - aucune dépendance externe/CDN/framework;
@@ -164,7 +170,7 @@ Un seul `index.html` contenant:
 - CSS;
 - header;
 - info banner;
-- clé API + sauvegarde + statut;
+- clé API + sauvegarde locale + statut, avec avertissement explicite « usage local/privé — ne pas publier avec une clé personnelle »;
 - contrôle wake lock;
 - upload multiple;
 - thumbnails;
@@ -230,3 +236,13 @@ Pour 50+ images:
 - collaboration;
 - backend serveur;
 - historique IndexedDB avancé.
+
+## Faits runtime à ne pas inventer
+
+Sans appel réel avec la clé de l'opérateur, restent inconnus:
+- CORS navigateur depuis la page locale;
+- schéma exact de réponse live pour ce compte;
+- entitlement/quota effectif;
+- disponibilité v2.0 pour cette clé.
+
+Les tests du dépôt doivent rester statiques/déterministes et ne pas effectuer de génération payante. Si un de ces faits bloque l'exécution réelle, le signaler; ne pas construire un backend ou changer de modèle spontanément.
