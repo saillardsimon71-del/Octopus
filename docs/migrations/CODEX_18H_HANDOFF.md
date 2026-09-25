@@ -1,4 +1,4 @@
-# Handoff Codex — 18h — Migration Hermes + Agnes
+# Handoff Codex — Migration Hermes + Agnes
 
 Date: 2026-09-25
 
@@ -12,12 +12,11 @@ Bases:
 - OCTOPUS main avant préparation: `ae4d98dc9692aa10ba15051381a36809e25377df`
 - Hermes étudié: `NousResearch/hermes-agent@59004a62356f3a4697ab0fe8ad5086d2b405e2a6`
 
-Lire avant toute modification:
-1. `docs/migrations/ASTRA_LOCAL_ORCHESTRATION.md`
-2. `docs/migrations/HERMES_COMPONENT_EXTRACTION.md`
-3. `docs/migrations/VIDEO_ENGINE_REMOVAL.md`
-4. `docs/migrations/AGNES_VIDEO_REPLACEMENT.md`
-5. `docs/migrations/OCTOPUS_HERMES_REPLACEMENT_MATRIX.md`
+Point d'entrée unique:
+
+`docs/migrations/CODEX_START_2026-09-25.md`
+
+Ne pas relire tout le dépôt avant d'agir. Le fichier de départ impose l'ordre de lecture minimal et indique quand ouvrir les documents spécialisés.
 
 ## Orchestration de cette session
 
@@ -39,7 +38,7 @@ Ne pas importer Hermes entier.
 
 ### Phase A — baseline
 - vérifier état git;
-- rebase/fast-forward sur main si nécessaire;
+- confirmer que la branche préparée est toujours basée sur le main courant; rebase/fast-forward seulement si main a réellement bougé;
 - lancer suite actuelle;
 - capturer les échecs préexistants.
 
