@@ -125,25 +125,22 @@ Goals:
 
 Commit this phase separately before the next one.
 
-### C — Agnes standalone workshop
-
-Target:
-`apps/agnes-video/index.html`
+### C — Agnes upstream engine
 
 Use `AGNES_VIDEO_REPLACEMENT.md`.
 
-Astra should first add/commit a small deterministic static test if none exists, then may delegate the single implementation file to Step with exact `allowed_paths`.
+The engine is **not** to be rebuilt in OCTOPUS. Use the pinned MIT upstream:
+`lcy362/agnes-video-generator@a87162d6df73ffe72186838ca0ae9d461e68589b`.
 
-Do not perform a live paid generation during tests.
+Treat Agnes as an independently running local service and build only the narrow OCTOPUS HTTP adapter/probe required by the current workflow. The upstream service already owns video API protocol, rate limiting/retries, media pipelines, TTS/subtitles/composition and UI.
 
-Security scope for V1:
-- this no-backend build is a **local/private operator tool**, not a public multi-user deployment;
-- do not claim that exposing/saving a personal Agnes API key in a public browser application is secure;
-- do not add a backend today merely to solve production secret management;
-- leave public deployment hardening for a separate explicit task.
+Do not vendor the whole upstream repo, create a Git submodule, or fork/copy its internals during this first migration unless a concrete incompatibility forces that decision.
 
-API target for this migration remains intentionally `agnes-video-v2.0`.
-Do not spontaneously migrate to 2.5.
+Astra should write/commit deterministic adapter tests before delegating bounded adapter implementation to Step.
+
+Do not perform a live generation during tests. A real smoke test requires explicit human authorization and a configured Agnes key.
+
+Keep `AGNES_API_KEY` in the Agnes process environment; never store it in OCTOPUS Git or send it to an OCTOPUS browser UI.
 
 ### D — Hermes P0, one replacement at a time
 
@@ -178,27 +175,25 @@ Guardrails/evidence follow the existing OCTOPUS capability/journal authorities; 
 
 Do not start scheduler, retry taxonomy, skills, memory or subagent-lifecycle work in this session unless all P0 work is already clean and the human explicitly extends scope.
 
-## Agnes facts already checked
+## Agnes source already checked
 
-The public Agnes material available on 2026-09-25 supports:
-- `POST https://apihub.agnes-ai.com/v1/videos`;
-- Bearer authentication;
-- legacy `agnes-video-v2.0` remains documented;
-- polling by returned `video_id` through `/agnesapi?video_id=...`;
-- optional `model_name=agnes-video-v2.0`;
-- v2.0 `num_frames <= 441` with the `8n+1` constraint;
-- public reference rate for default/free video access: 1 actual RPM.
+Pinned upstream `lcy362/agnes-video-generator@a87162d6df73ffe72186838ca0ae9d461e68589b` already exposes a local REST service. Relevant documented endpoints include:
+- `POST /api/tasks/simple`
+- `POST /api/tasks/creative`
+- `GET /api/tasks/{task_id}`
+- `POST /api/tasks/{task_id}/stop`
+- `POST /api/tasks/{task_id}/resume`
+- `GET /api/video/{task_id}`
+- `GET /api/tasks/{task_id}/artifacts`
 
-Agnes also has newer 2.5 video models. That is not a reason to change this migration contract.
+At that pin, upstream already handles Agnes v2.0/2.5 protocol differences, hosted-reference upload with Base64 fallback, retry/rate limiting, polling and completed-video URL extraction. Do not duplicate those concerns inside OCTOPUS.
 
-Still unverified without a real account/key:
-- browser CORS behavior for the standalone local page;
-- exact live response JSON fields for this account;
-- account-specific quota/entitlement;
-- whether the operator's key accepts v2.0 today;
-- whether v2.0 video accepts the transferred Data URI image form; public docs currently show a reference URL.
+Still runtime-dependent:
+- whether the pinned service starts cleanly in this Windows environment;
+- whether the operator's Agnes key is valid and entitled to the selected model;
+- live generation behavior.
 
-Treat those as runtime facts to test later, not reasons for speculative implementation.
+Treat these as smoke-test facts, not reasons to redesign the adapter.
 
 ## Stop conditions
 
@@ -216,7 +211,7 @@ Prefer a smaller correct result over a sprawling migration.
 
 Minimum useful result:
 - obsolete video engine removed without shared-core regression;
-- Agnes standalone implementation present with static tests;
+- pinned Agnes engine validated as an independent service and a thin OCTOPUS adapter present with deterministic tests;
 - one real Hermes P0 replacement (registry) integrated cleanly, or a precise code-based proof that keeping the current implementation is simpler;
 - tests executed;
 - diff reviewed;
