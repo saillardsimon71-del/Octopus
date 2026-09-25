@@ -430,3 +430,146 @@ def test_gate_94_still_rejects_absent_quote():
     accepted, rejected = runtime._qualify_business_signals([signal], results)
     assert accepted == []
     assert rejected
+
+
+# --- Granularité d'une mission multi-signaux : un seul replan, ni plus ni moins ---
+
+_SINGLE_DISCOVERY_PLAN = {
+    "tasks": [{"role": "SOUT", "task": "explorer toutes les pistes de découverte"}],
+}
+_MULTI_SOUT_PLAN = {
+    "tasks": [
+        {"role": "SOUT", "task": "explorer une première voie indépendante"},
+        {"role": "SOUT", "task": "explorer une deuxième voie indépendante"},
+        {"role": "SOUT", "task": "explorer une troisième voie indépendante"},
+    ],
+}
+
+
+def _run_planner_case(monkeypatch, plans, *, focus=True, target=3, max_steps=8,
+                      first_steps=None):
+    plan_queue = [deepcopy(plan) for plan in plans]
+    planner_messages = []
+    executed = []
+    call_count = {"planification": 0, "synthese": 0}
+
+    def call_json(agent, task, model, messages, **kwargs):
+        if task == "planification":
+            call_count["planification"] += 1
+            planner_messages.append(deepcopy(messages))
+            if not plan_queue:
+                raise AssertionError("appel planner supplémentaire inattendu")
+            return plan_queue.pop(0)
+        if task == "synthese":
+            call_count["synthese"] += 1
+            return {"rapport": "ok", "business_signals": []}
+        raise AssertionError(f"appel LLM inattendu : {agent}/{task}")
+
+    def run_agent(role, goal, max_steps=10, **kwargs):
+        executed.append({"role": role, "goal": goal, "max_steps": max_steps})
+        steps = []
+        if len(executed) == 1 and first_steps is not None:
+            steps = deepcopy(first_steps)
+        return {"role": role, "steps": steps, "final": "done"}
+
+    monkeypatch.setattr(runtime.deepseek, "call_json", call_json)
+    monkeypatch.setattr(runtime, "run_agent", run_agent)
+    out = runtime.run_mission(
+        "identifier plusieurs opportunités économiques testables",
+        max_steps_per_agent=max_steps,
+        business="octopus",
+        allowed_tools={"search", "browse"},
+        business_signal_focus=focus,
+        business_signal_target=target,
+    )
+    return out, call_count, planner_messages, executed
+
+
+def test_multi_signal_single_task_plan_triggers_exactly_one_replan(monkeypatch):
+    _, calls, messages, executed = _run_planner_case(
+        monkeypatch, [_SINGLE_DISCOVERY_PLAN, _MULTI_SOUT_PLAN])
+
+    assert calls["planification"] == 2
+    assert len(messages) == 2
+    assert len(executed) == 3
+    assert [item["role"] for item in executed] == ["SOUT", "SOUT", "SOUT"]
+    feedback = messages[1][-1]["content"]
+    assert "plusieurs signaux" in feedback
+    assert "plusieurs sous-tâches autonomes" in feedback
+    assert "Le même rôle, notamment SOUT, peut être utilisé plusieurs fois" in feedback
+
+
+def test_replanned_plan_with_all_sout_tasks_is_executed_as_is(monkeypatch):
+    _, calls, _, executed = _run_planner_case(
+        monkeypatch, [_SINGLE_DISCOVERY_PLAN, _MULTI_SOUT_PLAN])
+
+    assert calls["planification"] == 2
+    assert [item["role"] for item in executed] == ["SOUT", "SOUT", "SOUT"]
+    assert [item["max_steps"] for item in executed] == [8, 8, 8]
+
+
+def test_already_decomposed_multi_signal_plan_is_not_replanned(monkeypatch):
+    _, calls, _, executed = _run_planner_case(monkeypatch, [_MULTI_SOUT_PLAN])
+
+    assert calls["planification"] == 1
+    assert len(executed) == 3
+
+
+def test_single_signal_target_never_replans(monkeypatch):
+    _, calls, _, executed = _run_planner_case(
+        monkeypatch, [_SINGLE_DISCOVERY_PLAN], target=1)
+
+    assert calls["planification"] == 1
+    assert len(executed) == 1
+
+
+def test_non_business_single_task_plan_keeps_historical_behavior(monkeypatch):
+    _, calls, _, executed = _run_planner_case(
+        monkeypatch, [_SINGLE_DISCOVERY_PLAN], focus=False, target=3)
+
+    assert calls["planification"] == 1
+    assert len(executed) == 1
+
+
+def test_second_single_task_plan_is_accepted_without_third_planner_call(monkeypatch):
+    second = {"tasks": [{"role": "SOUT", "task": "encore une seule tâche"}]}
+    _, calls, _, executed = _run_planner_case(
+        monkeypatch, [_SINGLE_DISCOVERY_PLAN, second])
+
+    assert calls["planification"] == 2
+    assert len(executed) == 1
+    assert executed[0]["goal"].startswith("encore une seule tâche")
+
+
+def test_replan_still_respects_max_plan_tasks(monkeypatch):
+    oversized = {
+        "tasks": [{"role": "SOUT", "task": f"voie {i}"} for i in range(8)],
+    }
+    _, calls, _, executed = _run_planner_case(
+        monkeypatch, [_SINGLE_DISCOVERY_PLAN, oversized])
+
+    assert calls["planification"] == 2
+    assert len(executed) == runtime.MAX_PLAN_TASKS == 5
+
+
+def test_replanned_mission_keeps_structured_handoff_between_subtasks(monkeypatch):
+    first_steps = [{
+        "step": 1,
+        "tool": "search",
+        "result": "preuve amont conservée",
+    }]
+    two_tasks = {
+        "tasks": [
+            {"role": "SOUT", "task": "voie A"},
+            {"role": "SOUT", "task": "voie B"},
+        ],
+    }
+    _, calls, _, executed = _run_planner_case(
+        monkeypatch, [_SINGLE_DISCOVERY_PLAN, two_tasks],
+        first_steps=first_steps,
+    )
+
+    assert calls["planification"] == 2
+    assert len(executed) == 2
+    assert "Contexte structuré des sous-tâches précédentes" in executed[1]["goal"]
+    assert "preuve amont conservée" in executed[1]["goal"]
