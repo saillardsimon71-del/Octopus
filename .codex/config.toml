@@ -1,19 +1,21 @@
 # OCTOPUS project-local Codex policy.
-# Loaded by Codex only when this repository is trusted.
-# Keep model intelligence at the root; implementation delegation is handled by
-# OCTOPUS development.task/Kilo, not Codex native subagents.
+# This file is loaded only for a trusted project.
+# GPT-6 Astra is the only Codex model used for construction/review.
+# Bounded cheap implementation is delegated through OCTOPUS/Kilo, never
+# through Codex-native subagents.
 
 model = "gpt-6-astra"
 model_reasoning_effort = "high"
 model_reasoning_summary = "concise"
 
-# Human remains the approval authority. Never use the automatic approval-review
-# subagent, which would add another model loop.
+# Interactive Codex would use these values. The automated builder uses
+# `codex exec`, whose current implementation intentionally forces
+# approval_policy=never; denied/escalated operations therefore fail closed.
 approval_policy = "on-request"
 approvals_reviewer = "user"
 
-# Astra works only from the prepared local repository and the pinned upstream
-# caches fetched by preflight. External workers run in a separate human shell.
+# Astra receives a prepared local workspace. Source retrieval and long workers
+# happen outside the model process.
 sandbox_mode = "workspace-write"
 web_search = "disabled"
 
@@ -21,29 +23,46 @@ web_search = "disabled"
 network_access = false
 
 [agents]
-# Critical quota rule: native Codex multi-agent tools are disabled.
-# Cheap implementation workers are spawned by OCTOPUS/Kilo instead.
 enabled = false
 
 [features]
-# Keep this session single-root and explicitly turn off every Codex-native
-# continuation/delegation mechanism that could consume allowance behind the
-# OCTOPUS worker boundary.
+# Keep Astra single-root and remove autonomous/secondary model loops.
 multi_agent = false
 goals = false
 memories = false
 fast_mode = false
-apps = false
-remote_plugin = false
-hooks = false
 
-# Do not let a skill silently install missing MCP dependencies.
+# Remove external/context surfaces that are unnecessary for pure repo work.
+apps = false
+plugins = false
+remote_plugin = false
+plugin_sharing = false
+recommended_plugins = false
+hooks = false
+skill_search = false
 skill_mcp_dependency_install = false
+tool_suggest = false
+
+# No browser/computer-use surfaces in the constructor session.
+browser_use = false
+browser_use_full_cdp_access = false
+browser_use_external = false
+computer_use = false
+in_app_browser = false
+
+# Astra still has its useful local developer surface.
 shell_tool = true
 
+# Do not expose a model-side sleep primitive for supervising long work.
+# Long work is handled by the deterministic relay outside Codex.
+sleep_tool = false
+
+[features.multi_agent_v2]
+enabled = false
+
+[skills]
+include_instructions = false
 
 [memories]
-# Defense in depth: do not inject prior memories and do not turn this temporary
-# constructor session into input for future memory generation.
 use_memories = false
 generate_memories = false
