@@ -125,8 +125,13 @@ if (-not (Has-Command 'codex')) {
         Add-Fail ('cannot parse Codex version: ' + $VersionText)
     }
 
+    $SavedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     $Login = (& codex login status 2>&1 | Out-String).Trim()
-    if (($LASTEXITCODE -eq 0) -and ($Login -match 'Logged in using ChatGPT')) {
+    $LoginCode = $LASTEXITCODE
+    $ErrorActionPreference = $SavedPreference
+
+    if (($LoginCode -eq 0) -and ($Login -match 'Logged in using ChatGPT')) {
         Add-Ok 'Codex authenticated through ChatGPT'
     } else {
         Add-Fail ('Codex ChatGPT auth not confirmed: ' + $Login)
