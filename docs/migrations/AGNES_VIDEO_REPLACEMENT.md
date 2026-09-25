@@ -56,8 +56,9 @@ Payload validé par le document source:
 Contraintes source:
 - ne pas utiliser `first_frame`;
 - ne pas utiliser `mode: "keyframes"`;
-- conserver le préfixe `data:image/...;base64,`;
+- conserver le préfixe `data:image/...;base64,` selon le document de transfert;
 - `image` au niveau racine;
+- **ambiguïté connue**: la documentation publique v2.0 consultée le 2026-09-25 décrit `image` comme une URL de référence; le support Data URI vidéo n'a pas été confirmé publiquement. Ne pas réécrire l'app autour d'un uploader/backend spéculatif. Implémenter le contrat de transfert, puis considérer le premier appel live comme la vérification de cette hypothèse.
 - créations vidéo: 1/minute effective;
 - polling parallèle autorisé.
 
@@ -241,6 +242,7 @@ Pour 50+ images:
 
 Sans appel réel avec la clé de l'opérateur, restent inconnus:
 - CORS navigateur depuis la page locale;
+- acceptation d'un Data URI Base64 dans le champ vidéo v2.0 `image` (la doc publique montre une URL, le transfert affirme Data URI);
 - schéma exact de réponse live pour ce compte;
 - entitlement/quota effectif;
 - disponibilité v2.0 pour cette clé.
