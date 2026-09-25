@@ -92,10 +92,12 @@ Do not expose all Agnes modes merely because they exist.
 
 Keep Agnes as an external/pinned application, not as a second OCTOPUS core.
 
+**Bind it to loopback only.** At the pinned revision Agnes defaults its FastAPI host to `0.0.0.0`, while its local configuration endpoints can persist API keys. For the OCTOPUS workstation launch it with `HOST=127.0.0.1` (and port 8765 unless deliberately changed). Do not expose this service to the LAN/Internet.
+
 Preferred first setup:
-- clone/install the pinned upstream source outside OCTOPUS tracked source or in a dedicated ignored runtime/dependency location;
-- configure `AGNES_API_KEY` in Agnes's own environment, never in Git;
-- start Agnes independently;
+- obtain the exact pin with `scripts/fetch_pinned_upstreams.ps1 agnes` into the ignored `cache/upstreams/` location;
+- configure `AGNES_API_KEY` in Agnes's process environment, never in Git and preferably not through the persisted Web config;
+- set `HOST=127.0.0.1` and start Agnes independently;
 - health/probe it from OCTOPUS;
 - communicate only through the adapter.
 
