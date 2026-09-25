@@ -24,10 +24,10 @@ $configPath = Join-Path $CodexHome "config.toml"
 $managed = @(
     "# Managed by OCTOPUS setup_octopus_codex_home.ps1",
     "# Dedicated Codex home: auth/trust only. Project behavior lives in .codex/config.toml.",
-    "cli_auth_credentials_store = \"file\"",
+    'cli_auth_credentials_store = "file"',
     "",
-    ("[projects.\"{0}\"]" -f $escapedRepo),
-    "trust_level = \"trusted\"",
+    ('[projects."{0}"]' -f $escapedRepo),
+    'trust_level = "trusted"',
     ""
 ) -join [Environment]::NewLine
 
