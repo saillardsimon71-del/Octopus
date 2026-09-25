@@ -1,0 +1,75 @@
+name: free-worker-benchmark-v2
+
+on:
+  push:
+    branches:
+      - bench/free-workers-20260925
+    paths:
+      - ".github/workflows/free-worker-benchmark-v2.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: "benchmark-v2-${{ matrix.id }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - id: nex-n2-5-pro
+            model: "nex-agi/nex-n2.5-pro:free"
+          - id: minimax-m3
+            model: "minimax/minimax-m3:free"
+          - id: hy3
+            model: "tencent/hy3:free"
+          - id: laguna-s-2-1
+            model: "poolside/laguna-s-2.1:free"
+
+    steps:
+      - name: Checkout without push credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-local.txt
+          npm install -g @kilocode/cli
+          kilo --version
+
+      - name: Run benchmark
+        env:
+          BENCHMARK_MODEL: "${{ matrix.model }}"
+        run: |
+          python benchmarks/free_worker/run_benchmark.py --model "$BENCHMARK_MODEL"
+
+      - name: Print summary
+        if: always()
+        run: |
+          find benchmark-results -name summary.json -print -exec cat {} \; || true
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: "free-worker-v2-${{ matrix.id }}"
+          path: benchmark-results/
+          if-no-files-found: warn
+          retention-days: 7
