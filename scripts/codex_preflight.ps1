@@ -44,6 +44,32 @@ if ($LASTEXITCODE -eq 0) { Ok "$mainRef is an ancestor of HEAD" }
 else { Fail "prepared branch is behind/diverged from $mainRef; reconcile before Codex" }
 
 $configPath = Join-Path $repo ".codex\config.toml"
+$rulesPath = Join-Path $repo ".codex\rules\no-model-worker.rules"
+if (-not (Test-Path -LiteralPath $rulesPath -PathType Leaf)) {
+    Fail ".codex/rules/no-model-worker.rules missing"
+} else {
+    $rulesRaw = [System.IO.File]::ReadAllText($rulesPath)
+    $requiredWorkerBlocks = @(
+        'pattern = ["kilo"]',
+        'pattern = ["kilo.cmd"]',
+        'pattern = ["python", "-m", "octopus", "night-shift"]',
+        'decision = "forbidden"'
+    )
+    $missingBlocks = @($requiredWorkerBlocks | Where-Object { -not $rulesRaw.Contains($_) })
+    if ($missingBlocks.Count -eq 0) {
+        Ok "Codex execpolicy blocks direct model-shell worker launches"
+    } else {
+        Fail ("worker execpolicy incomplete: " + ($missingBlocks -join ", "))
+    }
+}
+
+$runnerPath = Join-Path $repo "scripts\run_external_dev_ticket.ps1"
+if (Test-Path -LiteralPath $runnerPath -PathType Leaf) {
+    Ok "external human-run worker helper present"
+} else {
+    Fail "scripts/run_external_dev_ticket.ps1 missing"
+}
+
 if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
     Fail ".codex/config.toml missing"
 } else {
@@ -62,11 +88,13 @@ if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
         'fast_mode = false',
         'apps = false',
         'plugins = false',
+        'remote_plugin = false',
         'hooks = false',
         'skill_search = false',
         'skill_mcp_dependency_install = false',
         'include_instructions = false',
-        'use_memories = false'
+        'use_memories = false',
+        'generate_memories = false'
     )
     $missing = @($required | Where-Object { -not $raw.Contains($_) })
     if ($missing.Count -eq 0) { Ok "Codex project policy contains required quota/safety locks" }
