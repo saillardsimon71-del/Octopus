@@ -88,7 +88,7 @@ Astra owns:
 A bounded Step worker may be used for:
 - mechanical deletion after Astra identifies the exact list;
 - import/reference cleanup with explicit paths and tests;
-- implementing the single-file Agnes app after Astra fixes the contract;
+- implementing a bounded OCTOPUS HTTP adapter to the pinned Agnes service after Astra fixes the contract;
 - narrowly scoped adapter code after Astra fixes interfaces;
 - targeted regression repairs.
 
