@@ -82,6 +82,12 @@ provider GPU, moteur vidéo, campagnes, CRM, microservices, message bus ou réé
 
 ## Travail sur le dépôt
 
+### Fenêtre de maintenance explicitement autorisée — 2026-09-25
+
+Pour la session Hermes + Agnes actuelle, l'opérateur humain a explicitement fixé un objectif de maintenance borné. Lire d'abord `docs/migrations/CODEX_START_2026-09-25.md` et suivre son budget de lecture/exécution. Ce fichier de session peut fixer la priorité immédiate malgré les anciennes phrases « prochaine action » des snapshots documentaires; il ne peut pas affaiblir les frontières de preuve, permissions, secrets, coûts, effets externes ou promotion de cette constitution.
+
+La suppression d'un moteur legacy et le remplacement d'une duplication par une primitive plus petite ne sont pas une généralisation économique. Toute capacité Hermes réellement nouvelle reste soumise aux critères de remplacement/besoin borné du fichier de session.
+
 Lire ce fichier, `docs/VISION.md`, `docs/CURRENT_STATE.md`, puis `docs/HANDOFF_WORK.md`.
 Git réel prime sur les snapshots documentaires. Les plans spécialisés ne fixent pas les priorités.
 Vérifier branche, HEAD de main, arbre et historique avant modification ; préserver le travail inconnu.
