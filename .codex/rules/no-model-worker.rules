@@ -1,0 +1,40 @@
+# Long external workers must never run inside the Codex model shell.
+# On Windows Codex shell tool calls yield a live process after a short window;
+# supervising that process from Astra would require repeated model/tool turns.
+# Run these commands manually in a separate PowerShell instead.
+
+prefix_rule(
+    pattern = ["kilo"],
+    decision = "forbidden",
+    justification = "Run Kilo workers outside the Codex model loop to preserve Astra quota."
+)
+
+prefix_rule(
+    pattern = ["kilo.cmd"],
+    decision = "forbidden",
+    justification = "Run Kilo workers outside the Codex model loop to preserve Astra quota."
+)
+
+prefix_rule(
+    pattern = ["python", "-m", "octopus", "night-shift"],
+    decision = "forbidden",
+    justification = "Run OCTOPUS night-shift externally; Astra prepares and later reviews the worker result."
+)
+
+prefix_rule(
+    pattern = ["python.exe", "-m", "octopus", "night-shift"],
+    decision = "forbidden",
+    justification = "Run OCTOPUS night-shift externally; Astra prepares and later reviews the worker result."
+)
+
+prefix_rule(
+    pattern = ["python3", "-m", "octopus", "night-shift"],
+    decision = "forbidden",
+    justification = "Run OCTOPUS night-shift externally; Astra prepares and later reviews the worker result."
+)
+
+prefix_rule(
+    pattern = ["py", "-m", "octopus", "night-shift"],
+    decision = "forbidden",
+    justification = "Run OCTOPUS night-shift externally; Astra prepares and later reviews the worker result."
+)
