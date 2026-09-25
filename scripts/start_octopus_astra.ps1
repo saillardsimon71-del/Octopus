@@ -110,6 +110,14 @@ $preflightCommand = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $pref
 if ($SkipFetch) { $preflightCommand += "-SkipFetch" }
 $pendingCheckpointBeforePreflight = Join-Path $repo "cache\astra-relay\checkpoint.json"
 if (Test-Path -LiteralPath $pendingCheckpointBeforePreflight -PathType Leaf) { $preflightCommand += "-AllowPendingCheckpoint" }
+$sessionBeforePreflight = Join-Path $repo "cache\astra-relay\session.json"
+if (-not $NewSession -and (Test-Path -LiteralPath $sessionBeforePreflight -PathType Leaf)) {
+    try { $earlySession = Get-Content -LiteralPath $sessionBeforePreflight -Raw | ConvertFrom-Json -ErrorAction Stop } catch { $earlySession = $null }
+    $earlyStatus = if ($earlySession) { [string]$earlySession.status } else { "" }
+    if ($earlyStatus -eq "active" -or ($earlyStatus -eq "failed" -and $ResumeFailed)) {
+        $preflightCommand += "-AllowResumableSession"
+    }
+}
 & powershell @preflightCommand
 if ($LASTEXITCODE -ne 0) { throw "Codex preflight failed. Astra was not started." }
 if ($ValidateOnly) {
@@ -238,6 +246,60 @@ function Save-SessionState([string]$Status) {
     })
 }
 
+function Invoke-CodexStreaming(
+    [string]$Executable,
+    [string[]]$Arguments,
+    [string]$JsonLog,
+    [string]$StderrLog
+) {
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $jsonWriter = New-Object System.IO.StreamWriter($JsonLog, $false, $utf8)
+    $stderrWriter = New-Object System.IO.StreamWriter($StderrLog, $false, $utf8)
+    $savedErrorActionPreference = $ErrorActionPreference
+    $observedThread = $null
+    $exitCode = $null
+
+    try {
+        # Windows PowerShell 5.1 converts native stderr into NativeCommandError.
+        # It is diagnostic output, not a failed Codex process; the exit code is authoritative.
+        $ErrorActionPreference = "Continue"
+        & $Executable @Arguments 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                $line = [string]$_.Exception.Message
+                $stderrWriter.WriteLine($line)
+                $stderrWriter.Flush()
+                Write-Host $line -ForegroundColor DarkYellow
+                return
+            }
+
+            $line = [string]$_
+            $jsonWriter.WriteLine($line)
+            $jsonWriter.Flush()
+            Write-Host $line
+
+            if (-not $observedThread -and $line.TrimStart().StartsWith("{")) {
+                try { $event = $line | ConvertFrom-Json -ErrorAction Stop } catch { $event = $null }
+                if ($event -and $event.type -eq "thread.started" -and $event.thread_id) {
+                    $observedThread = [string]$event.thread_id
+                    $script:threadId = $observedThread
+                    $ErrorActionPreference = "Stop"
+                    try { Save-SessionState -Status "active" } finally { $ErrorActionPreference = "Continue" }
+                }
+            }
+        }
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+        $jsonWriter.Dispose()
+        $stderrWriter.Dispose()
+    }
+
+    return [pscustomobject]@{
+        exit_code = $exitCode
+        thread_id = $observedThread
+    }
+}
+
 function Invoke-AstraTurn([string]$Prompt, [string]$ExistingThreadId = "") {
     $script:astraTurns++
     if ($script:astraTurns -gt $MaxAstraTurns) {
@@ -247,6 +309,7 @@ function Invoke-AstraTurn([string]$Prompt, [string]$ExistingThreadId = "") {
     $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
     $base = "turn-{0:D2}-{1}" -f $script:astraTurns, $stamp
     $jsonLog = Join-Path $turnLogRoot ($base + ".jsonl")
+    $stderrLog = Join-Path $turnLogRoot ($base + ".stderr.log")
     $lastMessage = Join-Path $turnLogRoot ($base + "-last.txt")
 
     Write-Host ""
@@ -268,20 +331,24 @@ function Invoke-AstraTurn([string]$Prompt, [string]$ExistingThreadId = "") {
     }
 
     try {
+        $codexArguments = @(
+            "exec", "--json", "--strict-config", "--disable", "shell_snapshot",
+            "--model", "gpt-6-astra", "--cd", $repo,
+            "--output-last-message", $lastMessage
+        )
         if ($ExistingThreadId) {
-            & $CodexExe exec --json --strict-config --disable shell_snapshot --model gpt-6-astra --cd $repo --output-last-message $lastMessage resume $ExistingThreadId $Prompt 2>&1 |
-                Tee-Object -FilePath $jsonLog
+            $codexArguments += @("resume", $ExistingThreadId, $Prompt)
         } else {
-            & $CodexExe exec --json --strict-config --disable shell_snapshot --model gpt-6-astra --cd $repo --output-last-message $lastMessage $Prompt 2>&1 |
-                Tee-Object -FilePath $jsonLog
+            $codexArguments += $Prompt
         }
-        $code = $LASTEXITCODE
+        $processResult = Invoke-CodexStreaming -Executable $CodexExe -Arguments $codexArguments -JsonLog $jsonLog -StderrLog $stderrLog
+        $code = $processResult.exit_code
+        $observedThread = $processResult.thread_id
     } finally {
         if ($null -eq $savedHome) { Remove-Item Env:HOME -ErrorAction SilentlyContinue } else { $env:HOME = $savedHome }
         if ($null -eq $savedUserProfile) { Remove-Item Env:USERPROFILE -ErrorAction SilentlyContinue } else { $env:USERPROFILE = $savedUserProfile }
         if ($null -eq $savedGitConfigGlobal) { Remove-Item Env:GIT_CONFIG_GLOBAL -ErrorAction SilentlyContinue } else { $env:GIT_CONFIG_GLOBAL = $savedGitConfigGlobal }
     }
-    $observedThread = Read-ThreadId $jsonLog
     if ($code -ne 0) {
         if ($observedThread) {
             $script:threadId = $observedThread
@@ -307,6 +374,7 @@ function Invoke-AstraTurn([string]$Prompt, [string]$ExistingThreadId = "") {
     return [pscustomobject]@{
         thread_id = $observedThread
         json_log = $jsonLog
+        stderr_log = $stderrLog
         last_message = $lastMessage
     }
 }

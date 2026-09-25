@@ -1,6 +1,7 @@
 param(
     [switch]$SkipFetch,
     [switch]$AllowPendingCheckpoint,
+    [switch]$AllowResumableSession,
     [string]$ExpectedCodexHome = ''
 )
 
@@ -42,6 +43,15 @@ function Invoke-NativeCapture([string]$FilePath, [string[]]$Arguments) {
     }
 }
 
+function Test-ResumableSessionState([string]$Path, [string]$Head) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try { $state = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -ErrorAction Stop } catch { return $false }
+    if ([int]$state.version -ne 2) { return $false }
+    if ([string]$state.status -notin @('active', 'failed')) { return $false }
+    if ([string]$state.thread_id -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { return $false }
+    return [string]$state.current_head -eq $Head
+}
+
 function Resolve-CodexExecutable {
     $official = Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\Codex\bin\codex.exe'
     if (Test-Path -LiteralPath $official -PathType Leaf) {
@@ -70,8 +80,12 @@ if ($Branch -eq $ExpectedBranch) {
 $Status = (git status --porcelain | Out-String).Trim()
 if ($Status) {
     $PendingCheckpoint = Join-Path $Repo 'cache\astra-relay\checkpoint.json'
+    $ResumableSession = Join-Path $Repo 'cache\astra-relay\session.json'
+    $CurrentHead = (git rev-parse HEAD | Out-String).Trim()
     if ($AllowPendingCheckpoint -and (Test-Path -LiteralPath $PendingCheckpoint -PathType Leaf)) {
         Add-Ok 'dirty working tree has a pending host checkpoint'
+    } elseif ($AllowResumableSession -and (Test-ResumableSessionState -Path $ResumableSession -Head $CurrentHead)) {
+        Add-Ok 'dirty working tree belongs to the exact resumable Astra session'
     } else {
         Add-Fail 'working tree is not clean'
     }

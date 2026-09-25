@@ -178,6 +178,107 @@ def test_constructor_powershell_parses_and_disables_shell_snapshot():
     assert "[switch]$ValidateOnly" in launcher
 
 
+def test_codex_stream_keeps_stderr_out_of_json_and_saves_thread_early(tmp_path: Path):
+    fake_codex = tmp_path / "fake-codex.cmd"
+    fake_codex.write_text(
+        "@echo off\n"
+        'echo {"type":"thread.started","thread_id":"thread-test"}\n'
+        "echo diagnostic-stderr 1>&2\n"
+        'echo {"type":"turn.completed","usage":{"input_tokens":1}}\n'
+        "exit /b 0\n",
+        encoding="ascii",
+    )
+    json_log = tmp_path / "turn.jsonl"
+    stderr_log = tmp_path / "turn.stderr.log"
+    runner = tmp_path / "exercise-stream.ps1"
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    runner.write_text(
+        f"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile('{launcher}', [ref]$tokens, [ref]$errors)
+if ($errors.Count) {{ throw ($errors | ForEach-Object Message) }}
+$function = $ast.Find({{ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-CodexStreaming' }}, $true)
+if (-not $function) {{ throw 'Invoke-CodexStreaming is missing' }}
+Invoke-Expression $function.Extent.Text
+$script:threadId = ''
+$script:savedSession = ''
+function Save-SessionState([string]$Status) {{ $script:savedSession = "$Status|$script:threadId" }}
+$result = Invoke-CodexStreaming -Executable '{fake_codex}' -Arguments @() -JsonLog '{json_log}' -StderrLog '{stderr_log}'
+[ordered]@{{
+    exit_code = $result.exit_code
+    thread_id = $result.thread_id
+    saved_session = $script:savedSession
+}} | ConvertTo-Json -Compress
+""",
+        encoding="utf-8",
+    )
+
+    result = run(
+        POWERSHELL,
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(runner),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout.splitlines()[-1])
+    assert payload["exit_code"] == 0
+    assert payload["thread_id"] == "thread-test"
+    assert payload["saved_session"] == "active|thread-test"
+    assert [json.loads(line)["type"] for line in json_log.read_text(encoding="utf-8").splitlines()] == [
+        "thread.started",
+        "turn.completed",
+    ]
+    assert stderr_log.read_text(encoding="utf-8").strip() == "diagnostic-stderr"
+
+
+def test_resumable_session_requires_matching_head_and_live_status(tmp_path: Path):
+    session = tmp_path / "session.json"
+    runner = tmp_path / "exercise-session.ps1"
+    preflight = ROOT / "scripts" / "codex_preflight.ps1"
+    runner.write_text(
+        f"""
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile('{preflight}', [ref]$tokens, [ref]$errors)
+if ($errors.Count) {{ throw ($errors | ForEach-Object Message) }}
+$function = $ast.Find({{ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-ResumableSessionState' }}, $true)
+if (-not $function) {{ throw 'Test-ResumableSessionState is missing' }}
+Invoke-Expression $function.Extent.Text
+$path = '{session}'
+$cases = @(
+    @{{ version = 2; status = 'active'; thread_id = '01a0da20-aa1d-7911-873a-bb0fad387446'; current_head = 'abc123' }},
+    @{{ version = 2; status = 'failed'; thread_id = '01a0da20-aa1d-7911-873a-bb0fad387446'; current_head = 'abc123' }},
+    @{{ version = 2; status = 'completed'; thread_id = '01a0da20-aa1d-7911-873a-bb0fad387446'; current_head = 'abc123' }},
+    @{{ version = 2; status = 'active'; thread_id = '01a0da20-aa1d-7911-873a-bb0fad387446'; current_head = 'wrong' }}
+)
+$results = foreach ($case in $cases) {{
+    $case | ConvertTo-Json | Set-Content -LiteralPath $path -Encoding UTF8
+    Test-ResumableSessionState -Path $path -Head 'abc123'
+}}
+@($results) | ConvertTo-Json -Compress
+""",
+        encoding="utf-8",
+    )
+
+    result = run(
+        POWERSHELL,
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(runner),
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout.splitlines()[-1]) == [True, True, False, False]
+
+
 def test_preflight_does_not_query_remote_kilo_catalog():
     preflight = (ROOT / "scripts" / "codex_preflight.ps1").read_text(encoding="utf-8")
     assert "models kilo" not in preflight
