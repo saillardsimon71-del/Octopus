@@ -1,5 +1,21 @@
 # CODEX START — 2026-09-25 — OCTOPUS maintenance window
 
+## Mandatory gate before opening Codex
+
+From the OCTOPUS repository root, the human must first run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\codex_preflight.ps1
+```
+
+Do not start the GPT-6 Astra session unless the script ends with:
+
+```text
+READY FOR CODEX / GPT-6 ASTRA
+```
+
+This gate verifies the prepared branch/clean tree/main ancestry, project Codex policy, Astra-compatible CLI version, ChatGPT sign-in, the exact live free Step route, Python, Docker, and absence of active Astra Flash Orchestrator residue. A failure is a setup issue to fix before spending Astra allowance.
+
 This file is the **single entry point for the current Codex/Astra session**.
 It records the human operator's explicit current directive. Do not spend model quota rediscovering the roadmap from historical branches or old conversation artifacts.
 
