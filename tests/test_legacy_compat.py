@@ -1,7 +1,8 @@
 """Non-regression : requetes et prompts identiques au code d'avant OCTOPUS (commit 4f36417).
 
-Les fixtures ont ete capturees sur le code historique. Avec le profil `legacy` (defaut),
-la passerelle doit envoyer exactement les memes requetes et journaliser leur cout.
+Les fixtures ont ete capturees sur le code historique, puis les outils video retires
+en phase B ont ete enleves des prompts runtime. Avec le profil `legacy` (defaut), la
+passerelle doit envoyer exactement les memes requetes et journaliser leur cout.
 """
 from __future__ import annotations
 

@@ -1,15 +1,9 @@
-"""Diagnostic avant un cycle réel : python -m agents.run doctor.
-
-Le diagnostic est aligné sur le mode cloud-first : le poste local porte le contrôle, les agents,
-le navigateur et OmniRoute ; le rendu vidéo lourd est distant par défaut.
-"""
+"""Diagnostic du contrôle local : Python, navigateur, journal et accès LLM."""
 from __future__ import annotations
 
 import importlib.util
 import os
-import re
 import shutil
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -17,7 +11,6 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from . import config, db
 
@@ -29,15 +22,6 @@ class Check:
     detail: str
     fix: str = ""
     blocking: bool = True
-
-
-def _port_open(url: str, timeout: float = 1.5) -> bool:
-    parts = urlsplit(url)
-    try:
-        with socket.create_connection((parts.hostname, parts.port or 80), timeout=timeout):
-            return True
-    except OSError:
-        return False
 
 
 def _http_ok(url: str, api_key: str = "", timeout: float = 3.0) -> tuple[bool, str]:
@@ -54,14 +38,6 @@ def _http_ok(url: str, api_key: str = "", timeout: float = 3.0) -> tuple[bool, s
         return False, f"injoignable ({type(exc).__name__})"
 
 
-def _remotion_browser() -> str | None:
-    cfg = config.PROJECT_ROOT / "remotion" / "remotion.config.ts"
-    if not cfg.exists():
-        return None
-    match = re.search(r"setBrowserExecutable\(\s*['\"](.+?)['\"]", cfg.read_text(encoding="utf-8"), re.S)
-    return match.group(1).replace("\\\\", "\\") if match else None
-
-
 def _chromium_executable() -> str | None:
     try:
         from playwright.sync_api import sync_playwright
@@ -71,62 +47,8 @@ def _chromium_executable() -> str | None:
         return None
 
 
-def _add_local_renderer_checks(checks: list[Check], blocking: bool) -> None:
-    python = Path(config.PYTHON)
-    checks.append(Check("Python renderer local", python.exists(), str(python),
-                        "définir PODALUX_PYTHON vers un environnement local valide", blocking=blocking))
-    for tool in ("ffmpeg", "ffprobe"):
-        found = shutil.which(tool)
-        checks.append(Check(tool, bool(found), found or "introuvable dans le PATH",
-                            "installer ffmpeg et l'ajouter au PATH", blocking=blocking))
-    npx = shutil.which("npx.cmd") or shutil.which("npx")
-    checks.append(Check("npx renderer local", bool(npx), npx or "introuvable",
-                        "installer Node.js", blocking=blocking))
-    modules = config.PROJECT_ROOT / "remotion" / "node_modules" / "remotion"
-    checks.append(Check("Remotion local", modules.exists(), str(modules.parent),
-                        "cd remotion && npm ci", blocking=blocking))
-    browser = _remotion_browser()
-    if browser:
-        checks.append(Check("Navigateur Remotion local", Path(browser).exists(), browser,
-                            "supprimer l'ancien chemin fixe ou définir PODALUX_REMOTION_BROWSER", blocking=blocking))
-    else:
-        checks.append(Check("Navigateur Remotion local", True, "auto-détection Remotion", blocking=blocking))
-    checks.append(_voice_check(blocking))
-
-
-def _voice_check(blocking: bool) -> "Check":
-    """Chaine de voix : le premier fournisseur utilisable sert la narration (aucun quota ne bloque le cycle)."""
-    sys.path.insert(0, str(config.PROJECT_ROOT))
-    try:
-        from tools import tts_providers
-        chain = tts_providers.chain()
-    except Exception as exc:  # noqa: BLE001 - diagnostic
-        return Check("Voix (chaine TTS)", False, f"{type(exc).__name__}: {exc}",
-                     "verifier TTS_CHAIN et tools/tts_providers.py", blocking=blocking)
-    ready = []
-    if os.environ.get("AZURE_SPEECH_KEY", "").strip() and os.environ.get("AZURE_SPEECH_REGION", "").strip():
-        ready.append("azure")
-    if os.environ.get("CF_ACCOUNT_ID", "").strip() and os.environ.get("CF_API_TOKEN", "").strip():
-        ready.append("cloudflare")
-    url = os.environ.get("CHATTERBOX_URL", "").strip()
-    if url.startswith("hf-space:"):
-        if importlib.util.find_spec("gradio_client") is not None:
-            ready.append("chatterbox (Space HF)")
-    elif _port_open(url or config.CHATTERBOX_URL):
-        ready.append("chatterbox (local)")
-    if importlib.util.find_spec("piper") is not None:
-        ready.append("piper (CPU)")
-    usable = [name for name in ready if name.split()[0] in chain]
-    detail = f"chaine {','.join(chain)} ; disponibles : {', '.join(usable) if usable else 'aucun'}"
-    return Check("Voix (chaine TTS)", bool(usable), detail,
-                 "python -m pip install piper-tts (voix locale sans compte), ou definir AZURE_SPEECH_KEY/"
-                 "AZURE_SPEECH_REGION (500 000 caracteres/mois gratuits)", blocking=blocking)
-
-
 def run_checks() -> list[Check]:
     checks: list[Check] = []
-    video_mode = os.environ.get("PODALUX_VIDEO_RENDERER", "local").strip().lower() or "local"
-    video_provider = os.environ.get("PODALUX_VIDEO_PROVIDER", "runpod").strip().lower() or "runpod"
     omni_enabled = os.environ.get("OMNIROUTE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 
     controller = Path(sys.executable)
@@ -176,28 +98,6 @@ def run_checks() -> list[Check]:
     else:
         checks.append(Check("OmniRoute", True, "désactivé par OMNIROUTE_ENABLED=0", blocking=False))
 
-    if video_mode == "cloud":
-        endpoint = os.environ.get("PODALUX_RUNPOD_ENDPOINT_ID", "").strip()
-        token = os.environ.get("PODALUX_RUNPOD_API_TOKEN", "").strip()
-        configured = bool(endpoint and token)
-        checks.append(Check("RunPod vidéo", configured,
-                            f"provider={video_provider}, endpoint={'présent' if endpoint else 'absent'}, token={'présent' if token else 'absent'}",
-                            "définir PODALUX_RUNPOD_ENDPOINT_ID et PODALUX_RUNPOD_API_TOKEN", blocking=True))
-        h3_endpoint = os.environ.get("OCTOPUS_MINIMAX_H3_ENDPOINT_ID", "").strip()
-        h3_token = os.environ.get("OCTOPUS_MINIMAX_H3_API_TOKEN", "").strip()
-        checks.append(Check("MiniMax H3 cloud", bool(h3_endpoint and h3_token),
-                            f"endpoint={'présent' if h3_endpoint else 'absent'}, token={'présent' if h3_token else 'absent'}",
-                            "définir OCTOPUS_MINIMAX_H3_ENDPOINT_ID et OCTOPUS_MINIMAX_H3_API_TOKEN lorsque H3 est utilisé",
-                            blocking=False))
-        checks.append(Check("Rendu vidéo", True, "cloud-first (RunPod) · aucun GPU local requis", blocking=False))
-        checks.append(Check("Chatterbox local", True, "non requis en cloud", blocking=False))
-        checks.append(Check("Remotion/FFmpeg local", True, "non requis pour le cycle cloud", blocking=False))
-    elif video_mode == "local":
-        _add_local_renderer_checks(checks, blocking=True)
-    else:
-        checks.append(Check("Rendu vidéo", False, f"mode inconnu: {video_mode!r}",
-                            "utiliser PODALUX_VIDEO_RENDERER=cloud ou local"))
-
     deepseek_key = bool(config.api_key())
     deepseek_required = (not omni_enabled) or os.environ.get("OCTOPUS_PROFILE", "").strip() == "legacy"
     checks.append(Check("Clé DeepSeek", deepseek_key, "présente" if deepseek_key else "absente",
@@ -224,5 +124,5 @@ def render(checks: list[Check]) -> tuple[str, int]:
         lines.append(f"[{mark}] {c.name:32} {c.detail}" + (f"\n       -> {c.fix}" if not c.ok and c.fix else ""))
     blocking = [c for c in checks if not c.ok and c.blocking]
     lines.append("")
-    lines.append("Prêt pour un cycle réel." if not blocking else f"{len(blocking)} problème(s) bloquant(s) avant un cycle réel.")
+    lines.append("Contrôle local prêt." if not blocking else f"{len(blocking)} problème(s) bloquant(s) dans le contrôle local.")
     return "\n".join(lines), (1 if blocking else 0)

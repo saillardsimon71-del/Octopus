@@ -2,8 +2,8 @@
 
 Un handler est une fonction `fn(ctx) -> sortie JSON`, enregistrée pour un type de tâche :
 
-    @handler("podalux.video_cycle", resource="cpu_heavy", budget_usd=1.0)
-    def video_cycle(ctx):
+    @handler("atelier.prepare_delivery", resource="cpu_heavy", budget_usd=1.0)
+    def prepare_delivery(ctx):
         ...
 
 - Chaque tâche tourne dans un run du journal (budget par tâche, coûts rattachés).

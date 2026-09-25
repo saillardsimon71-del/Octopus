@@ -585,23 +585,6 @@ def _browse(args):
         b.stop()
 
 
-def _render_offer(args):
-    run = journal.current_run()
-    if run is not None and run.business != DEFAULT_BUSINESS:
-        # Les offres et le rendu (potentiellement payant, RunPod) appartiennent à Podalux.
-        return {"refuse": True, "note": f"render_offer produit une offre Podalux : indisponible pour le business "
-                                        f"{run.business}. Propose l'action à l'humain au lieu de l'exécuter."}
-    from .cycle import run_cycle
-    r = run_cycle(offer_id=args["offer_id"], max_iterations=1)
-    return {"score": r["ledger"].get("score"), "decision": r["orbit"].get("decision"),
-            "iterations": r["iterations"]}
-
-
-def _qc(args):
-    from . import tools
-    return tools.qc_metrics(args["offer_id"])
-
-
 def _ask_human(args):
     # En mode autonome (CLI), pas d'humain présent → on ne bloque pas 5 min.
     ans = db.ask_human("RUNTIME", "agent_question", args["question"], timeout_s=5)
@@ -786,8 +769,6 @@ def _request_spend(args):
 TOOLS = {
     "search": {"desc": "recherche web (liens) ; site est un domaine optionnel réellement appliqué, ex. bpifrance.fr", "params": {"query": "str", "site": "str?"}, "fn": _search},
     "browse": {"desc": "ouvre une page dans TON Chrome réel (comptes Stripe/Reddit/X/Fiverr/YouTube connectés) et la décrit", "params": {"url": "str"}, "fn": _browse},
-    "render_offer": {"desc": "produit la vidéo complète d'une offre", "params": {"offer_id": "str"}, "fn": _render_offer},
-    "qc": {"desc": "métriques ffmpeg d'une offre", "params": {"offer_id": "str"}, "fn": _qc},
     "ask_human": {"desc": "demande confirmation/info à l'humain", "params": {"question": "str"}, "fn": _ask_human},
     "publish": {"desc": "plan de publication (dry-run)", "params": {"offer_id": "str"}, "fn": _publish},
     "send_message": {"desc": "prospection : envoie un message (dry-run)", "params": {"platform": "str", "recipient": "str", "text": "str"}, "fn": _send_message},
@@ -867,9 +848,9 @@ def _normalize_allowed_tools(allowed_tools) -> set[str] | None:
 ROLES = {
     "SOUT": "Recherche et veille : utilise search/browse pour trouver des infos utiles.",
     "CONVERT": "Monétisation : rédige offres, prix, CTA, contenu.",
-    "FORGE": "Production : produit les vidéos (render_offer).",
-    "GROWTH": "Qualité/distribution : juge (qc), publie (publish), prospecte (send_message).",
-    "LEDGER": "Data/finance : mesure (qc), suit les coûts, mémorise (remember).",
+    "FORGE": "Production : prépare les livrables de l'offre.",
+    "GROWTH": "Qualité/distribution : prépare la publication (publish) et la prospection (send_message).",
+    "LEDGER": "Data/finance : suit les coûts (economy_status), mémorise (remember).",
     "ORBIT": "CEO : planifie, arbitre, décide.",
 }
 

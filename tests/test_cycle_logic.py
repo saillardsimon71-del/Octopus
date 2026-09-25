@@ -1,4 +1,4 @@
-"""Etape 2 de l'audit : decisions du cycle en code, sorties LLM validees, offre forcee coherente."""
+"""Décisions et validateurs historiques encore utilisés par les offres et évaluations."""
 from __future__ import annotations
 
 import json
@@ -6,7 +6,7 @@ import json
 import pytest
 
 from agents import agents as ag
-from agents import config, cycle, db, deepseek
+from agents import config, db, deepseek
 
 AXES_OK = {"hook": 4, "douleur": 3, "preuve": 3, "cta": 3, "lisibilite": 3, "humanite": 4, "motion": 3, "son": 2, "pacing": 2}
 MEDIA_OK = {"duration_s": 25.18, "resolution": "1080x1920", "fps": 30.0, "lufs_integrated": -14.0, "freezes_gt1_2s": 0,
@@ -136,86 +136,3 @@ def test_orbit_code_mode_makes_no_llm_call(monkeypatch):
     monkeypatch.setattr(deepseek, "call_json", lambda *a, **k: pytest.fail("appel LLM inutile"))
     r = ag.ORBIT.run("o", LEDGER_OK, iterations_left=2)
     assert r["decision"] == "done" and r["ledger"] == LEDGER_OK
-
-
-# --- cycle complet (etapes simulees) -----------------------------------------------------------
-
-@pytest.fixture
-def pipeline(monkeypatch):
-    seen = {"convert": [], "scores": iter([23, 27]), "sout": 0, "asked": []}
-
-    def sout(already):
-        seen["sout"] += 1
-        return {"offer_id": "cash_avenant_scope01", "angle": "le client qui élargit sans payer"}
-
-    def convert(offer_id, angle, fixes=None):
-        seen["convert"].append((offer_id, angle, fixes))
-        return job()
-
-    def growth(offer_id, j, metrics):
-        total = next(seen["scores"])
-        return {"total_calcule": total, "humanite": 4, "warm_pass": total >= 24, "fixes": [f"fix-{total}"]}
-
-    def ask_human(agent, kind, question, timeout_s=300, cancel=None):
-        seen["asked"].append(question)
-        return seen.get("answer", "oui")
-
-    monkeypatch.setattr(ag.SOUT, "run", staticmethod(sout))
-    monkeypatch.setattr(ag.CONVERT, "run", staticmethod(convert))
-    monkeypatch.setattr(ag.FORGE, "run", staticmethod(lambda offer_id, j: dict(MEDIA_OK)))
-    monkeypatch.setattr(ag.GROWTH, "run", staticmethod(growth))
-    monkeypatch.setattr(db, "ask_human", ask_human)
-    monkeypatch.setattr(deepseek, "call_json", lambda *a, **k: pytest.fail("aucun appel LLM attendu"))
-    return seen
-
-
-def test_forced_offer_skips_sout_and_uses_its_own_angle(pipeline):
-    result = cycle.run_cycle(offer_id="cash_impayes_relance01", max_iterations=3)  # sonde 7
-    assert pipeline["sout"] == 0
-    assert pipeline["convert"][0] == ("cash_impayes_relance01", "le cash qui ne rentre pas", None)
-    assert [i["decision"] for i in result["iterations"]] == ["iterate", "done"]
-    assert pipeline["convert"][1][2] == ["fix-23"]  # corrections du QC transmises a l'iteration suivante
-    assert pipeline["asked"] and db.run_lock_holder() is None
-    decisions = [r["decision"] for r in db._conn().execute("SELECT decision FROM decisions")]
-    assert "publish_approved" in decisions
-
-
-def test_unknown_forced_offer_is_rejected_before_anything(pipeline):
-    with pytest.raises(ValueError, match="offre inconnue"):
-        cycle.run_cycle(offer_id="cash_inexistante")
-    assert db.current_run() is None and pipeline["convert"] == []
-
-
-def test_sout_out_of_catalog_falls_back(pipeline, monkeypatch):
-    monkeypatch.setattr(ag.SOUT, "run", staticmethod(lambda already: {"offer_id": "offre_inventee", "angle": "x"}))
-    result = cycle.run_cycle(max_iterations=1)
-    assert result["offer_id"] == "cash_impayes_relance01"
-    assert pipeline["convert"][0][1] == ag.CATALOG["cash_impayes_relance01"]["angle"]
-
-
-def test_ambiguous_answer_does_not_approve_publication(pipeline):
-    pipeline["answer"] = "on verra demain"
-    pipeline["scores"] = iter([30])
-    cycle.run_cycle(offer_id="cash_devis_cgv01", max_iterations=1)
-    decisions = [r["decision"] for r in db._conn().execute("SELECT decision FROM decisions")]
-    assert "publish_approved" not in decisions
-
-
-def test_stop_request_keeps_stopped_status(pipeline, monkeypatch):
-    real_convert = ag.CONVERT.run
-
-    def convert_then_stop(offer_id, angle, fixes=None):
-        db.request_stop()
-        return real_convert(offer_id, angle, fixes)
-
-    monkeypatch.setattr(ag.CONVERT, "run", staticmethod(convert_then_stop))
-    cycle.run_cycle(offer_id="cash_devis_cgv01", max_iterations=3)
-    run = db.current_run()
-    assert run["status"] == "stopped" and len(pipeline["convert"]) == 1
-
-
-@pytest.mark.parametrize("answer, expected", [("oui", True), ("Oui.", True), (" OK ", True), ("y", True),
-                                              ("non", False), ("on verra", False), ("oui mais non", False),
-                                              ("", False), (None, False)])
-def test_is_yes(answer, expected):
-    assert cycle.is_yes(answer) is expected

@@ -103,4 +103,64 @@ Après suppression:
 - stratégie/économie/journal fonctionnent;
 - aucune dépendance Node/Remotion/TTS/RunPod n'est requise pour la suite Python générale;
 - aucun test non vidéo ne casse;
-- l'atelier Agnes vit séparément dans `apps/agnes-video/index.html`.
+- le moteur Agnes vit séparément comme service upstream pinné; OCTOPUS ne conserve qu'un adapter minimal.
+
+## État de la phase B — 2026-09-25
+
+Suppression implémentée dans l'arbre de travail de la fenêtre Astra :
+- moteur, worker, outils et workflows exclusivement vidéo retirés ;
+- CLI vidéo/cycle/batch, handler de cycle, outils agent render_offer/qc et
+  commandes de lancement Cycle/Studio retirés ;
+- déclaration studio conservée sans handler pour l'identité des données historiques ;
+- workflow python-foundation recomposé : tests de contrôle, H3 agent/mission,
+  sandbox et evidence gate conservés, dépendances vidéo supprimées ;
+- diagnostic et setup local découplés des credentials et dépendances vidéo.
+
+Les consommateurs constatés élargissent la liste de suppression préparée :
+agents/cycle.py, agents/gui/studio.py, classe FORGE de rendu et tests exclusivement
+liés aux modules retirés. Les tests mixtes gardent les assertions sur les offres,
+les validateurs, le coût, les sous-processus, les verrous, l'annulation et le journal.
+Le test d'annulation du handler utilise désormais podalux.agent_message.
+
+Conservés : jobs/cash_*.json, rôles du runtime agent, évaluations et métadonnées des
+offres historiques, lecture des artefacts existants, publication dry-run, ledger,
+stratégie et primitives compute partagées. Le schéma media_generations et sa
+réconciliation dans tasks restent inchangés ; les tests utilisent des lignes SQL
+historiques sans importer le moteur retiré. Les anciennes tâches/schedules vidéo
+persistés ne sont ni migrés ni réactivés automatiquement.
+
+Aucun adapter Agnes n'est encore intégré à cette phase. Aucun rendu réel, appel
+payant, promotion ni fusion vers main n'a été lancé. Les caches/fichiers générés
+ignorés et les artefacts utilisateur ne sont pas supprimés ; Git conserve l'archive
+du moteur. Les anciens snapshots documentaires restent des références historiques.
+
+Validation finale : voir le résultat consigné ci-dessous avant checkpoint.
+
+### Validation exécutée dans le sandbox Astra
+
+- Tests ciblés finaux : 84 passent, 0 échec
+  (cache/astra-relay/phase-b-targeted.xml).
+- Suite Python complète exécutée une seule fois après les changements Python :
+  1 126 passent, 31 échouent, 8 ignorés, 0 erreur de collection (154 s).
+  Logs : cache/astra-relay/phase-b-full.log et phase-b-full.xml.
+- Les 30 échecs workshop/Git concernent dev_worker, night_shift et promotion :
+  les clones de dépôts temporaires sont bloqués par le helper Git-for-Windows
+  (sh.exe, couldn't create signal pipe, Win32 error 5), avec échecs en cascade
+  des assertions qui attendent un clone ou un résultat de worker.
+- Le test test_subprocess_tree_is_killed_on_stop échoue aussi isolément :
+  taskkill retourne exit 1, « Accès refusé », puis le délai atteint environ 22 s
+  au lieu des moins de 15 s attendues. Diagnostic capturé dans
+  cache/astra-relay/phase-b-cancellation-diagnostic.log. Le code de kill_tree
+  et l'assertion temporelle n'ont pas été modifiés.
+- Scan des six références runtime préparées : aucune référence résiduelle
+  dans agents, octopus, businesses, ops, scripts, tools et les workflows.
+  Les références de tests négatifs, d'ignore et de documents historiques restent.
+- Diff relu et git diff --check sans erreur. YAML des deux jobs du workflow
+  python-foundation validé ; syntaxe PowerShell du setup validée sans exécution
+  (encodage UTF-8 avec BOM pour Windows PowerShell).
+
+La suite n'est donc pas annoncée verte dans ce sandbox. Prochaine observation
+requise : résultat de la suite sur ce diff exact par le superviseur hors sandbox,
+notamment clones Git et annulation de l'arbre de processus. Ne pas contourner
+ces limites ni assouplir les tests ; ne pas confondre ce checkpoint avec une
+acceptation produit ou une preuve économique.
