@@ -80,6 +80,13 @@ if ($SkipFetch) { $preflightCommand += "-SkipFetch" }
 & powershell @preflightCommand
 if ($LASTEXITCODE -ne 0) { throw "Codex preflight failed. Astra was not started." }
 
+$sterileUserHome = Join-Path $CodexHome "user-home"
+New-Item -ItemType Directory -Force -Path $sterileUserHome | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $sterileUserHome ".agents") | Out-Null
+
+$originalUserHome = $HOME
+$originalGitConfig = Join-Path $originalUserHome ".gitconfig"
+
 $relayRoot = Join-Path $repo "cache\astra-relay"
 $ticketRoot = Join-Path $repo "cache\astra-tickets"
 $turnLogRoot = Join-Path $relayRoot "astra-turns"
@@ -111,15 +118,35 @@ function Invoke-AstraTurn([string]$Prompt, [string]$ExistingThreadId = "") {
     Write-Host ""
     Write-Host ("=== GPT-6 ASTRA TURN {0}/{1} ===" -f $script:astraTurns, $MaxAstraTurns) -ForegroundColor Magenta
 
-    if ($ExistingThreadId) {
-        & codex exec --json --strict-config --model gpt-6-astra --output-last-message $lastMessage resume $ExistingThreadId $Prompt 2>&1 |
-            Tee-Object -FilePath $jsonLog
+    # Codex 0.157 discovers user skills from the OS home (~/.agents/skills)
+    # independently of CODEX_HOME. Run only the Codex child with a sterile home
+    # so global personal skills/plugins cannot pollute or break OCTOPUS.
+    $savedHome = $env:HOME
+    $savedUserProfile = $env:USERPROFILE
+    $savedGitConfigGlobal = $env:GIT_CONFIG_GLOBAL
+
+    $env:HOME = $sterileUserHome
+    $env:USERPROFILE = $sterileUserHome
+    if (Test-Path -LiteralPath $originalGitConfig -PathType Leaf) {
+        $env:GIT_CONFIG_GLOBAL = $originalGitConfig
     } else {
-        & codex exec --json --strict-config --model gpt-6-astra --output-last-message $lastMessage $Prompt 2>&1 |
-            Tee-Object -FilePath $jsonLog
+        Remove-Item Env:GIT_CONFIG_GLOBAL -ErrorAction SilentlyContinue
     }
 
-    $code = $LASTEXITCODE
+    try {
+        if ($ExistingThreadId) {
+            & codex exec --json --strict-config --model gpt-6-astra --output-last-message $lastMessage resume $ExistingThreadId $Prompt 2>&1 |
+                Tee-Object -FilePath $jsonLog
+        } else {
+            & codex exec --json --strict-config --model gpt-6-astra --output-last-message $lastMessage $Prompt 2>&1 |
+                Tee-Object -FilePath $jsonLog
+        }
+        $code = $LASTEXITCODE
+    } finally {
+        if ($null -eq $savedHome) { Remove-Item Env:HOME -ErrorAction SilentlyContinue } else { $env:HOME = $savedHome }
+        if ($null -eq $savedUserProfile) { Remove-Item Env:USERPROFILE -ErrorAction SilentlyContinue } else { $env:USERPROFILE = $savedUserProfile }
+        if ($null -eq $savedGitConfigGlobal) { Remove-Item Env:GIT_CONFIG_GLOBAL -ErrorAction SilentlyContinue } else { $env:GIT_CONFIG_GLOBAL = $savedGitConfigGlobal }
+    }
     if ($code -ne 0) {
         throw "Codex/Astra exited with code $code. Log: $jsonLog"
     }
