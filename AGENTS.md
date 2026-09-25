@@ -88,6 +88,8 @@ Pour la session Hermes + Agnes actuelle, l'opérateur humain a explicitement fix
 
 La suppression d'un moteur legacy et le remplacement d'une duplication par une primitive plus petite ne sont pas une généralisation économique. Toute capacité Hermes réellement nouvelle reste soumise aux critères de remplacement/besoin borné du fichier de session.
 
+Pendant cette fenêtre, un worker Kilo/Step long ne doit jamais être lancé depuis le shell piloté par Astra. La délégation suit obligatoirement le protocole externe de `CODEX_START_2026-09-25.md` : Astra prépare puis rend la main, l'humain lance le worker dans un PowerShell séparé, Astra ne revient qu'après achèvement pour relire le diff.
+
 Pour la fenêtre de maintenance 2026-09-25, `docs/migrations/CODEX_START_2026-09-25.md` est le routeur de session. Ne précharger ni `VISION.md`, ni `CURRENT_STATE.md`, ni `HANDOFF_WORK.md` sauf si la tâche en cours touche réellement leur domaine. Hors de cette fenêtre, consulter ces documents uniquement lorsqu'ils sont pertinents à la modification demandée.
 Git réel prime sur les snapshots documentaires.
 Vérifier branche, HEAD de main, arbre et historique avant modification ; préserver le travail inconnu.
