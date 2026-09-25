@@ -9,7 +9,7 @@ For this session only, the operator explicitly authorizes a bounded maintenance/
 
 1. reconcile the preparation branch with the actual repository state;
 2. remove the obsolete OCTOPUS video engine cleanly;
-3. add the standalone Agnes video workshop;
+3. replace the legacy video runtime with a thin boundary to the pinned Agnes Video Generator service;
 4. integrate only the Hermes P0 primitives that replace duplication or establish a needed bounded capability, starting with the tool registry;
 5. finish with tests, diff review and a truthful current-state update.
 
@@ -31,22 +31,23 @@ At preparation time:
 
 Verify Git state with commands. If main moved after this file was written, reconcile normally before product changes.
 
-## Read budget
+## Context budget — progressive disclosure
 
-Read these files first, in this order:
+At session start, read only:
+1. root `AGENTS.md` (Codex normally injects it automatically);
+2. this file.
 
-1. `AGENTS.md`
-2. this file
-3. `docs/migrations/CODEX_18H_HANDOFF.md`
-4. `docs/migrations/VIDEO_ENGINE_REMOVAL.md`
-5. `docs/migrations/AGNES_VIDEO_REPLACEMENT.md`
-6. `docs/migrations/OCTOPUS_HERMES_REPLACEMENT_MATRIX.md`
+Then load the one document needed for the phase actually being executed:
+- Phase B: `docs/migrations/VIDEO_ENGINE_REMOVAL.md`;
+- Phase C: `docs/migrations/AGNES_VIDEO_REPLACEMENT.md`;
+- Phase D: `docs/migrations/OCTOPUS_HERMES_REPLACEMENT_MATRIX.md`, then `HERMES_COMPONENT_EXTRACTION.md` only for the component being integrated.
 
-Read `docs/migrations/HERMES_COMPONENT_EXTRACTION.md` only when starting Hermes work.
+`CODEX_18H_HANDOFF.md` is a preparation record, not required reading for execution.
+`docs/CURRENT_STATE.md`, `docs/VISION.md` and `docs/HANDOFF_WORK.md` remain background sources for economic semantics; read only the relevant section if a concrete change touches that semantic boundary.
 
-`docs/CURRENT_STATE.md`, `docs/VISION.md` and `docs/HANDOFF_WORK.md` remain canonical background for economic truth, but their older "next action" text is **not** the priority authority for this explicitly authorized maintenance window.
+Do not preload the whole migration packet.
 
-Do not perform a broad repository audit before starting.
+Do not perform a broad repository audit before starting. The preparation audit has already been done; inspect only code required by the current phase.
 Do not enumerate every historical branch.
 Do not re-benchmark free models.
 Do not inspect Astra Flash Orchestrator again.
