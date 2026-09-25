@@ -13,6 +13,7 @@ Lire avant toute modification:
 1. `docs/migrations/HERMES_COMPONENT_EXTRACTION.md`
 2. `docs/migrations/VIDEO_ENGINE_REMOVAL.md`
 3. `docs/migrations/AGNES_VIDEO_REPLACEMENT.md`
+4. `docs/migrations/OCTOPUS_HERMES_REPLACEMENT_MATRIX.md`
 
 ## Mission
 
