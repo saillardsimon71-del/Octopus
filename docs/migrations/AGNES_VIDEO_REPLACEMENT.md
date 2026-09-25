@@ -1,250 +1,164 @@
-# Atelier vidéo Agnes — contrat de remplacement
+# Agnes Video Generator — replacement contract
 
-Source normative fonctionnelle pour cette migration: document de transfert fourni par l'utilisateur le 2026-09-25.
+Date: 2026-09-25
 
-Validation publique complémentaire effectuée le 2026-09-25: le gateway Agnes documente toujours `POST /v1/videos`, l'authentification Bearer, le polling recommandé par `video_id`, et le protocole legacy `agnes-video-v2.0`. Agnes propose aussi des modèles vidéo 2.5 plus récents; **cette migration reste volontairement sur v2.0** afin de ne pas changer de contrat pendant le remplacement.
+## Source of truth
 
-Les limites peuvent dépendre du compte. Le 1 RPM ci-dessous est une référence publique, pas une garantie d'entitlement pour la clé de l'opérateur.
+The replacement engine is the existing open-source project:
 
-## But
+- repository: `lcy362/agnes-video-generator`
+- upstream branch observed: `master`
+- pinned source for this migration: `a87162d6df73ffe72186838ca0ae9d461e68589b`
+- license: MIT, Copyright (c) 2026 lcy362
 
-Application web autonome **locale/privée pour l'opérateur dans cette V1**:
+Do **not** rebuild Agnes inside OCTOPUS.
 
-> Sécurité: la documentation Agnes recommande de garder les clés API côté serveur. Une application réellement publique/multi-utilisateur ne doit donc pas embarquer une clé personnelle persistante dans le client. Le choix « fichier HTML unique, sans backend » est conservé aujourd'hui uniquement comme outil local. Ne pas présenter cette V1 comme un déploiement public sécurisé.
+The previous plan for a hand-written `apps/agnes-video/index.html` is superseded by this document.
 
-Caractéristiques:
-- un unique fichier `index.html`;
-- HTML/CSS/JS uniquement;
-- aucune dépendance externe/CDN/framework;
-- upload multiple d'images depuis téléphone;
-- génération d'une vidéo IA par image;
-- Android + iOS;
-- anti-veille pendant les longues générations.
+## Why this changes the architecture
 
-Chemin cible:
-`apps/agnes-video/index.html`
+The upstream project already provides:
 
-L'application est indépendante du moteur OCTOPUS. OCTOPUS peut éventuellement la lancer/servir plus tard, mais ne doit pas réintroduire Remotion/TTS/RunPod pour elle.
+- Python/FastAPI backend;
+- Agnes video API client;
+- text-to-video, image-to-video and keyframe modes;
+- multi-scene pipelines;
+- retries and rate limiting;
+- persisted task state and resume/stop;
+- FFmpeg/moviepy composition;
+- Edge TTS and subtitles;
+- Vue UI;
+- extensive tests;
+- Agnes 2.0 and 2.5 model adaptation.
 
-## API Agnes fournie
+Reimplementing these facilities in OCTOPUS would recreate the legacy-video problem we are trying to remove.
 
-Créer:
-```
-POST https://apihub.agnes-ai.com/v1/videos
-```
+## Target architecture
 
-Poll:
-```
-GET https://apihub.agnes-ai.com/agnesapi?video_id=<ID>&model_name=agnes-video-v2.0
-```
-
-Modèle:
-`agnes-video-v2.0`
-
-Payload validé par le document source:
-
-```js
-{
-  model: "agnes-video-v2.0",
-  prompt: "...prompt en anglais...",
-  image: "<data-uri-complet>",
-  num_frames: 153,
-  frame_rate: 24
-}
+```text
+OCTOPUS economic/control plane
+        |
+        | minimal explicit adapter
+        v
+Agnes Video Generator local service
+(pinned external application)
+        |
+        v
+Agnes AI + its own media pipeline
 ```
 
-Contraintes source:
-- ne pas utiliser `first_frame`;
-- ne pas utiliser `mode: "keyframes"`;
-- conserver le préfixe `data:image/...;base64,` selon le document de transfert;
-- `image` au niveau racine;
-- **ambiguïté connue**: la documentation publique v2.0 consultée le 2026-09-25 décrit `image` comme une URL de référence; le support Data URI vidéo n'a pas été confirmé publiquement. Ne pas réécrire l'app autour d'un uploader/backend spéculatif. Implémenter le contrat de transfert, puis considérer le premier appel live comme la vérification de cette hypothèse.
-- créations vidéo: 1/minute effective;
-- polling parallèle autorisé.
+Ownership:
 
-## Durées
+OCTOPUS owns:
+- economic decision to request video work;
+- task/experiment/evidence references;
+- permission to trigger an external action;
+- cost/time/result bookkeeping;
+- verification of the returned artifact.
 
-```
-121 frames = 5.0 s
-153 frames = 6.4 s recommandé
-241 frames = 10.0 s
-441 frames = 18.4 s max
-```
+Agnes Video Generator owns:
+- video-generation workflow;
+- Agnes API protocol;
+- rate limiting/retries;
+- images/video/TTS/subtitles/composition;
+- video-specific task state;
+- video UI.
 
-`num_frames = 8n + 1`, max 441.
+Do not copy Agnes's internal task manager, retry engine, model registry or media pipeline into OCTOPUS.
 
-## Pipeline
+## Integration boundary
 
-```
-T=0s    create image 1 -> poll 1
-T=62s   create image 2 -> poll 2
-T=124s  create image 3 -> poll 3
-...
-```
+Prefer a local HTTP adapter against the upstream FastAPI API.
 
-Les créations sont espacées; les pollers restent parallèles.
+Upstream documented endpoints at the pinned revision include:
 
-## Anti-429 adaptatif
+- `POST /api/tasks/simple`
+- `POST /api/tasks/creative`
+- `POST /api/tasks/manuscript`
+- `POST /api/tasks/poetry`
+- `POST /api/tasks/anchor`
+- `GET /api/tasks/{task_id}` for progress polling
+- `POST /api/tasks/{task_id}/stop`
+- `POST /api/tasks/{task_id}/resume`
+- `GET /api/video/{task_id}` for the final video
+- `GET /api/tasks/{task_id}/artifacts`
 
-Intervalle:
-- nominal: 62 s;
-- sur 429: +8 s jusqu'à 90 s;
-- après 3 succès consécutifs: -4 s progressivement jusqu'à 62 s.
+Default service URL documented upstream: `http://localhost:8765`.
 
-Backoff source:
+First OCTOPUS integration should use the smallest subset needed by the current product path.
+Do not expose all Agnes modes merely because they exist.
 
-```
-429:     15,30,45,60,90,120,180 s
-503:     5,10,15,20,30,45 s
-network: 3,5,8,12,20,30 s
-```
+## Deployment rule
 
-Toute réponse HTTP non OK doit être traitée avant parsing JSON.
+Keep Agnes as an external/pinned application, not as a second OCTOPUS core.
 
-## Cache timing local
+Preferred first setup:
+- clone/install the pinned upstream source outside OCTOPUS tracked source or in a dedicated ignored runtime/dependency location;
+- configure `AGNES_API_KEY` in Agnes's own environment, never in Git;
+- start Agnes independently;
+- health/probe it from OCTOPUS;
+- communicate only through the adapter.
 
-Clé:
-`agnes_timing_cache_v10`
+Do not vendor the entire Agnes repository into OCTOPUS in the first migration.
+Do not add a Git submodule unless a concrete deployment constraint requires it.
+Do not fork upstream code before a real incompatibility is observed.
 
-Forme:
-```json
-{"121":[62340,58900],"153":[75200]}
-```
+If upstream source code is copied or substantially derived later, preserve its MIT notice.
 
-- 10 derniers échantillons par durée;
-- médiane;
-- premier poll vers 80% de l'estimation.
+## Security
 
-## Prompt final
+The Agnes API key belongs to the Agnes process.
 
-Ordre:
-1. instruction continuité ou transformation;
-2. effet visuel;
-3. prompt utilisateur, priorité haute;
-4. cadrage;
-5. intensité;
-6. action aléatoire;
-7. mouvement caméra aléatoire;
-8. éclairage aléatoire;
-9. sound design minimal foley, no music;
-10. portrait 9:16, 24fps, no text, no watermarks.
+OCTOPUS should not persist or display it.
+Browser/UI code in OCTOPUS should not receive it.
 
-### Catégorie A — ambiance / continuité
-12 effets:
-- Cinématique
-- Golden Hour
-- Noir & Blanc
-- Pastel Rêveur
-- Néon Urbain
-- Vintage Super 8
-- Contraste Dramatique
-- Brume Mystique
-- Chiaroscuro
-- Tropical Saturé
-- Clair de Lune
-- Aube Douce
+The upstream service already keeps its generation calls server-side; preserve that architecture.
 
-Instruction de base:
-`Preserve the exact subject identity, face, pose, and clothing`
+Do not make real generation calls in the OCTOPUS test suite.
 
-### Catégorie B — transformations
-12 effets:
-- Simpson
-- Ghibli
-- Manga N&B
-- Polar
-- Cyberpunk
-- Pixar
-- BD franco-belge
-- Aquarelle
-- Peinture à l'huile
-- Claymation
-- Vaporwave
-- Surréaliste
+## Model/protocol ownership
 
-Instruction:
-`Transform the entire image into this style`
+Do not reproduce Agnes model protocol in OCTOPUS.
 
-## Interface
+At the pinned revision, upstream already supports:
+- default `agnes-video-v2.0`;
+- Agnes 2.5 model branches;
+- v2.0 image resolution including hosted-URL upload with Base64 fallback;
+- submit retry/rate limiting;
+- polling and returned video URL handling.
 
-Un seul `index.html` contenant:
-- CSS;
-- header;
-- info banner;
-- clé API + sauvegarde locale + statut, avec avertissement explicite « usage local/privé — ne pas publier avec une clé personnelle »;
-- contrôle wake lock;
-- upload multiple;
-- thumbnails;
-- prompt principal;
-- 7 presets;
-- choix effet;
-- durée/cadrage/intensité;
-- Créer;
-- Arrêter;
-- queue + progression + ETA;
-- galerie vidéo;
-- status bar;
-- toast;
-- canvas/video cachés anti-veille;
-- logique JS complète.
+Therefore the earlier OCTOPUS-side assumptions about exact Data URI behavior, 2.0 payload details and adaptive polling are no longer an OCTOPUS implementation concern. They belong to the pinned Agnes engine.
 
-## Anti-veille
+## Replacement sequence
 
-Niveau 1:
-```js
-wakeLockSentinel = await navigator.wakeLock.request('screen');
-```
+1. Remove OCTOPUS legacy video runtime according to `VIDEO_ENGINE_REMOVAL.md`.
+2. Confirm shared OCTOPUS tests are green.
+3. Validate the pinned Agnes project can start independently on this Windows machine.
+4. Add one minimal OCTOPUS adapter/probe for the local Agnes service.
+5. Add deterministic adapter tests with mocked HTTP responses.
+6. Run one explicit human-authorized live smoke test only after the key/service is configured.
+7. Record returned artifact evidence in OCTOPUS without importing Agnes internal state.
 
-Niveau 2:
-- canvas 2x2;
-- alternance très légère;
-- `captureStream(1)`;
-- vidéo muette;
-- relance à `visibilitychange`;
-- préférence `agnes_wakelock_enabled`.
+## Acceptance criteria
 
-## Performance images
+The migration succeeds when:
 
-Pour 50+ images:
-- ne pas laisser toutes les Data URIs originales dans le DOM;
-- thumbnails ~200 px;
-- `loading="lazy"`;
-- conserver les originaux seulement dans l'état JS nécessaire aux requêtes.
+- legacy OCTOPUS Remotion/RunPod/TTS/B-roll code is no longer required;
+- Agnes runs independently from its pinned upstream source;
+- OCTOPUS does not contain a second video-generation pipeline;
+- OCTOPUS can submit only the required Agnes job type through a narrow adapter;
+- OCTOPUS can query status, stop a task and obtain the completed video/artifact reference;
+- no Agnes secret is stored in OCTOPUS Git;
+- deterministic tests make no external generation call;
+- external side effects remain governed by OCTOPUS policy;
+- upstream version/pin is visible and upgradeable deliberately.
 
-## Critères d'acceptation
+## Not part of this migration
 
-- fichier unique;
-- aucune dépendance/CDN;
-- clé API sauvegardable avec feedback;
-- multi-upload mobile;
-- queue stable;
-- une création Agnes à la fois par fenêtre ~62 s;
-- pollers parallèles;
-- backoff adaptatif;
-- bouton Arrêter fonctionnel;
-- wake lock + fallback;
-- cache timing;
-- effets A préservent la continuité par prompt;
-- effets B assument transformation;
-- vidéos affichées/téléchargeables lorsqu'elles sont prêtes;
-- aucun ancien moteur vidéo OCTOPUS requis.
-
-## Hors scope initial
-
-- ffmpeg.wasm;
-- montage final concaténé;
-- TTS externe;
-- collaboration;
-- backend serveur;
-- historique IndexedDB avancé.
-
-## Faits runtime à ne pas inventer
-
-Sans appel réel avec la clé de l'opérateur, restent inconnus:
-- CORS navigateur depuis la page locale;
-- acceptation d'un Data URI Base64 dans le champ vidéo v2.0 `image` (la doc publique montre une URL, le transfert affirme Data URI);
-- schéma exact de réponse live pour ce compte;
-- entitlement/quota effectif;
-- disponibilité v2.0 pour cette clé.
-
-Les tests du dépôt doivent rester statiques/déterministes et ne pas effectuer de génération payante. Si un de ces faits bloque l'exécution réelle, le signaler; ne pas construire un backend ou changer de modèle spontanément.
+- rewriting Agnes UI;
+- copying Agnes's pipeline into OCTOPUS;
+- porting all six Agnes task types;
+- changing Agnes's default video model;
+- improving Agnes itself;
+- merging its persistence with OCTOPUS SQLite;
+- automatic upstream updates.
