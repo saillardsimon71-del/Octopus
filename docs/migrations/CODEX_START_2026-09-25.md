@@ -14,7 +14,7 @@ Do not begin work unless it ends with:
 
 `READY FOR CODEX / GPT-6 ASTRA`
 
-The gate checks Git cleanliness/main ancestry, effective project Codex feature state, Astra-compatible CLI, ChatGPT authentication, worker execpolicy, the exact live free Step route, Python/Docker and hidden global Codex context.
+The gate checks Git cleanliness/main ancestry, fetches/verifies the exact pinned Hermes + Agnes sources, validates effective project Codex feature state, Astra-compatible CLI, ChatGPT authentication, worker execpolicy, the exact live free Step route, Python/Docker and hidden global Codex context.
 
 If the repo is not trusted yet, Codex may ignore project `.codex/` config/rules. Approve the trust prompt before the first task, exit, and rerun preflight.
 
@@ -119,10 +119,7 @@ Read `AGNES_VIDEO_REPLACEMENT.md`.
 Source pin:
 `lcy362/agnes-video-generator@a87162d6df73ffe72186838ca0ae9d461e68589b`
 
-Fetch via:
-`scripts/fetch_pinned_upstreams.ps1 agnes`
-
-Do not rebuild/vendor/fork its media pipeline. Agnes runs independently; OCTOPUS gets only the narrow adapter/probe needed by the current workflow. Keep `AGNES_API_KEY` in the Agnes process, bind the local service to loopback, and make repository tests deterministic/no-live-generation. A real smoke test requires explicit human authorization.
+The preflight has already fetched the exact pin under `cache/upstreams/agnes-video-generator`. Do not rebuild/vendor/fork its media pipeline. Agnes runs independently; OCTOPUS gets only the narrow adapter/probe needed by the current workflow. Keep `AGNES_API_KEY` in the Agnes process, bind the local service to loopback, and make repository tests deterministic/no-live-generation. A real smoke test requires explicit human authorization.
 
 ### D — Hermes P0
 Read the replacement matrix, then only the needed extraction section.
@@ -130,10 +127,7 @@ Read the replacement matrix, then only the needed extraction section.
 Source pin:
 `NousResearch/hermes-agent@59004a62356f3a4697ab0fe8ad5086d2b405e2a6`
 
-Fetch via:
-`scripts/fetch_pinned_upstreams.ps1 hermes`
-
-Start with the tool registry because it has a concrete replacement target. For every port require: exact code replaced or bounded missing capability, preserved interface, tests, permission consequences, attribution if derived, and net complexity reduction.
+The preflight has already fetched the exact pin under `cache/upstreams/hermes-agent`. Start with the tool registry because it has a concrete replacement target. For every port require: exact code replaced or bounded missing capability, preserved interface, tests, permission consequences, attribution if derived, and net complexity reduction.
 
 Do not import Hermes loop, planner, persona, memory, LLM router or full orchestration. Do not create a second planner/router/journal/permission/evidence authority. P1 work is out of scope unless the human explicitly extends scope after P0 is clean.
 
