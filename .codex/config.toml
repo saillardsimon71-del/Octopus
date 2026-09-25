@@ -12,13 +12,13 @@ model_reasoning_summary = "concise"
 approval_policy = "on-request"
 approvals_reviewer = "user"
 
-# Shell networking is required for the OCTOPUS Kilo worker and for explicitly
-# pinned GitHub upstreams. Hosted Codex web search remains disabled.
+# Astra works only from the prepared local repository and the pinned upstream
+# caches fetched by preflight. External workers run in a separate human shell.
 sandbox_mode = "workspace-write"
 web_search = "disabled"
 
 [sandbox_workspace_write]
-network_access = true
+network_access = false
 
 [agents]
 # Critical quota rule: native Codex multi-agent tools are disabled.
