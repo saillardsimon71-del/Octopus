@@ -329,14 +329,34 @@ if (($residualPaths.Count -eq 0) -and -not $policyHit) {
 
 $globalConfig = Join-Path $codexHome "config.toml"
 if (Test-Path -LiteralPath $globalConfig -PathType Leaf) {
+    $globalRaw = [System.IO.File]::ReadAllText($globalConfig)
+
     $mcpDefs = @(Select-String -LiteralPath $globalConfig -Pattern '^\s*\[mcp_servers\.' -AllMatches -ErrorAction SilentlyContinue)
     if ($mcpDefs.Count -gt 0) {
         Fail "user-level MCP server definitions detected in $globalConfig; disable/review them before the purified OCTOPUS session"
     } else {
         Ok "no user-level MCP server definitions detected"
     }
+
+    # Provider/profile routing is intentionally not trusted to project config:
+    # Codex ignores project-scoped provider/profile keys. A user-level custom
+    # provider could route gpt-6-astra away from the ChatGPT-plan backend.
+    $routingPatterns = @(
+        '(?m)^\s*model_provider\s*=',
+        '(?m)^\s*openai_base_url\s*=',
+        '(?m)^\s*chatgpt_base_url\s*=',
+        '(?m)^\s*profile\s*=',
+        '(?m)^\s*\[model_providers\.',
+        '(?m)^\s*\[profiles\.'
+    )
+    $routingHits = @($routingPatterns | Where-Object { $globalRaw -match $_ })
+    if ($routingHits.Count -gt 0) {
+        Fail "user-level Codex provider/profile routing detected in $globalConfig; review/remove it so Astra is guaranteed to use the ChatGPT-plan route"
+    } else {
+        Ok "no user-level provider/profile routing overrides detected"
+    }
 } else {
-    Ok "no user-level Codex config.toml MCP definitions detected"
+    Ok "no user-level Codex config.toml MCP/provider overrides detected"
 }
 
 $userRulesDir = Join-Path $codexHome "rules"
