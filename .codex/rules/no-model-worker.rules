@@ -1,40 +1,53 @@
-# Long external workers must never run inside the Codex model shell.
-# On Windows Codex shell tool calls yield a live process after a short window;
-# supervising that process from Astra would require repeated model/tool turns.
-# Run these commands manually in a separate PowerShell instead.
+# Defense in depth only.
+# The primary quota boundary is architectural: GPT-6 Astra runs under the
+# deterministic parent supervisor and must never start the long worker itself.
+# These prefix rules block the common accidental direct paths. They are not
+# treated as a complete security sandbox against arbitrary shell indirection.
 
 prefix_rule(
     pattern = ["kilo"],
     decision = "forbidden",
-    justification = "Run Kilo workers outside the Codex model loop to preserve Astra quota."
+    justification = "Kilo must run only through the external OCTOPUS relay."
 )
 
 prefix_rule(
     pattern = ["kilo.cmd"],
     decision = "forbidden",
-    justification = "Run Kilo workers outside the Codex model loop to preserve Astra quota."
+    justification = "Kilo must run only through the external OCTOPUS relay."
 )
 
 prefix_rule(
     pattern = ["python", "-m", "octopus", "night-shift"],
     decision = "forbidden",
-    justification = "Run OCTOPUS night-shift externally; Astra prepares and later reviews the worker result."
+    justification = "night-shift must run only through the external OCTOPUS relay."
 )
 
 prefix_rule(
     pattern = ["python.exe", "-m", "octopus", "night-shift"],
     decision = "forbidden",
-    justification = "Run OCTOPUS night-shift externally; Astra prepares and later reviews the worker result."
+    justification = "night-shift must run only through the external OCTOPUS relay."
 )
 
 prefix_rule(
     pattern = ["python3", "-m", "octopus", "night-shift"],
     decision = "forbidden",
-    justification = "Run OCTOPUS night-shift externally; Astra prepares and later reviews the worker result."
+    justification = "night-shift must run only through the external OCTOPUS relay."
 )
 
 prefix_rule(
     pattern = ["py", "-m", "octopus", "night-shift"],
     decision = "forbidden",
-    justification = "Run OCTOPUS night-shift externally; Astra prepares and later reviews the worker result."
+    justification = "night-shift must run only through the external OCTOPUS relay."
+)
+
+prefix_rule(
+    pattern = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\scripts\\run_external_dev_ticket.ps1"],
+    decision = "forbidden",
+    justification = "The worker runner is owned by the parent supervisor, not the Astra shell."
+)
+
+prefix_rule(
+    pattern = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\scripts\\run_external_dev_ticket.ps1"],
+    decision = "forbidden",
+    justification = "The worker runner is owned by the parent supervisor, not the Astra shell."
 )
