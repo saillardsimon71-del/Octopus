@@ -1213,9 +1213,9 @@ def _review_business_signals(business_signals: list[dict], results: list[dict]) 
         messages = _business_signal_review_messages(signal, page["text"])
         try:
             verdict = deepseek.call_json(
-                "REVUE", "revue_signal", deepseek.config.MODEL_PRO, messages,
+                "REVUE", "revue_signal", deepseek.config.MODEL_FLASH, messages,
                 max_tokens=1000, validate=_validate_business_signal_review)
-        except (llm.GatewayError, ValueError) as exc:
+        except llm.GatewayError as exc:
             error = f"{type(exc).__name__}: {exc}"
             db.post("REVUE", f"revue d'actionnabilité dégradée : {error[:120]}")
             entry.update({"status": "degraded", "classification": None, "justification": None,
