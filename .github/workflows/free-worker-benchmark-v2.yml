@@ -6,6 +6,7 @@ on:
       - bench/free-workers-20260925
     paths:
       - ".github/workflows/free-worker-benchmark-v2.yml"
+      - "benchmarks/free_worker/**"
   workflow_dispatch:
 
 permissions:
@@ -25,12 +26,12 @@ jobs:
       max-parallel: 4
       matrix:
         include:
-          - id: nex-n2-5-pro
-            model: "kilo/nex-agi/nex-n2.5-pro:free"
-          - id: minimax-m3
-            model: "kilo/minimax/minimax-m3:free"
-          - id: hy3
-            model: "kilo/tencent/hy3:free"
+          - id: step-3-7-flash
+            model: "kilo/stepfun/step-3.7-flash:free"
+          - id: nemotron-3-ultra
+            model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free"
+          - id: north-mini-code
+            model: "kilo/cohere/north-mini-code:free"
           - id: laguna-s-2-1
             model: "kilo/poolside/laguna-s-2.1:free"
 
