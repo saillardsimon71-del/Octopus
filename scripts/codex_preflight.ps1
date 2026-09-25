@@ -85,7 +85,7 @@ if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
         'approvals_reviewer = "user"',
         'sandbox_mode = "workspace-write"',
         'web_search = "disabled"',
-        'network_access = true',
+        'network_access = false',
         'enabled = false',
         'multi_agent = false',
         'goals = false',
