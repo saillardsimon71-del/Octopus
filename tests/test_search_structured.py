@@ -708,6 +708,8 @@ def test_structured_search_still_reaches_the_evidence_gate(monkeypatch):
             "summary_evidence": "recherche un prestataire pour la gestion",
             "test_channel": "réponse à l'appel d'offres", "test_offer": "audit gratuit",
             "next_test": "répondre à l'appel d'offres"}]},
+        # Revue d'actionnabilité du signal qualifié : appel LLM indépendant, APRÈS le gate.
+        {"classification": "actionable_now", "justification": "appel d'offres ouvert"},
     ])
     monkeypatch.setattr(deepseek, "call_json", lambda *a, **k: next(actions))
 

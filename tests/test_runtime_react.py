@@ -679,6 +679,9 @@ def test_business_signal_focus_reaches_planner_agent_and_synthesis(monkeypatch):
                 "next_test": "répondre manuellement à 3 missions similaires",
             }],
         },
+        # Revue d'actionnabilité : un appel indépendant suit la synthèse dès qu'un
+        # signal structurellement valide existe.
+        {"classification": "actionable_now", "justification": "mission publiée encore ouverte"},
     ])
 
     monkeypatch.setitem(
