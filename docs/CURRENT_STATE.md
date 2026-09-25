@@ -1,3 +1,14 @@
+# Current-state notice — 2026-09-25
+
+The detailed report below is an earlier intervention snapshot and contains historical priority language and an older baseline SHA.
+For the current repository state, the protected reference is `main@ae4d98dc9692aa10ba15051381a36809e25377df` and the prepared maintenance branch is `prep/astra-local-orchestration`, based on that main with zero commits behind at preparation time.
+
+The human operator has explicitly authorized the bounded 2026-09-25 maintenance window documented in `docs/migrations/CODEX_START_2026-09-25.md`: legacy-video removal, standalone Agnes replacement, then selective Hermes P0 replacement work. Statements below such as “the next work is a client experiment”, “freeze video/MCP”, or the old baseline SHA remain historical context and must not be used to override that current directive.
+
+Economic truth rules, evidence semantics, permission boundaries and market-first doctrine remain unchanged.
+
+---
+
 **AVANT CETTE INTERVENTION, OCTOPUS ÉTAIT :**
 un système de contrôle et d'exécution riche, issu de Podalux, avec de vraies protections et
 une boucle stratégique/financière déjà présente, mais des priorités documentaires contradictoires

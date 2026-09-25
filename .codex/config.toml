@@ -1,0 +1,79 @@
+# OCTOPUS project-local Codex policy.
+# This file is loaded only for a trusted project.
+# GPT-6 Astra is the only Codex model used for construction/review.
+# Bounded cheap implementation is delegated through OCTOPUS/Kilo, never
+# through Codex-native subagents.
+
+model = "gpt-6-astra"
+model_reasoning_effort = "high"
+model_reasoning_summary = "concise"
+
+# Interactive Codex would use these values. The automated builder uses
+# `codex exec`, whose current implementation intentionally forces
+# approval_policy=never; denied/escalated operations therefore fail closed.
+approval_policy = "on-request"
+approvals_reviewer = "user"
+
+# Astra receives a prepared local workspace. Source retrieval and long workers
+# happen outside the model process.
+sandbox_mode = "workspace-write"
+web_search = "disabled"
+
+# Required on Windows for non-interactive codex exec. Without the native
+# Restricted Token backend, approval_policy=never causes even safe unmatched
+# PowerShell commands (for example Get-Content) to be forbidden.
+windows.sandbox = "unelevated"
+
+[sandbox_workspace_write]
+network_access = false
+
+[agents]
+enabled = false
+
+[features]
+# Keep Astra single-root and remove autonomous/secondary model loops.
+multi_agent = false
+goals = false
+memories = false
+fast_mode = false
+
+# Remove external/context surfaces that are unnecessary for pure repo work.
+apps = false
+plugins = false
+remote_plugin = false
+plugin_sharing = false
+recommended_plugins = false
+hooks = false
+skill_search = false
+skill_mcp_dependency_install = false
+tool_suggest = false
+
+# No browser/computer-use surfaces in the constructor session.
+browser_use = false
+browser_use_full_cdp_access = false
+browser_use_external = false
+computer_use = false
+in_app_browser = false
+
+# Astra still has its useful local developer surface.
+shell_tool = true
+
+# Do not expose a model-side sleep primitive for supervising long work.
+# Long work is handled by the deterministic relay outside Codex.
+sleep_tool = false
+
+[features.multi_agent_v2]
+enabled = false
+
+[skills]
+include_instructions = false
+
+[skills.bundled]
+enabled = false
+
+[cloud.skills]
+enabled = false
+
+[memories]
+use_memories = false
+generate_memories = false

@@ -82,8 +82,18 @@ provider GPU, moteur vidéo, campagnes, CRM, microservices, message bus ou réé
 
 ## Travail sur le dépôt
 
-Lire ce fichier, `docs/VISION.md`, `docs/CURRENT_STATE.md`, puis `docs/HANDOFF_WORK.md`.
-Git réel prime sur les snapshots documentaires. Les plans spécialisés ne fixent pas les priorités.
+### Fenêtre de maintenance explicitement autorisée — 2026-09-25
+
+Pour la session Hermes + Agnes actuelle, l'opérateur humain a explicitement fixé un objectif de maintenance borné. Lire d'abord `docs/migrations/CODEX_START_2026-09-25.md` et suivre son budget de lecture/exécution. Ce fichier de session peut fixer la priorité immédiate malgré les anciennes phrases « prochaine action » des snapshots documentaires; il ne peut pas affaiblir les frontières de preuve, permissions, secrets, coûts, effets externes ou promotion de cette constitution.
+
+La suppression d'un moteur legacy et le remplacement d'une duplication par une primitive plus petite ne sont pas une généralisation économique. Toute capacité Hermes réellement nouvelle reste soumise aux critères de remplacement/besoin borné du fichier de session.
+
+Pendant cette fenêtre, un worker Kilo/Step long ne doit jamais être lancé depuis le shell piloté par Astra. La délégation suit obligatoirement le relay déterministe de `CODEX_START_2026-09-25.md` : Astra publie un ticket borné puis termine son tour; le superviseur local exécute Step hors de la boucle modèle et reprend ensuite exactement la même thread Astra une seule fois pour la review.
+
+Pendant cette même fenêtre, ne jamais poursuivre sous un modèle de fallback. Le superviseur utilise `codex exec` avec `--model gpt-6-astra`; tout échec/rate-limit Codex arrête la chaîne au lieu de sélectionner un autre modèle.
+
+Pour la fenêtre de maintenance 2026-09-25, `docs/migrations/CODEX_START_2026-09-25.md` est le routeur de session. Ne précharger ni `VISION.md`, ni `CURRENT_STATE.md`, ni `HANDOFF_WORK.md` sauf si la tâche en cours touche réellement leur domaine. Hors de cette fenêtre, consulter ces documents uniquement lorsqu'ils sont pertinents à la modification demandée.
+Git réel prime sur les snapshots documentaires.
 Vérifier branche, HEAD de main, arbre et historique avant modification ; préserver le travail inconnu.
 Branche dédiée et revue avant fusion ; ne jamais merger main automatiquement.
 Tester chaque changement puis les frontières partagées ; aucune ressource payante dans les tests.
