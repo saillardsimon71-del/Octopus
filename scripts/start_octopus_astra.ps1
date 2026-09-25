@@ -48,9 +48,26 @@ $setup = Join-Path $repo "scripts\setup_octopus_codex_home.ps1"
 $preflight = Join-Path $repo "scripts\codex_preflight.ps1"
 $runner = Join-Path $repo "scripts\run_external_dev_ticket.ps1"
 
-foreach ($required in @($setup, $preflight, $runner)) {
+$fetcher = Join-Path $repo "scripts\fetch_pinned_upstreams.ps1"
+
+foreach ($required in @($setup, $preflight, $runner, $fetcher)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Missing launcher dependency: $required"
+    }
+
+    $tokens = $null
+    $parseErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile(
+        $required,
+        [ref]$tokens,
+        [ref]$parseErrors
+    ) | Out-Null
+
+    if ($parseErrors.Count -gt 0) {
+        $details = ($parseErrors | ForEach-Object {
+            "{0}:{1} {2}" -f $_.Extent.StartLineNumber, $_.Extent.StartColumnNumber, $_.Message
+        }) -join [Environment]::NewLine
+        throw "PowerShell syntax check failed before launch: $required" + [Environment]::NewLine + $details
     }
 }
 
