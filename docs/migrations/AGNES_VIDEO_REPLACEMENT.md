@@ -169,3 +169,59 @@ The migration succeeds when:
 - improving Agnes itself;
 - merging its persistence with OCTOPUS SQLite;
 - automatic upstream updates.
+
+## Phase C implementation — 2026-09-25
+
+`octopus.agnes` implements the pinned local HTTP boundary with Python's standard
+library. It exposes `probe()`, `status(task_id)` and `video_reference(task_id)`;
+each accepts an explicit loopback service URL (default `http://127.0.0.1:8765`).
+Proxy environment settings and redirects are disabled. No Agnes credentials are
+read, sent or persisted. The health response does not attest the deployed version:
+`expected_pin` is the required source pin, not an observed server revision.
+
+Mutations require explicit `agnes.register()` and the existing `actions.propose`
+path. The channel kind is `agnes_video`, its locator is the service origin, and
+the human must grant active `act` access. Capabilities are `agnes_submit` and
+`agnes_stop`. Registration alone grants neither access nor budget.
+
+- `submit`: payload exactly `{"prompt": "..."}`; calls `/api/tasks/simple` as a
+  form with `mode=t2v`, leaving model, duration and media settings to Agnes.
+  Requires a stable mission idempotency key, declared spend amount/currency and
+  an existing allowance. No image upload, resume or alternative modes.
+- `stop`: payload exactly `{"task_id": "<12 lowercase hex characters>"}`;
+  requires its own stable idempotency key. A stop acknowledgement does not prove
+  cancellation or absence of charges and does not release generation spend.
+- A successful submission records the returned task ID and service reference in
+  the existing action journal. Its evidence describes an HTTP acknowledgement,
+  never completion, delivery, customer acceptance or an observed charge.
+- `video_reference` requires a service-reported `completed` simple task and
+  returns the fixed `/api/video/{task_id}` reference with `verified=False`.
+  The pinned simple pipeline writes `final_video.mp4`; its `/artifacts` manifest
+  has no simple-task definitions. No remote URLs or filesystem paths from the
+  response are followed. Download, integrity and delivery checks remain human
+  workflow responsibilities; this adapter does not claim artifact verification.
+
+`actions.AmbiguousAction` preserves the existing spend reservation when a
+mutation times out, returns an uncertain HTTP error or has an invalid response.
+No retry is performed. The reservation is linked to the action before HTTP, so
+a crash during submission retains both identity and budget. Reusing the same
+key returns the journaled action, including after process restart; no new call
+is made. A crash before acknowledgement persistence can leave status `proposed`
+and no Agnes task ID. Reconcile in the independent service before any new key
+or spend release; upstream creation has no client idempotency facility.
+
+The declared reservation is not an upstream billing cap: Agnes owns model
+configuration and its internal retries. Before live authorization the human must
+bound those costs and later reconcile the observed charge through
+`economy.record_cash(..., spend_request_id=...)`, or release a reservation only
+with evidence that no charge occurred. There is no second ledger or automatic
+settlement. Blocked identities are retained too; a newly authorized attempt
+needs a new key only after reviewing the prior action.
+
+Tests in `tests/test_agnes.py` mock HTTP and exercise the pinned wire contract,
+permission/budget refusals, durable deduplication, concurrent identical requests,
+crash and ambiguous outcomes, loopback restrictions, and status/video references.
+No independent service launch or live generation was performed in phase C.
+Next operational observation: verify the pinned service starts on loopback;
+only after explicit human authorization, observe a real task and verify its
+artifact and actual charge. Deployment and economic acceptance remain unproven.
