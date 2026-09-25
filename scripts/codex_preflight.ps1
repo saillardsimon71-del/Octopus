@@ -152,7 +152,12 @@ if (Test-Path -LiteralPath $ProjectConfig -PathType Leaf) {
 $ProjectConfig = Join-Path $Repo '.codex\config.toml'
 if (Test-Path -LiteralPath $ProjectConfig -PathType Leaf) {
     $ProjectRaw = [System.IO.File]::ReadAllText($ProjectConfig)
-    if ($ProjectRaw -match '(?m)^\s*windows\.sandbox\s*=\s*"unelevated"\s*
+    if ($ProjectRaw.Contains('windows.sandbox = "unelevated"')) {
+        Add-Ok 'Windows sandbox configured: unelevated'
+    } else {
+        Add-Fail 'windows.sandbox must be unelevated for non-interactive Codex exec on Windows'
+    }
+}
 if (-not (Has-Command 'codex')) {
     Add-Fail 'codex CLI not found'
 } else {
