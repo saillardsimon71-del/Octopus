@@ -27,6 +27,16 @@ function Invoke-NativeCapture([string]$FilePath, [string[]]$Arguments) {
     }
 }
 
+function Resolve-CodexExecutable {
+    $official = Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\Codex\bin\codex.exe'
+    if (Test-Path -LiteralPath $official -PathType Leaf) {
+        return [System.IO.Path]::GetFullPath($official)
+    }
+    $command = Get-Command codex -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    throw 'codex CLI not found. Install the official Windows standalone CLI first: powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"'
+}
+
 $repo = (git rev-parse --show-toplevel 2>$null | Out-String).Trim()
 if (-not $repo) { throw "Run this script from inside the OCTOPUS repository." }
 $repo = [System.IO.Path]::GetFullPath($repo).TrimEnd("\")
@@ -73,26 +83,17 @@ if (Test-Path -LiteralPath $generatedSkills -PathType Container) {
 Write-Host "[OK] CODEX_HOME: $CodexHome" -ForegroundColor Green
 Write-Host "[OK] Project marked trusted in dedicated home: $repo" -ForegroundColor Green
 
-if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
-    $OfficialBin = Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\Codex\bin'
-    $OfficialExe = Join-Path $OfficialBin 'codex.exe'
-    if (Test-Path -LiteralPath $OfficialExe -PathType Leaf) {
-        $env:PATH = $OfficialBin + [System.IO.Path]::PathSeparator + $env:PATH
-        Write-Host ('[OK] Added official Codex standalone bin to this process PATH: ' + $OfficialBin) -ForegroundColor Green
-    } else {
-        throw 'codex CLI not found. Install the official Windows standalone CLI first: powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"'
-    }
-}
+$codexExe = Resolve-CodexExecutable
+Write-Host ('[OK] Codex executable: ' + $codexExe) -ForegroundColor Green
 
 if (-not $SkipLogin) {
-    $codexExe = (Get-Command codex -ErrorAction Stop).Source
     $statusResult = Invoke-NativeCapture -FilePath $codexExe -Arguments @("login", "status")
     $status = $statusResult.Output
 
     if (($statusResult.ExitCode -ne 0) -or ($status -notmatch "(?i)Logged in using ChatGPT")) {
         Write-Host "Dedicated OCTOPUS Codex home is not logged in with ChatGPT yet." -ForegroundColor Yellow
         Write-Host "Starting ChatGPT login now..."
-        & codex login
+        & $codexExe login
         if ($LASTEXITCODE -ne 0) { throw "codex login failed." }
 
         $statusResult = Invoke-NativeCapture -FilePath $codexExe -Arguments @("login", "status")

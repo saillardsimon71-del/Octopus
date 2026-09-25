@@ -38,6 +38,10 @@ $ticketRoot = [System.IO.Path]::GetFullPath((Join-Path $repo "cache\astra-ticket
 if (-not $planPath.StartsWith($ticketRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Relay tickets must live under cache\astra-tickets\."
 }
+$planBody = Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json
+if ([string]$planBody.policy -ne "product_ticket") {
+    throw "Relay ticket policy must be product_ticket."
+}
 
 if ($Hours -le 0 -or $Hours -gt 8) { throw "Hours must be > 0 and <= 8." }
 

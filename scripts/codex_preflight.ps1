@@ -1,5 +1,6 @@
 param(
     [switch]$SkipFetch,
+    [switch]$AllowPendingCheckpoint,
     [string]$ExpectedCodexHome = ''
 )
 
@@ -41,6 +42,16 @@ function Invoke-NativeCapture([string]$FilePath, [string[]]$Arguments) {
     }
 }
 
+function Resolve-CodexExecutable {
+    $official = Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\Codex\bin\codex.exe'
+    if (Test-Path -LiteralPath $official -PathType Leaf) {
+        return [System.IO.Path]::GetFullPath($official)
+    }
+    $command = Get-Command codex -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    return $null
+}
+
 # Repo -------------------------------------------------------------------------------
 $Repo = (git rev-parse --show-toplevel 2>$null | Out-String).Trim()
 if (-not $Repo) { throw 'Run this script from inside OCTOPUS.' }
@@ -57,7 +68,14 @@ if ($Branch -eq $ExpectedBranch) {
 }
 
 $Status = (git status --porcelain | Out-String).Trim()
-if ($Status) { Add-Fail 'working tree is not clean' } else { Add-Ok 'working tree clean' }
+if ($Status) {
+    $PendingCheckpoint = Join-Path $Repo 'cache\astra-relay\checkpoint.json'
+    if ($AllowPendingCheckpoint -and (Test-Path -LiteralPath $PendingCheckpoint -PathType Leaf)) {
+        Add-Ok 'dirty working tree has a pending host checkpoint'
+    } else {
+        Add-Fail 'working tree is not clean'
+    }
+} else { Add-Ok 'working tree clean' }
 
 if (-not $SkipFetch) {
     Write-Host '[..]  fetching origin/main'
@@ -158,10 +176,12 @@ if (Test-Path -LiteralPath $ProjectConfig -PathType Leaf) {
         Add-Fail 'windows.sandbox must be unelevated for non-interactive Codex exec on Windows'
     }
 }
-if (-not (Has-Command 'codex')) {
+$CodexExe = Resolve-CodexExecutable
+if (-not $CodexExe) {
     Add-Fail 'codex CLI not found'
 } else {
-    $VersionText = (& codex --version 2>&1 | Out-String).Trim()
+    Add-Ok ('Codex executable: ' + $CodexExe)
+    $VersionText = (& $CodexExe --version 2>&1 | Out-String).Trim()
     if ($VersionText -match '(\d+)\.(\d+)\.(\d+)') {
         $Version = New-Object System.Version([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
         $Minimum = New-Object System.Version(0, 157, 0)
@@ -170,7 +190,6 @@ if (-not (Has-Command 'codex')) {
         Add-Fail ('cannot parse Codex version: ' + $VersionText)
     }
 
-    $CodexExe = (Get-Command codex -ErrorAction Stop).Source
     $LoginResult = Invoke-NativeCapture -FilePath $CodexExe -Arguments @('login', 'status')
     $Login = $LoginResult.Output
     if (($LoginResult.ExitCode -eq 0) -and ($Login -match 'Logged in using ChatGPT')) {
@@ -183,7 +202,7 @@ if (-not (Has-Command 'codex')) {
         if ([Environment]::GetEnvironmentVariable($EnvName)) { Add-Fail ($EnvName + ' is set') }
     }
 
-    $FeatureText = (& codex features list 2>&1 | Out-String)
+    $FeatureText = (& $CodexExe features list 2>&1 | Out-String)
     if ($LASTEXITCODE -ne 0) {
         Add-Fail 'codex features list failed'
     } else {
@@ -192,7 +211,7 @@ if (-not (Has-Command 'codex')) {
             'apps', 'plugins', 'remote_plugin', 'plugin_sharing', 'recommended_plugins',
             'hooks', 'skill_search', 'skill_mcp_dependency_install', 'tool_suggest',
             'browser_use', 'browser_use_full_cdp_access', 'browser_use_external',
-            'computer_use', 'in_app_browser', 'sleep_tool'
+            'computer_use', 'in_app_browser', 'sleep_tool', 'shell_snapshot'
         )
         $FeatureLines = @($FeatureText -split "`r?`n")
         foreach ($Feature in $Off) {
@@ -205,8 +224,14 @@ if (-not (Has-Command 'codex')) {
                 Add-Fail ('feature not false: ' + $Line.Trim())
             }
         }
-        $ShellLine = $FeatureLines | Where-Object { $_ -match '^shell_tool\s+' } | Select-Object -First 1
-        if ($ShellLine -and ($ShellLine -match '\strue\s*$')) { Add-Ok 'shell_tool enabled' } else { Add-Fail 'shell_tool not enabled' }
+        foreach ($Feature in @('shell_tool', 'skip_host_skill_discovery')) {
+            $Line = $FeatureLines | Where-Object { $_ -match ('^' + [regex]::Escape($Feature) + '\s+') } | Select-Object -First 1
+            if ($Line -and ($Line -match '\strue\s*$')) {
+                Add-Ok ('feature on: ' + $Feature)
+            } else {
+                Add-Fail ('feature not true: ' + $Feature)
+            }
+        }
     }
 }
 

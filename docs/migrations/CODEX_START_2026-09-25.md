@@ -13,9 +13,10 @@ It uses a dedicated \`CODEX_HOME\`, runs the local preflight, launches GPT-6 Ast
 Do not replace this with an ad-hoc interactive Codex session for the current migration.
 
 Current supervisor defaults:
-- max Astra turns: 8;
+- max Astra turns per launch: 4;
 - max Step relay cycles: 6;
 - exact thread-id verification on every resume;
+- a saved thread above 250,000 input tokens is archived instead of resumed;
 - any non-zero Codex exit stops the supervisor;
 - any worker result is reviewed by root Astra before integration.
 
@@ -45,6 +46,8 @@ Git reality wins. If main moved materially, stop/reconcile before product change
 At startup use only:
 - injected root \`AGENTS.md\`;
 - this file.
+
+The host runs and caches the full Python baseline by HEAD before the first model call. Astra receives only its exit code, compact tail and log path. It must not rerun that baseline or repeat Git/repository discovery. Use targeted tests during a phase and one full suite after the phase changes are complete.
 
 Load phase documents only on entry to that phase:
 - video removal → \`VIDEO_ENGINE_REMOVAL.md\`;
@@ -102,7 +105,7 @@ Inside Astra's Codex sandbox:
 - Astra must **not** create/switch/delete branches;
 - Astra must **not** run `git add`, `commit`, `reset`, `merge`, `rebase`, `stash`, `cherry-pick` or other operations that write `.git`.
 
-This is intentional. Codex protects Git metadata inside workspace-write sandboxes, and Git-for-Windows/MSYS helpers are not a required execution dependency for model-side work.
+This is intentional. Codex protects Git metadata inside workspace-write sandboxes, and Git-for-Windows/MSYS helpers are not a required execution dependency for model-side work. The project disables Codex `shell_snapshot`; otherwise Codex 0.157 repeatedly starts Git-for-Windows `sh.exe`, which fails under the restricted token with `couldn't create signal pipe, Win32 error 5`.
 
 When a coherent direct-Astra phase has been implemented and tested, Astra atomically publishes:
 
@@ -112,17 +115,20 @@ Schema:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "request_id": "short-unique-id",
-  "message": "phase: concise commit message"
+  "kind": "working_tree",
+  "base_head": "40-character HEAD SHA",
+  "message": "phase: concise commit message",
+  "paths": ["exact/changed/path.py"]
 }
 ```
 
 Then Astra ends the turn.
 
 The deterministic parent supervisor, outside the model sandbox:
-1. verifies the working tree is dirty;
-2. stages the repository diff;
+1. verifies `base_head`, branch, clean index and the exact changed-path set;
+2. stages only the declared paths;
 3. creates the requested one-line commit;
 4. records the resulting SHA;
 5. resumes the **exact same Astra thread** with that SHA.
@@ -130,6 +136,8 @@ The deterministic parent supervisor, outside the model sandbox:
 No model call is active while the host performs Git mechanics.
 
 If Astra wants to delegate to Step while its direct source tree is dirty, it must request a host checkpoint first. Step relay requests are accepted only from a clean source tree.
+
+After Astra reviews an accepted Step result, it publishes the same version 2 checkpoint with `kind: "worker_commit"`, the full `source_commit` SHA and exact reviewed paths. The host accepts only a clean source tree and a commit whose sole parent is `base_head`, then fast-forwards the working branch to that commit. This is not a merge to `main`.
 
 ## 5. Automatic quota-safe relay
 
@@ -220,9 +228,7 @@ The dedicated Codex home is ChatGPT-authenticated and the preflight rejects Open
 
 ### A — Baseline
 
-Verify branch/HEAD/status/merge-base and run the existing relevant/full Python suite once.
-Record environmental failures truthfully.
-No architecture rediscovery.
+The deterministic host verifies branch/HEAD/status/merge-base and runs the full Python suite once per baseline fingerprint before Astra starts. It records failures truthfully under \`cache/astra-relay/\`. Astra consumes the compact result and does no architecture rediscovery.
 
 ### B — Remove legacy video
 
