@@ -85,7 +85,7 @@ if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
         'approvals_reviewer = "user"',
         'sandbox_mode = "workspace-write"',
         'web_search = "disabled"',
-        'network_access = true',
+        'network_access = false',
         'enabled = false',
         'multi_agent = false',
         'goals = false',
@@ -131,6 +131,19 @@ if (Test-Path -LiteralPath $runnerPath -PathType Leaf) {
     Ok "external human-run worker helper present"
 } else {
     Fail "scripts/run_external_dev_ticket.ps1 missing"
+}
+
+$upstreamFetcher = Join-Path $repo "scripts\fetch_pinned_upstreams.ps1"
+if (-not (Test-Path -LiteralPath $upstreamFetcher -PathType Leaf)) {
+    Fail "scripts/fetch_pinned_upstreams.ps1 missing"
+} else {
+    Info "fetching/verifying pinned Hermes and Agnes source outside the Codex model loop"
+    & $upstreamFetcher -Target all
+    if ($LASTEXITCODE -eq 0) {
+        Ok "pinned upstream sources are present and clean"
+    } else {
+        Fail "pinned upstream fetch/verification failed"
+    }
 }
 
 # --------------------------------------------------------------------------------------
