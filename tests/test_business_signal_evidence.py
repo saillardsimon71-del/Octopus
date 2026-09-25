@@ -342,3 +342,91 @@ def test_gate_94_rejects_tavily_url_mismatch_and_failed_extraction():
 
     assert runtime._qualify_business_signals([signal], mismatch_results)[0] == []
     assert runtime._qualify_business_signals([failed_signal], failed_results)[0] == []
+
+
+# --- Contrat de sérialisation de la synthèse : une acquisition, citations continues ---
+
+def _business_synthesis_system_prompt(monkeypatch):
+    calls = []
+    actions = iter([
+        {"tasks": [{"role": "SOUT", "task": "trouver une demande achetable"}]},
+        {"final": "rien lu"},
+        {"rapport": "aucun signal", "business_signals": []},
+    ])
+
+    def call_json(agent, task, model, messages, **kwargs):
+        calls.append((task, messages))
+        return next(actions)
+
+    monkeypatch.setattr(runtime.deepseek, "call_json", call_json)
+    runtime.run_mission("identifier une opportunité vendable", max_steps_per_agent=1,
+                        business="octopus", allowed_tools={"browse"},
+                        business_signal_focus=True, business_signal_target=1)
+    return next(messages for task, messages in calls if task == "synthese")[0]["content"]
+
+
+def test_synthesis_contract_binds_signal_to_one_acquisition(monkeypatch):
+    prompt = _business_synthesis_system_prompt(monkeypatch)
+    # La règle #94 existante est conservée, puis clarifiée.
+    assert "citations exactes de 8 à 600 caractères du texte de cette même acquisition" in prompt
+    assert "choisis exactement UNE acquisition réellement ouverte" in prompt
+    assert "evidence_url identifie cette acquisition" in prompt
+    assert "les quatre champs *_evidence proviennent tous de son texte" in prompt
+
+
+def test_synthesis_contract_requires_one_continuous_literal_quote(monkeypatch):
+    prompt = _business_synthesis_system_prompt(monkeypatch)
+    assert "UNE SEULE sous-chaîne continue, copiée mot pour mot" in prompt
+    assert "ne paraphrase pas" in prompt
+
+
+def test_synthesis_contract_forbids_ellipsis_and_fragment_assembly(monkeypatch):
+    prompt = _business_synthesis_system_prompt(monkeypatch)
+    assert "ne concatène jamais plusieurs fragments" in prompt
+    assert "n'insère jamais « ... » ni « … » pour les relier" in prompt
+
+
+def test_synthesis_contract_uses_one_representation_for_html_and_pdf(monkeypatch):
+    prompt = _business_synthesis_system_prompt(monkeypatch)
+    assert "page HTML et PDF), n'en utilise qu'une seule, sans les mélanger" in prompt
+    assert ("si le PDF contient les quatre preuves, evidence_url est l'URL exacte du PDF acquis "
+            "et les quatre citations viennent du PDF") in prompt
+
+
+# --- Gate #94 inchangé : ces cas restent rejetés, quelle que soit la consigne ---
+
+def test_gate_94_still_rejects_composite_quote_joined_by_ellipsis():
+    signal, results = evidence_case()
+    for joiner in (" ... ", " … ", " "):
+        signal["summary_evidence"] = ("Cabinet comptable Acme." + joiner
+                                      + "Merci de répondre à cette demande de prestation.")
+        accepted, rejected = runtime._qualify_business_signals([signal], results)
+        assert accepted == []
+        assert "summary_evidence_not_in_source" in rejected[0]["reasons"]
+
+
+def test_gate_94_still_rejects_quotes_split_between_html_and_pdf_acquisitions():
+    html_url, pdf_url = "https://example.org/avis/42", "https://example.org/avis/42.pdf"
+    signal, html = evidence_case(html_url, html_url,
+                                 text="Cabinet comptable Acme. Avis de marché publié. " * 3)
+    pdf_text = TEXT.replace("Cabinet comptable Acme. ", "")
+    _, pdf = evidence_case()
+    _as_tavily_acquisition(pdf, text=pdf_text, requested=pdf_url, final=pdf_url)
+    for url in (html_url, pdf_url):
+        signal["evidence_url"] = url
+        accepted, rejected = runtime._qualify_business_signals([signal], html + pdf)
+        assert accepted == []
+        assert "quotes_not_in_same_acquisition" in rejected[0]["reasons"]
+    # Positif de contrôle : les quatre citations dans le seul PDF, evidence_url = PDF.
+    _, pdf_full = evidence_case()
+    _as_tavily_acquisition(pdf_full, requested=pdf_url, final=pdf_url)
+    signal["evidence_url"] = pdf_url
+    assert len(runtime._qualify_business_signals([signal], html + pdf_full)[0]) == 1
+
+
+def test_gate_94_still_rejects_absent_quote():
+    signal, results = evidence_case()
+    signal["money_evidence"] = "Budget de 150 000 € HT par an"
+    accepted, rejected = runtime._qualify_business_signals([signal], results)
+    assert accepted == []
+    assert rejected

@@ -1534,7 +1534,16 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             "tous les critères du contrat ci-dessus. Chaque evidence_url doit être une URL effectivement "
             "acquise dans les étapes. Fournis buyer_evidence, pain_evidence, money_evidence et "
             "summary_evidence : citations exactes de 8 à 600 caractères du texte de cette même "
-            "acquisition. Le contrôle est littéral, non sémantique ; revue humaine nécessaire.\n"
+            "acquisition. Pour chaque signal, choisis exactement UNE acquisition réellement ouverte : "
+            "evidence_url identifie cette acquisition et les quatre champs *_evidence proviennent tous "
+            "de son texte. Chaque champ *_evidence est UNE SEULE sous-chaîne continue, copiée mot pour "
+            "mot : ne concatène jamais plusieurs fragments, n'insère jamais « ... » ni « … » pour les "
+            "relier, ne paraphrase pas. Si un même document a été acquis sous plusieurs représentations "
+            "(par ex. page HTML et PDF), n'en utilise qu'une seule, sans les mélanger ; si le PDF contient "
+            "les quatre preuves, evidence_url est l'URL exacte du PDF acquis et les quatre citations "
+            "viennent du PDF. Les champs analytiques (buyer, pain, money_signal, evidence_summary, "
+            "test_channel, test_offer, next_test) restent rédigés selon les règles ci-dessus. "
+            "Le contrôle est littéral, non sémantique ; revue humaine nécessaire.\n"
             "Réponds en JSON avec exactement la forme : "
             '{\"rapport\":\"...\",\"business_signals\":[{'
             '\"signal_type\":\"explicit_request|manual_work|procurement|job_demand|complaint|regulatory_deadline|paid_alternative|review_gap\",'
