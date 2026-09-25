@@ -88,9 +88,9 @@ Pour la session Hermes + Agnes actuelle, l'opérateur humain a explicitement fix
 
 La suppression d'un moteur legacy et le remplacement d'une duplication par une primitive plus petite ne sont pas une généralisation économique. Toute capacité Hermes réellement nouvelle reste soumise aux critères de remplacement/besoin borné du fichier de session.
 
-Pendant cette fenêtre, un worker Kilo/Step long ne doit jamais être lancé depuis le shell piloté par Astra. La délégation suit obligatoirement le protocole externe de `CODEX_START_2026-09-25.md` : Astra prépare puis rend la main, l'humain lance le worker dans un PowerShell séparé, Astra ne revient qu'après achèvement pour relire le diff.
+Pendant cette fenêtre, un worker Kilo/Step long ne doit jamais être lancé depuis le shell piloté par Astra. La délégation suit obligatoirement le relay déterministe de `CODEX_START_2026-09-25.md` : Astra publie un ticket borné puis termine son tour; le superviseur local exécute Step hors de la boucle modèle et reprend ensuite exactement la même thread Astra une seule fois pour la review.
 
-Pendant cette même fenêtre, ne jamais poursuivre sous Luna Reserve ou un autre fallback Codex. Si le modèle actif quitte GPT-6 Astra ou si le quota Astra ordinaire est épuisé, arrêter la session de construction; ne pas échanger de qualité contre de la continuité.
+Pendant cette même fenêtre, ne jamais poursuivre sous un modèle de fallback. Le superviseur utilise `codex exec` avec `--model gpt-6-astra`; tout échec/rate-limit Codex arrête la chaîne au lieu de sélectionner un autre modèle.
 
 Pour la fenêtre de maintenance 2026-09-25, `docs/migrations/CODEX_START_2026-09-25.md` est le routeur de session. Ne précharger ni `VISION.md`, ni `CURRENT_STATE.md`, ni `HANDOFF_WORK.md` sauf si la tâche en cours touche réellement leur domaine. Hors de cette fenêtre, consulter ces documents uniquement lorsqu'ils sont pertinents à la modification demandée.
 Git réel prime sur les snapshots documentaires.
