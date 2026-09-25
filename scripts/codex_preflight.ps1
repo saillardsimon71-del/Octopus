@@ -37,7 +37,8 @@ if (-not $SkipFetch) {
     if ($LASTEXITCODE -ne 0) { Fail "git fetch origin main failed" }
 }
 
-$mainRef = if (git show-ref --verify --quiet refs/remotes/origin/main) { "origin/main" } else { "main" }
+git show-ref --verify --quiet refs/remotes/origin/main *> $null
+$mainRef = if ($LASTEXITCODE -eq 0) { "origin/main" } else { "main" }
 git merge-base --is-ancestor $mainRef HEAD 2>$null
 if ($LASTEXITCODE -eq 0) { Ok "$mainRef is an ancestor of HEAD" }
 else { Fail "prepared branch is behind/diverged from $mainRef; reconcile before Codex" }
