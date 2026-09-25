@@ -85,19 +85,16 @@ if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
         'approvals_reviewer = "user"',
         'sandbox_mode = "workspace-write"',
         'web_search = "disabled"',
-        'network_access = false',
+        'network_access = true',
         'enabled = false',
         'multi_agent = false',
         'goals = false',
         'memories = false',
         'fast_mode = false',
         'apps = false',
-        'plugins = false',
         'remote_plugin = false',
         'hooks = false',
-        'skill_search = false',
         'skill_mcp_dependency_install = false',
-        'include_instructions = false',
         'use_memories = false',
         'generate_memories = false'
     )
@@ -157,11 +154,11 @@ if (-not $hasCodex) {
     $versionText = (& codex --version 2>&1 | Out-String).Trim()
     if ($versionText -match '(\d+)\.(\d+)\.(\d+)') {
         $version = [version]::new([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
-        $minimum = [version]::new(0, 157, 0)
+        $minimum = [version]::new(0, 153, 0)
         if ($version -ge $minimum) {
-            Ok "Codex $version (OCTOPUS-audited baseline >= 0.157.0)"
+            Ok "Codex $version (meets official GPT-6 Astra minimum >= 0.153.0)"
         } else {
-            Fail "Codex $version is below the OCTOPUS-audited baseline; require >= 0.157.0 (Astra itself requires >= 0.153.0)"
+            Fail "Codex $version is below the official GPT-6 Astra minimum client version 0.153.0"
         }
     } else {
         Fail "could not parse Codex version: $versionText"
@@ -180,10 +177,8 @@ if (-not $hasCodex) {
             "hooks",
             "memories",
             "multi_agent",
-            "plugins",
             "remote_plugin",
-            "skill_mcp_dependency_install",
-            "skill_search"
+            "skill_mcp_dependency_install"
         )
         $featureErrors = [System.Collections.Generic.List[string]]::new()
         $featureLines = @($featureList -split '\r?\n')
