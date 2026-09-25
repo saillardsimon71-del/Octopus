@@ -264,7 +264,7 @@ class Toolbox:
         return result
 
     def compile_python(self) -> dict[str, Any]:
-        return self._run([sys.executable, "-m", "compileall", "-q", "octopus", "agents", "core", "video_worker"], timeout=300)
+        return self._run([sys.executable, "-m", "compileall", "-q", "octopus", "agents", "core"], timeout=300)
 
     def git_status(self) -> dict[str, Any]:
         return self._run(["git", "status", "--short", "--branch"])
@@ -298,7 +298,7 @@ class Toolbox:
 
     def audit_ready(self) -> tuple[bool, list[str]]:
         reasons: list[str] = []
-        required_prefixes = ("octopus/", "agents/", "video_worker/", "tests/", "businesses/", "core/", "docs/")
+        required_prefixes = ("octopus/", "agents/", "tests/", "businesses/", "core/", "docs/")
         if len(self.read_paths) < 20:
             reasons.append(f"inspect at least 20 distinct files; currently {len(self.read_paths)}")
         for prefix in required_prefixes:
@@ -380,7 +380,7 @@ Available tools:
     if mode == "audit":
         return common + """
 
-Audit mission: inspect the complete repository architecture and current branch, run the full offline test suite, and create docs/audits/GPU_AUDIT_2026-09-18.md with write_audit_report. Read 20 to 40 strategic files spanning octopus, agents, video_worker, tests, businesses, core, and docs, and run 3 to 12 searches across the repository. Do not attempt to read every file. Once the minimum evidence is collected, stop exploring and synthesize the report. Cover architecture, correctness, security boundaries, reliability, tests, performance, video pipeline, GPU integration, agent/runtime behavior, persistence, operations, and documentation drift. Include sections named Architecture, Findings, and Roadmap. Rank findings P0-P3 even when a rank has no finding. Every finding needs concrete file references and evidence; cite at least 12 distinct Python files. Separate verified facts from hypotheses. End with a dependency-aware roadmap of small independently testable improvement batches. Review the final diff, run the full suite after the report write, and create a local audit checkpoint if checks pass. A final response is rejected until these requirements are verified by the controller.
+Audit mission: inspect the complete repository architecture and current branch, run the full offline test suite, and create docs/audits/GPU_AUDIT_2026-09-18.md with write_audit_report. Read 20 to 40 strategic files spanning octopus, agents, tests, businesses, core, and docs, and run 3 to 12 searches across the repository. Do not attempt to read every file. Once the minimum evidence is collected, stop exploring and synthesize the report. Cover architecture, correctness, security boundaries, reliability, tests, performance, video pipeline, GPU integration, agent/runtime behavior, persistence, operations, and documentation drift. Include sections named Architecture, Findings, and Roadmap. Rank findings P0-P3 even when a rank has no finding. Every finding needs concrete file references and evidence; cite at least 12 distinct Python files. Separate verified facts from hypotheses. End with a dependency-aware roadmap of small independently testable improvement batches. Review the final diff, run the full suite after the report write, and create a local audit checkpoint if checks pass. A final response is rejected until these requirements are verified by the controller.
 """
     if mode == "build":
         return common + """

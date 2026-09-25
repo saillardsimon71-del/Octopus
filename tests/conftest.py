@@ -87,8 +87,6 @@ def isolated(tmp_path, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OCTOPUS_PROFILE", "legacy")
     monkeypatch.setenv("OMNIROUTE_ENABLED", "0")
-    # Rendu local simule par defaut : un test ne doit jamais viser RunPod sans le demander.
-    monkeypatch.setenv("PODALUX_VIDEO_RENDERER", "local")
     # Les secrets de l'utilisateur (registre Windows) ne doivent jamais fuir dans les tests.
     if sys.platform == "win32":
         monkeypatch.setitem(sys.modules, "winreg", _NoRegistry())

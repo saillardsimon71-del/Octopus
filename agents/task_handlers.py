@@ -1,7 +1,6 @@
 """Tâches Podalux exécutables par le worker OCTOPUS (python -m octopus worker).
 
-Parité avec la CLI : chaque tâche appelle le code existant (cycle, agent, mission). Le découpage du
-cycle en étapes (write_job, tts, render...) viendra avec le module business short_video.
+Chaque tâche appelle le runtime agent/mission existant, avec ses contrôles H3.
 """
 from __future__ import annotations
 
@@ -41,18 +40,6 @@ def _run(ctx, fn):
     if ctx.cancelled():
         raise TaskCancelled("arrêt demandé")
     return result
-
-
-@handler("podalux.video_cycle", resource="cpu_heavy", max_attempts=3, retry_delay_s=120)
-def video_cycle(ctx):
-    """Cycle complet. Relancé plus tard si un cycle lancé ailleurs (GUI, CLI) tient le verrou."""
-    from .cycle import run_cycle
-    offer_id = ctx.input.get("offer_id")
-    result = _run(ctx, lambda: run_cycle(offer_id=offer_id, max_iterations=int(ctx.input.get("max_iterations", 3))))
-    ledger, orbit = result.get("ledger") or {}, result.get("orbit") or {}
-    return {"offer_id": result.get("offer_id"), "score": ledger.get("score"), "go": ledger.get("go"),
-            "decision": orbit.get("decision"), "iterations": len(result.get("iterations") or []),
-            "blocking": ledger.get("blocking", [])}
 
 
 @handler("podalux.agent_message", resource="llm")

@@ -8,7 +8,7 @@
   python -m octopus night-shift [--repo .] [--hours 8] [--max-tasks 4] [--dry-run]
   python -m octopus night-stop | night-resume
   python -m octopus promotion --report data/night-shift-reports/<run>.json
-  python -m octopus enqueue podalux podalux.video_cycle --input '{"offer_id": "cash_devis_cgv01"}'
+  python -m octopus enqueue octopus octopus.cost_report
   python -m octopus tasks [--status queued] | cancel ID | ask | answer REQUEST_ID "texte"
   python -m octopus schedule octopus octopus.cost_report --every 86400 [--disable]
   python -m octopus events [--since ID]
@@ -382,8 +382,6 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("businesses", help="tableau de bord par activite")
     p.add_argument("--days", type=int, default=7)
-    from .media import cli as media_cli
-    media_cli.add_parser(sub)
     from . import strategy_cli
     strategy_cli.add_parser(sub)
     args = parser.parse_args(argv)
@@ -392,7 +390,7 @@ def main(argv: list[str] | None = None) -> int:
                 "night-resume": cmd_night_resume, "promotion": cmd_promotion, "enqueue": cmd_enqueue,
                 "tasks": cmd_tasks, "cancel": cmd_cancel,
                 "ask": cmd_ask, "answer": cmd_answer, "schedule": cmd_schedule, "events": cmd_events,
-                "video": media_cli.run, "businesses": cmd_businesses, "strategy": strategy_cli.run,
+                "businesses": cmd_businesses, "strategy": strategy_cli.run,
                 "economy": strategy_cli.run_economy, "resources": cmd_resources}
     return commands[args.cmd](args)
 

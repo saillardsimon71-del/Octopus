@@ -30,7 +30,7 @@ CYCLE_BUDGET_USD = 1.00
 ORBIT_DECISION = os.environ.get("PODALUX_ORBIT_DECISION", "code").strip().lower()
 QC_SHIP_SCORE = 24     # note /35 minimale pour publier
 QC_MIN_HUMANITE = 3    # WARM_PASS
-# Contrôles objectifs bloquants (ffmpeg, tools/qc_metrics.py) : (min, max) ou valeur exacte.
+# Contrôles objectifs bloquants (métriques historiques) : (min, max) ou valeur exacte.
 MEDIA_GATES = {
     "duration_s": (18.0, 35.0),
     "resolution": "1080x1920",
@@ -87,10 +87,6 @@ if os.name == "nt":
 else:
     _VENV_PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python"
 PYTHON = str(_VENV_PYTHON if _VENV_PYTHON.exists() else Path(sys.executable))
-
-# Serveur Chatterbox (Phase 3)
-CHATTERBOX_URL = "http://127.0.0.1:4123/v1/audio/speech"
-CHATTERBOX_VOICE = "vivienne-fr"
 
 # Recherche web : clés API optionnelles (gratuites). Sans clé → Google News RSS + Wikipedia.
 # - BRAVE_API_KEY : https://brave.com/search/api/ (2000 req/mois, 1 req/s)

@@ -6,9 +6,8 @@ import time
 
 import pytest
 
-from agents import cycle, db, deepseek, task_handlers  # noqa: F401  (enregistre les handlers Podalux)
+from agents import db, deepseek, task_handlers  # noqa: F401  (enregistre les handlers Podalux)
 from octopus import builtin_handlers, journal, llm, tasks, worker  # noqa: F401
-from octopus.media import library
 from octopus.pricing import Usage
 
 QUIET = dict(log=lambda s: None)
@@ -72,14 +71,29 @@ def test_expired_lease_is_retried_then_failed():
     assert "bail expiré" in tasks.get(task_id)["error"]
 
 
+def _historical_generation(task_id):
+    # Existing journal rows still reconcile after removal of the media runtime.
+    conn = journal.connect()
+    try:
+        row = conn.execute(
+            "INSERT INTO media_generations "
+            "(created_at, updated_at, business, task_id, provider, model_type, prompt, status, phase, progress) "
+            "VALUES (?, ?, 'b', ?, 'wangp', 't2v', 'historical', 'running', 'rendering', 50)",
+            (time.time(), time.time(), task_id),
+        )
+        conn.commit()
+        return row.lastrowid
+    finally:
+        conn.close()
+
+
 def test_expired_lease_reconciles_linked_media_generation():
     task_id = tasks.enqueue("b", "media.video_generate", max_attempts=2)
     tasks.claim("mort", lease_s=-1)
-    generation_id = library.create("b", "wangp", "t2v", "test", {}, task_id=task_id)
-    library.update(generation_id, status="running", phase="rendering", progress=50)
+    generation_id = _historical_generation(task_id)
 
     tasks.reap()
-    retried = library.get(generation_id)
+    retried = dict(journal.query("SELECT * FROM media_generations WHERE id=?", (generation_id,))[0])
     assert retried["status"] == "queued"
     assert retried["phase"] == "retrying"
     assert retried["progress"] == 0
@@ -87,7 +101,7 @@ def test_expired_lease_reconciles_linked_media_generation():
 
     tasks.claim("mort-aussi", lease_s=-1)
     tasks.reap()
-    failed = library.get(generation_id)
+    failed = dict(journal.query("SELECT * FROM media_generations WHERE id=?", (generation_id,))[0])
     assert failed["status"] == "failed"
     assert failed["phase"] == "failed"
     assert "bail expiré" in failed["error"]
@@ -95,13 +109,12 @@ def test_expired_lease_reconciles_linked_media_generation():
 
 def test_reap_repairs_preexisting_terminal_media_mismatch():
     task_id = tasks.enqueue("b", "media.video_generate")
-    generation_id = library.create("b", "wangp", "t2v", "test", {}, task_id=task_id)
-    library.update(generation_id, status="running", phase="rendering", progress=50)
+    generation_id = _historical_generation(task_id)
     assert tasks.cancel(task_id, "arrêt demandé") == "cancelled"
 
     result = tasks.reap()
 
-    repaired = library.get(generation_id)
+    repaired = dict(journal.query("SELECT * FROM media_generations WHERE id=?", (generation_id,))[0])
     assert result["reconciled_media"] == [generation_id]
     assert repaired["status"] == "cancelled"
     assert repaired["phase"] == "cancelled"
@@ -422,30 +435,20 @@ def test_schedule_does_not_pile_up(handlers):
 
 # --- handlers Podalux -----------------------------------------------------------------------
 
-def test_podalux_video_cycle_task(handlers, monkeypatch):
-    monkeypatch.setattr(cycle, "run_cycle", lambda offer_id=None, max_iterations=3: {
-        "offer_id": offer_id, "ledger": {"score": 27, "go": True, "blocking": []},
-        "orbit": {"decision": "done"}, "iterations": [{}]})
-    worker.enqueue("podalux", "podalux.video_cycle", {"offer_id": "cash_devis_cgv01"})
-    result = worker.run_one("w", **QUIET)
-    assert result["resource"] == "cpu_heavy" and result["max_attempts"] == 3
-    assert result["output"] == {"offer_id": "cash_devis_cgv01", "score": 27, "go": True, "decision": "done",
-                                "iterations": 1, "blocking": []}
-
-
-def test_podalux_task_cancel_reaches_the_cycle(handlers, monkeypatch):
+def test_podalux_task_cancel_reaches_the_agent(handlers, monkeypatch):
     seen = {}
 
-    def fake_cycle(offer_id=None, max_iterations=3):
+    def fake_agent(*args, **kwargs):
         for _ in range(60):
             if db.stop_requested():
                 seen["stopped"] = True
                 break
             time.sleep(0.1)
-        return {"offer_id": offer_id, "ledger": {}, "orbit": {}, "iterations": []}
+        return {"final": "stopped", "steps": []}
 
-    monkeypatch.setattr(cycle, "run_cycle", fake_cycle)
-    task_id = worker.enqueue("podalux", "podalux.video_cycle", {})
+    from agents import runtime
+    monkeypatch.setattr(runtime, "run_agent", fake_agent)
+    task_id = worker.enqueue("podalux", "podalux.agent_message", {"text": "test"})
     threading.Timer(0.3, lambda: tasks.cancel(task_id)).start()
     assert worker.run_one("w", **QUIET)["status"] == "cancelled" and seen.get("stopped")
 
@@ -464,3 +467,18 @@ def test_cli_roundtrip(handlers, capsys):
     out = capsys.readouterr().out
     assert "tâche #1 en file" in out and "done" in out
     assert main(["enqueue", "octopus", "inconnu"]) == 2
+
+
+def test_retired_video_commands_are_rejected(monkeypatch, capsys):
+    from agents import run
+    from octopus.__main__ import main
+
+    with pytest.raises(SystemExit) as error:
+        main(["video"])
+    assert error.value.code == 2
+    for command in ("cycle", "batch"):
+        monkeypatch.setattr("sys.argv", ["agents.run", command])
+        with pytest.raises(SystemExit) as error:
+            run.main()
+        assert error.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err

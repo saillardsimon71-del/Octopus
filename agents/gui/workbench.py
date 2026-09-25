@@ -271,9 +271,8 @@ class PodaluxWorkbench(ctk.CTk):
         # Le titre de _card est placé avec pack : les boutons en grille vont dans un cadre dédié.
         quick_row = ctk.CTkFrame(quick, fg_color="transparent")
         quick_row.pack(fill="x")
-        for i in range(5): quick_row.grid_columnconfigure(i, weight=1)
+        for i in range(4): quick_row.grid_columnconfigure(i, weight=1)
         buttons = [
-            ("▶  Cycle", self._start_cycle, COLORS["accent"]),
             ("◇  Mission", lambda: self._show_page("Missions"), COLORS["surface3"]),
             ("▣  Production", lambda: self._show_page("Production"), COLORS["surface3"]),
             ("◉  Agents", lambda: self._show_page("Agents"), COLORS["surface3"]),
@@ -402,10 +401,10 @@ class PodaluxWorkbench(ctk.CTk):
             self.production_offer.set(run["offer_id"])
         row = ctk.CTkFrame(controls, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=(0, 8))
-        for text, command in (("▶ Cycle", self._start_cycle), ("🎬 Studio", self._open_studio), ("▶ Ouvrir", self._open_video)):
+        for text, command in (("▶ Ouvrir", self._open_video),):
             ctk.CTkButton(row, text=text, command=command, fg_color=COLORS["surface3"], hover_color=COLORS["surface3"]).pack(side="left", fill="x", expand=True, padx=3)
         ctk.CTkButton(controls, text="Publication dry-run", fg_color="#28623f", hover_color="#32774d", command=self._publish).pack(fill="x", padx=14, pady=(0, 14))
-        ctk.CTkLabel(controls, text="Rendu normal : cloud / RunPod\nMiniMax H3 : cloud-only", text_color=COLORS["muted"], justify="left", anchor="w").pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkLabel(controls, text="Historique des livrables\nGénération vidéo indisponible", text_color=COLORS["muted"], justify="left", anchor="w").pack(fill="x", padx=14, pady=(0, 12))
 
         summary = self._card(root, "Run & QC")
         summary.grid(row=1, column=0, sticky="nsew", padx=(0, 7))
@@ -586,22 +585,6 @@ class PodaluxWorkbench(ctk.CTk):
             ctk.CTkLabel(row, text=check["detail"], text_color=COLORS["muted"], anchor="e", justify="right", wraplength=330).pack(side="right", padx=8)
 
     # actions ------------------------------------------------------------------------
-    def _start_cycle(self) -> None:
-        if self.proc is not None and self.proc.poll() is None:
-            self._set_status("Cycle déjà en cours", COLORS["warn"])
-            return
-        if db.run_lock_holder():
-            self._set_status("Un autre cycle détient le verrou", COLORS["warn"])
-            return
-        offer = self.production_offer.get() if hasattr(self, "production_offer") else "auto"
-        if offer == "Aucune offre":
-            self._set_status("Aucune offre disponible dans ce business", COLORS["warn"])
-            return
-        args = ["cycle"] if offer in {"", "auto", None} else ["cycle", "--offer", offer]
-        self.proc, log = procs.spawn(args, "cycle")
-        self._set_status(f"Cycle lancé · {self._business_label()}", COLORS["info"])
-        self.page_subtitle.configure(text=f"Cycle lancé · journal {log.name}")
-
     def _start_mission(self) -> None:
         entry = getattr(self, "mission_entry", None)
         if entry is None:
@@ -714,13 +697,6 @@ class PodaluxWorkbench(ctk.CTk):
         proc, _ = procs.spawn(["browser", url], "browser-check")
         self.msg_procs.append(proc)
         self._set_status("Navigation demandée", COLORS["info"])
-
-    def _open_studio(self) -> None:
-        from .studio import StudioWindow
-        if getattr(self, "_studio", None) is not None and self._studio.winfo_exists():
-            self._studio.focus()
-            return
-        self._studio = StudioWindow(self, start_worker=self._toggle_worker)
 
     def _open_video(self) -> None:
         run = db.current_run() or {}
