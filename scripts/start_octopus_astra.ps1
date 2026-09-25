@@ -58,9 +58,9 @@ foreach ($required in @($setup, $preflight, $runner)) {
 if ($LASTEXITCODE -ne 0) { throw "Dedicated Codex home setup failed." }
 $env:CODEX_HOME = $CodexHome
 
-$preflightArgs = @{ ExpectedCodexHome = $CodexHome }
-if ($SkipFetch) { $preflightArgs["SkipFetch"] = $true }
-& $preflight @preflightArgs
+$preflightCommand = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $preflight, "-ExpectedCodexHome", $CodexHome)
+if ($SkipFetch) { $preflightCommand += "-SkipFetch" }
+& powershell @preflightCommand
 if ($LASTEXITCODE -ne 0) { throw "Codex preflight failed. Astra was not started." }
 
 $relayRoot = Join-Path $repo "cache\astra-relay"
@@ -185,7 +185,7 @@ while (Test-Path -LiteralPath $requestPath) {
     Write-Host ""
     Write-Host ("=== RELAY CYCLE {0}/{1}: {2} ===" -f $relayCycles, $MaxRelayCycles, $requestId) -ForegroundColor Cyan
 
-    & $runner -Plan $plan -Hours $hours -RequestId $requestId -ResultPath $resultPath
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $runner -Plan $plan -Hours $hours -RequestId $requestId -ResultPath $resultPath
     $workerExit = $LASTEXITCODE
 
     $reviewPrompt = @(
