@@ -158,6 +158,7 @@ def test_reviewer_call_is_independent_from_the_synthesis(monkeypatch):
 
     review = _review_calls(calls)[0]
     assert review["agent"] == "REVUE"  # appel distinct de la synthèse ("ORBIT"/"synthese")
+    assert review["model"] == deepseek.config.MODEL_FLASH  # respecte flash_fallback
     assert review["kwargs"].get("validate") is runtime._validate_business_signal_review
     system, user = review["messages"][0]["content"], review["messages"][1]["content"]
 
@@ -272,6 +273,14 @@ def test_reviewer_failure_is_fail_open_on_structural_results(monkeypatch):
     }]
     assert out["actionable_business_signal_count"] == 0
     assert out["business_signal_review_status"] == "degraded"
+
+
+def test_unexpected_value_error_from_reviewer_is_not_masked(monkeypatch):
+    # Les sorties invalides passent par InvalidOutput/GatewayError dans la passerelle ;
+    # un ValueError brut ici signale donc un bug de programmation et doit remonter.
+    with pytest.raises(ValueError, match="bug interne"):
+        _run_focused_mission(
+            monkeypatch, [signal_for()], [evidence_step()], [ValueError("bug interne")])
 
 
 def test_reviewer_output_outside_contract_degrades_without_inventing(monkeypatch):
