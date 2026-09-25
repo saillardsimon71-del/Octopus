@@ -1,5 +1,7 @@
 # Agnes Video App
 
+V1 is a local/private operator tool. Do not deploy it publicly with a personal Agnes API key embedded or persisted in client-side code.
+
 Target application replacing the legacy OCTOPUS video engine.
 
 Implementation target:
