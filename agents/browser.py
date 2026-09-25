@@ -40,6 +40,11 @@ PUBLIC_BLOCK_MARKERS = (
     "access denied",
     "captcha",
     "errors.edgesuite.net",
+    "err_blocked_by_client",
+    "blocked by chromium",
+    "bloqué par chromium",
+    "bloquée par chromium",
+    "you've been blocked",
 )
 PUBLIC_TEXT_EXTRACTION_METHODS = frozenset({
     "http:html_main",

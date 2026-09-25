@@ -316,6 +316,11 @@ _BROWSE_BLOCK_MARKERS = (
     "request blocked",
     "captcha",
     "chrome-error://",
+    "err_blocked_by_client",
+    "blocked by chromium",
+    "bloqué par chromium",
+    "bloquée par chromium",
+    "you've been blocked",
 )
 
 
@@ -448,6 +453,30 @@ def _browser_request_allowed(url: str, state, *, account_context: bool,
     return any(host == d or host.endswith("." + d) for d in anonymous_account_domains)
 
 
+def _account_read_succeeded(browser_instance, final_url: str) -> bool:
+    """Deterministic check: the account navigation returned real content, not a block/error page.
+
+    A failed account read must NOT commit mission-level taint.  The markers are the same
+    already used for public acquisition so there is a single shared vocabulary.
+    """
+    from . import browser as _browser_mod
+    if getattr(browser_instance, "blocked", None):
+        return False
+    try:
+        page_text = browser_instance.snapshot(6000)
+    except Exception:
+        page_text = ""
+    if not page_text.strip():
+        # Empty or whitespace-only page: no account content was exposed.
+        # Do not commit mission taint.
+        return False
+    try:
+        html_sample = browser_instance.html()[:4000]
+    except Exception:
+        html_sample = ""
+    return not _browser_mod._contains_block_marker(final_url, page_text, html_sample)
+
+
 def _browse(args):
     """Public : HTTP-first + extraction ; comptes : Chromium connecté, lecture seule."""
     from . import browser
@@ -485,10 +514,20 @@ def _browse(args):
             "vision_error": None,
         }
 
+    # --- Account path: temporary state transaction ---
+    # The guard must taint a *temporary* state during navigation so that anti-exfiltration
+    # holds within the account browser (public subrequests are refused).  The mission state
+    # is only committed after the navigation is verified successful.  A blocked/error page
+    # therefore never taints the mission, and subsequent public navigations remain allowed.
+    #
+    # The temporary state inherits the mission's current account_read flag so that a
+    # previously successful account read still blocks public subrequests in later navigations.
+    temp_state = web_guard.BrowseState(account_read=state.account_read)
+
     b = browser.new_browser(
         headless=False,
         account=True,
-        guard=lambda u: _browser_request_allowed(u, state, account_context=True),
+        guard=lambda u: _browser_request_allowed(u, temp_state, account_context=True),
     )
     try:
         try:
@@ -499,12 +538,46 @@ def _browse(args):
             raise
         final = b.url()
         final_kind = web_guard.classify(final)
+
+        if not _account_read_succeeded(b, final):
+            # Navigation completed but the page is a block/error page.
+            # Discard temporary taint: mission state stays clean.
+            page_text = b.snapshot(6000)
+            return {
+                "url": final,
+                "source": "compte connecté (lecture seule)",
+                "texte": page_text,
+                "vision": None,
+                "vision_error": "page de compte bloquée ou en erreur",
+                "page": {
+                    "final_url": final,
+                    "main_text": page_text,
+                    "text_chars": len(page_text),
+                    "blocked": True,
+                    "error": "account_page_blocked_or_error",
+                    "extraction_method": "",
+                    "rendered": True,
+                    "http_status": None,
+                    "content_type": "text/html",
+                    "title": "",
+                    "raw_chars": 0,
+                    "truncated": False,
+                    "requested_url": url,
+                    "fetched_at": "",
+                },
+            }
+
+        # Successful account read: commit temporary taint to mission state.
+        # web_guard.record sets account_read=True for ACCOUNT-kind final URLs,
+        # preserving the historical anti-exfiltration property.
         web_guard.record(final, final_kind, state)
+
         seen = b.see(agent=_ROLE.get())
+        page_text = b.snapshot(6000)
         return {
             "url": final,
             "source": "compte connecté (lecture seule)",
-            "texte": b.snapshot(6000),
+            "texte": page_text,
             "vision": seen["description"],
             "vision_error": seen.get("vision_error"),
         }
