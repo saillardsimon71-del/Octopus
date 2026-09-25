@@ -197,8 +197,8 @@ Hermes:
 - non pertinent.
 
 Nouvelle cible:
-- `apps/agnes-video/index.html`
-- autonome;
+- moteur externe pinné `lcy362/agnes-video-generator@a87162d6df73ffe72186838ca0ae9d461e68589b`;
+- service indépendant derrière un adapter HTTP OCTOPUS minimal;
 - aucune dépendance au core.
 
 Décision:
