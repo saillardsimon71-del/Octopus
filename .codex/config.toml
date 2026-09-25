@@ -12,13 +12,13 @@ model_reasoning_summary = "concise"
 approval_policy = "on-request"
 approvals_reviewer = "user"
 
-# Astra works from a pre-fetched local workspace. Networked dependency/source
-# retrieval and long workers are human-run out-of-band operations.
+# Shell networking is required for the OCTOPUS Kilo worker and for explicitly
+# pinned GitHub upstreams. Hosted Codex web search remains disabled.
 sandbox_mode = "workspace-write"
 web_search = "disabled"
 
 [sandbox_workspace_write]
-network_access = false
+network_access = true
 
 [agents]
 # Critical quota rule: native Codex multi-agent tools are disabled.
@@ -34,19 +34,13 @@ goals = false
 memories = false
 fast_mode = false
 apps = false
-plugins = false
 remote_plugin = false
 hooks = false
-skill_search = false
 
 # Do not let a skill silently install missing MCP dependencies.
 skill_mcp_dependency_install = false
 shell_tool = true
 
-[skills]
-# Do not inject global/bundled/plugin skill catalogs into Astra's context.
-# This project's workflow is carried by AGENTS.md + the phase router.
-include_instructions = false
 
 [memories]
 # Defense in depth: do not inject prior memories and do not turn this temporary
