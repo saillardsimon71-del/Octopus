@@ -61,6 +61,14 @@ Inspect only code needed by the current phase. Nested `AGENTS.md` instructions s
 
 ## 3. Astra vs worker
 
+### No quality fallback
+
+Codex may offer/automatically enter **Luna Reserve** after regular usage is exhausted on eligible accounts. There is no project config switch in the audited 0.157.0 client that reliably disables this backend-authorized fallback.
+
+Before each major phase, use the local `/status` surface and confirm the active model is GPT-6 Astra and regular usage is available.
+
+If Codex displays `Luna Reserve`, `Automatically switched to`, changes the active model away from GPT-6 Astra, or reports that regular Astra usage is exhausted: **stop the session immediately and do not continue OCTOPUS work in that thread until Astra is available again.** Do not accept a lower-quality reserve/fallback for architecture, integration or review.
+
 Astra owns architecture, scope, permissions/security, contracts/oracles, ambiguous failures and final diff review.
 
 The only current cheap implementation candidate is the existing OCTOPUS DevWorker route:
