@@ -50,3 +50,7 @@ credentials.json
 *.pem
 *.key
 .credentials
+# Historical H1/H2/H3 experiment run artifacts (local, reproducible)
+/h1_*.json
+/h2*.json
+/h3*.json
