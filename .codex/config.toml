@@ -63,6 +63,12 @@ enabled = false
 [skills]
 include_instructions = false
 
+[skills.bundled]
+enabled = false
+
+[cloud.skills]
+enabled = false
+
 [memories]
 use_memories = false
 generate_memories = false
