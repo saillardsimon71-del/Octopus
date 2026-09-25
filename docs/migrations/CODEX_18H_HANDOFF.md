@@ -54,21 +54,17 @@ Priorité:
 
 Le résultat doit être un OCTOPUS généraliste sans Remotion/RunPod/TTS/B-roll.
 
-### Phase C — ajouter atelier Agnes
-Créer:
-`apps/agnes-video/index.html`
+### Phase C — brancher le moteur Agnes upstream
 
-Suivre strictement le contrat fourni.
-Pas de framework, CDN, build step ou backend.
+Suivre `AGNES_VIDEO_REPLACEMENT.md`.
 
-Ajouter seulement les tests statiques/minimaux pertinents au repo:
-- fichier unique;
-- pas de CDN/import externe;
-- endpoints/config attendus;
-- queue/backoff/wakelock présents;
-- syntaxe JS vérifiable si possible sans navigateur lourd.
+Source pin:
+`lcy362/agnes-video-generator@a87162d6df73ffe72186838ca0ae9d461e68589b` (MIT).
 
-Ne pas coupler Agnes au journal OCTOPUS pendant cette phase.
+Ne pas reconstruire Agnes dans OCTOPUS et ne pas vendoriser tout son dépôt.
+Valider le service upstream indépendamment, puis ajouter uniquement un adapter HTTP OCTOPUS minimal et ses tests mockés/déterministes.
+Le secret `AGNES_API_KEY` reste dans l'environnement du processus Agnes.
+Aucun appel live de génération dans les tests.
 
 ### Phase D — extraction Hermes P0
 Ordre:
@@ -117,7 +113,7 @@ Pour chaque remplacement:
 
 Un PR, non mergé sans ordre explicite, qui montre:
 - ancien moteur vidéo supprimé;
-- Agnes app présente et autonome;
+- moteur Agnes upstream pinné utilisable séparément + adapter OCTOPUS minimal;
 - au moins la première tranche Hermes P0 réellement intégrée OU une preuve précise que son portage direct serait plus complexe que l'existant;
 - CI verte;
 - aucune régression H3/journal/worker/économie.
