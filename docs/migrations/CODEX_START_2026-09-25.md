@@ -93,7 +93,45 @@ Keep \`allow_declarative_fallback=false\`.
 
 Broad surgery that must remove tests/workflows or cross protected paths is done directly by Astra instead of weakening DevWorker protections.
 
-## 4. Automatic quota-safe relay
+## 4. Git metadata ownership on Windows
+
+The current branch `prep/astra-local-orchestration` is already the canonical working branch for this construction window.
+
+Inside Astra's Codex sandbox:
+- read-only Git inspection is allowed (`status`, `diff`, `log`, `show`, `rev-parse`, `merge-base`);
+- Astra must **not** create/switch/delete branches;
+- Astra must **not** run `git add`, `commit`, `reset`, `merge`, `rebase`, `stash`, `cherry-pick` or other operations that write `.git`.
+
+This is intentional. Codex protects Git metadata inside workspace-write sandboxes, and Git-for-Windows/MSYS helpers are not a required execution dependency for model-side work.
+
+When a coherent direct-Astra phase has been implemented and tested, Astra atomically publishes:
+
+`cache/astra-relay/checkpoint.json`
+
+Schema:
+
+```json
+{
+  "version": 1,
+  "request_id": "short-unique-id",
+  "message": "phase: concise commit message"
+}
+```
+
+Then Astra ends the turn.
+
+The deterministic parent supervisor, outside the model sandbox:
+1. verifies the working tree is dirty;
+2. stages the repository diff;
+3. creates the requested one-line commit;
+4. records the resulting SHA;
+5. resumes the **exact same Astra thread** with that SHA.
+
+No model call is active while the host performs Git mechanics.
+
+If Astra wants to delegate to Step while its direct source tree is dirty, it must request a host checkpoint first. Step relay requests are accepted only from a clean source tree.
+
+## 5. Automatic quota-safe relay
 
 Astra must **never** launch Kilo, \`night-shift\`, or the external worker runner itself from its model shell.
 
@@ -102,7 +140,7 @@ The project execpolicy blocks the direct common commands as defense in depth. It
 When Astra wants to delegate:
 
 1. Fix the contract.
-2. If a new oracle is needed, write/run/commit it first so the source repo is clean.
+2. If a new oracle or direct source change is needed, write and test it, request a host checkpoint, and resume only after the supervisor reports the commit SHA so the source repo is clean.
 3. Write exactly one \`policy: "product_ticket"\` plan under:
    \`cache/astra-tickets/<ticket>.json\`
 4. Atomically publish:
@@ -168,7 +206,7 @@ Do not use:
 - repeated \`write_stdin\` waits;
 - direct worker execution.
 
-## 5. Model/quality fail-closed behavior
+## 6. Model/quality fail-closed behavior
 
 The constructor is launched with exact \`--model gpt-6-astra\` and project config also pins \`gpt-6-astra\`.
 
@@ -178,7 +216,7 @@ If a Codex exec/resume call is rejected, rate-limited or exits non-zero, the sup
 
 The dedicated Codex home is ChatGPT-authenticated and the preflight rejects OpenAI API/provider overrides.
 
-## 6. Execution phases
+## 7. Execution phases
 
 ### A — Baseline
 
@@ -194,7 +232,7 @@ Disconnect runtime hooks, delete the identified Remotion/RunPod/TTS/B-roll/video
 
 This is broad surgery; Astra may do it directly.
 
-Commit the phase separately.
+After the phase is tested, request a host checkpoint. Astra itself must not write Git metadata.
 
 ### C — Agnes
 
@@ -239,7 +277,7 @@ Do not create a second planner/router/journal/permission/evidence authority.
 
 P1 work stays out of scope unless P0 is clean and the human explicitly extends scope.
 
-## 7. Stop conditions
+## 8. Stop conditions
 
 Stop rather than explore when:
 - a required credential/account capability is absent;
@@ -250,7 +288,7 @@ Stop rather than explore when:
 - main moved materially;
 - Codex/Astra is rate-limited or returns non-zero.
 
-## 8. Done
+## 9. Done
 
 Prefer a smaller correct result over a sprawling migration.
 
