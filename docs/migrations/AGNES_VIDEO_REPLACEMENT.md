@@ -95,11 +95,16 @@ Keep Agnes as an external/pinned application, not as a second OCTOPUS core.
 **Bind it to loopback only.** At the pinned revision Agnes defaults its FastAPI host to `0.0.0.0`, while its local configuration endpoints can persist API keys. For the OCTOPUS workstation launch it with `HOST=127.0.0.1` (and port 8765 unless deliberately changed). Do not expose this service to the LAN/Internet.
 
 Preferred first setup:
-- obtain the exact pin with `scripts/fetch_pinned_upstreams.ps1 agnes` into the ignored `cache/upstreams/` location;
-- configure `AGNES_API_KEY` in Agnes's process environment, never in Git and preferably not through the persisted Web config;
-- set `HOST=127.0.0.1` and start Agnes independently;
-- health/probe it from OCTOPUS;
-- communicate only through the adapter.
+- obtain the exact pin with `scripts/fetch_pinned_upstreams.ps1 agnes` into ignored `cache/upstreams/`;
+- prefer building a local Docker image **from that pinned source** rather than running upstream `start.bat` on the host or pulling an unverified moving image;
+- publish container port 8765 only as `127.0.0.1:8765:8765`;
+- inject `AGNES_API_KEY` at container/process runtime, never into Git and preferably not through the persisted Web config;
+- health/probe the service from OCTOPUS;
+- communicate only through the narrow adapter.
+
+If Docker is unavailable and native execution is deliberately chosen, use an isolated virtual environment and force `HOST=127.0.0.1`.
+
+Reproducibility limitation: the pinned upstream source is fixed, but its Dockerfile/requirements use version ranges and an unpinned `python:3.11-slim` base. Treat dependency resolution as a remaining supply-chain variable; do not claim a bit-reproducible build.
 
 Do not vendor the entire Agnes repository into OCTOPUS in the first migration.
 Do not add a Git submodule unless a concrete deployment constraint requires it.
