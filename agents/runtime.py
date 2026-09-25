@@ -1478,6 +1478,32 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     tasks = [t for t in proposed if isinstance(t, dict)][:MAX_PLAN_TASKS]
     if len(proposed) > len(tasks):
         db.post("ORBIT", f"plan tronqué : {len(proposed)} sous-tâches proposées, {len(tasks)} gardées")
+    # Replan unique de granularité (H3 #68/#69) : une mission multi-signaux concentrée dans
+    # une seule sous-tâche plafonne chaque voie de découverte au budget d'étapes d'un agent.
+    # Le feedback ne porte que sur la faisabilité du plan par rapport au budget ; il ne
+    # prescrit aucun rôle, aucune source, aucune requête ni aucune stratégie. Le second
+    # plan est accepté tel quel : pas de boucle de retry, pas de minimum de sous-tâches.
+    if business_signal_focus and business_signal_target > 1 and len(tasks) == 1:
+        db.post("ORBIT", "mission multi-signaux concentrée en une seule sous-tâche : replan unique")
+        feedback = (
+            f"Le plan précédent concentre une mission visant plusieurs signaux dans une seule boucle "
+            f"limitée à {max_steps_per_agent} étapes.\n"
+            "Décompose les voies de découverte indépendantes en plusieurs sous-tâches autonomes afin que "
+            "chacune puisse utiliser son propre budget d'étapes.\n"
+            "Le même rôle, notamment SOUT, peut être utilisé plusieurs fois ; ne force pas la diversité des rôles.\n"
+            "Ne prescris pas de sources, de requêtes, de segments ou de stratégie, et n'exige pas une "
+            "sous-tâche par signal : tu restes libre de déterminer la bonne décomposition."
+        )
+        plan = deepseek.call_json("ORBIT", "planification", pro,
+                                  [{"role": "system", "content": plan_sys},
+                                   {"role": "user", "content": goal},
+                                   {"role": "assistant", "content": json.dumps(plan, ensure_ascii=False)},
+                                   {"role": "user", "content": feedback}],
+                                  reasoning="high")
+        proposed = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
+        tasks = [t for t in proposed if isinstance(t, dict)][:MAX_PLAN_TASKS]
+        if len(proposed) > len(tasks):
+            db.post("ORBIT", f"plan tronqué : {len(proposed)} sous-tâches proposées, {len(tasks)} gardées")
     db.post("ORBIT", f"mission : {goal[:70]} → {len(tasks)} sous-tâches")
 
     results = []
