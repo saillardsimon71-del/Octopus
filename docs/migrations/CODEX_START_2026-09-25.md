@@ -14,7 +14,7 @@ Do not begin work unless it ends with:
 
 `READY FOR CODEX / GPT-6 ASTRA`
 
-The gate checks Git cleanliness/main ancestry, fetches/verifies the exact pinned Hermes + Agnes sources, validates effective project Codex feature state, Astra-compatible CLI, ChatGPT authentication, worker execpolicy, the exact live free Step route, Python/Docker and hidden global Codex context.
+The gate checks Git cleanliness/main ancestry, fetches/verifies the exact pinned Hermes + Agnes sources, validates effective project Codex feature state, Codex CLI >= 0.157.0 (the version baseline audited for this setup; Astra itself needs >= 0.153.0), ChatGPT authentication, worker execpolicy, the exact live free Step route, Python/Docker and hidden global Codex context.
 
 If the repo is not trusted yet, Codex may ignore project `.codex/` config/rules. Approve the trust prompt before the first task, exit, and rerun preflight.
 
