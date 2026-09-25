@@ -25,7 +25,7 @@ RESULT_ROOT = ROOT / "benchmark-results"
 CASES = [
     {
         "name": "provider-cooldown",
-        "bad_ref": "bdb01cf9df44d41a3c4c65bc24a9738d66267f9f",
+        "fix_commit": "b431835a411f4db6cbb37b6b49ed125a7cab57fe",
         "path": "octopus/llm.py",
         "test": [sys.executable, "-m", "pytest", "-q", "tests/test_provider_cooldown.py"],
         "prompt": (
@@ -44,7 +44,7 @@ CASES = [
     },
     {
         "name": "business-replan",
-        "bad_ref": "525d8071b21804129329c64ec8d42cf3ef84f6f3",
+        "fix_commit": "5301a27b8f400041e38eef8b2f0afd73a7b23e6f",
         "path": "agents/runtime.py",
         "test": [sys.executable, "-m", "pytest", "-q", "tests/test_business_signal_evidence.py"],
         "prompt": (
@@ -68,11 +68,12 @@ CASES = [
 
 
 def run(cmd: list[str], *, cwd: Path = ROOT, env: dict[str, str] | None = None,
-        timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+        timeout: int | None = None, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         cmd,
         cwd=str(cwd),
         env=env,
+        input=input_text,
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -182,16 +183,26 @@ def status_paths() -> list[str]:
 
 
 def prepare_case(case: dict) -> tuple[str, str]:
-    # Reset all tracked files to the benchmark branch, then remove stray worker output.
+    # Reset all tracked files to the benchmark branch, then reverse ONLY the historical
+    # production fix. This preserves every later unrelated OCTOPUS change while recreating
+    # the exact regression that the current oracle should detect.
     git("reset", "--hard", "HEAD")
     run(["git", "clean", "-fd", "-e", "benchmark-results/"])
-    bad = run(["git", "show", f"{case['bad_ref']}:{case['path']}"])
-    if bad.returncode:
-        raise RuntimeError(f"cannot materialize historical regression {case['name']}: {bad.stderr[-2000:]}")
-    target = ROOT / case["path"]
-    target.write_text(bad.stdout, encoding="utf-8")
-    baseline = target.read_text(encoding="utf-8")
     current = git("show", f"HEAD:{case['path']}")
+    patch = run([
+        "git", "show", "--format=", "--binary", case["fix_commit"], "--", case["path"]
+    ])
+    if patch.returncode or not patch.stdout.strip():
+        raise RuntimeError(
+            f"cannot read historical fix patch {case['name']}: {(patch.stderr or patch.stdout)[-2000:]}"
+        )
+    applied = run(["git", "apply", "--reverse", "--whitespace=nowarn", "-"], input_text=patch.stdout)
+    if applied.returncode:
+        raise RuntimeError(
+            f"cannot inject historical regression {case['name']}: {(applied.stderr or applied.stdout)[-3000:]}"
+        )
+    target = ROOT / case["path"]
+    baseline = target.read_text(encoding="utf-8")
     return baseline, current
 
 
