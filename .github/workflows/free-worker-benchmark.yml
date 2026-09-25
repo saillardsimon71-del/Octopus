@@ -28,12 +28,12 @@ jobs:
         include:
           - id: step-3-7-flash
             model: "kilo/stepfun/step-3.7-flash:free"
-          - id: nex-n2-5-pro
-            model: "kilo/nex-agi/nex-n2.5-pro:free"
-          - id: minimax-m3
-            model: "kilo/minimax/minimax-m3:free"
-          - id: hy3
-            model: "kilo/tencent/hy3:free"
+          - id: laguna-s-2-1
+            model: "kilo/poolside/laguna-s-2.1:free"
+          - id: nemotron-3-ultra
+            model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free"
+          - id: north-mini-code
+            model: "kilo/cohere/north-mini-code:free"
 
     steps:
       - name: Checkout benchmark branch without push credentials
