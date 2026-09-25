@@ -157,11 +157,11 @@ if (-not $hasCodex) {
     $versionText = (& codex --version 2>&1 | Out-String).Trim()
     if ($versionText -match '(\d+)\.(\d+)\.(\d+)') {
         $version = [version]::new([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
-        $minimum = [version]::new(0, 153, 0)
+        $minimum = [version]::new(0, 157, 0)
         if ($version -ge $minimum) {
-            Ok "Codex $version (Astra-compatible >= 0.153.0)"
+            Ok "Codex $version (OCTOPUS-audited baseline >= 0.157.0)"
         } else {
-            Fail "Codex $version is too old for Astra; require >= 0.153.0"
+            Fail "Codex $version is below the OCTOPUS-audited baseline; require >= 0.157.0 (Astra itself requires >= 0.153.0)"
         }
     } else {
         Fail "could not parse Codex version: $versionText"
