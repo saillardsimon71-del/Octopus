@@ -7,10 +7,6 @@ model = "gpt-6-astra"
 model_reasoning_effort = "high"
 model_reasoning_summary = "concise"
 
-# Use the user's ChatGPT Codex entitlement for the root session; do not silently
-# switch this project to API-key billing.
-forced_login_method = "chatgpt"
-
 # Human remains the approval authority. Never use the automatic approval-review
 # subagent, which would add another model loop.
 approval_policy = "on-request"
