@@ -30,7 +30,7 @@ Le moteur OCTOPUS (journal, worker, économie, agents, stratégie, capacités) r
 
 5. `octopus/businesses.py::overview`
    - le champ `media_generations` du journal peut rester temporairement pour compatibilité historique;
-   - ne pas le confondre avec le nouvel atelier Agnes, qui est une application autonome.
+   - ne pas le confondre avec le moteur Agnes externe pinné, qui vit comme service indépendant derrière un adapter OCTOPUS minimal.
 
 ## Arbre à supprimer après découplage
 
