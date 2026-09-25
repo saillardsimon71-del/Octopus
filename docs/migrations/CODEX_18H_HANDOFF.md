@@ -2,7 +2,10 @@
 
 Date: 2026-09-25
 
-Branche de préparation:
+Branche de préparation active:
+`prep/astra-local-orchestration`
+
+Base documentaire précédente:
 `prep/hermes-agnes-migration`
 
 Bases:
@@ -10,10 +13,21 @@ Bases:
 - Hermes étudié: `NousResearch/hermes-agent@59004a62356f3a4697ab0fe8ad5086d2b405e2a6`
 
 Lire avant toute modification:
-1. `docs/migrations/HERMES_COMPONENT_EXTRACTION.md`
-2. `docs/migrations/VIDEO_ENGINE_REMOVAL.md`
-3. `docs/migrations/AGNES_VIDEO_REPLACEMENT.md`
-4. `docs/migrations/OCTOPUS_HERMES_REPLACEMENT_MATRIX.md`
+1. `docs/migrations/ASTRA_LOCAL_ORCHESTRATION.md`
+2. `docs/migrations/HERMES_COMPONENT_EXTRACTION.md`
+3. `docs/migrations/VIDEO_ENGINE_REMOVAL.md`
+4. `docs/migrations/AGNES_VIDEO_REPLACEMENT.md`
+5. `docs/migrations/OCTOPUS_HERMES_REPLACEMENT_MATRIX.md`
+
+## Orchestration de cette session
+
+- GPT-6 Astra reste root, architecte, arbitre sécurité et reviewer final.
+- Ne pas installer, charger ni réinstaller le package tiers `astra-flash-orchestrator`.
+- Réutiliser uniquement la primitive OCTOPUS existante `development.task` lorsqu'une implémentation est suffisamment bornée.
+- Le worker gratuit actuel est Step 3.7 via `octopus/dev_worker.py`; il n'est pas une autorité.
+- Aucun fallback automatique vers un autre modèle gratuit ou payant. Si le worker échoue, si la preuve est ambiguë ou si Astra ne fait pas confiance au diff, Astra reprend le travail.
+- Ne pas déléguer les décisions d'architecture, permissions, sécurité, preuves économiques ou trust boundaries.
+- Pour les tâches déléguées: `allowed_paths` explicite, tests déterministes, `allow_declarative_fallback=false`, puis review Astra du diff réel avant intégration.
 
 ## Mission
 
