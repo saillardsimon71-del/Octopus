@@ -2,7 +2,7 @@
 
 Date: 2026-09-25
 
-Objectif: retirer le moteur vidéo Podalux/Remotion/RunPod/TTS/B-roll devenu hors cible, puis le remplacer par l'atelier Agnes autonome décrit dans `AGNES_VIDEO_REPLACEMENT.md`.
+Objectif: retirer le moteur vidéo Podalux/Remotion/RunPod/TTS/B-roll devenu hors cible, puis le remplacer par une frontière mince vers le moteur externe pinné `lcy362/agnes-video-generator`, décrite dans `AGNES_VIDEO_REPLACEMENT.md`.
 
 ## Principe
 
@@ -103,4 +103,4 @@ Après suppression:
 - stratégie/économie/journal fonctionnent;
 - aucune dépendance Node/Remotion/TTS/RunPod n'est requise pour la suite Python générale;
 - aucun test non vidéo ne casse;
-- l'atelier Agnes vit séparément dans `apps/agnes-video/index.html`.
+- le moteur Agnes vit séparément comme service upstream pinné; OCTOPUS ne conserve qu'un adapter minimal.
