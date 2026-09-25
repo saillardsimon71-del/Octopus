@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: free-worker-benchmark-v2-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   benchmark:
     name: "benchmark-v2-${{ matrix.id }}"
@@ -22,13 +26,13 @@ jobs:
       matrix:
         include:
           - id: nex-n2-5-pro
-            model: "nex-agi/nex-n2.5-pro:free"
+            model: "kilo/nex-agi/nex-n2.5-pro:free"
           - id: minimax-m3
-            model: "minimax/minimax-m3:free"
+            model: "kilo/minimax/minimax-m3:free"
           - id: hy3
-            model: "tencent/hy3:free"
+            model: "kilo/tencent/hy3:free"
           - id: laguna-s-2-1
-            model: "poolside/laguna-s-2.1:free"
+            model: "kilo/poolside/laguna-s-2.1:free"
 
     steps:
       - name: Checkout without push credentials
@@ -42,17 +46,22 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Set up Node 22
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
-
-      - name: Install dependencies
+      - name: Install OCTOPUS test dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-local.txt
-          npm install -g @kilocode/cli
-          kilo --version
+
+      - name: Install proven Kilo CLI
+        run: |
+          curl -fsSL https://kilo.ai/cli/install | bash
+          echo "$HOME/.kilo/bin" >> "$GITHUB_PATH"
+
+      - name: Verify exact free route
+        env:
+          BENCHMARK_MODEL: "${{ matrix.model }}"
+        run: |
+          test "$(kilo --version)" = "7.7.9"
+          kilo models kilo | grep -F -x "$BENCHMARK_MODEL"
 
       - name: Run benchmark
         env:
