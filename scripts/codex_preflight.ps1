@@ -127,7 +127,7 @@ if (-not (Has-Command 'codex')) {
 
     $SavedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    $Login = (& codex login status 2>&1 | Out-String).Trim()
+    $Login = (& codex login status 2>$null | Out-String).Trim()
     $LoginCode = $LASTEXITCODE
     $ErrorActionPreference = $SavedPreference
 
