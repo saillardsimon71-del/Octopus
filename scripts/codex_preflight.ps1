@@ -208,10 +208,24 @@ if (Has-Command 'kilo') { $Kilo = 'kilo' } elseif (Has-Command 'kilo.cmd') { $Ki
 if (-not $Kilo) {
     Add-Fail 'Kilo CLI not found'
 } else {
+    $KiloVersion = (& $Kilo --version 2>&1 | Out-String).Trim()
+    Add-Ok ('Kilo CLI present: ' + $KiloVersion)
+
+    # Do NOT query the remote Kilo model catalog during startup. That command
+    # can block on network/provider availability and Astra does not need Kilo
+    # until it actually delegates a bounded ticket.
     $ExpectedRoute = 'kilo/stepfun/step-3.7-flash:free'
-    $Catalog = (& $Kilo models kilo 2>&1 | Out-String)
-    $Routes = @($Catalog -split "`r?`n" | ForEach-Object { $_.Trim() })
-    if (($LASTEXITCODE -eq 0) -and ($Routes -contains $ExpectedRoute)) { Add-Ok ('Step route available: ' + $ExpectedRoute) } else { Add-Fail ('Step route unavailable: ' + $ExpectedRoute) }
+    $DevWorkerPath = Join-Path $Repo 'octopus\dev_worker.py'
+    if (-not (Test-Path -LiteralPath $DevWorkerPath -PathType Leaf)) {
+        Add-Fail 'octopus/dev_worker.py missing'
+    } else {
+        $DevWorkerText = [System.IO.File]::ReadAllText($DevWorkerPath)
+        if ($DevWorkerText.Contains($ExpectedRoute)) {
+            Add-Ok ('configured Step route: ' + $ExpectedRoute)
+        } else {
+            Add-Fail ('expected Step route not configured in dev_worker.py: ' + $ExpectedRoute)
+        }
+    }
 }
 
 if (Has-Command 'python') { Add-Ok ((& python --version 2>&1 | Out-String).Trim()) } else { Add-Fail 'python not found' }
