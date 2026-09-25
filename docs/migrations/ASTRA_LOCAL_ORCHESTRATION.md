@@ -131,3 +131,15 @@ A green test is not enough if the contract or architecture is wrong.
 - free-worker evidence: `bench/free-workers-20260925`
 
 The benchmark branch is evidence, not a runtime dependency.
+
+## Execution mechanics that Astra must know before delegating
+
+- Do not poll a running Kilo task from Astra. Use the blocking OCTOPUS command and resume reasoning only after it returns.
+- `night-shift` preflight requires a clean source repository.
+- Real product-code delegation uses `policy: product_ticket`.
+- A product ticket cannot modify tests or protected trust-boundary files. New deterministic tests must therefore be written and committed by Astra first.
+- `allowed_paths` are exact paths. Broad deletion of many legacy files is usually cheaper and safer for Astra to perform directly than to enumerate a huge worker write radius.
+- The worker produces isolated local commits/worktrees; nothing is automatically merged into the active branch.
+- No worker output is accepted without one Astra diff review.
+
+This is intentionally not a resident supervisor loop. The expensive model plans once, the cheap worker executes, the expensive model reviews once.
