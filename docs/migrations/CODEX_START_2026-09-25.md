@@ -172,6 +172,8 @@ For each Hermes component, require:
 If it merely adds a parallel abstraction, stop and keep OCTOPUS.
 
 After registry is clean, proceed to MCP/cua-driver only if it can be integrated without creating a second authority and the relevant tests can be stated first.
+
+Known upstream facts for computer-use: Hermes uses cua-driver over MCP/stdio; Windows is supported without an install-time OS permission grant; upstream sanitizes the cua-driver child environment and disables its telemetry. Preserve those security properties if adapting the backend. Do not run an upstream auto-installer implicitly from OCTOPUS.
 Guardrails/evidence follow the existing OCTOPUS capability/journal authorities; never create a second permission or evidence database.
 
 Do not start scheduler, retry taxonomy, skills, memory or subagent-lifecycle work in this session unless all P0 work is already clean and the human explicitly extends scope.
@@ -193,7 +195,8 @@ Still unverified without a real account/key:
 - browser CORS behavior for the standalone local page;
 - exact live response JSON fields for this account;
 - account-specific quota/entitlement;
-- whether the operator's key accepts v2.0 today.
+- whether the operator's key accepts v2.0 today;
+- whether v2.0 video accepts the transferred Data URI image form; public docs currently show a reference URL.
 
 Treat those as runtime facts to test later, not reasons for speculative implementation.
 
