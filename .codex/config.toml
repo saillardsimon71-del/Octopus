@@ -19,6 +19,11 @@ approvals_reviewer = "user"
 sandbox_mode = "workspace-write"
 web_search = "disabled"
 
+# Required on Windows for non-interactive codex exec. Without the native
+# Restricted Token backend, approval_policy=never causes even safe unmatched
+# PowerShell commands (for example Get-Content) to be forbidden.
+windows.sandbox = "unelevated"
+
 [sandbox_workspace_write]
 network_access = false
 
