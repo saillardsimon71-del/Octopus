@@ -30,7 +30,7 @@ Ne pas relire tout le dépôt avant d'agir. Le fichier de départ impose l'ordre
 
 ## Mission
 
-Simplifier OCTOPUS en remplaçant les briques génériques maison par des primitives éprouvées inspirées/portées depuis Hermes lorsque cela réduit réellement le code et la dette, ET retirer l'ancien moteur vidéo pour installer le nouvel atelier Agnes autonome.
+Simplifier OCTOPUS en remplaçant les briques génériques maison par des primitives éprouvées inspirées/portées depuis Hermes lorsque cela réduit réellement le code et la dette, ET retirer l'ancien moteur vidéo pour le remplacer par une frontière mince vers le moteur Agnes upstream pinné.
 
 Ne pas importer Hermes entier.
 
