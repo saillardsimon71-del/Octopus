@@ -134,34 +134,55 @@ The benchmark branch is evidence, not a runtime dependency.
 
 ## Execution mechanics that Astra must know before delegating
 
-### Hard boundary: long workers run outside the Codex model loop
+### Hard boundary: automatic external relay
 
-On Windows, Codex's model-driven shell yields a still-running process after a short bounded wait (currently at most about 30 seconds for the unified exec path). A 5–10 minute Kilo task launched by Astra would therefore require additional model/tool turns to supervise or poll it.
+Long Kilo/Step work must remain outside the Codex model process.
 
-**Astra must never launch Kilo or `octopus night-shift` from its own shell.**
+The supported supervisor is \`scripts/start_octopus_astra.ps1\`.
+It launches Astra with \`codex exec --json\`, records the exact \`thread_id\`, consumes a bounded relay request, runs Step through \`run_external_dev_ticket.ps1\`, then performs exactly one \`codex exec resume <thread_id>\` for Astra review.
 
-The project exec policy in `.codex/rules/no-model-worker.rules` forbids the direct worker commands as defense in depth.
+No model call is active while Step works.
 
-Delegation protocol:
+Astra never launches Kilo/night-shift/runner itself.
+The execpolicy is defense in depth, not the primary boundary.
 
-1. Astra designs the bounded task and, when needed, writes/commits the deterministic oracle first.
-2. Astra writes a one-ticket `product_ticket` plan under ignored `cache/astra-tickets/<ticket>.json`.
-3. Astra validates the plan statically, prints exactly one human command:
-   `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_external_dev_ticket.ps1 -Plan cache\astra-tickets\<ticket>.json`
-4. Astra ends the turn with `WAITING_FOR_EXTERNAL_WORKER`. It does not call the runner, Kilo, night-shift, `write_stdin`, `/goal`, or any polling mechanism.
-5. The human runs that command in a separate PowerShell. Step/Kilo then consumes no Astra model turns while it works.
-6. When the terminal finishes, the human sends `WORKER_FINISHED` (or the full failure output) in the same Codex thread.
-7. Astra performs one review pass over the report, produced commit, actual diff and tests. It either integrates the reviewed commit, requests one new bounded external ticket, or takes the task back itself.
+Relay request:
 
-Do not use Codex `/review` for this review; root Astra reviews the diff directly so a reviewer subagent is not introduced.
+\`\`\`json
+{
+  "version": 1,
+  "request_id": "unique-id",
+  "plan_path": "cache/astra-tickets/task.json",
+  "hours": 1.0
+}
+\`\`\`
 
-This out-of-band boundary is the quota guarantee. "Do not poll" as a prompt instruction alone is not sufficient.
+The plan must use \`policy: product_ticket\`.
+New deterministic tests/oracles must be created and committed by Astra before delegation because product tickets cannot modify tests/protected trust-boundary files.
 
-- `night-shift` preflight requires a clean source repository.
-- Real product-code delegation uses `policy: product_ticket`.
-- A product ticket cannot modify tests or protected trust-boundary files. New deterministic tests must therefore be written and committed by Astra first.
-- `allowed_paths` are exact paths. Broad deletion of many legacy files is usually cheaper and safer for Astra to perform directly than to enumerate a huge worker write radius.
-- The worker produces isolated local commits/worktrees; nothing is automatically merged into the active branch.
-- No worker output is accepted without one Astra diff review.
+The runner:
+- requires a clean source repository;
+- records SHA-256 of the plan;
+- refuses accidental replay of the same plan;
+- records logs/result/night-shift report;
+- leaves worker commits isolated for review.
 
-This is intentionally not a resident supervisor loop. The expensive model plans once and yields to the human; the cheap worker executes in a separate process; the expensive model is invoked again only after completion for one review.
+The supervisor:
+- verifies the resumed Codex \`thread_id\` equals the original;
+- caps Astra turns and relay cycles;
+- stops on any non-zero Codex call;
+- does not select a fallback model.
+
+Astra then reviews the actual worker result/diff/tests and either integrates, takes back, delegates one further bounded task, or completes.
+
+This preserves the intended shape:
+
+\`\`\`text
+Astra plans/decides
+  -> deterministic relay
+  -> Step implements/tests
+  -> deterministic relay
+  -> same Astra thread reviews
+\`\`\`
+
+There is no human polling step and no resident LLM supervisor.
