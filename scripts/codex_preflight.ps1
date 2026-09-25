@@ -125,6 +125,142 @@ if (Command-Exists "codex") {
 }
 
 if (Command-Exists "codex") {
+    $featureList = (& codex features list 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        Fail ("could not read effective Codex feature flags: " + $featureList.Trim())
+    } else {
+        $mustBeOff = @(
+            "apps", "fast_mode", "goals", "hooks", "memories", "multi_agent",
+            "plugins", "remote_plugin", "skill_mcp_dependency_install", "skill_search"
+        )
+        $featureErrors = @()
+        foreach ($name in $mustBeOff) {
+            $line = @($featureList -split "\r?\n" | Where-Object { $_ -match ("^" + [regex]::Escape($name) + "\s+") }) | Select-Object -First 1
+            if (-not $line) {
+                $featureErrors += "$name=missing"
+            } elseif ($line -notmatch '\sfalse\s*    Info ("Codex auth: " + $loginStatus)
+    if ($loginStatus -match '(?i)chatgpt') {
+        Ok "Codex is using ChatGPT sign-in (plan allowance path)"
+    } else {
+        Fail "Codex is not confirmed as ChatGPT-authenticated; do not start Astra until 'codex login status' confirms ChatGPT sign-in"
+    }
+}
+
+if (Command-Exists "kilo") {
+    $kiloVersion = (& kilo --version 2>&1 | Out-String).Trim()
+    Ok ("Kilo CLI present" + $(if ($kiloVersion) { ": $kiloVersion" } else { "" }))
+} elseif (Command-Exists "kilo.cmd") {
+    $kiloVersion = (& kilo.cmd --version 2>&1 | Out-String).Trim()
+    Ok ("Kilo CLI present" + $(if ($kiloVersion) { ": $kiloVersion" } else { "" }))
+} else {
+    Fail "Kilo CLI not found; bounded free worker cannot run"
+}
+
+$kiloCmd = if (Command-Exists "kilo") { "kilo" } elseif (Command-Exists "kilo.cmd") { "kilo.cmd" } else { $null }
+if ($kiloCmd) {
+    $expectedRoute = "kilo/stepfun/step-3.7-flash:free"
+    $catalog = (& $kiloCmd models kilo 2>&1 | Out-String)
+    $routes = @($catalog -split "\r?\n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($routes -contains $expectedRoute) {
+        Ok "exact free Kilo route available: $expectedRoute"
+    } else {
+        Fail "expected free Kilo route absent from live catalog: $expectedRoute"
+    }
+}
+
+if (Command-Exists "python") {
+    $pythonVersion = (& python --version 2>&1 | Out-String).Trim()
+    Ok $pythonVersion
+} else {
+    Fail "python not found in PATH"
+}
+
+if (Command-Exists "docker") {
+    & docker info *> $null
+    if ($LASTEXITCODE -eq 0) { Ok "Docker daemon reachable (required by product_ticket sandbox)" }
+    else { Fail "Docker CLI exists but daemon is not reachable" }
+} else {
+    Fail "Docker not found; product_ticket Docker sandbox cannot run"
+}
+
+$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ".codex" }
+$residualPaths = @(
+    (Join-Path $HOME ".agents\skills\astra-flash-orchestrator"),
+    (Join-Path $codexHome "agents\astra_flash_builder.toml")
+) | Where-Object { Test-Path -LiteralPath $_ }
+if ($residualPaths.Count -gt 0) {
+    Fail ("active Astra Flash Orchestrator residue: " + ($residualPaths -join ", "))
+}
+
+$markers = @(
+    (Join-Path $codexHome "AGENTS.md"),
+    (Join-Path $codexHome "AGENTS.override.md")
+)
+$policyHit = $false
+foreach ($path in $markers) {
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        if (Select-String -LiteralPath $path -SimpleMatch "astra-flash-orchestrator managed policy" -Quiet) {
+            $policyHit = $true
+            Fail "Astra Flash managed policy still present in $path"
+        }
+    }
+}
+if (($residualPaths.Count -eq 0) -and -not $policyHit) {
+    Ok "no active Astra Flash Orchestrator residue detected"
+}
+
+# Purity checks: global instructions are concatenated into project context, and
+# user-level MCP servers can remain available independently of Apps/Plugins.
+$globalInstructionFiles = @(
+    (Join-Path $codexHome "AGENTS.md"),
+    (Join-Path $codexHome "AGENTS.override.md")
+)
+foreach ($path in $globalInstructionFiles) {
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $body = [System.IO.File]::ReadAllText($path).Trim()
+        if ($body.Length -gt 0) {
+            Fail "non-empty global Codex instructions detected at $path; review/remove them for the purified OCTOPUS session"
+        }
+    }
+}
+
+$globalConfig = Join-Path $codexHome "config.toml"
+if (Test-Path -LiteralPath $globalConfig -PathType Leaf) {
+    $mcpDefs = @(Select-String -LiteralPath $globalConfig -Pattern '^\s*\[mcp_servers\.' -AllMatches -ErrorAction SilentlyContinue)
+    if ($mcpDefs.Count -gt 0) {
+        Fail "user-level MCP server definitions detected in $globalConfig; explicitly disable/review them before the purified OCTOPUS session"
+    } else {
+        Ok "no user-level MCP server definitions detected"
+    }
+} else {
+    Ok "no user-level Codex config.toml MCP definitions detected"
+}
+
+Write-Host ""
+if ($failures.Count -gt 0) {
+    Write-Host ("NOT READY — " + $failures.Count + " blocking issue(s).") -ForegroundColor Red
+    $failures | ForEach-Object { Write-Host (" - " + $_) }
+    exit 2
+}
+
+Write-Host "READY FOR CODEX / GPT-6 ASTRA" -ForegroundColor Green
+Write-Host "Launch from this repository root with: codex"
+Write-Host "If Codex asks whether to trust this project, approve the repository BEFORE sending the first prompt."
+Write-Host "Then run /status before the first task and use a normal prompt, not /goal."
+) {
+                $featureErrors += "$name=not-false ($($line.Trim()))"
+            }
+        }
+        if ($featureErrors.Count -eq 0) {
+            Ok "effective Codex feature state confirms project isolation"
+        } else {
+            Fail ("effective Codex features do not match project policy: " + ($featureErrors -join "; ") +
+                ". If this repo is not trusted yet, launch 'codex', approve the trust prompt WITHOUT sending a task, exit, then rerun preflight.")
+        }
+    }
+}
+
+if (Command-Exists "codex") {
     $loginStatus = (& codex login status 2>&1 | Out-String).Trim()
     Info ("Codex auth: " + $loginStatus)
     if ($loginStatus -match '(?i)chatgpt') {
