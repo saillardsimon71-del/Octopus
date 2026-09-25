@@ -1,0 +1,109 @@
+# Handoff Codex — 18h — Migration Hermes + Agnes
+
+Date: 2026-09-25
+
+Branche de préparation:
+`prep/hermes-agnes-migration`
+
+Bases:
+- OCTOPUS main avant préparation: `ae4d98dc9692aa10ba15051381a36809e25377df`
+- Hermes étudié: `NousResearch/hermes-agent@59004a62356f3a4697ab0fe8ad5086d2b405e2a6`
+
+Lire avant toute modification:
+1. `docs/migrations/HERMES_COMPONENT_EXTRACTION.md`
+2. `docs/migrations/VIDEO_ENGINE_REMOVAL.md`
+3. `docs/migrations/AGNES_VIDEO_REPLACEMENT.md`
+
+## Mission
+
+Simplifier OCTOPUS en remplaçant les briques génériques maison par des primitives éprouvées inspirées/portées depuis Hermes lorsque cela réduit réellement le code et la dette, ET retirer l'ancien moteur vidéo pour installer le nouvel atelier Agnes autonome.
+
+Ne pas importer Hermes entier.
+
+## Ordre obligatoire
+
+### Phase A — baseline
+- vérifier état git;
+- rebase/fast-forward sur main si nécessaire;
+- lancer suite actuelle;
+- capturer les échecs préexistants.
+
+### Phase B — retirer ancien moteur vidéo
+Suivre `VIDEO_ENGINE_REMOVAL.md`.
+
+Priorité:
+1. débrancher le noyau;
+2. tests;
+3. supprimer arbre historique;
+4. réparer imports/workflows/tests;
+5. suite complète.
+
+Le résultat doit être un OCTOPUS généraliste sans Remotion/RunPod/TTS/B-roll.
+
+### Phase C — ajouter atelier Agnes
+Créer:
+`apps/agnes-video/index.html`
+
+Suivre strictement le contrat fourni.
+Pas de framework, CDN, build step ou backend.
+
+Ajouter seulement les tests statiques/minimaux pertinents au repo:
+- fichier unique;
+- pas de CDN/import externe;
+- endpoints/config attendus;
+- queue/backoff/wakelock présents;
+- syntaxe JS vérifiable si possible sans navigateur lourd.
+
+Ne pas coupler Agnes au journal OCTOPUS pendant cette phase.
+
+### Phase D — extraction Hermes P0
+Ordre:
+1. capability/tool registry;
+2. client MCP générique;
+3. computer-use via cua-driver;
+4. guardrails de conséquences;
+5. verification-evidence généralisée.
+
+Pour chaque composant:
+- comparer OCTOPUS actuel vs Hermes;
+- préférer supprimer/remplacer plutôt qu'ajouter une seconde implémentation;
+- préserver les interfaces économiques OCTOPUS;
+- ajouter attribution MIT pour tout code substantiellement dérivé;
+- pinner le commit Hermes source dans les commentaires/NOTICE appropriés.
+
+### Phase E — P1 seulement si P0 propre
+- retry/error/cooldown;
+- periodic scheduler;
+- lifecycle subagents.
+
+Skills/memory/cron/gateway restent hors phase sauf besoin observé.
+
+## Règles d'architecture
+
+- OCTOPUS possède le raisonnement économique.
+- Hermes fournit des primitives techniques.
+- MCP est une frontière de capacité, pas un nouveau cerveau.
+- Aucun double router LLM.
+- Aucun double planner.
+- Aucun double journal économique.
+- Aucun nouveau framework sans suppression équivalente.
+- CONSTRAIN CONSEQUENCES, NOT INTELLIGENCE.
+- MARKET FIRST, AUTOMATION SECOND, GENERALIZATION LAST.
+
+## Preuves attendues
+
+Pour chaque remplacement:
+- lignes/fichiers supprimés;
+- lignes/fichiers ajoutés;
+- tests;
+- interface préservée;
+- raison pour laquelle la nouvelle brique est plus simple/robuste.
+
+## Critère final de la session
+
+Un PR, non mergé sans ordre explicite, qui montre:
+- ancien moteur vidéo supprimé;
+- Agnes app présente et autonome;
+- au moins la première tranche Hermes P0 réellement intégrée OU une preuve précise que son portage direct serait plus complexe que l'existant;
+- CI verte;
+- aucune régression H3/journal/worker/économie.
