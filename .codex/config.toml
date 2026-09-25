@@ -33,10 +33,19 @@ multi_agent = false
 goals = false
 memories = false
 fast_mode = false
+apps = false
+plugins = false
+hooks = false
+skill_search = false
 
 # Do not let a skill silently install missing MCP dependencies.
 skill_mcp_dependency_install = false
 shell_tool = true
+
+[skills]
+# Do not inject global/bundled/plugin skill catalogs into Astra's context.
+# This project's workflow is carried by AGENTS.md + the phase router.
+include_instructions = false
 
 [memories]
 # Defense in depth: even if the memories feature is enabled by another layer,
