@@ -12,13 +12,13 @@ model_reasoning_summary = "concise"
 approval_policy = "on-request"
 approvals_reviewer = "user"
 
-# Codex may edit the checked-out workspace. Network is available to fetch only
-# explicitly pinned upstream sources named in AGENTS/CODEX_START.
+# Astra works from a pre-fetched local workspace. Networked dependency/source
+# retrieval and long workers are human-run out-of-band operations.
 sandbox_mode = "workspace-write"
 web_search = "disabled"
 
 [sandbox_workspace_write]
-network_access = true
+network_access = false
 
 [agents]
 # Critical quota rule: native Codex multi-agent tools are disabled.
