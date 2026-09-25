@@ -31,12 +31,22 @@ foreach ($item in $items) {
     if (-not (Test-Path -LiteralPath (Join-Path $dest ".git"))) {
         git clone --filter=blob:none --no-checkout $item.Repo $dest
         if ($LASTEXITCODE -ne 0) { throw "clone failed: $($item.Repo)" }
+        git -C $dest fetch --quiet --no-tags origin
+        if ($LASTEXITCODE -ne 0) { throw "fetch failed: $($item.Repo)" }
     }
+
     git -C $dest remote set-url origin $item.Repo
-    git -C $dest fetch --quiet --no-tags origin
-    if ($LASTEXITCODE -ne 0) { throw "fetch failed: $($item.Repo)" }
+
+    # Fast path: if the exact pinned commit already exists locally, never hit
+    # the network again during ordinary builder startup.
     git -C $dest cat-file -e "$($item.Sha)^{commit}" 2>$null
-    if ($LASTEXITCODE -ne 0) { throw "pinned commit unavailable: $($item.Sha)" }
+    if ($LASTEXITCODE -ne 0) {
+        git -C $dest fetch --quiet --no-tags origin
+        if ($LASTEXITCODE -ne 0) { throw "fetch failed: $($item.Repo)" }
+        git -C $dest cat-file -e "$($item.Sha)^{commit}" 2>$null
+        if ($LASTEXITCODE -ne 0) { throw "pinned commit unavailable: $($item.Sha)" }
+    }
+
     git -C $dest checkout --quiet --detach $item.Sha
     if ($LASTEXITCODE -ne 0) { throw "checkout failed: $($item.Sha)" }
     $actual = (git -C $dest rev-parse HEAD).Trim()
