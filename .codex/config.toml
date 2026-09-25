@@ -35,6 +35,7 @@ memories = false
 fast_mode = false
 apps = false
 plugins = false
+remote_plugin = false
 hooks = false
 skill_search = false
 
@@ -48,6 +49,7 @@ shell_tool = true
 include_instructions = false
 
 [memories]
-# Defense in depth: even if the memories feature is enabled by another layer,
-# do not inject prior Codex memories into this project session.
+# Defense in depth: do not inject prior memories and do not turn this temporary
+# constructor session into input for future memory generation.
 use_memories = false
+generate_memories = false
