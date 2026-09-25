@@ -114,7 +114,7 @@ if (-not (Test-Path -LiteralPath $userConfig -PathType Leaf)) {
     if ($userRaw -match '(?m)^\s*cli_auth_credentials_store\s*=\s*"file"\s*$') {
         Ok "dedicated auth store is file-scoped to CODEX_HOME"
     } else {
-        Fail "dedicated CODEX_HOME must use cli_auth_credentials_store=\"file\""
+        Fail 'dedicated CODEX_HOME must use cli_auth_credentials_store="file"'
     }
 
     if ($userRaw -match '(?m)^\s*trust_level\s*=\s*"trusted"\s*$') {
