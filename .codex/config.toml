@@ -1,0 +1,35 @@
+# OCTOPUS project-local Codex policy.
+# Loaded by Codex only when this repository is trusted.
+# Keep model intelligence at the root; implementation delegation is handled by
+# OCTOPUS development.task/Kilo, not Codex native subagents.
+
+model = "gpt-6-astra"
+model_reasoning_effort = "high"
+model_reasoning_summary = "concise"
+
+# Use the user's ChatGPT Codex entitlement for the root session; do not silently
+# switch this project to API-key billing.
+forced_login_method = "chatgpt"
+
+# Human remains the approval authority. Never use the automatic approval-review
+# subagent, which would add another model loop.
+approval_policy = "on-request"
+approvals_reviewer = "user"
+
+# Codex may edit the checked-out workspace. Network is available to fetch only
+# explicitly pinned upstream sources named in AGENTS/CODEX_START.
+sandbox_mode = "workspace-write"
+web_search = "disabled"
+
+[sandbox_workspace_write]
+network_access = true
+
+[agents]
+# Critical quota rule: native Codex multi-agent tools are disabled.
+# Cheap implementation workers are spawned by OCTOPUS/Kilo instead.
+enabled = false
+
+[features]
+# Do not let a skill silently install missing MCP dependencies.
+skill_mcp_dependency_install = false
+shell_tool = true
