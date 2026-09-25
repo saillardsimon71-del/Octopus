@@ -60,7 +60,12 @@ if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
         'goals = false',
         'memories = false',
         'fast_mode = false',
+        'apps = false',
+        'plugins = false',
+        'hooks = false',
+        'skill_search = false',
         'skill_mcp_dependency_install = false',
+        'include_instructions = false',
         'use_memories = false'
     )
     $missing = @($required | Where-Object { -not $raw.Contains($_) })
