@@ -19,6 +19,28 @@ function Has-Command([string]$Name) {
     return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Invoke-NativeCapture([string]$FilePath, [string[]]$Arguments) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.Arguments = ($Arguments | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+    }) -join ' '
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    [pscustomobject]@{
+        ExitCode = $proc.ExitCode
+        Output = (($stdout + [Environment]::NewLine + $stderr).Trim())
+    }
+}
+
 # Repo -------------------------------------------------------------------------------
 $Repo = (git rev-parse --show-toplevel 2>$null | Out-String).Trim()
 if (-not $Repo) { throw 'Run this script from inside OCTOPUS.' }
@@ -112,6 +134,21 @@ foreach ($DirName in @('rules', 'skills', 'plugins')) {
     }
 }
 
+$ProjectConfig = Join-Path $Repo '.codex\config.toml'
+if (Test-Path -LiteralPath $ProjectConfig -PathType Leaf) {
+    $ProjectRaw = [System.IO.File]::ReadAllText($ProjectConfig)
+    if ($ProjectRaw -match '(?ms)\[skills\.bundled\]\s*enabled\s*=\s*false') {
+        Add-Ok 'bundled skills disabled in project config'
+    } else {
+        Add-Fail 'bundled skills are not explicitly disabled'
+    }
+    if ($ProjectRaw -match '(?ms)\[cloud\.skills\]\s*enabled\s*=\s*false') {
+        Add-Ok 'cloud skills disabled in project config'
+    } else {
+        Add-Fail 'cloud skills are not explicitly disabled'
+    }
+}
+
 # Codex CLI --------------------------------------------------------------------------
 if (-not (Has-Command 'codex')) {
     Add-Fail 'codex CLI not found'
@@ -125,13 +162,10 @@ if (-not (Has-Command 'codex')) {
         Add-Fail ('cannot parse Codex version: ' + $VersionText)
     }
 
-    $SavedPreference = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    $Login = (& codex login status 2>$null | Out-String).Trim()
-    $LoginCode = $LASTEXITCODE
-    $ErrorActionPreference = $SavedPreference
-
-    if (($LoginCode -eq 0) -and ($Login -match 'Logged in using ChatGPT')) {
+    $CodexExe = (Get-Command codex -ErrorAction Stop).Source
+    $LoginResult = Invoke-NativeCapture -FilePath $CodexExe -Arguments @('login', 'status')
+    $Login = $LoginResult.Output
+    if (($LoginResult.ExitCode -eq 0) -and ($Login -match 'Logged in using ChatGPT')) {
         Add-Ok 'Codex authenticated through ChatGPT'
     } else {
         Add-Fail ('Codex ChatGPT auth not confirmed: ' + $Login)
