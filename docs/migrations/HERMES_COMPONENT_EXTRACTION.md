@@ -77,6 +77,46 @@ Cible OCTOPUS:
 
 Décision: ADAPTER, pas copier aveuglément tout le discovery/plugin system.
 
+#### Tranche D — registre uniquement (2026-09-26)
+
+`agents/tool_registry.py::ToolRegistry` remplace la table passive et les
+fonctions de description/validation de `agents/runtime.py`. `runtime.TOOLS`
+est l'unique instance, compatible avec les consommateurs existants du mapping
+`nom -> desc/params/fn`. Les anciens noms de fonctions référencent ses méthodes.
+`dispatch(nom, args, allowed_tools)` renvoie `(refus, résultat)` ; il applique
+le filtre de mission et le schéma avant le handler, sans retry. Les exceptions
+sont limitées à 2048 caractères ; l'annulation humaine remonte intacte.
+Les résultats normaux restent intacts, avec leur vue de contexte bornée existante.
+
+Le dialecte de paramètres existant est conservé (optionnels, unions, IDs,
+champs supplémentaires tolérés) ; un type de schéma inconnu ne valide plus
+arbitrairement une valeur. Les 17 handlers et leurs politiques restent en place.
+La disponibilité reste vérifiée par les handlers : cette tranche n'ajoute ni
+probes, ni toolsets, ni discovery, ni dépendance runtime Hermes. Elle ne promeut
+pas `capabilities.py` en autorité, conformément à la constitution actuelle.
+
+Réduction de complexité : le runtime ne possède plus sa propre séquence de
+filtrage/validation/exécution ; le registre porte ce contrat unique. L'extraction
+ajoute un module et 31 lignes de production nettes : le gain porte sur la
+localisation du contrat, pas sur le volume de code ni sur un gain économique.
+Le pattern vient du pin Hermes indiqué ci-dessus ; l'implémentation reprend le
+code OCTOPUS existant, sans copie substantielle de code upstream.
+Les tests H3 existants sont conservés ; les nouveaux cas vérifient le refus avant
+effet, l'unicité du registre, les résultats intacts, les erreurs bornées et l'arrêt.
+
+Validation exécutée dans le sandbox Astra : 383 tests ciblés passent
+(`cache/astra-relay/phase-d-targeted.log`). L'unique suite complète termine avec
+1181 succès, 8 ignorés, 31 échecs (`cache/astra-relay/phase-d-full.log`, code 1).
+Les échecs concernent `test_dev_worker` (21), `test_night_shift` (1),
+`test_promotion` (8) et `test_stop_memory` (1). Le log montre des clones Git
+bloqués par `sh.exe: couldn't create signal pipe, Win32 error 5` ; le test
+d'arrêt dépasse sa limite de 15 secondes (22,08 s), sans cause établie ici.
+La baseline fournie par le host hors sandbox passait au HEAD
+`8ad10bc53767e1af3359a4e113234ffc86332e4b` ; elle ne valide pas ce diff.
+Prochaine observation nécessaire : résultat de ces frontières partagées hors
+sandbox, sur le checkpoint exact. Aucune validation globale verte ni promotion
+n'est revendiquée.
+
 ### P0 — MCP boundary
 
 Upstream:

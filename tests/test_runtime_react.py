@@ -15,6 +15,65 @@ REAL_QUERIES = [  # run ORBIT du 16/09, 14:07-14:10
 ]
 
 
+def test_registry_is_the_single_runtime_source(monkeypatch):
+    from agents.tool_registry import ToolRegistry
+
+    assert isinstance(runtime.TOOLS, ToolRegistry)
+    for method in (runtime.tools_desc, runtime._validate_tool_args,
+                   runtime._normalize_allowed_tools):
+        assert method.__self__ is runtime.TOOLS
+    payload = {"observed": False, "nested": {"value": None}}
+    monkeypatch.setitem(runtime.TOOLS["resources_status"], "fn", lambda args: payload)
+    refusal, result = runtime.TOOLS.dispatch("resources_status", {}, {"resources_status"})
+    assert refusal is None
+    assert result is payload  # No rewriting of evidence or result metadata.
+
+
+@pytest.mark.parametrize("tool,args,allowed,reason", [
+    ("missing", {}, None, "inconnu"),
+    ("request_spend", {}, set(), "interdit par la politique"),
+    ("request_spend", [], None, "args doit être un objet"),
+    ("request_spend", {}, None, "argument obligatoire manquant"),
+    ("request_spend", {"amount": True, "currency": "EUR", "purpose": "test"},
+     None, "type attendu float"),
+])
+def test_registry_dispatch_refuses_before_handler(monkeypatch, tool, args, allowed, reason):
+    monkeypatch.setitem(runtime.TOOLS["request_spend"], "fn",
+                        lambda args: pytest.fail("refused tool executed"))
+    refusal, result = runtime.TOOLS.dispatch(tool, args, allowed)
+    assert reason in refusal
+    assert result is None
+
+
+def test_registry_rejects_unknown_schema_type(monkeypatch):
+    monkeypatch.setitem(runtime.TOOLS["recall"]["params"], "key", "unsupported")
+    monkeypatch.setitem(runtime.TOOLS["recall"], "fn",
+                        lambda args: pytest.fail("invalid schema executed"))
+    refusal, result = runtime.TOOLS.dispatch("recall", {"key": "value"})
+    assert "type attendu unsupported" in refusal
+    assert result is None
+
+
+def test_registry_bounds_errors_without_retry_and_preserves_cancellation(monkeypatch):
+    calls = []
+    error = RuntimeError("x" * 10000)
+
+    def fail(args):
+        calls.append(args)
+        raise error
+
+    monkeypatch.setitem(runtime.TOOLS["recall"], "fn", fail)
+    with pytest.raises(RuntimeError) as caught:
+        runtime.TOOLS.dispatch("recall", {"key": "test"})
+    assert len(str(caught.value)) == 2048
+    assert len(calls) == 1
+    error = runtime.cancel.Cancelled("stop")
+    with pytest.raises(runtime.cancel.Cancelled) as caught:
+        runtime.TOOLS.dispatch("recall", {"key": "test"})
+    assert caught.value is error
+    assert len(calls) == 2
+
+
 def test_equivalent_queries_share_a_key():
     assert len({runtime.query_key(q) for q in REAL_QUERIES}) == 1
     assert runtime.query_key("relance facture impayée") != runtime.query_key("injonction de payer")

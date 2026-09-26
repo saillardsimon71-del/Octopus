@@ -20,6 +20,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 from octopus import journal, llm
 
 from . import cancel, config, db, deepseek, web_guard
+from .tool_registry import ToolRegistry
 
 _ROLE: contextvars.ContextVar[str] = contextvars.ContextVar("podalux_role", default="RUNTIME")
 _SEARCHES: contextvars.ContextVar[dict | None] = contextvars.ContextVar("podalux_searches", default=None)
@@ -766,7 +767,7 @@ def _request_spend(args):
                                    experiment_id=int(args["experiment_id"]) if args.get("experiment_id") else None)
 
 
-TOOLS = {
+TOOLS = ToolRegistry({
     "search": {"desc": "recherche web (liens) ; site est un domaine optionnel réellement appliqué, ex. bpifrance.fr", "params": {"query": "str", "site": "str?"}, "fn": _search},
     "browse": {"desc": "ouvre une page dans TON Chrome réel (comptes Stripe/Reddit/X/Fiverr/YouTube connectés) et la décrit", "params": {"url": "str"}, "fn": _browse},
     "ask_human": {"desc": "demande confirmation/info à l'humain", "params": {"question": "str"}, "fn": _ask_human},
@@ -784,65 +785,13 @@ TOOLS = {
     "resources_status": {"desc": "inventaire des ressources reelles disponibles (comptes, argent, audiences, machines) avec leur etat constate, leur acces et ce qui manque", "params": {"capability": "str?", "state": "str?"}, "fn": _resources_status},
     "request_resource": {"desc": "demande a l'humain de creer, connecter ou autoriser une ressource manquante (login, oauth, 2fa, kyc, signature, validation bancaire) ; l'operation reprend seule apres la reponse", "params": {"key": "str", "need": "str", "question": "str", "label": "str?", "kind": "str?"}, "fn": _request_resource},
     "request_spend": {"desc": "demande l'autorisation de dépenser (ne paie rien) ; refusée hors enveloppe accordée", "params": {"amount": "float", "currency": "str", "purpose": "str", "experiment_id": "int?"}, "fn": _request_spend},
-}
+})
 
 
-def tools_desc(allowed_tools: set[str] | None = None, *, legacy_search: bool = False) -> str:
-    items = TOOLS.items() if allowed_tools is None else (
-        (name, spec) for name, spec in TOOLS.items() if name in allowed_tools
-    )
-    lines = []
-    for name, spec in items:
-        if legacy_search and name == "search":
-            lines.append("- search(query) : recherche web (liens)")
-        else:
-            lines.append(f"- {name}({', '.join(spec['params'])}) : {spec['desc']}")
-    return "\n".join(lines)
-
-
-def _matches_tool_type(value, token: str) -> bool:
-    if token.endswith("_id"):
-        token = "int"
-    checks = {
-        "str": lambda v: isinstance(v, str),
-        "int": lambda v: isinstance(v, int) and not isinstance(v, bool),
-        "float": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
-        "list": lambda v: isinstance(v, list),
-        "dict": lambda v: isinstance(v, dict),
-        "bool": lambda v: isinstance(v, bool),
-    }
-    check = checks.get(token)
-    return True if check is None else check(value)
-
-
-def _validate_tool_args(tool: str, args) -> str | None:
-    """Validation structurelle minimale des paramètres déclarés dans TOOLS."""
-    if not isinstance(args, dict):
-        return f"args doit être un objet, reçu {type(args).__name__}"
-    for name, declared in TOOLS[tool]["params"].items():
-        declared = str(declared)
-        variants = declared.split("|")
-        optional = all(v.endswith("?") for v in variants)
-        clean = [v[:-1] if v.endswith("?") else v for v in variants]
-        if name not in args or args[name] is None:
-            if optional:
-                continue
-            return f"argument obligatoire manquant : {name}"
-        value = args[name]
-        if not any(_matches_tool_type(value, token) for token in clean):
-            expected = "|".join(clean)
-            return f"argument {name} : type attendu {expected}, reçu {type(value).__name__}"
-    return None
-
-
-def _normalize_allowed_tools(allowed_tools) -> set[str] | None:
-    if allowed_tools is None:
-        return None
-    allowed = set(allowed_tools)
-    unknown = sorted(allowed - set(TOOLS))
-    if unknown:
-        raise ValueError(f"outils inconnus dans allowed_tools : {', '.join(unknown)}")
-    return allowed
+# Compatibility names reference the single registry, not parallel implementations.
+tools_desc = TOOLS.describe
+_validate_tool_args = TOOLS.validate
+_normalize_allowed_tools = TOOLS.normalize_allowed
 
 
 ROLES = {
@@ -1349,26 +1298,18 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
             steps.append({"step": i + 1, "tool": tool, "result": "inconnu"})
             continue
 
-        refusal = None
-        if allowed_tools is not None and tool not in allowed_tools:
-            refusal = f"outil {tool} interdit par la politique de cette mission"
-        else:
-            refusal = _validate_tool_args(tool, args)
-
-        result = None
-        if refusal is not None:
-            result = {"refused": True, "tool": tool, "reason": refusal}
+        refusal, result = None, None
+        try:
+            refusal, result = TOOLS.dispatch(tool, args, allowed_tools)
+            if refusal is not None:
+                result = {"refused": True, "tool": tool, "reason": refusal}
+                db.post(role, f"refus outil {tool} : {refusal}")
             result_str = _tool_result_view(tool, result)
-            db.post(role, f"refus outil {tool} : {refusal}")
-        else:
-            try:
-                result = TOOLS[tool]["fn"](args)
-                result_str = _tool_result_view(tool, result)
-            except cancel.Cancelled:
-                db.post(role, "arrêt demandé par l'humain — fin de l'agent")
-                return {"role": role, "steps": steps, "final": "(arrêt demandé)"}
-            except Exception as e:
-                result_str = f"erreur : {e}"
+        except cancel.Cancelled:
+            db.post(role, "arrêt demandé par l'humain — fin de l'agent")
+            return {"role": role, "steps": steps, "final": "(arrêt demandé)"}
+        except Exception as e:
+            result_str = f"erreur : {str(e)[:2048]}"
         if (
             search_browse_lockstep
             and refusal is None
