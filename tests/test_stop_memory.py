@@ -66,7 +66,10 @@ def test_mission_stops_before_delegating(monkeypatch):
 
     monkeypatch.setattr(deepseek, "call_json", call_json)
     result = runtime.run_mission("objectif")
-    assert calls == ["planification"] and result["rapport"] == "(arrêt demandé)"
+    assert calls == ["planification"]
+    assert result["execution_status"] == "cancelled"
+    assert result["synthesis_status"] == "degraded"
+    assert result["results"] == []
 
 
 def test_subprocess_tree_is_killed_on_stop(tmp_path):

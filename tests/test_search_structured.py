@@ -648,7 +648,7 @@ def test_lockstep_browses_a_native_url(monkeypatch):
     monkeypatch.setitem(runtime.TOOLS["browse"], "fn",
                         lambda args: seen.append(args["url"]) or {"texte": "preuve " + "x" * 200})
     from agents import deepseek
-    actions = iter([{"tool": "search", "args": {"query": "mission déménagement"}}])
+    actions = iter([{"tool": "search", "args": {"query": "mission déménagement"}}, {"final": "ok"}])
     monkeypatch.setattr(deepseek, "call_json", lambda *a, **k: next(actions))
 
     result = runtime.run_agent("SOUT", "chercher", max_steps=3, allowed_tools={"search", "browse"},
@@ -656,6 +656,7 @@ def test_lockstep_browses_a_native_url(monkeypatch):
 
     assert seen == ["https://example.org/offre/(42)"]
     assert result["steps"][1]["lockstep_forced"] is True
+    assert result["execution_status"] == "completed"
 
 
 def test_search_failure_does_not_produce_urls(monkeypatch):
