@@ -181,18 +181,44 @@ Validation ciblée exécutée : **330 tests passent** en 54,28 s ; log
 Oracle payé entièrement simulé : deux sous-agents coûtent chacun 0,70 USD dans
 une enveloppe commune de 2 USD ; le troisième est bloqué avant transport. Les
 oracles zéro coût, absence d'evidence, arrêt du pool, limites de prompt, gate de
-sources et permissions sont conservés. La validation complète finale reste à
-exécuter après délégation et revue Step ; ne pas réutiliser le baseline comme
-preuve de validation de ces changements.
+sources et permissions sont conservés.
 
-Ticket mécanique prévu, uniquement `octopus/strategy_cli.py` : ajouter
-`--llm-budget-usd` comme alias de `--budget-usd`, destination inchangée
-`budget_usd`, et clarifier l'aide (plafond LLM distinct de toute dépense externe ;
-profil explicite nécessaire pour le payant). Aucun changement de défaut, de
-validation, de catalogue, d'allowlist, de permission ou de handler dans ce ticket.
-Oracle de non-régression : `tests/test_strategy.py`, en particulier le passage
-explicite de `zero_cost/0` et `flash_fallback/2` sans modification de l'allowlist.
-Astra vérifiera aussi les deux orthographes et les valeurs invalides à la revue.
+Ticket mécanique Step terminé et relu par Astra : commit
+`83b033081cfd66aff1037899660f30fd59f20de9`, seul fichier
+`octopus/strategy_cli.py`. `--llm-budget-usd` est désormais un alias de
+`--budget-usd` ; les deux alimentent le même plafond LLM, sans autoriser de
+dépense externe ni changer le profil par défaut. Le premier essai de relay a
+été refusé avant exécution (cible pytest avec `::`) ; le ticket corrigé a passé
+85 tests dans le sandbox et le gate technique `ACCEPTED`. Astra a inspecté le
+diff, la filiation du commit, les arbres propres et le hash de la preuve, puis
+exécuté 97 tests hors ligne, dont les deux alias et leurs valeurs invalides
+(`cache/astra-relay/phase-d-cli-review.log`). Les cas CLI sont maintenant
+conservés dans `tests/test_strategy.py` : profils explicites, zéro, 2 USD,
+absence de plafond, NaN, infinis et valeurs négatives refusées avant enqueue.
+
+Validation finale exécutée une seule fois sous sandbox Astra : **1212 succès,
+8 ignorés, 34 échecs**, code 1, 164,92 s
+(`cache/astra-relay/mission-contract-final-full.log`). Trois oracles historiques
+ont ensuite été corrigés : le mock SEARCH/BROWSE fournit maintenant sa réponse
+finale au lieu de dépendre d'un `StopIteration` masqué ; le scénario multi-business
+exige l'absence d'evidence automatique pour son rapport sans acquisition ; le test
+d'annulation vérifie `cancelled`, `degraded` et zéro délégation plutôt que l'ancien
+texte du rapport. La sélection après correction passe **270 tests en 18,22 s**
+(`cache/astra-relay/mission-contract-final-regressions.log`), dont les frontières
+de prompt et d'evidence. Les cas CLI seuls passent aussi 54 tests.
+
+Les 31 autres échecs de la suite sont dans `test_dev_worker` (21),
+`test_night_shift` (1), `test_promotion` (8) et le test d'arrêt de sous-processus
+(1), comme lors de la tranche registre. Le log et la base temporaire d'un test
+de développement montrent le refus du clone par `sh.exe: couldn't create signal
+pipe, Win32 error 5`. L'arrêt prend 22,08 s pour une limite de 15 s ; sa cause
+n'est pas établie ici. Aucun de ces tests n'a été ignoré ou assoupli. La suite
+complète n'a pas été relancée ; une validation globale hors sandbox par l'hôte
+reste nécessaire sur le checkpoint final. Le baseline vert ne valide pas ces
+changements. `git diff --check` passe.
+La prochaine observation utile reste une mission supervisée avec acquisitions
+lisibles et revue humaine de leur pertinence ; elle n'est pas lancée pendant
+cette maintenance. Aucun test vert ne prouve une opportunité commerciale.
 
 ### P0 — MCP boundary
 

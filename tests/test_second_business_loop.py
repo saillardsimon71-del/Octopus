@@ -43,11 +43,12 @@ def test_second_business_runs_the_whole_strategic_loop(transport, tmp_path):
     assert done["id"] == task_id and done["status"] == "done", done["error"]
     output = done["output"]
     assert output["business"] == BUSINESS and output["rapport_nature"] == "inferred"
-    auto_evidence = output["strategy"].pop("evidence_id")
+    # Un rapport sans acquisition ne prouve pas une opportunité, même pour un autre business.
+    assert output["opportunity_status"] == "inconclusive"
+    assert output["execution_status"] == "completed"
+    assert "evidence_id" not in output["strategy"]
+    assert strategy.list_items("evidence", BUSINESS) == []
     assert output["strategy"] == {"objective_id": objective, "hypothesis_id": hypothesis, "experiment_id": experiment}
-    recorded = strategy.get("evidence", auto_evidence, BUSINESS)
-    assert recorded["nature"] == "inferred" and recorded["source_ref"] == f"task#{task_id}"
-    assert recorded["observation"] == output["rapport"] and recorded["origin_task_id"] == task_id
     prompt = json.dumps(transport.calls[0][1]["messages"], ensure_ascii=False)
     assert "Identifier 3 ateliers" in prompt and "Signer un premier atelier partenaire" in prompt
     assert {r["business"] for r in journal.query("SELECT business FROM runs")} == {BUSINESS}
@@ -55,19 +56,17 @@ def test_second_business_runs_the_whole_strategic_loop(transport, tmp_path):
     assert ("experiment", "task") in {(l["from_type"], l["to_type"])
                                       for l in strategy.links(BUSINESS, "experiment", experiment)}
 
-    # 7. preuves : le rapport enregistré automatiquement (inférence) + une donnée fournie par l'humain
-    assert ("evidence", "experiment") in {(l["from_type"], l["to_type"])
-                                          for l in strategy.links(BUSINESS, "evidence", auto_evidence)}
+    # 7. Une donnée fournie par l'humain reste non vérifiée, distincte du rapport.
     evidence = strategy.create("evidence", BUSINESS, "Retour d'un atelier", created_by="human",
                                nature="unverified", source_type="human", observation="Un atelier a répondu")
     strategy.link(BUSINESS, "evidence", evidence, "experiment", experiment, "informs")
 
     # 8. résultat de l'expérience et décision candidate, approuvée par l'humain
     strategy.transition("experiment", experiment, BUSINESS, "completed", actor="human", outcome="inconclusive",
-                        actual_result="Liste préparée ; aucun contact réel effectué")
+                        actual_result="Rapport non sourcé ; aucun contact réel effectué")
     decision = strategy.create("decision", BUSINESS, "Contacter les ateliers", created_by="orbit",
                                origin_task_id=task_id, decision="Préparer un message d'essai gratuit",
-                               rationale="Preuve faible (inférence du modèle) : validation humaine requise")
+                               rationale="Déclaration humaine non vérifiée : validation requise")
     strategy.link(BUSINESS, "decision", decision, "evidence", evidence, "considers")
     strategy.transition("decision", decision, BUSINESS, "approved", actor="human")
 
