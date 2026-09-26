@@ -270,7 +270,7 @@ def test_business_signal_focus_upgrades_evidence_selector_for_subagents(monkeypa
 
     def fake_run_agent(role, goal, max_steps=10, conversational=False, **kwargs):
         seen.append(kwargs.get("search_browse_selector"))
-        return {"role": role, "steps": [], "final": "aucune preuve"}
+        return {"role": role, "steps": [], "final": "aucune preuve", "execution_status": "completed"}
 
     monkeypatch.setattr(runtime, "run_agent", fake_run_agent)
 
@@ -1181,3 +1181,80 @@ def test_mission_does_not_hide_non_gateway_synthesis_bug(monkeypatch):
     monkeypatch.setattr(deepseek, "call_json", call_json)
     with pytest.raises(RuntimeError, match="bug de code synthèse"):
         runtime.run_mission("objectif", max_steps_per_agent=2)
+
+
+@pytest.mark.parametrize("stop", ["budget_exceeded", "cancelled", "llm_unavailable", "step_limit"])
+def test_stopped_empty_mission_never_synthesizes(monkeypatch, stop):
+    calls = []
+    def call(*args, **kwargs):
+        calls.append(args[1])
+        return {"tasks": [{"role": "SOUT", "task": "collect"}]}
+    monkeypatch.setattr(deepseek, "call_json", call)
+    monkeypatch.setattr(runtime, "run_agent", lambda *a, **k: {
+        "steps": [], "final": "unavailable", "execution_status": stop})
+    out = runtime.run_mission("collect")
+    assert out["synthesis_status"] == "degraded"
+    assert calls == ["planification"]
+
+
+def test_empty_plan_never_synthesizes(monkeypatch):
+    calls = []
+    def call(*args, **kwargs):
+        calls.append(args[1])
+        return {"tasks": []}
+    monkeypatch.setattr(deepseek, "call_json", call)
+    out = runtime.run_mission("collect")
+    assert out["execution_status"] == "no_work"
+    assert out["synthesis_status"] == "degraded"
+    assert calls == ["planification"]
+
+
+def test_react_pool_exhaustion_stops_mission_and_retains_acquired_work(monkeypatch):
+    calls = []
+    def call(*args, **kwargs):
+        calls.append(args[1])
+        if args[1] == "planification":
+            return {"tasks": [{"role": "SOUT", "task": "collect"},
+                              {"role": "CONVERT", "task": "analyze"}]}
+        if calls.count("action") == 1:
+            return {"tool": "resources_status", "args": {}}
+        raise llm.NoEligibleModel("agent.react_step", "zero_cost", [
+            {"model": "free-route", "reason": "429 cooldown"}])
+    monkeypatch.setattr(deepseek, "call_json", call)
+    monkeypatch.setitem(runtime.TOOLS["resources_status"], "fn", lambda a: {"available": []})
+    out = runtime.run_mission("collect")
+    assert out["execution_status"] == "llm_unavailable"
+    assert out["synthesis_status"] == "degraded"
+    assert "NoEligibleModel" in out["synthesis_error"]
+    assert len(out["results"]) == 1
+    assert len(out["results"][0]["steps"]) == 1
+    assert calls == ["planification", "action", "action"]
+
+
+def test_react_does_not_disguise_programming_bug_as_step_limit(monkeypatch):
+    def broken(*a, **k):
+        raise RuntimeError("programming bug")
+    monkeypatch.setattr(deepseek, "call_json", broken)
+    with pytest.raises(RuntimeError, match="programming bug"):
+        runtime.run_agent("SOUT", "collect")
+
+
+
+def test_planner_pool_exhaustion_is_durable_degradation(monkeypatch):
+    def call(*a, **k):
+        raise llm.NoEligibleModel("agent.plan", "zero_cost", [])
+    monkeypatch.setattr(deepseek, "call_json", call)
+    out = runtime.run_mission("collect")
+    assert out["synthesis_status"] == "degraded"
+    assert out["execution_status"] == "llm_unavailable"
+    assert out["results"] == []
+
+
+@pytest.mark.parametrize("rapport", [None, "", "  ", 42])
+def test_empty_or_nontext_synthesis_is_not_validated(monkeypatch, rapport):
+    actions = iter([{"tasks": [{"role": "SOUT", "task": "analyze"}]},
+                    {"final": "analysis"}, {"rapport": rapport}])
+    monkeypatch.setattr(deepseek, "call_json", lambda *a, **k: next(actions))
+    out = runtime.run_mission("analyze")
+    assert out["synthesis_status"] == "degraded"
+    assert out["execution_status"] == "invalid_synthesis"

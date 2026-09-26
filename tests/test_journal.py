@@ -118,3 +118,18 @@ def test_agent_stops_when_its_run_budget_is_spent(monkeypatch):
     monkeypatch.setattr(deepseek, "call_json", call_json)
     result = runtime.run_agent("SOUT", "veille", max_steps=5)
     assert result["final"] == "(budget dépassé)" and len(calls) == 2
+
+
+
+def test_zero_budget_allows_free_agent_steps(monkeypatch):
+    calls = []
+    def call(*a, **k):
+        calls.append(1)
+        return {"final": "done"}
+    monkeypatch.setattr(deepseek, "call_json", call)
+    with journal.run("atelier", "task", budget_usd=0, profile="zero_cost") as ctx:
+        result = runtime.run_agent("SOUT", "collect")
+        assert not journal.budget_exhausted(ctx)
+        assert journal.subtree_cost(ctx.id) == 0
+    assert result["execution_status"] == "completed"
+    assert len(calls) == 1

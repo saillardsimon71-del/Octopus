@@ -359,6 +359,9 @@ def orbit_mission(ctx):
                 strategy.link(ctx.business, kind, context[f"{kind}_id"], "task", ctx.id, "executed_by")
         goal = f"{context['brief']}\n\n{goal}"
     allowed_tools = ctx.input.get("allowed_tools")
+    # Durable ORBIT missions are economic work. Opt-out keeps analysis available,
+    # but cannot qualify an opportunity or create an economic mission evidence.
+    signal_focus = bool(ctx.input.get("business_signal_focus", True))
     result = _run(ctx, lambda: run_mission(
         goal,
         max_steps_per_agent=int(ctx.input.get("max_steps", 8)),
@@ -367,16 +370,21 @@ def orbit_mission(ctx):
         profile=ctx.input.get("profile"),
         search_browse_lockstep=bool(ctx.input.get("search_browse_lockstep", False)),
         search_browse_selector=str(ctx.input.get("search_browse_selector") or "first"),
-        business_signal_focus=bool(ctx.input.get("business_signal_focus", False)),
+        business_signal_focus=signal_focus,
         business_signal_target=max(1, int(ctx.input.get("business_signal_target", 3))),
     ))
-    synthesis_status = result.get("synthesis_status", "validated")
+    synthesis_status = result.get("synthesis_status", "degraded")
     output = {
         "business": ctx.business,
         "rapport": result.get("rapport"),
         "rapport_nature": "inferred" if synthesis_status == "validated" else "unavailable",
         "subtasks": len(result.get("plan") or []),
         "synthesis_status": synthesis_status,
+        "execution_status": result.get("execution_status", "unknown"),
+        "opportunity_status": (
+            "source_supported" if signal_focus and synthesis_status == "validated"
+            and result.get("business_signals") else "inconclusive" if signal_focus else "not_evaluated"
+        ),
     }
     objective_result = _mission_objective_result(
         result.get("results") or [],
@@ -384,7 +392,10 @@ def orbit_mission(ctx):
     )
     if objective_result is not None:
         output["objective_result"] = objective_result
-    if ctx.input.get("business_signal_focus"):
+    if signal_focus:
+        # Keep the acquired text behind the citations in the durable task output,
+        # including successful runs; the compact trace is only a diagnostic view.
+        output["results"] = result.get("results") or []
         target = max(1, int(ctx.input.get("business_signal_target", 3)))
         signals = result.get("business_signals") or []
         rejected = result.get("business_signal_rejections") or []
@@ -462,7 +473,9 @@ def orbit_mission(ctx):
     if context:
         output["strategy"] = {k: context[k] for k in ("objective_id", "hypothesis_id", "experiment_id")}
 
-    if context and output["rapport"] and synthesis_status == "validated":
+    if (context and output["rapport"] and synthesis_status == "validated"
+            and output["execution_status"] == "completed"
+            and output["opportunity_status"] == "source_supported"):
         target = next(kind for kind in ("experiment", "hypothesis", "objective") if context[f"{kind}_id"] is not None)
 
         def record():
