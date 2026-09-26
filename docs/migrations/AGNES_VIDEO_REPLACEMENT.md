@@ -225,3 +225,18 @@ No independent service launch or live generation was performed in phase C.
 Next operational observation: verify the pinned service starts on loopback;
 only after explicit human authorization, observe a real task and verify its
 artifact and actual charge. Deployment and economic acceptance remain unproven.
+
+### Validation at host resume — 2026-09-26
+
+The host saved phase C at `8435a8855c4a47313e56e029998baedb291dd390` and
+reported baseline exit code `0` (`cache/astra-relay/baseline-pytest.log`). The
+earlier sandbox full-suite attempt was interrupted with failures visible but
+without a final diagnostic summary; it is not evidence of a successful run or
+of their cause. That suite was not rerun in the model loop after resume.
+
+Final review rejects invalid service ports (including zero) and converts malformed
+task-status responses into explicit contract errors. After these bounded fixes,
+59 targeted cases passed (exit code `0`): `tests/test_agnes.py`,
+`tests/test_actions.py`, and `tests/test_browser_actions.py`. Output is retained in
+`cache/astra-relay/phase-c-targeted.log`. The host's full-suite result precedes
+these final fixes; only the targeted suite validates the final delta.
