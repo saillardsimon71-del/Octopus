@@ -26,12 +26,15 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 def _base_url(value: str) -> str:
-    parts = urlsplit(value)
+    try:
+        parts = urlsplit(value)
+        port = parts.port if parts.port is not None else 8765
+    except (TypeError, ValueError):
+        raise StrategyError("Invalid Agnes origin") from None
     if (parts.scheme != "http" or parts.hostname not in {"127.0.0.1", "localhost", "::1"}
             or parts.username is not None or parts.password is not None
             or parts.path not in {"", "/"} or parts.query or parts.fragment):
         raise StrategyError("Agnes requires a loopback HTTP origin without credentials")
-    port = parts.port or 8765
     if not 1 <= port <= 65535:
         raise StrategyError("Invalid Agnes port")
     # Resolve localhost to a literal loopback; do not depend on DNS or proxy env.
@@ -87,7 +90,7 @@ def status(task_id: str, *, base_url: str = DEFAULT_URL) -> dict:
     task_id = _task_id(task_id)
     result = _request(base_url, f"/api/tasks/{task_id}")
     if (result.get("task_id") != task_id or result.get("task_type") != "simple"
-            or result.get("status") not in {"pending", "queued", "running", "completed", "failed"}):
+            or result.get("status") not in ("pending", "queued", "running", "completed", "failed")):
         raise StrategyError("Unexpected Agnes task response")
     return {"task_id": task_id, "status": result["status"],
             "source_ref": _base_url(base_url) + f"/api/tasks/{task_id}"}

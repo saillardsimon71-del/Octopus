@@ -169,11 +169,20 @@ def test_probe_and_loopback_transport(http):
 
 
 @pytest.mark.parametrize("url", ["https://127.0.0.1:8765", "http://example.com", "http://127.0.0.1.evil",
-                                  "http://user:secret@localhost", "http://localhost/config", "http://localhost?key=x"])
+                                  "http://user:secret@localhost", "http://localhost/config", "http://localhost?key=x",
+                                  "http://localhost:0", "http://localhost:65536", "http://localhost:secret",
+                                  "http://[::1"])
 def test_nonlocal_or_secret_urls_are_rejected(http, url):
     with pytest.raises(StrategyError):
         agnes.probe(url)
     http.assert_not_called()
+
+
+@pytest.mark.parametrize("malformed", [[], {}, None, "unknown"])
+def test_malformed_task_status_is_a_contract_error(http, malformed):
+    reply(http, {"task_id": TASK, "task_type": "simple", "status": malformed})
+    with pytest.raises(StrategyError, match="task response"):
+        agnes.status(TASK)
 
 
 def test_status_does_not_expose_server_secrets_or_follow_video_urls(http):
