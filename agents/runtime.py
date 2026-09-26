@@ -1237,7 +1237,8 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
     if search_browse_selector not in {"first", "evidence_relevance", "business_signal_relevance"}:
         raise ValueError(f"search_browse_selector inconnu : {search_browse_selector}")
     with journal.run(_business(business), "agent", label=f"{role} : {goal}",
-                     budget_usd=deepseek.config.CYCLE_BUDGET_USD):
+                     budget_usd=None if journal.current_run() and journal.current_run().budgets
+                     else deepseek.config.CYCLE_BUDGET_USD):
         token = _ROLE.set(role)
         try:
             with cancel.scope(), web_guard.session(), _search_cache():
@@ -1265,11 +1266,11 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
     for i in range(max_steps):
         if cancel.requested():
             db.post(role, "arrêt demandé par l'humain — fin de l'agent")
-            return {"role": role, "steps": steps, "final": "(arrêt demandé)"}
+            return {"role": role, "steps": steps, "final": "(arrêt demandé)", "execution_status": "cancelled"}
         # Garde-budget : on arrête l'agent si le budget du run est atteint.
         if _budget_exhausted():
             db.post(role, "budget dépassé — arrêt du run")
-            return {"role": role, "steps": steps, "final": "(budget dépassé)"}
+            return {"role": role, "steps": steps, "final": "(budget dépassé)", "execution_status": "budget_exceeded"}
         forced_lockstep = lockstep_url is not None
         forced_selection = lockstep_selection if forced_lockstep else None
         if forced_lockstep:
@@ -1281,12 +1282,13 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
             try:
                 r = deepseek.call_json(role, "action", MODEL, context + [
                     {"role": "user", "content": "Choisis ta prochaine action (JSON)."}])
-            except Exception as e:
-                steps.append({"step": i + 1, "tool": "erreur", "result": str(e)})
-                break
+            except llm.GatewayError as exc:
+                error = f"{type(exc).__name__}: {exc}"[:1500]
+                return {"role": role, "steps": steps, "final": "(LLM indisponible)",
+                        "execution_status": "llm_unavailable", "execution_error": error}
         if "final" in r:
             db.post(role, f"{done_label} : {str(r['final'])[:120]}")
-            return {"role": role, "steps": steps, "final": r["final"]}
+            return {"role": role, "steps": steps, "final": r["final"], "execution_status": "completed"}
         tool = r.get("tool")
         raw_args = r.get("args")
         args = {} if raw_args is None else raw_args
@@ -1307,7 +1309,7 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
             result_str = _tool_result_view(tool, result)
         except cancel.Cancelled:
             db.post(role, "arrêt demandé par l'humain — fin de l'agent")
-            return {"role": role, "steps": steps, "final": "(arrêt demandé)"}
+            return {"role": role, "steps": steps, "final": "(arrêt demandé)", "execution_status": "cancelled"}
         except Exception as e:
             result_str = f"erreur : {str(e)[:2048]}"
         if (
@@ -1385,7 +1387,7 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
             if isinstance(forced_selection, dict):
                 step_record["lockstep_selection"] = dict(forced_selection)
         steps.append(step_record)
-    return {"role": role, "steps": steps, "final": "(max steps atteint)"}
+    return {"role": role, "steps": steps, "final": "(max steps atteint)", "execution_status": "step_limit"}
 
 
 def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None = None,
@@ -1401,7 +1403,9 @@ def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None
     allowed_tools = _normalize_allowed_tools(allowed_tools)
     if search_browse_selector not in {"first", "evidence_relevance", "business_signal_relevance"}:
         raise ValueError(f"search_browse_selector inconnu : {search_browse_selector}")
-    with journal.run(_business(business), "mission", label=goal, budget_usd=deepseek.config.CYCLE_BUDGET_USD,
+    with journal.run(_business(business), "mission", label=goal,
+                     budget_usd=None if journal.current_run() and journal.current_run().budgets
+                     else deepseek.config.CYCLE_BUDGET_USD,
                      profile=profile):
         with cancel.scope(), web_guard.session(), _search_cache():
             return _run_mission(
@@ -1447,6 +1451,16 @@ def _handoff_payload(result: dict) -> dict:
     }
 
 
+def _mission_unavailable(tasks: list[dict], results: list[dict], status: str, error: str) -> dict:
+    """An execution failure is not a model-authored conclusion or strategy evidence."""
+    output = {"plan": tasks, "results": results,
+              "rapport": "Mission interrompue ; résultats bruts conservés, aucune synthèse validée.",
+              "execution_status": status, "synthesis_status": "degraded",
+              "synthesis_error": str(error)[:1500]}
+    db.decide("ORBIT", "mission_done", {k: v for k, v in output.items() if k not in {"plan", "results"}})
+    return output
+
+
 def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | None = None, *,
                  search_browse_lockstep: bool = False,
                  search_browse_selector: str = "first",
@@ -1455,7 +1469,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     from .search import SEARCH_PURPOSE_BUSINESS, SEARCH_PURPOSE_GENERAL
     pro = deepseek.config.MODEL_PRO
     if cancel.requested():
-        return {"plan": [], "results": [], "rapport": "(arrêt demandé)"}
+        return _mission_unavailable([], [], "cancelled", "Arrêt demandé")
     current = journal.current_run()
     planner_roles = GENERIC_ROLES if current is not None and current.business != DEFAULT_BUSINESS else ROLES
     role_catalog = "\n".join(f"- {name}: {desc}" for name, desc in planner_roles.items())
@@ -1481,10 +1495,13 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         "Réponds en JSON : "
         '{"tasks":[{"role":"...","task":"..."}]}'
     )
-    plan = deepseek.call_json("ORBIT", "planification", pro,
-                              [{"role": "system", "content": plan_sys},
-                               {"role": "user", "content": goal}],
-                              reasoning="high")
+    try:
+        plan = deepseek.call_json("ORBIT", "planification", pro,
+                                  [{"role": "system", "content": plan_sys},
+                                   {"role": "user", "content": goal}],
+                                  reasoning="high")
+    except llm.GatewayError as exc:
+        return _mission_unavailable([], [], "llm_unavailable", f"{type(exc).__name__}: {exc}")
     proposed = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
     # Garde-fou budgétaire, pas une consigne du prompt : au-delà de 5, chaque
     # sous-tâche coûte une boucle ReAct complète de plus.
@@ -1507,12 +1524,15 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             "Ne prescris pas de sources, de requêtes, de segments ou de stratégie, et n'exige pas une "
             "sous-tâche par signal : tu restes libre de déterminer la bonne décomposition."
         )
-        plan = deepseek.call_json("ORBIT", "planification", pro,
-                                  [{"role": "system", "content": plan_sys},
-                                   {"role": "user", "content": goal},
-                                   {"role": "assistant", "content": json.dumps(plan, ensure_ascii=False)},
-                                   {"role": "user", "content": feedback}],
-                                  reasoning="high")
+        try:
+            plan = deepseek.call_json("ORBIT", "planification", pro,
+                                      [{"role": "system", "content": plan_sys},
+                                       {"role": "user", "content": goal},
+                                       {"role": "assistant", "content": json.dumps(plan, ensure_ascii=False)},
+                                       {"role": "user", "content": feedback}],
+                                      reasoning="high")
+        except llm.GatewayError as exc:
+            return _mission_unavailable(tasks, [], "llm_unavailable", f"{type(exc).__name__}: {exc}")
         proposed = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
         tasks = [t for t in proposed if isinstance(t, dict)][:MAX_PLAN_TASKS]
         if len(proposed) > len(tasks):
@@ -1523,7 +1543,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     for t in tasks:
         if cancel.requested():
             db.post("ORBIT", "mission arrêtée par l'humain")
-            return {"plan": tasks, "results": results, "rapport": "(arrêt demandé)"}
+            return _mission_unavailable(tasks, results, "cancelled", "Arrêt demandé")
         role = t.get("role", "ORBIT")
         if role not in ROLES:
             role = "ORBIT"
@@ -1561,11 +1581,20 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                 search_browse_selector=effective_selector,
             )
         results.append({"role": role, "task": original,
-                        "final": r.get("final"), "steps": r.get("steps")})
+                        "final": r.get("final"), "steps": r.get("steps"),
+                        "execution_status": r.get("execution_status", "unknown"),
+                        "execution_error": r.get("execution_error")})
+        if r.get("execution_status") in {"cancelled", "budget_exceeded", "llm_unavailable"}:
+            return _mission_unavailable(tasks, results, r["execution_status"],
+                                        r.get("execution_error") or r.get("final"))
+
+    if not results or all(not r.get("steps") and r.get("execution_status") != "completed"
+                          for r in results):
+        return _mission_unavailable(tasks, results, "no_work", "Aucun travail exécuté")
 
     if cancel.requested():
         db.post("ORBIT", "mission arrêtée par l'humain avant la synthèse")
-        return {"plan": tasks, "results": results, "rapport": "(arrêt demandé)"}
+        return _mission_unavailable(tasks, results, "cancelled", "Arrêt demandé")
     signal_schema = ""
     if business_signal_focus:
         signal_schema = (
@@ -1631,11 +1660,14 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             "plan": tasks,
             "results": results,
             "rapport": rapport,
+            "execution_status": "synthesis_unavailable",
             "synthesis_status": "degraded",
             "synthesis_error": error,
         }
 
     rapport = syn.get("rapport", "")
+    if not isinstance(rapport, str) or not rapport.strip():
+        return _mission_unavailable(tasks, results, "invalid_synthesis", "Rapport absent ou vide")
     business_signals, rejected_signals = ([], [])
     business_signal_reviews = []
     if business_signal_focus:
@@ -1666,7 +1698,9 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         decision_payload["business_signal_review_status"] = business_signal_review_status
     db.decide("ORBIT", "mission_done", decision_payload)
     db.post("ORBIT", f"mission terminée : {rapport[:80]}")
-    output = {"plan": tasks, "results": results, "rapport": rapport, "synthesis_status": "validated"}
+    output = {"plan": tasks, "results": results, "rapport": rapport, "synthesis_status": "validated",
+              "execution_status": ("completed" if all(r.get("execution_status") == "completed"
+                                                       for r in results) else "incomplete")}
     if business_signal_focus:
         output["business_signals"] = business_signals
         output["business_signal_rejections"] = rejected_signals

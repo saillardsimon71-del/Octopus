@@ -22,14 +22,15 @@ def _chain(business: str = "podalux"):
     return objective, hypothesis, experiment
 
 
-def test_strategy_mission_cli_passes_profile_and_budget(monkeypatch):
+@pytest.mark.parametrize("profile,budget", [("zero_cost", 0), ("flash_fallback", 2)])
+def test_strategy_mission_cli_passes_profile_and_budget(monkeypatch, profile, budget):
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     strategy_cli.add_parser(sub)
     args = parser.parse_args([
         "strategy", "mission", "octopus", "collecte",
-        "--profile", "flash_fallback",
-        "--budget-usd", "0.05",
+        "--profile", profile,
+        "--budget-usd", str(budget),
         "--allow-tools", "search,browse",
     ])
 
@@ -47,9 +48,9 @@ def test_strategy_mission_cli_passes_profile_and_budget(monkeypatch):
 
     assert strategy_cli.run(args) == 0
     assert captured["kind"] == "orbit.mission"
-    assert captured["input"]["profile"] == "flash_fallback"
+    assert captured["input"]["profile"] == profile
     assert captured["input"]["allowed_tools"] == ["search", "browse"]
-    assert captured["kwargs"]["budget_usd"] == pytest.approx(0.05)
+    assert captured["kwargs"]["budget_usd"] == pytest.approx(budget)
 
 
 # --- migration ---------------------------------------------------------------------------

@@ -118,6 +118,80 @@ relancé la suite complète hors sandbox avec `.venv/Scripts/python.exe -m pytes
 sandbox Astra et ne se reproduisent pas sur le checkpoint exact. Aucune promotion
 vers `main` n'est effectuée par cette validation.
 
+#### Fiabilité des missions — contrat D, checkpoint avant relay (2026-09-26)
+
+Incident observé dans `data/octopus.db`, tâches durables 71 et 72 (lecture seule).
+La tâche 71 avait `budget_usd=0`, cinq sous-tâches sans étape, mais un rapport
+`synthesis_status=validated` et une evidence inférée 74. Au diagnostic, cette
+preuve était déjà `retracted` ; aucune donnée historique n'a été modifiée.
+La tâche 72 avait huit SEARCH et zéro BROWSE ; les traces contiennent notamment
+une collision sémantique avec une marque et une offre/chiffres sans acquisition.
+Elle finit `done_degraded` après épuisement des routes gratuites (429).
+
+Causes et correction bornée dans le runtime existant :
+- `coût >= plafond` coupait le ReAct avant le premier appel à zéro sur zéro.
+  Le coupe-circuit historique utilise désormais `>` ; le gateway conserve son
+  contrôle préalable `coût cumulé + estimation du candidat > plafond`.
+- Une erreur LLM était capturée puis rendue comme `(max steps atteint)` ; les
+  agents exposent maintenant `execution_status` et `execution_error`. Un arrêt
+  pour budget, annulation ou indisponibilité LLM coupe la mission, conserve les
+  résultats et produit `synthesis_status=degraded`, sans nouvelle synthèse ni
+  exécution des rôles restants. Les bugs de programmation remontent.
+- Plan vide, absence de travail après arrêt et rapport vide/non textuel ne
+  produisent plus de synthèse validée. Une limite d'étapes avec travail acquis
+  peut encore produire une synthèse partielle ; l'exécution est `incomplete`.
+- Le handler durable `orbit.mission` active par défaut le contrat existant
+  `business_signal_focus`. Il réutilise le gate acquisition + citations d'une
+  même page et la politique SEARCH business existants. Le runtime générique
+  garde son défaut historique. Aucun mot, requête, fournisseur de recherche ou
+  enchaînement SEARCH/BROWSE n'est imposé par cette correction.
+- Le handler expose `opportunity_status` : `source_supported`, `inconclusive`
+  ou `not_evaluated` pour une analyse explicitement hors qualification.
+  Une preuve de rapport automatique exige exécution `completed`, synthèse
+  valide et signal qualifié ; elle reste `inferred`, jamais preuve de revenu
+  ou d'acceptation client. Les acquisitions complètes restent dans la sortie
+  durable, même si la trace diagnostique compacte n'est pas demandée.
+
+`synthesis_status=validated` reste un statut technique du rapport. Les citations
+littérales ne démontrent pas la pertinence sémantique ; une revue humaine reste
+nécessaire. L'échec du reviewer conserve son statut séparé et ne fabrique aucune
+classification. Les propositions non sourcées ne deviennent pas des signaux
+qualifiés. Aucun nouveau planner, journal ou moteur d'evidence n'est ajouté.
+
+**Deux budgets distincts.** `tasks.budget_usd` est le plafond des appels LLM,
+partagé par les runs imbriqués ; un run enfant n'ajoute plus son plafond implicite
+historique de 1 USD lorsqu'un budget parent existe. Ce champ n'accorde aucune
+allowance économique et ne sélectionne aucun profil. Les dépenses externes
+restent contrôlées par `economy`/`actions`, et SEARCH payant reste refusé.
+`zero_cost` interdit toujours tout fallback payant. Pour l'autorisation humaine
+courante (zéro dépense externe, au plus 2 USD de LLM), la combinaison explicite
+est `profile=flash_fallback`, `budget_usd=2` et l'allowlist
+`search,browse,economy_status,resources_status`. Le profil existant tente les
+routes gratuites puis DeepSeek Flash via le gateway, sans raccourci fournisseur.
+Aucune mission n'a été mise en file ni exécutée avec cette autorisation.
+Le plafond est contrôlé avant chaque appel sur les coûts journalisés et
+l'estimation existante ; ceci n'est pas une réconciliation de facture fournisseur.
+Une nouvelle mission est une nouvelle enveloppe, pas une prolongation implicite.
+
+Validation ciblée exécutée : **330 tests passent** en 54,28 s ; log
+`cache/astra-relay/mission-contract-targeted.log`. `git diff --check` passe.
+
+Oracle payé entièrement simulé : deux sous-agents coûtent chacun 0,70 USD dans
+une enveloppe commune de 2 USD ; le troisième est bloqué avant transport. Les
+oracles zéro coût, absence d'evidence, arrêt du pool, limites de prompt, gate de
+sources et permissions sont conservés. La validation complète finale reste à
+exécuter après délégation et revue Step ; ne pas réutiliser le baseline comme
+preuve de validation de ces changements.
+
+Ticket mécanique prévu, uniquement `octopus/strategy_cli.py` : ajouter
+`--llm-budget-usd` comme alias de `--budget-usd`, destination inchangée
+`budget_usd`, et clarifier l'aide (plafond LLM distinct de toute dépense externe ;
+profil explicite nécessaire pour le payant). Aucun changement de défaut, de
+validation, de catalogue, d'allowlist, de permission ou de handler dans ce ticket.
+Oracle de non-régression : `tests/test_strategy.py`, en particulier le passage
+explicite de `zero_cost/0` et `flash_fallback/2` sans modification de l'allowlist.
+Astra vérifiera aussi les deux orthographes et les valeurs invalides à la revue.
+
 ### P0 — MCP boundary
 
 Upstream:
