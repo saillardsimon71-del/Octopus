@@ -111,11 +111,12 @@ Les échecs concernent `test_dev_worker` (21), `test_night_shift` (1),
 `test_promotion` (8) et `test_stop_memory` (1). Le log montre des clones Git
 bloqués par `sh.exe: couldn't create signal pipe, Win32 error 5` ; le test
 d'arrêt dépasse sa limite de 15 secondes (22,08 s), sans cause établie ici.
-La baseline fournie par le host hors sandbox passait au HEAD
-`8ad10bc53767e1af3359a4e113234ffc86332e4b` ; elle ne valide pas ce diff.
-Prochaine observation nécessaire : résultat de ces frontières partagées hors
-sandbox, sur le checkpoint exact. Aucune validation globale verte ni promotion
-n'est revendiquée.
+Après le checkpoint `954a7e62a1655e1102c4739a7a8820e02c08e78d`, le host a
+relancé la suite complète hors sandbox avec `.venv/Scripts/python.exe -m pytest
+-q --tb=short`. Elle termine avec le code `0`; le journal est conservé dans
+`cache/astra-relay/phase-d-host-full.log`. Les 31 échecs sont donc propres au
+sandbox Astra et ne se reproduisent pas sur le checkpoint exact. Aucune promotion
+vers `main` n'est effectuée par cette validation.
 
 ### P0 — MCP boundary
 
