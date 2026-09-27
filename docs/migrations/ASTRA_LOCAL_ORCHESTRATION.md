@@ -2,6 +2,10 @@
 
 Date: 2026-09-25
 
+Current execution brief: `docs/migrations/CODEX_START_2026-09-27.md`. This file
+continues to define the Astra/Step ownership and relay mechanics; its original
+phase B/C/D scope is historical.
+
 ## Decision
 
 Do **not** install or load `ethanplusai/astra-flash-orchestrator` as a global Codex skill or policy.

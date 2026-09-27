@@ -1,6 +1,8 @@
 # CODEX START — 2026-09-25
 
-Single execution router for the current OCTOPUS construction window.
+Historical execution router for phases B, C and D. Those phase contracts remain
+useful for provenance and replay, but the current phase E router is
+`docs/migrations/CODEX_START_2026-09-27.md`.
 
 ## 0. How this session is launched
 

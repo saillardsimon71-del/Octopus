@@ -2,6 +2,9 @@
 
 Date: 2026-09-25
 
+Handoff historique des phases B, C et D. Le chantier actuel utilise
+`docs/migrations/CODEX_START_2026-09-27.md`.
+
 Branche de préparation active:
 `prep/astra-local-orchestration`
 

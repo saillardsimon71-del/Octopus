@@ -82,17 +82,30 @@ provider GPU, moteur vidéo, campagnes, CRM, microservices, message bus ou réé
 
 ## Travail sur le dépôt
 
-### Fenêtre de maintenance explicitement autorisée — 2026-09-25
+### Fenêtre de maintenance explicitement autorisée - phase E du 2026-09-27
 
-Pour la session Hermes + Agnes actuelle, l'opérateur humain a explicitement fixé un objectif de maintenance borné. Lire d'abord `docs/migrations/CODEX_START_2026-09-25.md` et suivre son budget de lecture/exécution. Ce fichier de session peut fixer la priorité immédiate malgré les anciennes phrases « prochaine action » des snapshots documentaires; il ne peut pas affaiblir les frontières de preuve, permissions, secrets, coûts, effets externes ou promotion de cette constitution.
+L'opérateur humain autorise une revue, correction, amélioration et mise en cohérence importante avant
+la première activité économique. Lire d'abord `docs/migrations/CODEX_START_2026-09-27.md` et suivre
+son ordre, son budget de contexte et sa définition de terminé. Ce mandat permet de corriger les
+blocages constatés et de terminer les composants Hermes réellement nécessaires. Il n'autorise pas
+une généralisation spéculative et ne peut pas affaiblir les frontières de preuve, permissions,
+secrets, coûts, effets externes ou promotion de cette constitution.
 
-La suppression d'un moteur legacy et le remplacement d'une duplication par une primitive plus petite ne sont pas une généralisation économique. Toute capacité Hermes réellement nouvelle reste soumise aux critères de remplacement/besoin borné du fichier de session.
+La suppression d'un moteur legacy, le remplacement d'une duplication et l'ajout d'une capacité
+nécessaire à un parcours actuel ne sont pas une généralisation économique. Toute capacité Hermes
+doit néanmoins remplacer un code concret, corriger un obstacle reproduit ou servir un consommateur
+actuel. Sinon elle est différée ou rejetée.
 
-Pendant cette fenêtre, un worker Kilo/Step long ne doit jamais être lancé depuis le shell piloté par Astra. La délégation suit obligatoirement le relay déterministe de `CODEX_START_2026-09-25.md` : Astra publie un ticket borné puis termine son tour; le superviseur local exécute Step hors de la boucle modèle et reprend ensuite exactement la même thread Astra une seule fois pour la review.
+Pendant cette fenêtre, un worker Kilo/Step long ne doit jamais être lancé depuis le shell piloté par
+Astra. La délégation suit obligatoirement le relay déterministe du routeur de phase E: Astra publie
+un ticket borné puis termine son tour; le superviseur local exécute Step hors de la boucle modèle et
+reprend ensuite exactement la même thread Astra une seule fois pour la review.
 
 Pendant cette même fenêtre, ne jamais poursuivre sous un modèle de fallback. Le superviseur utilise `codex exec` avec `--model gpt-6-astra`; tout échec/rate-limit Codex arrête la chaîne au lieu de sélectionner un autre modèle.
 
-Pour la fenêtre de maintenance 2026-09-25, `docs/migrations/CODEX_START_2026-09-25.md` est le routeur de session. Ne précharger ni `VISION.md`, ni `CURRENT_STATE.md`, ni `HANDOFF_WORK.md` sauf si la tâche en cours touche réellement leur domaine. Hors de cette fenêtre, consulter ces documents uniquement lorsqu'ils sont pertinents à la modification demandée.
+Pour la phase E, `docs/migrations/CODEX_START_2026-09-27.md` est le routeur de session. Il nomme
+explicitement les documents canoniques à lire une fois. Hors de cette fenêtre, consulter ces
+documents uniquement lorsqu'ils sont pertinents à la modification demandée.
 Git réel prime sur les snapshots documentaires.
 Vérifier branche, HEAD de main, arbre et historique avant modification ; préserver le travail inconnu.
 Branche dédiée et revue avant fusion ; ne jamais merger main automatiquement.

@@ -1,33 +1,48 @@
 # Prochaines étapes
 
-État vérifié : `docs/CURRENT_STATE.md`. Protocole : `docs/HANDOFF_WORK.md`.
+État canonique: `docs/CURRENT_STATE.md`. Vision: `docs/VISION.md`.
+Protocole économique: `docs/HANDOFF_WORK.md`.
+Chantier constructeur actuel: `docs/migrations/CODEX_START_2026-09-27.md`.
 
-## P0 — Une expérience économique supervisée
+## P0 - Préparation technique avant la première activité
 
-1. Vérifier l'offre sur quelques références réellement incomplètes et une source fabricant accessible.
-2. Créer une expérience bornée : au plus cinq contacts revus, sept jours, plafond de temps humain
-   de quatre heures ; aucun coût externe sans décision humaine explicite.
-3. Contacter manuellement ou via le canal existant explicitement autorisé ; respecter refus et opt-out.
-4. Si commande : exécuter un lot de 20 références, vérifier et livrer le CSV sourcé.
-5. Enregistrer séparément livraison, encaissement, acceptation/utilisation, coûts et minutes humaines.
-6. Lire `python -m octopus economy outcome BUSINESS EXPERIMENT`, puis enregistrer une décision.
+1. Exécuter la phase E Astra sur la branche du constructeur.
+2. Diagnostiquer et réparer le transport SEARCH qui a empêché la tâche 75 d'acquérir une source.
+3. Vérifier le parcours SEARCH -> BROWSE -> citation -> qualification sans créer de preuve économique
+   à partir d'un simple succès technique.
+4. Terminer uniquement les composants Hermes nécessaires aux parcours actuels et consigner une
+   décision pour chaque composant P0/P1 de la matrice.
+5. Exécuter la suite complète et relire les changements de permissions, budgets, reprise et preuves.
+6. Extraire les commits produit relus hors de la branche du constructeur, puis mettre à jour la PR
+   produit sans y inclure `.codex/`, les scripts Astra ou leurs tests.
+7. Faire séparément le smoke test Agnes réel autorisé par l'opérateur. Ne pas le lancer dans les tests
+   ou dans le chantier Astra.
 
-Le dépôt ne prouve encore **aucun paiement commercial**. Ne pas inventer un client pour remplir le rapport.
+## P0 - Première expérience économique supervisée
 
-## P1 — Seulement après cette observation
+Après validation technique, suivre `docs/HANDOFF_WORK.md`:
 
-- Répéter le travail si intérêt réel et économie soutenable, sans généraliser.
-- Sinon changer l'offre ou arrêter ; absence de données = améliorer la mesure, pas déclarer l'échec marché.
+1. vérifier l'offre sur quelques références réellement incomplètes et une source fabricant accessible;
+2. créer une expérience bornée: au plus cinq contacts revus, sept jours et quatre heures humaines;
+3. n'effectuer aucun contact, dépense ou action externe sans validation humaine explicite;
+4. si commande, produire et vérifier un lot de 20 références puis livrer le CSV sourcé;
+5. enregistrer séparément livraison, encaissement, acceptation, utilisation, coûts et minutes humaines;
+6. lire `python -m octopus economy outcome BUSINESS EXPERIMENT`, puis enregistrer une décision.
+
+Le dépôt ne prouve encore aucun paiement commercial. Ne pas inventer un client, un résultat ou une
+preuve pour compléter le rapport.
+
+## P1 - Après observation
+
+- Répéter le travail seulement si l'intérêt et l'économie sont soutenables.
+- Sinon changer l'offre ou arrêter; absence de données signifie améliorer la mesure.
 - Identifier la phase qui consomme le plus de minutes ou produit le plus de corrections.
-- Une seule amélioration ciblée, reliée à la preuve existante ; mesurer avant/après sur le même périmètre.
+- Faire une seule amélioration reliée à cette preuve et mesurer avant/après sur le même périmètre.
 
-## P2 — Gelé jusqu'à besoin démontré
+## Gelé sans besoin démontré
 
-- nouvelles surfaces canary, Model Lab, capability acquisition, MCP discovery ;
-- refonte GUI / Web Control Plane ;
-- benchmarks GPU, nouveaux providers et moteurs vidéo ;
-- campagnes automatisées, CRM et connecteurs e-commerce ;
-- extension des probes sans scénario de régression réel à couvrir.
-
-Les protections existantes continuent d'être testées. G1 live et G3–G5 ne sont requis que si
-l'expérience utilise effectivement un LLM ou du compute ; ils ne bloquent pas un pilote manuel.
+- nouveau cerveau, planner, routeur LLM, mémoire ou UI Hermes;
+- discovery MCP générique sans consommateur;
+- campagnes automatisées, CRM, connecteurs e-commerce et nouvelle surface Web;
+- nouveau moteur vidéo, provider GPU ou benchmark sans scénario réel;
+- généralisation d'une capability, d'un scheduler ou de skills sans obstacle observé.

@@ -1,8 +1,27 @@
 # Matrice OCTOPUS ↔ Hermes — remplacement concret
 
-Date: 2026-09-25
+Date initiale: 2026-09-25
+État révisé: 2026-09-27
 
 But: identifier les remplacements qui réduisent réellement la dette. Un composant Hermes n'est accepté que s'il supprime une implémentation maison ou apporte une capacité absente.
+
+## État au démarrage de la phase E
+
+| Composant | État réel | Décision à prendre en phase E |
+|---|---|---|
+| Registry d'outils | intégré et testé | conserver, vérifier son raccordement aux policies |
+| Capability / permissions | modèles OCTOPUS existants, raccordement registry incomplet | intégrer seulement la frontière d'exécution nécessaire |
+| Computer use | absent | intégrer uniquement si un parcours actuel le requiert |
+| MCP générique | absent | créer une frontière minimale seulement avec un premier consommateur |
+| Evidence / vérification | preuves économiques et gate de sources présentes | vérifier portée, fraîcheur et lien action/résultat sans seconde base |
+| Retry / cooldown | présent pour LLM, dispersé ailleurs | extraire seulement si SEARCH/BROWSE/computer le justifient |
+| Scheduler | queue durable présente, threads ciblés restants | conserver ou remplacer selon consommateurs observés |
+| Worker / lifecycle | queue OCTOPUS durable conservée | n'extraire que des primitives manquantes et testables |
+| Mémoire / skills | non intégrés | différer sans workflow économique répété et prouvé |
+
+La phase E doit produire une décision actuelle `integrate`, `keep_octopus`, `defer` ou `reject`
+pour chaque ligne P0/P1. Elle doit implémenter entièrement les décisions `integrate`; elle ne doit
+pas ajouter un composant pour compléter mécaniquement la liste Hermes.
 
 ## 1. Registry d'outils
 
@@ -22,6 +41,10 @@ Décision:
 - REMPLACER progressivement la table `TOOLS` par un registry dédié OCTOPUS inspiré de Hermes.
 - Conserver les handlers existants.
 - Ne pas importer plugin discovery complet lors de la première tranche.
+
+État 2026-09-27: TERMINÉ pour la tranche registry. `agents.tool_registry.ToolRegistry` est la source
+unique de description, validation, allowlist et dispatch. Les probes de disponibilité, toolsets et
+discovery ne sont pas intégrés.
 
 Critère:
 - aucun double registry;
@@ -204,16 +227,14 @@ Nouvelle cible:
 Décision:
 - SUPPRIMER ancien moteur selon `VIDEO_ENGINE_REMOVAL.md`.
 
-## Ordre de migration recommandé
+## Ordre de la phase E
 
-1. retirer moteur vidéo;
-2. remettre suite générale au vert;
-3. introduire registry central sans changer les handlers;
-4. introduire MCP générique;
-5. brancher cua-driver;
-6. brancher policy/capabilities;
-7. généraliser evidence;
-8. seulement ensuite examiner scheduler/error taxonomy.
+1. reproduire et corriger les blocages opérationnels, SEARCH en premier;
+2. vérifier le parcours économique complet et ses frontières;
+3. statuer sur MCP, computer-use, capabilities et vérification à partir de consommateurs réels;
+4. intégrer les composants nécessaires avec tests, sans autorité parallèle;
+5. examiner error taxonomy, scheduler et lifecycle seulement si un défaut actuel les justifie;
+6. exécuter la suite complète et actualiser cette matrice avec les décisions finales.
 
 ## Mesure de succès
 

@@ -1,6 +1,6 @@
 param(
     [string]$CodexHome = "",
-    [ValidateSet("B", "C", "D")]
+    [ValidateSet("B", "C", "D", "E")]
     [string]$Phase = "B",
     [int]$MaxAstraTurns = 4,
     [int]$MaxRelayCycles = 6,
@@ -92,6 +92,12 @@ $phaseSpec = switch ($Phase) {
         [ordered]@{
             documents = "docs/migrations/OCTOPUS_HERMES_REPLACEMENT_MATRIX.md and docs/migrations/HERMES_COMPONENT_EXTRACTION.md"
             mission = "Implement the Hermes P0 tool-registry replacement only. Preserve OCTOPUS policies and do not introduce a second registry or broad plugin discovery."
+        }
+    }
+    "E" {
+        [ordered]@{
+            documents = "docs/migrations/CODEX_START_2026-09-27.md"
+            mission = "Complete the necessary Hermes integration, remove verified blockers to correct OCTOPUS operation, and align the implementation with the supervised economic-workshop vision. Implement and validate corrections; do not stop after an audit report."
         }
     }
 }

@@ -207,11 +207,12 @@ def test_constructor_powershell_parses_and_disables_shell_snapshot():
     assert "model_auto_compact_token_limit = 120000" in config
     launcher = (ROOT / "scripts" / "start_octopus_astra.ps1").read_text(encoding="utf-8")
     assert "[switch]$ValidateOnly" in launcher
-    assert '[ValidateSet("B", "C", "D")]' in launcher
+    assert '[ValidateSet("B", "C", "D", "E")]' in launcher
     assert '[string]$Phase = "B"' in launcher
     assert "MaxResumeInputTokens = 120000" in launcher
     assert "AGNES_VIDEO_REPLACEMENT.md" in launcher
     assert "OCTOPUS_HERMES_REPLACEMENT_MATRIX.md" in launcher
+    assert "CODEX_START_2026-09-27.md" in launcher
 
 
 def test_codex_stream_keeps_stderr_out_of_json_and_saves_thread_early(tmp_path: Path):

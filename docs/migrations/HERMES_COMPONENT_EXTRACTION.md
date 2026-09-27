@@ -170,7 +170,8 @@ courante (zéro dépense externe, au plus 2 USD de LLM), la combinaison explicit
 est `profile=flash_fallback`, `budget_usd=2` et l'allowlist
 `search,browse,economy_status,resources_status`. Le profil existant tente les
 routes gratuites puis DeepSeek Flash via le gateway, sans raccourci fournisseur.
-Aucune mission n'a été mise en file ni exécutée avec cette autorisation.
+Au checkpoint initial du contrat, aucune mission n'avait été mise en file ni
+exécutée avec cette autorisation ; l'E2E réel ultérieur est décrit ci-dessous.
 Le plafond est contrôlé avant chaque appel sur les coûts journalisés et
 l'estimation existante ; ceci n'est pas une réconciliation de facture fournisseur.
 Une nouvelle mission est une nouvelle enveloppe, pas une prolongation implicite.
@@ -217,8 +218,46 @@ complète n'a pas été relancée ; une validation globale hors sandbox par l'h�
 reste nécessaire sur le checkpoint final. Le baseline vert ne valide pas ces
 changements. `git diff --check` passe.
 La prochaine observation utile reste une mission supervisée avec acquisitions
-lisibles et revue humaine de leur pertinence ; elle n'est pas lancée pendant
-cette maintenance. Aucun test vert ne prouve une opportunité commerciale.
+lisibles et revue humaine de leur pertinence. L'autorisation humaine ultérieure
+d'un E2E réel est consignée ci-dessous. Aucun test vert ne prouve une opportunité
+commerciale.
+
+
+#### Phase D — E2E réel explicitement autorisé (2026-09-26)
+
+HEAD vérifié avant lancement : `2952db4781ec8ad60b6958301a2ab48d388fdcd4` ;
+Step intégré, arbre propre. L'objectif 13 est actif pour `cycle_0`. La file et
+les planifications étaient vides. La suite complète demandée avant ce nouvel
+E2E a été exécutée une fois : **1215 succès, 8 ignorés, 31 échecs** en 165,66 s,
+code 1 (`cache/astra-relay/phase-d-real-e2e-full.log`). Les échecs restent dans
+les tests Git/arrêt documentés ci-dessus ; les trois oracles corrigés passent.
+La validation globale ne doit donc pas être annoncée verte.
+
+Lancement réel via la CLI, puis un seul passage du worker, sans mocks :
+
+```powershell
+$missionGoal = 'Mission supervisée courte pour cycle_0 et objectif 13 : examiner les ressources disponibles et rechercher une opportunité économique réaliste testable sans dépense externe. Utiliser des recherches réelles et ouvrir les pages utiles ; distinguer citations acquises, hypothèses et inconnues. Ne retenir une piste que si les sources consultées la soutiennent ; sinon conclure explicitement inconclusif. Produire un rapport bref et proposer un prochain test soumis à revue humaine, sans le réaliser. Dépenses économiques et externes autorisées : 0 USD. Appels LLM autorisés dans un plafond cumulé de 2 USD pour toute cette mission. Interdiction absolue de contacter qui que ce soit, publier, créer ou modifier un compte, acheter ou effectuer une action externe irréversible.'
+.venv/Scripts/python.exe -m octopus strategy mission cycle_0 $missionGoal --objective 13 --allow-tools search,browse,economy_status,resources_status --profile flash_fallback --llm-budget-usd 2 --max-steps 4 --trace-tools
+.venv/Scripts/python.exe -m octopus worker --once
+```
+
+`--max-steps` limite chaque sous-agent, pas le nombre total d'appels ; le plafond
+LLM s'applique à la mission et à ses runs imbriqués. Les 2 USD ne constituent
+aucune allowance économique. L'allowlist limite cette exécution aux acquisitions
+et états en lecture ; aucun contact, publication, achat ou mutation de compte
+n'est autorisé. Le routage reste celui du profil existant, sans raccourci DeepSeek.
+
+Résultat persistant de la tâche 75: la tâche est `done`, mais sa sortie porte
+`execution_status=incomplete`, `synthesis_status=validated` et
+`opportunity_status=inconclusive`. Les trois sous-agents ont exécuté 12 SEARCH,
+0 BROWSE et atteint leur limite de quatre étapes. Chaque acquisition SEARCH a
+échoué sur l'accès Bing/proxy et n'a retourné aucun résultat exploitable. Le
+journal contient 16 appels LLM, dont 14 réussis et 2 erreurs de sortie JSON, pour
+un coût enregistré de 0 USD. Aucune evidence stratégique n'a été créée, ce qui
+confirme le refus attendu d'une preuve sans acquisition source. Cet E2E valide
+la persistance et les garde-fous, pas la découverte économique réelle. La
+prochaine observation doit rétablir le transport SEARCH, ouvrir au moins une
+page source et vérifier à nouveau la qualification sans autoriser d'effet externe.
 
 ### P0 — MCP boundary
 
