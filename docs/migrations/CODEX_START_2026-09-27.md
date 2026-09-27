@@ -196,3 +196,76 @@ La phase E est terminée seulement si:
 
 Un test vert ne prouve ni marché, ni paiement, ni satisfaction client. La phase livre un OCTOPUS
 techniquement cohérent et prêt pour une activité supervisée, pas une entreprise autonome prouvée.
+
+
+### E5 - Première observation économique réelle
+
+La préparation technique de la phase E est terminée et validée.
+
+État acquis :
+- accès Internet HTTP/HTTPS fonctionnel dans Astra ;
+- SEARCH -> BROWSE fonctionnel ;
+- provider DDGS dérivé du Hermes pinné intégré ;
+- acquisition multi-moteurs disponible ;
+- 1268 tests passent ;
+- checkpoint correspondant commité.
+
+La priorité change maintenant : ne plus améliorer l'infrastructure sans obstacle observé.
+
+Lancer UNE mission économique réelle, supervisée et bornée avec OCTOPUS.
+
+Objectif :
+identifier dans le monde réel une opportunité économique testable suffisamment soutenue par des sources acquises.
+
+La mission doit réellement utiliser :
+
+SEARCH
+-> sélection
+-> BROWSE
+-> citations acquises
+-> qualification du signal
+
+Un résultat SEARCH seul n'est jamais une preuve.
+
+Une piste ne peut être retenue que si les pages réellement ouvertes permettent de soutenir suffisamment :
+
+- un acheteur ou segment d'acheteurs identifiable ;
+- un besoin, problème ou douleur observable ;
+- un signal économique, budgétaire, de paiement ou d'urgence ;
+- un canal réaliste permettant ultérieurement de tester l'offre ;
+- une offre minimale qu'OCTOPUS pourrait réellement produire.
+
+Utiliser plusieurs providers disponibles lorsque pertinent.
+Ne pas dépendre d'un moteur unique.
+Ne pas forcer Google si son provider ne produit aucun résultat exploitable.
+
+Contraintes :
+- 0 dépense externe ;
+- aucun contact avec un tiers ;
+- aucune publication ;
+- aucun achat ;
+- aucune création ou modification de compte ;
+- aucune action externe irréversible.
+
+À la fin de la mission, consigner :
+- les sources réellement ouvertes ;
+- les citations acquises ;
+- les faits soutenus ;
+- les inconnues ;
+- les pistes rejetées et leurs raisons ;
+- au maximum une piste suffisamment soutenue ;
+- le prochain test économique minimal proposé.
+
+Ne PAS exécuter ce prochain test s'il implique contact, dépense ou autre action externe : attendre la validation humaine.
+
+Si aucune piste n'est suffisamment soutenue, conclure explicitement `inconclusive`.
+
+Cette mission constitue aussi la première observation réelle de la nouvelle acquisition Hermes/DDGS.
+
+Si un obstacle technique apparaît :
+1. l'observer et le reproduire précisément ;
+2. déterminer s'il bloque réellement le parcours économique ;
+3. avant toute nouvelle implémentation, examiner Hermes pinné ;
+4. n'ajouter que la correction minimale justifiée par cet obstacle.
+
+Aucune nouvelle infrastructure spéculative.
