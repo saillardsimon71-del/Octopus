@@ -34,6 +34,44 @@ Architecture cible:
 
 ## Composants à extraire en priorité
 
+### Reprise E1/E2 - acquisition Web (2026-09-27)
+
+La table E1/E2 de `OCTOPUS_HERMES_REPLACEMENT_MATRIX.md` remplace les intentions
+P0/P1 historiques qui suivent. Le pin local a été vérifié, puis les providers Web,
+registry, extraction, MCP, erreurs, retry, cooldown, browser et computer-use comparés.
+
+Extraction réalisée: `plugins/web/ddgs/provider.py` et `_search_worker.py` adaptés
+dans `agents/search_ddgs.py`, licence conservée dans `THIRD_PARTY_NOTICES.md`.
+La frontière enfant jetable et la normalisation sont reprises; OCTOPUS fournit son
+annulation, l'allowlist de mission et le contrat SEARCH existant. Pas d'import du
+runtime Hermes, de loader de plugins, de découverte MCP ou d'installation runtime.
+La dépendance `ddgs==9.16.0` est celle du pin Hermes. Google, Brave, DuckDuckGo,
+Mojeek, Startpage et Yahoo sont gérés par cette dépendance. Les backends encyclopédiques
+du mode auto sont exclus pour préserver la politique business de SEARCH.
+
+Le worker a un plafond global de 30 s et est terminé/récolté sur timeout ou arrêt
+humain; il n'hérite que des variables OS/transport nécessaires, pas des secrets LLM.
+Les proxies sont respectés, jamais neutralisés dans le produit. BROWSE conserve sa
+frontière URL, comptes, acquisition datée et qualification des citations.
+
+Mesure de complexité: aucun parser Google/Bing ni registry parallèle ajouté.
+Le volume produit augmente d'un adapter isolé d'environ 100 lignes; aucune réduction
+nette de lignes n'est revendiquée. Les providers historiques restent nécessaires au
+repli et à leurs consommateurs. Les variantes de moteurs sont maintenues par DDGS.
+
+Validation ciblée: quatre oracles DDGS ont d'abord échoué, puis 191 tests ciblés passent
+en 43,56 s. Le parcours live via registry découvre puis acquiert la documentation Python
+(HTTP 200, 6250 caractères). Le probe Google seul échoue avec `No results found`.
+Cela ne prouve ni sa disponibilité, ni un résultat économique. Voir `CURRENT_STATE`
+pour le résultat final et les limites. Aucun test vidéo live, contact, dépense ou merge.
+
+Le probe SEARCH -> BROWSE a aussi réussi en sandbox native Codex, sans enlever ses
+proxies depuis le code produit. Profil de contrôle explicite (Codex 0.157.0):
+`--permission-profile phase_e_probe -c 'permissions.phase_e_probe.extends=":workspace"'
+-c permissions.phase_e_probe.network.enabled=true`. Le profil `:workspace` sans
+activation réseau reproduit les proxies morts. Le constructeur conserve sa configuration
+historique `sandbox_workspace_write.network_access`, maintenant à `true`.
+
 ### P0 — Computer Use
 
 Upstream:

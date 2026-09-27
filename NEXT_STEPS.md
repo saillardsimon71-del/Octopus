@@ -6,13 +6,12 @@ Chantier constructeur actuel: `docs/migrations/CODEX_START_2026-09-27.md`.
 
 ## P0 - Préparation technique avant la première activité
 
-1. Exécuter la phase E Astra sur la branche du constructeur.
-2. Diagnostiquer et réparer le transport SEARCH qui a empêché la tâche 75 d'acquérir une source.
-3. Vérifier le parcours SEARCH -> BROWSE -> citation -> qualification sans créer de preuve économique
-   à partir d'un simple succès technique.
-4. Terminer uniquement les composants Hermes nécessaires aux parcours actuels et consigner une
-   décision pour chaque composant P0/P1 de la matrice.
-5. Exécuter la suite complète et relire les changements de permissions, budgets, reprise et preuves.
+1. Faire relire et checkpoint par l'hôte le diff E sur `prep/astra-local-orchestration`.
+2. Consommer le résultat de validation finale consigné dans `CURRENT_STATE`, sans relancer le baseline.
+3. Prochaine observation: SEARCH -> BROWSE -> citations sur une source pertinente au besoin client,
+   avec revue humaine. Le probe Python réussi ne constitue aucune preuve économique.
+4. Google seul via DDGS n'a pas fourni de résultat au probe; ne pas annoncer sa disponibilité.
+5. Réutiliser les décisions P0/P1 de la matrice Hermes, sans relancer l'audit historique.
 6. Extraire les commits produit relus hors de la branche du constructeur, puis mettre à jour la PR
    produit sans y inclure `.codex/`, les scripts Astra ou leurs tests.
 7. Faire séparément le smoke test Agnes réel autorisé par l'opérateur. Ne pas le lancer dans les tests

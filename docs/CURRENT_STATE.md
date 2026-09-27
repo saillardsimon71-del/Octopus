@@ -7,14 +7,29 @@ prouvée dans le dépôt. Son noyau économique, ses tâches durables, ses garde
 journal et ses budgets existent. Le chantier Hermes + Agnes a supprimé l'ancien moteur vidéo,
 ajouté une frontière Agnes minimale et renforcé le runtime de mission.
 
-La première activité économique est prévue après une dernière phase de revue et correction. Le
-blocage opérationnel actuellement démontré est SEARCH: la mission réelle 75 n'a acquis aucune
-source parce que ses 12 recherches ont échoué sur le transport Bing/proxy.
+La mission réelle 75 reste inconclusive. Son blocage proxy a été reproduit hors OCTOPUS:
+la sandbox sans réseau injecte HTTP_PROXY/HTTPS_PROXY/ALL_PROXY vers 127.0.0.1:9.
+La configuration Astra autorise maintenant le réseau; aucune neutralisation des proxies
+n'a été ajoutée à SEARCH. Un probe natif Codex avec profil workspace et réseau activé
+confirme HTTP/HTTPS 200 et absence de ces proxies. L'autorisation reste limitée aux lectures.
+
+La reprise E1/E2 adapte le provider DDGS de Hermes pinné, avec timeout global de 30 secondes,
+annulation humaine et environnement enfant sans secrets provider. SEARCH utilise DDGS avant
+les API sous politique de coût et les RSS historiques. Les moteurs et leur agrégation restent
+dans `ddgs==9.16.0`, pas dans du code Google/Bing propre à OCTOPUS. BROWSE reste distinct.
+
+Probe réel du 2026-09-27: SEARCH via registry a trouvé la documentation Python avec DDGS;
+BROWSE a acquis `https://docs.python.org/3/tutorial/index.html` en HTTP 200,
+méthode `http:html_main`, 6250 caractères, `usable=true`. Aucun LLM, effet métier ni
+evidence stratégique créé. Google seul via DDGS a renvoyé `No results found`:
+intégration présente, disponibilité effective Google non démontrée par ce probe.
 
 ## Réalité Git
 
-- Référence GitHub `main`: `ae4d98dc9692aa10ba15051381a36809e25377df`.
+- Référence locale `origin/main`: `ae4d98dc9692aa10ba15051381a36809e25377df`.
+- `main` local: `5301a27b8f400041e38eef8b2f0afd73a7b23e6f`.
 - Branche locale du constructeur: `prep/astra-local-orchestration`.
+- Base de la reprise E: `b5032cae97947e9f83347f1564f0a5fab755b6ed`, arbre initial propre.
 - Dernier checkpoint produit avant préparation de la phase E:
   `2952db4781ec8ad60b6958301a2ab48d388fdcd4`.
 - Branche produit publiée: `feat/hermes-agnes-product`.
@@ -93,11 +108,30 @@ Intégré:
 - statuts `source_supported`, `inconclusive` et `not_evaluated`;
 - alias CLI `--llm-budget-usd`.
 
-Le registre est le seul composant directement adapté de Hermes à ce stade. MCP générique,
-computer-use, raccordement complet capabilities/guardrails, portée/fraîcheur de vérification et
-primitives génériques d'erreur restent à décider et, si nécessaires, à intégrer pendant la phase E.
+Le registre et le provider SEARCH DDGS sont adaptés de Hermes. La carte E1/E2 de
+`OCTOPUS_HERMES_REPLACEMENT_MATRIX.md` statue sur les composants P0/P1: permissions,
+acquisition, preuves, scheduler et lifecycle OCTOPUS conservés; SearXNG, MCP et computer-use
+différés sans consommateur supplémentaire. Le modèle de capabilities n'est pas promu en autorité.
 
 ## Validation disponible
+
+Sur le diff E de la branche constructeur, le 2026-09-27:
+
+- baseline hôte de `b5032ca` réutilisé, sans réexécution;
+- 191 tests ciblés passent en 43,56 s, dont frontières SEARCH/BROWSE, preuves,
+  coûts, permissions, timeout natif, annulation et secrets du worker;
+- suite complète finale exécutée une fois: **1268 passed en 203,96 s**, code 0;
+  commande `.venv/Scripts/python.exe -m pytest -q --tb=short -o addopts=''`,
+  log `cache/astra-relay/phase-e-final-full.log`;
+- diff relu, `git diff --check` passe; aucune suppression/relaxation de test valide;
+- HTTP/HTTPS et SEARCH DDGS -> BROWSE validés aussi en sandbox native avec un profil
+  workspace réseau activé: même page Python, 6250 caractères, HTTP 200, `usable=true`;
+  aucun LLM ni écriture de données métier.
+
+Les modifications sont en attente de checkpoint Git hôte, pas fusionnées ni publiées.
+Le changement `.codex/config.toml` appartient au constructeur et doit être exclu du
+transfert produit. La lecture seule réseau est une limite du mandat, pas un filtre HTTP
+implémenté par `network_access=true`. Cette validation ne prouve pas une opportunité client.
 
 Sur la branche produit isolée:
 
@@ -129,12 +163,11 @@ capacité actuelle à rechercher une opportunité.
 
 ## Freins connus avant la première activité
 
-1. SEARCH doit être diagnostiqué et réparé, puis le chemin vers BROWSE et les citations doit être
-   vérifié.
-2. Les composants Hermes restants doivent recevoir une décision actuelle fondée sur leurs
-   consommateurs et les obstacles observés.
-3. Une revue transversale doit vérifier permissions, budgets, reprise, idempotence, preuves et
-   cohérence documentaire.
+1. Mesurer maintenant SEARCH/BROWSE sur une source pertinente pour la mission économique,
+   puis faire relire les citations. Le probe technique Python ne valide pas le marché.
+2. Google peut ne pas répondre: conserver les erreurs observables et les autres moteurs;
+   ne pas inventer un résultat ni déclencher un fallback payant.
+3. Faire checkpoint et revue du diff E par l'hôte avant transfert dans la branche produit.
 4. Le smoke test Agnes réel reste à faire séparément si la première activité utilise la vidéo.
 5. Les prochains commits produit doivent être extraits de la branche constructeur sans y inclure
    l'infrastructure Astra.

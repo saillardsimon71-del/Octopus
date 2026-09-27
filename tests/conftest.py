@@ -75,6 +75,9 @@ class FakeTransport:
 
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
+    from agents import search
+    # Optional Web engines must never turn an offline test into a live search.
+    monkeypatch.setattr(search, "_ddgs_available", lambda: False)
     root = tmp_path / "root"
     (root / "agents" / "data").mkdir(parents=True)
     monkeypatch.setenv("OCTOPUS_HOME", str(root))

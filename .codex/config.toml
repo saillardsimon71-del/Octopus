@@ -28,7 +28,9 @@ web_search = "disabled"
 windows.sandbox = "unelevated"
 
 [sandbox_workspace_write]
-network_access = false
+# Phase E authorizes read-only HTTP/HTTPS probes and source acquisition.
+# Network access itself does not authorize publication, contact or spending.
+network_access = true
 
 [agents]
 enabled = false

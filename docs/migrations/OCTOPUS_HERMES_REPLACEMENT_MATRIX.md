@@ -25,6 +25,33 @@ pas ajouter un composant pour compléter mécaniquement la liste Hermes.
 
 ## 1. Registry d'outils
 
+### Décisions E1/E2 du 2026-09-27 (code pinné inspecté)
+
+Hermes vérifié à `59004a62356f3a4697ab0fe8ad5086d2b405e2a6` dans
+`cache/upstreams/hermes-agent`. Cette table remplace les intentions historiques ci-dessous.
+
+| Besoin OCTOPUS | Composant actuel | Composant Hermes disponible | Décision |
+|---|---|---|---|
+| SEARCH Web indépendant de Bing, Google compris | `agents/search.py`, RSS et Brave/Tavily | `plugins/web/ddgs/provider.py`, `_search_worker.py`, dépendance `ddgs==9.16.0` | `integrate`: adapter recherche seule, normalisation et isolation avec délai global; pas de parser Google/Bing maison |
+| Métarecherche auto-hébergée | aucune instance configurée | `plugins/web/searxng/provider.py`, endpoint JSON | `defer`: DDGS couvre le consommateur actuel sans déployer un service |
+| MCP pour acquisition | aucun serveur autorisé/configuré | `plugins/web/keyless_mcp.py`, `tools/mcp_tool_transport.py`, `mcp_tool_errors.py` | `defer`: DDGS suffit ici; pas de discovery ni de ring de services activé implicitement |
+| BROWSE public et récupération de pages | `browser.acquire_public_page`: HTTP, Playwright, extraction PDF sous politique de coût | `tools/web_tools_extract.py`, `web_tools_rescue.py`, `agent/browser_provider.py` | `keep_octopus`: acquisition datée, garde-fous URL/comptes et citations déjà consommés; cloud/rescue n'enlèveraient pas ces obligations |
+| Disponibilité et normalisation SEARCH | table `PROVIDERS`, enveloppe six champs | `DDGSWebSearchProvider.is_available`, `plugins/web/_common.py` | `integrate`: disponibilité locale sans réseau, résultat adapté une seule fois au contrat existant |
+| Registry, toolsets et permissions | `agents.tool_registry`, allowlist, policies des handlers | `tools/registry.py` | `keep_octopus`: SEARCH est déjà raccordé; pas de nouveau toolset, discovery ou promotion de `capabilities.py` |
+| Annulation et timeout natif SEARCH | appels HTTP bornés mais pas de worker DDGS | `_run_ddgs_search_bounded`, `_terminate_and_reap` | `integrate`: enfant jetable, arrêt humain OCTOPUS propagé, secrets exclus de son environnement |
+| Erreurs, retry et cooldown | erreurs par provider, cooldown LLM et retry worker existants | `agent/error_classifier.py`, `retry_utils.py`, `fallback_cooldown.py` | `keep_octopus`: upstream orienté failover LLM; aucun retry de soumission ni nouvelle taxonomie nécessaire pour ce GET/search borné |
+| Computer-use | BROWSE HTTP/Playwright | `tools/computer_use/permissions.py`, backend cua MCP | `defer`: aucun obstacle desktop démontré; ne pas confondre disponibilité du driver et permission OCTOPUS |
+| Qualification et fraîcheur | `PublicPageRecord.fetched_at`, gate de citations, journal strategy | `agent/verification_evidence.py` (ledger de vérification de code) | `keep_octopus`: autre domaine et seconde DB; acquisition != preuve économique |
+| Scheduler | queue durable et watchdog existants | `agent/periodic_scheduler.py` | `keep_octopus`: aucun blocage actuel justifiant un scheduler supplémentaire |
+| Lifecycle | worker/tasks, scopes d'annulation | `agent/subagent_lifecycle.py` | `keep_octopus`: contrats dépendants de la délégation Hermes, pas nécessaires au worker SEARCH jetable |
+| Skills | pas de procédure économique répétée prouvée | système de skills Hermes | `defer`: aucun consommateur actuel |
+| Cerveau, mémoire générale et UI | identité, orchestration et preuves OCTOPUS | loop/planner/mémoire/UI Hermes | `reject`: autorités parallèles hors mandat |
+
+Frontière minimale: registry OCTOPUS -> SEARCH -> adapter DDGS dérivé de Hermes ->
+enveloppe OCTOPUS -> BROWSE -> qualification. Les moteurs DDGS restent dans la dépendance,
+pas dans OCTOPUS. Le choix de moteurs Web exclut les backends encyclopédiques du mode `auto`
+de DDGS pour préserver la politique business existante. Une URL découverte n'est pas acquise.
+
 OCTOPUS actuel:
 - `agents/runtime.py::TOOLS`
 - `agents/runtime.py::_validate_tool_args`

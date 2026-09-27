@@ -1,6 +1,8 @@
 # Runtime local OCTOPUS
 openai>=1.99,<2
 requests>=2.32,<3
+# Search-only provider selected from the pinned Hermes dependency.
+ddgs==9.16.0
 customtkinter>=5.2,<6
 Pillow>=10,<13
 playwright>=1.55,<2
