@@ -7,11 +7,12 @@ Chantier constructeur actuel: `docs/migrations/FINAL_READINESS_ANTI_CONTAMINATIO
 ## P0 - Préparation technique avant la première activité
 
 1. Checkpoint E acquis: `057fc6e`; routeur E5: `dbf30d2`. Conserver la revue avant transfert produit.
-2. Consommer le résultat de validation finale consigné dans `CURRENT_STATE`, sans relancer le baseline.
+2. Phase F : READY pour le dry run supervisé neutre ; suite complète hôte exit=0 sur `587001d`.
+   Résultat et limites consignés dans `CURRENT_STATE`, sans relancer le baseline.
 3. E5 terminée `inconclusive`: annonce acquise mais fermée, arrêt LLM gratuit sur 429.
-   Ne pas relancer la mission. Correction de la vue BROWSE validée par 225 tests ciblés;
-   exécuter la validation complète finale du nouvel état après checkpoint.
-   Le prochain test économique proposé dans `CURRENT_STATE` reste soumis à revue humaine.
+   Ne pas relancer la mission. La correction de la vue BROWSE est incluse dans l'état validé.
+   Son test économique proposé reste historique, soumis à revue humaine s'il est reconsidéré ;
+   il ne devient pas l'objectif du dry run neutre.
 4. Google seul via DDGS n'a pas fourni de résultat au probe; ne pas annoncer sa disponibilité.
 5. Réutiliser les décisions P0/P1 de la matrice Hermes, sans relancer l'audit historique.
 6. Extraire les commits produit relus hors de la branche du constructeur, puis mettre à jour la PR

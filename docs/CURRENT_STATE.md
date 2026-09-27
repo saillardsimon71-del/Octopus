@@ -1,10 +1,14 @@
 # État actuel OCTOPUS - 2026-09-27
 
-## Phase F — readiness au checkpoint
+## Phase F — readiness finale
 
-Verdict provisoire : **NOT READY**, validation complète du nouvel état encore attendue.
-Le baseline hôte sur `ad95f22c9f82cadb2cf3a1b320e9b9a7b47676b3` a terminé avec exit=0
-(`cache/astra-relay/baseline-pytest.log`) ; il ne valide pas les modifications suivantes.
+Verdict : **READY pour le dry run économique supervisé au démarrage neutre décrit dans
+`HANDOFF_WORK.md`**. Aucun blocage technique reproduit ne reste ouvert pour ce parcours.
+La suite complète hôte a terminé avec exit=0 en 187 secondes sur
+`587001d07ebc201d8c7d62c5e5a2bd7b6c5f2303`, le 2026-09-27
+(`cache/astra-relay/results/validation-latest.json`, log `cache/astra-relay/validation-pytest.log`).
+Ce résultat valide le code et le canari de ce checkpoint, pas une disponibilité live ou un
+résultat économique. La clôture suivante ne modifie que la documentation.
 
 Contaminations reproduites : une mission sans business ni run parent injectait l'identité
 Podalux et une description affirmant des comptes connectés ; `NEXT_STEPS` prescrivait encore
@@ -33,15 +37,17 @@ Validation exécutée sans réseau ni ressource payante :
 Ces groupes se recouvrent ; ne pas additionner leurs nombres comme des tests distincts.
 Diff relu et `git diff --check` sans erreur.
 
-Prochaine étape constructeur : checkpoint hôte, puis demander la suite complète via
-`validation.json` dans un appel Astra frais, avant le verdict final. Aucun dry run lancé.
+Revue finale : HEAD conforme au résultat hôte, arbre initial propre, branche constructeur
+distincte de `main` ; aucun merge. Six cas ciblés réexécutés avec succès : canari cold start
+(business omis, neuf et `octopus`), scopes explicite et parent, mission générale de bout en bout.
+Aucun dry run lancé. Clôture documentaire soumise au checkpoint hôte.
 Le parcours proposé reste un business neuf, une mission neutre, SEARCH/BROWSE seulement,
 politique `zero_cost`, citations acquises puis revue humaine. Les anciennes expériences
 restent accessibles à un appel explicite d'economy/status/drive ou de mémoire : ce n'est
 pas un parcours de cold start. Les entrées legacy agent/message restent historiques.
 La disponibilité live du LLM gratuit (429 en E5) n'est pas démontrée par ces tests ; une
-indisponibilité doit arrêter la mission sans fallback payant. Prochaine observation après
-validation : source réellement acquise et signal qualifié, ou résultat `inconclusive`.
+indisponibilité doit arrêter la mission sans fallback payant. Prochaine observation dans le
+dry run supervisé : source réellement acquise et signal qualifié, ou résultat `inconclusive`.
 
 ## Résumé
 
