@@ -1,14 +1,12 @@
-"""Audit C6 : libelles du template Remotion propres a chaque offre."""
+"""Audit C6 : libelles historiques des jobs propres a chaque offre."""
 from __future__ import annotations
 
-import importlib.util
 import json
 
 import pytest
 
 from agents import agents as ag
 from agents import evals
-from conftest import PROJECT
 
 ROLES = ("hook", "douleur", "preuve", "soulagement", "cta")
 
@@ -43,17 +41,3 @@ def test_role_name_copied_into_narration_is_rejected():
         ag.validate_job({"titre": "t", "hook": "h", "cta": "c", "keywords": [], "narration": narration})
     narration[5]["texte"] = "Après : un outil qui relance pour toi."
     ag.validate_job({"titre": "t", "hook": "h", "cta": "c", "keywords": [], "narration": narration})
-
-
-def test_job_ts_carries_visuals():
-    pytest.importorskip("numpy")
-    spec = importlib.util.spec_from_file_location("audio_mix", PROJECT / "tools" / "make_audio_chatterbox_full.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    job = {"titre": "t", "prix": "37 €", "cta": "c", "hook": "h", "palette": ag.PALETTE, "keywords": ["devis"],
-           "visuel": ag.VISUELS["cash_devis_cgv01"]}
-    ts = module.render_job_ts(job)
-    assert ts.startswith("export const JOB = ") and ts.endswith(" as const;\n")
-    data = json.loads(ts[len("export const JOB = "):-len(" as const;\n")])
-    assert data["visuel"]["preuve"]["card_title"] == "DEVIS N°2026-012"
-    assert json.loads(module.render_job_ts({**job, "visuel": None})[19:-11])["visuel"] is None  # anciens jobs : defauts

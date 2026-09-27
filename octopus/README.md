@@ -52,7 +52,7 @@ Tables `tasks`, `events`, `human_requests`, `schedules` dans `data/octopus.db` (
 | Élément | Comportement |
 |---|---|
 | Prise de tâche | transaction `BEGIN IMMEDIATE` : un seul worker par tâche ; priorité puis ancienneté ; `not_before` pour les délais |
-| Ressources | une tâche `cpu_heavy` (TTS, rendu) à la fois ; les tâches sans ressource passent à côté |
+| Ressources | une tâche `cpu_heavy` (traitement CPU) à la fois ; les tâches sans ressource passent à côté |
 | Bail | identifiant unique par exécution du worker, renouvelé avant expiration ; un bail expiré ne peut plus écrire ni être renouvelé ; reprise s'il reste des tentatives, sinon échec |
 | Échec | nouvelle tentative différée (`max_attempts`, `retry_delay_s` du handler) |
 | Annulation | immédiate en file ; coopérative en cours (`ctx.check_cancel()`, relayée à l'arrêt Podalux) |
@@ -61,11 +61,11 @@ Tables `tasks`, `events`, `human_requests`, `schedules` dans `data/octopus.db` (
 | Idempotence | `idempotency_key` unique (ex. `publish:<offre>:<sha256>`) |
 | Coûts | chaque tâche tourne dans un run du journal, avec le budget déclaré par son handler |
 
-Handlers chargés : `octopus.builtin_handlers` (`octopus.cost_report`), `agents.task_handlers` (`podalux.video_cycle`, `podalux.agent_message`, `podalux.mission`) et `businesses.veille.handlers` (`veille.brief`, voir `businesses/veille/README.md`), surchargeables par `OCTOPUS_HANDLERS`. Une tâche rejouée après une réponse humaine retrouve ses étapes coûteuses via `ctx.memo`. Aucune planification n'est créée d'office : un cycle vidéo planifié consomme du CPU et des appels payants, c'est à décider.
+Handlers chargés : `octopus.builtin_handlers` (`octopus.cost_report`), `agents.task_handlers` (`podalux.agent_message`, `podalux.mission`, `orbit.mission`) et `businesses.veille.handlers` (`veille.brief`, voir `businesses/veille/README.md`), surchargeables par `OCTOPUS_HANDLERS`. Une tâche rejouée après une réponse humaine retrouve ses étapes coûteuses via `ctx.memo`. Aucune planification n'est créée d'office. Le moteur vidéo historique a été retiré le 2026-09-25.
 
 ```
 python -m octopus worker                      boucle (Ctrl+C pour arrêter)
-python -m octopus enqueue podalux podalux.video_cycle --input "{\"offer_id\": \"cash_devis_cgv01\"}"
+python -m octopus enqueue octopus octopus.cost_report
 python -m octopus tasks / events / ask / answer 3 "oui" / cancel 12
 python -m octopus schedule octopus octopus.cost_report --every 86400
 ```

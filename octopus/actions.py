@@ -20,6 +20,10 @@ from .strategy import StrategyError
 _EXECUTORS: dict[tuple[str, str], tuple[Callable[[dict, dict], dict], str, bool]] = {}
 
 
+class AmbiguousAction(RuntimeError):
+    """The remote effect may exist: retain the reservation until reconciliation."""
+
+
 def register_executor(channel_kind: str, action: str, fn: Callable[[dict, dict], dict], *, cost_class: str,
                       requires_idempotency: bool = False) -> None:
     if cost_class not in {"local", "free_quota", "paid"}:
@@ -98,11 +102,22 @@ def propose(business: str, channel_id: int, action: str, payload: dict | None = 
                      decided_by="policy:actions")
             return {"action_id": action_id, "status": "blocked", "reason": f"dépense : {decision['reason']}"}
         spend_request_id = decision["request_id"]
+        # Persist before invoking the provider, including when the process dies there.
+        with tasks._tx() as conn:
+            conn.execute("UPDATE channel_actions SET spend_request_id=? WHERE id=?",
+                         (spend_request_id, action_id))
     try:
         result = _EXECUTORS[(channel["kind"], action)][0](channel, payload or {})
         source = str(result.get("source_ref") or "").strip()
         if not source:
             raise StrategyError("l'exécuteur n'a pas renvoyé de source vérifiable")
+    except AmbiguousAction as exc:
+        reason = str(exc)[:500]
+        with tasks._tx() as conn:
+            _set(conn, action_id, business, "ambiguous", reason=reason,
+                 spend_request_id=spend_request_id, decided_by="policy:actions")
+        return {"action_id": action_id, "status": "ambiguous", "reason": reason,
+                "spend_request_id": spend_request_id}
     except Exception as exc:  # l'échec d'une intégration externe est un résultat, pas un plantage du moteur
         if spend_request_id:
             economy.cancel_spend(business, spend_request_id, actor="policy:actions")

@@ -15,6 +15,65 @@ REAL_QUERIES = [  # run ORBIT du 16/09, 14:07-14:10
 ]
 
 
+def test_registry_is_the_single_runtime_source(monkeypatch):
+    from agents.tool_registry import ToolRegistry
+
+    assert isinstance(runtime.TOOLS, ToolRegistry)
+    for method in (runtime.tools_desc, runtime._validate_tool_args,
+                   runtime._normalize_allowed_tools):
+        assert method.__self__ is runtime.TOOLS
+    payload = {"observed": False, "nested": {"value": None}}
+    monkeypatch.setitem(runtime.TOOLS["resources_status"], "fn", lambda args: payload)
+    refusal, result = runtime.TOOLS.dispatch("resources_status", {}, {"resources_status"})
+    assert refusal is None
+    assert result is payload  # No rewriting of evidence or result metadata.
+
+
+@pytest.mark.parametrize("tool,args,allowed,reason", [
+    ("missing", {}, None, "inconnu"),
+    ("request_spend", {}, set(), "interdit par la politique"),
+    ("request_spend", [], None, "args doit être un objet"),
+    ("request_spend", {}, None, "argument obligatoire manquant"),
+    ("request_spend", {"amount": True, "currency": "EUR", "purpose": "test"},
+     None, "type attendu float"),
+])
+def test_registry_dispatch_refuses_before_handler(monkeypatch, tool, args, allowed, reason):
+    monkeypatch.setitem(runtime.TOOLS["request_spend"], "fn",
+                        lambda args: pytest.fail("refused tool executed"))
+    refusal, result = runtime.TOOLS.dispatch(tool, args, allowed)
+    assert reason in refusal
+    assert result is None
+
+
+def test_registry_rejects_unknown_schema_type(monkeypatch):
+    monkeypatch.setitem(runtime.TOOLS["recall"]["params"], "key", "unsupported")
+    monkeypatch.setitem(runtime.TOOLS["recall"], "fn",
+                        lambda args: pytest.fail("invalid schema executed"))
+    refusal, result = runtime.TOOLS.dispatch("recall", {"key": "value"})
+    assert "type attendu unsupported" in refusal
+    assert result is None
+
+
+def test_registry_bounds_errors_without_retry_and_preserves_cancellation(monkeypatch):
+    calls = []
+    error = RuntimeError("x" * 10000)
+
+    def fail(args):
+        calls.append(args)
+        raise error
+
+    monkeypatch.setitem(runtime.TOOLS["recall"], "fn", fail)
+    with pytest.raises(RuntimeError) as caught:
+        runtime.TOOLS.dispatch("recall", {"key": "test"})
+    assert len(str(caught.value)) == 2048
+    assert len(calls) == 1
+    error = runtime.cancel.Cancelled("stop")
+    with pytest.raises(runtime.cancel.Cancelled) as caught:
+        runtime.TOOLS.dispatch("recall", {"key": "test"})
+    assert caught.value is error
+    assert len(calls) == 2
+
+
 def test_equivalent_queries_share_a_key():
     assert len({runtime.query_key(q) for q in REAL_QUERIES}) == 1
     assert runtime.query_key("relance facture impayée") != runtime.query_key("injonction de payer")
@@ -211,7 +270,7 @@ def test_business_signal_focus_upgrades_evidence_selector_for_subagents(monkeypa
 
     def fake_run_agent(role, goal, max_steps=10, conversational=False, **kwargs):
         seen.append(kwargs.get("search_browse_selector"))
-        return {"role": role, "steps": [], "final": "aucune preuve"}
+        return {"role": role, "steps": [], "final": "aucune preuve", "execution_status": "completed"}
 
     monkeypatch.setattr(runtime, "run_agent", fake_run_agent)
 
@@ -1122,3 +1181,80 @@ def test_mission_does_not_hide_non_gateway_synthesis_bug(monkeypatch):
     monkeypatch.setattr(deepseek, "call_json", call_json)
     with pytest.raises(RuntimeError, match="bug de code synthèse"):
         runtime.run_mission("objectif", max_steps_per_agent=2)
+
+
+@pytest.mark.parametrize("stop", ["budget_exceeded", "cancelled", "llm_unavailable", "step_limit"])
+def test_stopped_empty_mission_never_synthesizes(monkeypatch, stop):
+    calls = []
+    def call(*args, **kwargs):
+        calls.append(args[1])
+        return {"tasks": [{"role": "SOUT", "task": "collect"}]}
+    monkeypatch.setattr(deepseek, "call_json", call)
+    monkeypatch.setattr(runtime, "run_agent", lambda *a, **k: {
+        "steps": [], "final": "unavailable", "execution_status": stop})
+    out = runtime.run_mission("collect")
+    assert out["synthesis_status"] == "degraded"
+    assert calls == ["planification"]
+
+
+def test_empty_plan_never_synthesizes(monkeypatch):
+    calls = []
+    def call(*args, **kwargs):
+        calls.append(args[1])
+        return {"tasks": []}
+    monkeypatch.setattr(deepseek, "call_json", call)
+    out = runtime.run_mission("collect")
+    assert out["execution_status"] == "no_work"
+    assert out["synthesis_status"] == "degraded"
+    assert calls == ["planification"]
+
+
+def test_react_pool_exhaustion_stops_mission_and_retains_acquired_work(monkeypatch):
+    calls = []
+    def call(*args, **kwargs):
+        calls.append(args[1])
+        if args[1] == "planification":
+            return {"tasks": [{"role": "SOUT", "task": "collect"},
+                              {"role": "CONVERT", "task": "analyze"}]}
+        if calls.count("action") == 1:
+            return {"tool": "resources_status", "args": {}}
+        raise llm.NoEligibleModel("agent.react_step", "zero_cost", [
+            {"model": "free-route", "reason": "429 cooldown"}])
+    monkeypatch.setattr(deepseek, "call_json", call)
+    monkeypatch.setitem(runtime.TOOLS["resources_status"], "fn", lambda a: {"available": []})
+    out = runtime.run_mission("collect")
+    assert out["execution_status"] == "llm_unavailable"
+    assert out["synthesis_status"] == "degraded"
+    assert "NoEligibleModel" in out["synthesis_error"]
+    assert len(out["results"]) == 1
+    assert len(out["results"][0]["steps"]) == 1
+    assert calls == ["planification", "action", "action"]
+
+
+def test_react_does_not_disguise_programming_bug_as_step_limit(monkeypatch):
+    def broken(*a, **k):
+        raise RuntimeError("programming bug")
+    monkeypatch.setattr(deepseek, "call_json", broken)
+    with pytest.raises(RuntimeError, match="programming bug"):
+        runtime.run_agent("SOUT", "collect")
+
+
+
+def test_planner_pool_exhaustion_is_durable_degradation(monkeypatch):
+    def call(*a, **k):
+        raise llm.NoEligibleModel("agent.plan", "zero_cost", [])
+    monkeypatch.setattr(deepseek, "call_json", call)
+    out = runtime.run_mission("collect")
+    assert out["synthesis_status"] == "degraded"
+    assert out["execution_status"] == "llm_unavailable"
+    assert out["results"] == []
+
+
+@pytest.mark.parametrize("rapport", [None, "", "  ", 42])
+def test_empty_or_nontext_synthesis_is_not_validated(monkeypatch, rapport):
+    actions = iter([{"tasks": [{"role": "SOUT", "task": "analyze"}]},
+                    {"final": "analysis"}, {"rapport": rapport}])
+    monkeypatch.setattr(deepseek, "call_json", lambda *a, **k: next(actions))
+    out = runtime.run_mission("analyze")
+    assert out["synthesis_status"] == "degraded"
+    assert out["execution_status"] == "invalid_synthesis"

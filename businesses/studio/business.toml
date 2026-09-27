@@ -1,7 +1,7 @@
-# Studio : générations vidéo locales à la demande (WanGP), utilisables par toutes les activités.
+# Studio historique : identité conservée pour le journal, moteur retiré le 2026-09-25.
 id = "studio"
 name = "Studio vidéo"
-description = "Générations vidéo locales (WanGP / Pinokio) depuis le Studio, la CLI ou d'autres activités."
-handlers = ["octopus.media.handlers"]
-budget_daily_usd = 0.0     # génération locale : aucun appel payant attendu
+description = "Historique des générations vidéo ; aucune génération locale disponible."
+handlers = []
+budget_daily_usd = 0.0     # aucune génération active
 kpis = ["videos_generees", "temps_de_generation"]

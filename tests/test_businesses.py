@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -50,7 +51,7 @@ def test_broken_or_duplicate_declarations_are_skipped(isolated):
 
 
 def test_handler_modules_engine_first_without_duplicates(isolated):
-    declare(isolated, "alpha", 'handlers = ["octopus.media.handlers", "mod.a"]\n')
+    declare(isolated, "alpha", 'handlers = ["octopus.builtin_handlers", "mod.a"]\n')
     declare(isolated, "beta", 'handlers = ["mod.a", "mod.b"]\n')
     assert businesses.handler_modules() == [*businesses.ENGINE_HANDLERS, "mod.a", "mod.b"]
 
@@ -67,13 +68,25 @@ def test_worker_loads_declared_handlers(isolated, monkeypatch):
     declare(isolated, "demo", 'handlers = ["demo_pkg.handlers"]\n')
     monkeypatch.setattr(worker, "HANDLERS", dict(worker.HANDLERS))
     loaded = worker.load_handlers()
-    assert "demo.ping" in loaded and "media.video_generate" in loaded
+    assert "demo.ping" in loaded and "media.video_generate" not in loaded
 
 
 def test_env_overrides_declared_handlers(isolated, monkeypatch):
     declare(isolated, "demo", 'handlers = ["module.inexistant"]\n')
     monkeypatch.setenv("OCTOPUS_HANDLERS", "octopus.builtin_handlers")
     worker.load_handlers()  # le module déclaré n'est pas importé : pas d'ImportError
+
+
+def test_repository_businesses_load_without_legacy_video(monkeypatch):
+    base = Path(__file__).resolve().parents[1] / "businesses"
+    monkeypatch.setattr(businesses, "root", lambda: base)
+    monkeypatch.delenv("OCTOPUS_HANDLERS", raising=False)
+    monkeypatch.setattr(worker, "HANDLERS", {})
+    loaded = worker.load_handlers()
+    assert {"octopus.cost_report", "podalux.agent_message", "podalux.mission", "orbit.mission", "veille.brief"} <= set(loaded)
+    assert "podalux.video_cycle" not in loaded
+    assert "media.video_generate" not in loaded
+    assert businesses.get("studio").handlers == []
 
 
 def test_development_workshop_requires_explicit_loading(isolated, monkeypatch):

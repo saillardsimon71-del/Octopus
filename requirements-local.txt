@@ -1,19 +1,10 @@
-# Runtime local léger (mode cloud-first)
+# Runtime local OCTOPUS
 openai>=1.99,<2
 requests>=2.32,<3
 customtkinter>=5.2,<6
 Pillow>=10,<13
 playwright>=1.55,<2
 mcp>=1.30,<2
-
-# Voix locale de repli (MIT, CPU, sans compte ni quota) : dernier maillon de TTS_CHAIN.
-piper-tts>=1.3,<2
-
-# Calage des sous-titres sur la voix (optionnel, CPU, MIT) : PODALUX_WORD_SYNC=0 pour s'en passer.
-faster-whisper>=1.2,<2
-
-# Optionnel mais utile pour les outils audio / certains modules média locaux.
-numpy>=1.26,<3
 
 # Développement / tests
 pytest>=9.0.3,<10

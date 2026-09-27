@@ -20,6 +20,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 from octopus import journal, llm
 
 from . import cancel, config, db, deepseek, web_guard
+from .tool_registry import ToolRegistry
 
 _ROLE: contextvars.ContextVar[str] = contextvars.ContextVar("podalux_role", default="RUNTIME")
 _SEARCHES: contextvars.ContextVar[dict | None] = contextvars.ContextVar("podalux_searches", default=None)
@@ -585,23 +586,6 @@ def _browse(args):
         b.stop()
 
 
-def _render_offer(args):
-    run = journal.current_run()
-    if run is not None and run.business != DEFAULT_BUSINESS:
-        # Les offres et le rendu (potentiellement payant, RunPod) appartiennent à Podalux.
-        return {"refuse": True, "note": f"render_offer produit une offre Podalux : indisponible pour le business "
-                                        f"{run.business}. Propose l'action à l'humain au lieu de l'exécuter."}
-    from .cycle import run_cycle
-    r = run_cycle(offer_id=args["offer_id"], max_iterations=1)
-    return {"score": r["ledger"].get("score"), "decision": r["orbit"].get("decision"),
-            "iterations": r["iterations"]}
-
-
-def _qc(args):
-    from . import tools
-    return tools.qc_metrics(args["offer_id"])
-
-
 def _ask_human(args):
     # En mode autonome (CLI), pas d'humain présent → on ne bloque pas 5 min.
     ans = db.ask_human("RUNTIME", "agent_question", args["question"], timeout_s=5)
@@ -783,11 +767,9 @@ def _request_spend(args):
                                    experiment_id=int(args["experiment_id"]) if args.get("experiment_id") else None)
 
 
-TOOLS = {
+TOOLS = ToolRegistry({
     "search": {"desc": "recherche web (liens) ; site est un domaine optionnel réellement appliqué, ex. bpifrance.fr", "params": {"query": "str", "site": "str?"}, "fn": _search},
     "browse": {"desc": "ouvre une page dans TON Chrome réel (comptes Stripe/Reddit/X/Fiverr/YouTube connectés) et la décrit", "params": {"url": "str"}, "fn": _browse},
-    "render_offer": {"desc": "produit la vidéo complète d'une offre", "params": {"offer_id": "str"}, "fn": _render_offer},
-    "qc": {"desc": "métriques ffmpeg d'une offre", "params": {"offer_id": "str"}, "fn": _qc},
     "ask_human": {"desc": "demande confirmation/info à l'humain", "params": {"question": "str"}, "fn": _ask_human},
     "publish": {"desc": "plan de publication (dry-run)", "params": {"offer_id": "str"}, "fn": _publish},
     "send_message": {"desc": "prospection : envoie un message (dry-run)", "params": {"platform": "str", "recipient": "str", "text": "str"}, "fn": _send_message},
@@ -803,73 +785,21 @@ TOOLS = {
     "resources_status": {"desc": "inventaire des ressources reelles disponibles (comptes, argent, audiences, machines) avec leur etat constate, leur acces et ce qui manque", "params": {"capability": "str?", "state": "str?"}, "fn": _resources_status},
     "request_resource": {"desc": "demande a l'humain de creer, connecter ou autoriser une ressource manquante (login, oauth, 2fa, kyc, signature, validation bancaire) ; l'operation reprend seule apres la reponse", "params": {"key": "str", "need": "str", "question": "str", "label": "str?", "kind": "str?"}, "fn": _request_resource},
     "request_spend": {"desc": "demande l'autorisation de dépenser (ne paie rien) ; refusée hors enveloppe accordée", "params": {"amount": "float", "currency": "str", "purpose": "str", "experiment_id": "int?"}, "fn": _request_spend},
-}
+})
 
 
-def tools_desc(allowed_tools: set[str] | None = None, *, legacy_search: bool = False) -> str:
-    items = TOOLS.items() if allowed_tools is None else (
-        (name, spec) for name, spec in TOOLS.items() if name in allowed_tools
-    )
-    lines = []
-    for name, spec in items:
-        if legacy_search and name == "search":
-            lines.append("- search(query) : recherche web (liens)")
-        else:
-            lines.append(f"- {name}({', '.join(spec['params'])}) : {spec['desc']}")
-    return "\n".join(lines)
-
-
-def _matches_tool_type(value, token: str) -> bool:
-    if token.endswith("_id"):
-        token = "int"
-    checks = {
-        "str": lambda v: isinstance(v, str),
-        "int": lambda v: isinstance(v, int) and not isinstance(v, bool),
-        "float": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
-        "list": lambda v: isinstance(v, list),
-        "dict": lambda v: isinstance(v, dict),
-        "bool": lambda v: isinstance(v, bool),
-    }
-    check = checks.get(token)
-    return True if check is None else check(value)
-
-
-def _validate_tool_args(tool: str, args) -> str | None:
-    """Validation structurelle minimale des paramètres déclarés dans TOOLS."""
-    if not isinstance(args, dict):
-        return f"args doit être un objet, reçu {type(args).__name__}"
-    for name, declared in TOOLS[tool]["params"].items():
-        declared = str(declared)
-        variants = declared.split("|")
-        optional = all(v.endswith("?") for v in variants)
-        clean = [v[:-1] if v.endswith("?") else v for v in variants]
-        if name not in args or args[name] is None:
-            if optional:
-                continue
-            return f"argument obligatoire manquant : {name}"
-        value = args[name]
-        if not any(_matches_tool_type(value, token) for token in clean):
-            expected = "|".join(clean)
-            return f"argument {name} : type attendu {expected}, reçu {type(value).__name__}"
-    return None
-
-
-def _normalize_allowed_tools(allowed_tools) -> set[str] | None:
-    if allowed_tools is None:
-        return None
-    allowed = set(allowed_tools)
-    unknown = sorted(allowed - set(TOOLS))
-    if unknown:
-        raise ValueError(f"outils inconnus dans allowed_tools : {', '.join(unknown)}")
-    return allowed
+# Compatibility names reference the single registry, not parallel implementations.
+tools_desc = TOOLS.describe
+_validate_tool_args = TOOLS.validate
+_normalize_allowed_tools = TOOLS.normalize_allowed
 
 
 ROLES = {
     "SOUT": "Recherche et veille : utilise search/browse pour trouver des infos utiles.",
     "CONVERT": "Monétisation : rédige offres, prix, CTA, contenu.",
-    "FORGE": "Production : produit les vidéos (render_offer).",
-    "GROWTH": "Qualité/distribution : juge (qc), publie (publish), prospecte (send_message).",
-    "LEDGER": "Data/finance : mesure (qc), suit les coûts, mémorise (remember).",
+    "FORGE": "Production : prépare les livrables de l'offre.",
+    "GROWTH": "Qualité/distribution : prépare la publication (publish) et la prospection (send_message).",
+    "LEDGER": "Data/finance : suit les coûts (economy_status), mémorise (remember).",
     "ORBIT": "CEO : planifie, arbitre, décide.",
 }
 
@@ -1307,7 +1237,8 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
     if search_browse_selector not in {"first", "evidence_relevance", "business_signal_relevance"}:
         raise ValueError(f"search_browse_selector inconnu : {search_browse_selector}")
     with journal.run(_business(business), "agent", label=f"{role} : {goal}",
-                     budget_usd=deepseek.config.CYCLE_BUDGET_USD):
+                     budget_usd=None if journal.current_run() and journal.current_run().budgets
+                     else deepseek.config.CYCLE_BUDGET_USD):
         token = _ROLE.set(role)
         try:
             with cancel.scope(), web_guard.session(), _search_cache():
@@ -1335,11 +1266,11 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
     for i in range(max_steps):
         if cancel.requested():
             db.post(role, "arrêt demandé par l'humain — fin de l'agent")
-            return {"role": role, "steps": steps, "final": "(arrêt demandé)"}
+            return {"role": role, "steps": steps, "final": "(arrêt demandé)", "execution_status": "cancelled"}
         # Garde-budget : on arrête l'agent si le budget du run est atteint.
         if _budget_exhausted():
             db.post(role, "budget dépassé — arrêt du run")
-            return {"role": role, "steps": steps, "final": "(budget dépassé)"}
+            return {"role": role, "steps": steps, "final": "(budget dépassé)", "execution_status": "budget_exceeded"}
         forced_lockstep = lockstep_url is not None
         forced_selection = lockstep_selection if forced_lockstep else None
         if forced_lockstep:
@@ -1351,12 +1282,13 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
             try:
                 r = deepseek.call_json(role, "action", MODEL, context + [
                     {"role": "user", "content": "Choisis ta prochaine action (JSON)."}])
-            except Exception as e:
-                steps.append({"step": i + 1, "tool": "erreur", "result": str(e)})
-                break
+            except llm.GatewayError as exc:
+                error = f"{type(exc).__name__}: {exc}"[:1500]
+                return {"role": role, "steps": steps, "final": "(LLM indisponible)",
+                        "execution_status": "llm_unavailable", "execution_error": error}
         if "final" in r:
             db.post(role, f"{done_label} : {str(r['final'])[:120]}")
-            return {"role": role, "steps": steps, "final": r["final"]}
+            return {"role": role, "steps": steps, "final": r["final"], "execution_status": "completed"}
         tool = r.get("tool")
         raw_args = r.get("args")
         args = {} if raw_args is None else raw_args
@@ -1368,26 +1300,18 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
             steps.append({"step": i + 1, "tool": tool, "result": "inconnu"})
             continue
 
-        refusal = None
-        if allowed_tools is not None and tool not in allowed_tools:
-            refusal = f"outil {tool} interdit par la politique de cette mission"
-        else:
-            refusal = _validate_tool_args(tool, args)
-
-        result = None
-        if refusal is not None:
-            result = {"refused": True, "tool": tool, "reason": refusal}
+        refusal, result = None, None
+        try:
+            refusal, result = TOOLS.dispatch(tool, args, allowed_tools)
+            if refusal is not None:
+                result = {"refused": True, "tool": tool, "reason": refusal}
+                db.post(role, f"refus outil {tool} : {refusal}")
             result_str = _tool_result_view(tool, result)
-            db.post(role, f"refus outil {tool} : {refusal}")
-        else:
-            try:
-                result = TOOLS[tool]["fn"](args)
-                result_str = _tool_result_view(tool, result)
-            except cancel.Cancelled:
-                db.post(role, "arrêt demandé par l'humain — fin de l'agent")
-                return {"role": role, "steps": steps, "final": "(arrêt demandé)"}
-            except Exception as e:
-                result_str = f"erreur : {e}"
+        except cancel.Cancelled:
+            db.post(role, "arrêt demandé par l'humain — fin de l'agent")
+            return {"role": role, "steps": steps, "final": "(arrêt demandé)", "execution_status": "cancelled"}
+        except Exception as e:
+            result_str = f"erreur : {str(e)[:2048]}"
         if (
             search_browse_lockstep
             and refusal is None
@@ -1463,7 +1387,7 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
             if isinstance(forced_selection, dict):
                 step_record["lockstep_selection"] = dict(forced_selection)
         steps.append(step_record)
-    return {"role": role, "steps": steps, "final": "(max steps atteint)"}
+    return {"role": role, "steps": steps, "final": "(max steps atteint)", "execution_status": "step_limit"}
 
 
 def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None = None,
@@ -1479,7 +1403,9 @@ def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None
     allowed_tools = _normalize_allowed_tools(allowed_tools)
     if search_browse_selector not in {"first", "evidence_relevance", "business_signal_relevance"}:
         raise ValueError(f"search_browse_selector inconnu : {search_browse_selector}")
-    with journal.run(_business(business), "mission", label=goal, budget_usd=deepseek.config.CYCLE_BUDGET_USD,
+    with journal.run(_business(business), "mission", label=goal,
+                     budget_usd=None if journal.current_run() and journal.current_run().budgets
+                     else deepseek.config.CYCLE_BUDGET_USD,
                      profile=profile):
         with cancel.scope(), web_guard.session(), _search_cache():
             return _run_mission(
@@ -1525,6 +1451,16 @@ def _handoff_payload(result: dict) -> dict:
     }
 
 
+def _mission_unavailable(tasks: list[dict], results: list[dict], status: str, error: str) -> dict:
+    """An execution failure is not a model-authored conclusion or strategy evidence."""
+    output = {"plan": tasks, "results": results,
+              "rapport": "Mission interrompue ; résultats bruts conservés, aucune synthèse validée.",
+              "execution_status": status, "synthesis_status": "degraded",
+              "synthesis_error": str(error)[:1500]}
+    db.decide("ORBIT", "mission_done", {k: v for k, v in output.items() if k not in {"plan", "results"}})
+    return output
+
+
 def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | None = None, *,
                  search_browse_lockstep: bool = False,
                  search_browse_selector: str = "first",
@@ -1533,7 +1469,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     from .search import SEARCH_PURPOSE_BUSINESS, SEARCH_PURPOSE_GENERAL
     pro = deepseek.config.MODEL_PRO
     if cancel.requested():
-        return {"plan": [], "results": [], "rapport": "(arrêt demandé)"}
+        return _mission_unavailable([], [], "cancelled", "Arrêt demandé")
     current = journal.current_run()
     planner_roles = GENERIC_ROLES if current is not None and current.business != DEFAULT_BUSINESS else ROLES
     role_catalog = "\n".join(f"- {name}: {desc}" for name, desc in planner_roles.items())
@@ -1559,10 +1495,13 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         "Réponds en JSON : "
         '{"tasks":[{"role":"...","task":"..."}]}'
     )
-    plan = deepseek.call_json("ORBIT", "planification", pro,
-                              [{"role": "system", "content": plan_sys},
-                               {"role": "user", "content": goal}],
-                              reasoning="high")
+    try:
+        plan = deepseek.call_json("ORBIT", "planification", pro,
+                                  [{"role": "system", "content": plan_sys},
+                                   {"role": "user", "content": goal}],
+                                  reasoning="high")
+    except llm.GatewayError as exc:
+        return _mission_unavailable([], [], "llm_unavailable", f"{type(exc).__name__}: {exc}")
     proposed = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
     # Garde-fou budgétaire, pas une consigne du prompt : au-delà de 5, chaque
     # sous-tâche coûte une boucle ReAct complète de plus.
@@ -1585,12 +1524,15 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             "Ne prescris pas de sources, de requêtes, de segments ou de stratégie, et n'exige pas une "
             "sous-tâche par signal : tu restes libre de déterminer la bonne décomposition."
         )
-        plan = deepseek.call_json("ORBIT", "planification", pro,
-                                  [{"role": "system", "content": plan_sys},
-                                   {"role": "user", "content": goal},
-                                   {"role": "assistant", "content": json.dumps(plan, ensure_ascii=False)},
-                                   {"role": "user", "content": feedback}],
-                                  reasoning="high")
+        try:
+            plan = deepseek.call_json("ORBIT", "planification", pro,
+                                      [{"role": "system", "content": plan_sys},
+                                       {"role": "user", "content": goal},
+                                       {"role": "assistant", "content": json.dumps(plan, ensure_ascii=False)},
+                                       {"role": "user", "content": feedback}],
+                                      reasoning="high")
+        except llm.GatewayError as exc:
+            return _mission_unavailable(tasks, [], "llm_unavailable", f"{type(exc).__name__}: {exc}")
         proposed = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
         tasks = [t for t in proposed if isinstance(t, dict)][:MAX_PLAN_TASKS]
         if len(proposed) > len(tasks):
@@ -1601,7 +1543,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     for t in tasks:
         if cancel.requested():
             db.post("ORBIT", "mission arrêtée par l'humain")
-            return {"plan": tasks, "results": results, "rapport": "(arrêt demandé)"}
+            return _mission_unavailable(tasks, results, "cancelled", "Arrêt demandé")
         role = t.get("role", "ORBIT")
         if role not in ROLES:
             role = "ORBIT"
@@ -1639,11 +1581,20 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                 search_browse_selector=effective_selector,
             )
         results.append({"role": role, "task": original,
-                        "final": r.get("final"), "steps": r.get("steps")})
+                        "final": r.get("final"), "steps": r.get("steps"),
+                        "execution_status": r.get("execution_status", "unknown"),
+                        "execution_error": r.get("execution_error")})
+        if r.get("execution_status") in {"cancelled", "budget_exceeded", "llm_unavailable"}:
+            return _mission_unavailable(tasks, results, r["execution_status"],
+                                        r.get("execution_error") or r.get("final"))
+
+    if not results or all(not r.get("steps") and r.get("execution_status") != "completed"
+                          for r in results):
+        return _mission_unavailable(tasks, results, "no_work", "Aucun travail exécuté")
 
     if cancel.requested():
         db.post("ORBIT", "mission arrêtée par l'humain avant la synthèse")
-        return {"plan": tasks, "results": results, "rapport": "(arrêt demandé)"}
+        return _mission_unavailable(tasks, results, "cancelled", "Arrêt demandé")
     signal_schema = ""
     if business_signal_focus:
         signal_schema = (
@@ -1709,11 +1660,14 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             "plan": tasks,
             "results": results,
             "rapport": rapport,
+            "execution_status": "synthesis_unavailable",
             "synthesis_status": "degraded",
             "synthesis_error": error,
         }
 
     rapport = syn.get("rapport", "")
+    if not isinstance(rapport, str) or not rapport.strip():
+        return _mission_unavailable(tasks, results, "invalid_synthesis", "Rapport absent ou vide")
     business_signals, rejected_signals = ([], [])
     business_signal_reviews = []
     if business_signal_focus:
@@ -1744,7 +1698,9 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         decision_payload["business_signal_review_status"] = business_signal_review_status
     db.decide("ORBIT", "mission_done", decision_payload)
     db.post("ORBIT", f"mission terminée : {rapport[:80]}")
-    output = {"plan": tasks, "results": results, "rapport": rapport, "synthesis_status": "validated"}
+    output = {"plan": tasks, "results": results, "rapport": rapport, "synthesis_status": "validated",
+              "execution_status": ("completed" if all(r.get("execution_status") == "completed"
+                                                       for r in results) else "incomplete")}
     if business_signal_focus:
         output["business_signals"] = business_signals
         output["business_signal_rejections"] = rejected_signals

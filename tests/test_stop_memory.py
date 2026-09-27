@@ -8,8 +8,7 @@ import time
 
 import pytest
 
-from agents import agents as ag
-from agents import cancel, config, cycle, db, deepseek, runtime, tools
+from agents import cancel, config, db, deepseek, runtime, tools
 
 PY = sys.executable
 
@@ -67,7 +66,10 @@ def test_mission_stops_before_delegating(monkeypatch):
 
     monkeypatch.setattr(deepseek, "call_json", call_json)
     result = runtime.run_mission("objectif")
-    assert calls == ["planification"] and result["rapport"] == "(arrêt demandé)"
+    assert calls == ["planification"]
+    assert result["execution_status"] == "cancelled"
+    assert result["synthesis_status"] == "degraded"
+    assert result["results"] == []
 
 
 def test_subprocess_tree_is_killed_on_stop(tmp_path):
@@ -110,33 +112,6 @@ def test_ask_human_can_be_cancelled():
         assert db.ask_human("GROWTH", "publish_confirmation", "Publier ?", timeout_s=30, cancel=cancel.requested) is None
     assert time.time() - started < 5
     assert db._conn().execute("SELECT status FROM handoffs").fetchone()["status"] == "cancelled"
-
-
-def test_cycle_stop_during_forge(monkeypatch):
-    growth_calls = []
-    monkeypatch.setattr(ag.CONVERT, "run", staticmethod(lambda offer_id, angle, fixes=None: {"narration": []}))
-
-    def forge(offer_id, job):
-        db.request_stop()
-        cancel.checkpoint("avant le rendu")
-
-    monkeypatch.setattr(ag.FORGE, "run", staticmethod(forge))
-    monkeypatch.setattr(ag.GROWTH, "run", staticmethod(lambda *a: growth_calls.append(1)))
-    result = cycle.run_cycle(offer_id="cash_devis_cgv01")
-    run = db.current_run()
-    assert run["status"] == "stopped" and "avant le rendu" in run["step"]
-    assert growth_calls == [] and result["iterations"] == [] and db.run_lock_holder() is None
-
-
-def test_stop_before_cycle_start_is_not_applied(monkeypatch):
-    db.request_stop()
-    time.sleep(0.01)
-    seen = []
-    monkeypatch.setattr(ag.CONVERT, "run", staticmethod(lambda *a, **k: seen.append("convert") or {"narration": []}))
-    monkeypatch.setattr(ag.FORGE, "run", staticmethod(lambda *a: (_ for _ in ()).throw(RuntimeError("fin du test"))))
-    with pytest.raises(RuntimeError, match="fin du test"):
-        cycle.run_cycle(offer_id="cash_devis_cgv01", max_iterations=1)
-    assert seen == ["convert"]
 
 
 # --- memoire -------------------------------------------------------------------------------

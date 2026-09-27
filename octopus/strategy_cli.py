@@ -68,8 +68,8 @@ def add_parser(sub) -> None:
     )
     n.add_argument("--profile", default=None,
                    help="profil LLM explicite pour cette mission (ex. flash_fallback)")
-    n.add_argument("--budget-usd", type=float, default=None,
-                   help="plafond LLM dur pour cette tâche, en USD")
+    n.add_argument("--budget-usd", "--llm-budget-usd", type=float, default=None,
+                    help="plafond LLM cumulé pour cette tâche et ses exécutions imbriquées, en USD ; pas une autorisation de dépense économique/externe ; un profil LLM capable d'appels payants doit être sélectionné explicitement (ex. flash_fallback) ; zero_cost interdit toujours les appels payants")
     n.add_argument("--trace-tools", action="store_true",
                    help="inclut une trace compacte des résultats search/browse dans la sortie de tâche")
     r = s.add_parser("review", help="planifie une revue (tâche strategy.review)")

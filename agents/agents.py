@@ -1,16 +1,11 @@
-"""Les 6 agents du groupe Podalux.
-
-Rôles : ORBIT (CEO) · GROWTH (QC+distribution) · LEDGER (data/finance) ·
-FORGE (production) · CONVERT (monétisation) · SOUT (recherche).
-"""
+"""Rôles historiques Podalux conservés pour les offres, évaluations et métriques."""
 from __future__ import annotations
 
 import json
 import re
-import time
 from pathlib import Path
 
-from . import cancel, config, db, deepseek, tools
+from . import cancel, config, db, deepseek
 
 CATALOG = {
     "cash_impayes_relance01": {
@@ -31,7 +26,7 @@ CATALOG = {
     },
 }
 
-# Libellés affichés par le template Remotion (remotion/src/CashShort.tsx), par offre et par rôle.
+# Libellés historiques conservés pour les jobs et évaluations existants.
 # Illustrations de l'usage du produit : aucun chiffre de résultat client inventé hors offre d'origine.
 VISUELS = {
     "cash_impayes_relance01": {
@@ -133,7 +128,7 @@ def validate_verdict(raw) -> dict:
 
 
 def validate_job(r) -> None:
-    """Job de CONVERT : champs utilisés par l'audio et Remotion, 7 segments dans l'ordre (audit M4)."""
+    """Job de CONVERT : champs historiques des offres, 7 segments dans l'ordre (audit M4)."""
     if not isinstance(r, dict):
         raise InvalidLLMOutput("le job n'est pas un objet JSON")
     errors = [f"{k} vide ou absent" for k in ("titre", "hook", "cta")
@@ -281,7 +276,7 @@ class CONVERT:
             "douleur": r.get("douleur", ""), "preuve": r.get("preuve", ""),
             "soulagement": r.get("soulagement", ""), "cta": r.get("cta", ""),
             "prix": meta["prix"], "stripe_link": STRIPE_LINK, "sub_id": SUB_ID,
-            "voix": {"moteur": "chatterbox", "nom": config.CHATTERBOX_VOICE},
+            "voix": {"moteur": "chatterbox", "nom": "vivienne-fr"},
             "keywords": r.get("keywords", []),
             "palette": PALETTE,
             "visuel": VISUELS[offer_id],
@@ -293,35 +288,6 @@ class CONVERT:
         db.post("CONVERT", f"job.json écrit : {offer_id}.json")
         db.decide("CONVERT", "job_written", {"offer_id": offer_id})
         return job
-
-
-class FORGE:
-    NAME = "FORGE"
-
-    @staticmethod
-    def run(offer_id, job):
-        """Production déterministe : chaque étape doit produire un artefact neuf, sinon StepError."""
-        job_path = config.JOBS_DIR / f"{offer_id}.json"
-        out = config.PROJECT_ROOT / "out" / offer_id
-        rem = config.PROJECT_ROOT / "remotion" / "src" / "data"
-        db.post("FORGE", f"démarrage du rendu de {offer_id} (@FORGE)")
-        t0 = time.time()
-        tools.make_audio(str(job_path), offer_id)
-        tools.require_fresh([out / "audio" / "mix.wav", rem / "captions.ts", rem / "job.ts"], t0)
-        db.post("FORGE", "audio + captions générés (Chatterbox)")
-        cancel.checkpoint("avant le rendu")
-        tools.remotion_render(offer_id)
-        tools.require_fresh([out / "video.mp4"], t0)
-        db.post("FORGE", "rendu Remotion terminé")
-        cancel.checkpoint("avant le mux")
-        tools.mux(offer_id)
-        tools.require_fresh([out / "final.mp4"], t0)
-        db.post("FORGE", "mux final.mp4 ok")
-        metrics = tools.qc_metrics(offer_id)
-        tools.require_fresh([out / "qc_metrics.json"], t0)
-        db.post("FORGE", f"métriques : LUFS {metrics.get('lufs_integrated')} · "
-                         f"LRA {metrics.get('lra_lu')} · SATAVG {metrics.get('satavg_mean')}")
-        return metrics
 
 
 class GROWTH:
