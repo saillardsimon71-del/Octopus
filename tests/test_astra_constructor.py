@@ -202,7 +202,8 @@ def test_constructor_powershell_parses_and_disables_shell_snapshot():
 
     config = (ROOT / ".codex" / "config.toml").read_text(encoding="utf-8")
     assert "shell_snapshot = false" in config
-    assert 'model_reasoning_effort = "medium"' in config
+    assert '\nmodel = ' not in config
+    assert '\nmodel_reasoning_effort = ' not in config
     assert 'model_verbosity = "low"' in config
     assert "model_auto_compact_token_limit = 120000" in config
     launcher = (ROOT / "scripts" / "start_octopus_astra.ps1").read_text(encoding="utf-8")
@@ -212,6 +213,7 @@ def test_constructor_powershell_parses_and_disables_shell_snapshot():
     assert '[int]$MaxAstraTurns = 2' in launcher
     assert '[string]$Reasoning = "medium"' in launcher
     assert 'model_reasoning_effort=$Reasoning' in launcher
+    assert '"--ephemeral"' in launcher
     assert 'codexArguments += @("resume"' not in launcher
     assert "Invoke-HostValidation" in launcher
     assert "Read-TurnUsage" in launcher
@@ -223,6 +225,100 @@ def test_constructor_powershell_parses_and_disables_shell_snapshot():
     assert '"F" {' in launcher
     assert "FINAL_READINESS_ANTI_CONTAMINATION.md" in launcher
     assert "deterministic contamination canary" in launcher
+
+
+def test_constructor_context_is_bounded_and_does_not_preload_documents():
+    launcher = (ROOT / "scripts" / "start_octopus_astra.ps1").read_text(encoding="utf-8")
+
+    assert "[int]$MaxHandoffChars = 6000" in launcher
+    assert "[int]$MaxSnapshotChars = 8000" in launcher
+    assert "[int]$MaxManifestChars = 6000" in launcher
+    assert "[int]$MaxPreparedContextChars = 30000" in launcher
+    assert "HOST_SNAPSHOT_JSON" in launcher
+    assert "CONTEXT_MANIFEST_JSON" in launcher
+    assert "MINIMAL_HANDOFF_JSON" in launcher
+    assert "estimated_prompt_chars" in launcher
+    assert "context_file_count = 3" in launcher
+    assert "Read $($phaseSpec.documents)" not in launcher
+    assert "Read cache/astra-relay/handoff.json" not in launcher
+    assert "referenced report and actual diff" not in launcher
+    assert "Never reread a document whose manifest hash is unchanged" in launcher
+    assert "at most 200 lines and 20000 characters" in launcher
+
+
+def test_context_manifest_marks_unchanged_documents(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    phase_doc = repo / "docs" / "phase.md"
+    phase_doc.parent.mkdir(parents=True)
+    (repo / "AGENTS.md").write_text("rules\n", encoding="utf-8")
+    phase_doc.write_text("PHASE DOCUMENT MUST NOT BE PRELOADED\n", encoding="utf-8")
+    git(repo, "add", "AGENTS.md", "docs/phase.md")
+    git(repo, "commit", "-m", "context documents")
+    relay = repo / "cache" / "astra-relay"
+    relay.mkdir(parents=True)
+    (relay / "handoff.json").write_text("{}", encoding="utf-8")
+    manifest = repo / "context-manifest.json"
+    snapshot = repo / "snapshot.json"
+    metrics = repo / "metrics.json"
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    runner = tmp_path / "manifest.ps1"
+    runner.write_text(
+        f"""
+$tokens=$null;$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
+if($errors.Count){{throw ($errors|ForEach-Object Message)}}
+foreach($name in @('Write-JsonAtomic','Write-BoundedJsonAtomic','Limit-Text','Get-ChangedPaths','Get-CompactDiffStat','Save-ContextManifest','Write-AstraContext')){{
+  $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
+  Invoke-Expression $fn.Extent.Text
+}}
+$repo='{repo}';$contextManifestPath='{manifest}';$snapshotPath='{snapshot}';$contextMetricsPath='{metrics}'
+$handoffPath='{relay / "handoff.json"}';$checkpointPath='{relay / "checkpoint.json"}';$requestPath='{relay / "request.json"}';$validationPath='{relay / "validation.json"}'
+$Phase='F';$MaxManifestChars=6000;$MaxSnapshotChars=8000;$MaxHandoffChars=6000;$MaxPreparedContextChars=30000
+$phaseSpec=@{{documents=@('docs/phase.md');mission='bounded mission'}};$baseline=@{{exit_code=0;duration_seconds=1}}
+$first=Write-AstraContext -TaskPrompt 'first';$second=Write-AstraContext -TaskPrompt 'second'
+@{{prompt=$second;manifest=(Get-Content -LiteralPath $contextManifestPath -Raw|ConvertFrom-Json);metrics=(Get-Content -LiteralPath $contextMetricsPath -Raw|ConvertFrom-Json)}}|ConvertTo-Json -Depth 20
+""",
+        encoding="utf-8",
+    )
+
+    result = run(POWERSHELL, "-NoProfile", "-File", str(runner), cwd=repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert [item["changed_since_previous_call"] for item in payload["manifest"]["documents"]] == [False, False]
+    assert all("content" not in item for item in payload["manifest"]["documents"])
+    assert "PHASE DOCUMENT MUST NOT BE PRELOADED" not in payload["prompt"]
+    assert payload["metrics"]["context_file_count"] == 3
+    assert payload["metrics"]["estimated_input_chars"] <= 30000
+
+
+def test_handoff_rejects_massive_context(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    handoff = repo / "cache" / "astra-relay" / "handoff.json"
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    runner = tmp_path / "handoff.ps1"
+    runner.write_text(
+        f"""
+$tokens=$null;$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
+if($errors.Count){{throw ($errors|ForEach-Object Message)}}
+foreach($name in @('Write-BoundedJsonAtomic','Limit-Text','Get-ChangedPaths','Save-Handoff')){{
+  $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
+  Invoke-Expression $fn.Extent.Text
+}}
+$handoffPath='{handoff}';$MaxHandoffChars=6000;$Phase='F'
+$phaseSpec=@{{mission='bounded mission'}}
+$large=@(1..12|ForEach-Object{{'x'*1000}})
+try {{ Save-Handoff -Result ('y'*5000) -NextDecision ('z'*5000) -Decisions $large; exit 2 }}
+catch {{ if($_.Exception.Message -notmatch 'character limit'){{throw}} }}
+""",
+        encoding="utf-8",
+    )
+
+    result = run(POWERSHELL, "-NoProfile", "-File", str(runner), cwd=repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not handoff.exists()
 
 
 def test_codex_stream_keeps_stderr_out_of_json_and_saves_thread_early(tmp_path: Path):
@@ -324,7 +420,7 @@ def test_host_validation_accepts_only_fixed_full_pytest(tmp_path: Path):
 $tokens=$null;$errors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
 if($errors.Count){{throw ($errors|ForEach-Object Message)}}
-foreach($name in @('Write-JsonAtomic','Invoke-HostValidation')){{
+foreach($name in @('Write-JsonAtomic','Limit-Text','Invoke-HostValidation')){{
   $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
   Invoke-Expression $fn.Extent.Text
 }}
@@ -337,7 +433,10 @@ $result | ConvertTo-Json -Compress
     assert result.returncode == 0, result.stdout + result.stderr
     receipt = json.loads((relay / "results" / "validation-latest.json").read_text(encoding="utf-8-sig"))
     assert receipt["exit_code"] == 0
+    assert receipt["status"] == "passed"
     assert receipt["summary"] == ["8 passed in 0.01s"]
+    assert receipt["failing_tests"] == []
+    assert receipt["summary_truncated"] is True
     assert not request.exists()
     request.write_text('{"version":1,"kind":"arbitrary_command","command":"git reset --hard"}', encoding="utf-8")
     rejected = run(POWERSHELL, "-NoProfile", "-Command", command, cwd=repo)
@@ -394,3 +493,7 @@ def test_preflight_does_not_query_remote_kilo_catalog():
     assert "AllowPendingCheckpoint" in preflight
     runner = (ROOT / "scripts" / "run_external_dev_ticket.ps1").read_text(encoding="utf-8")
     assert 'policy -ne "product_ticket"' in runner
+    assert "worker_summary" in runner
+    assert "changed_paths" in runner
+    assert "diff_stat" in runner
+    assert "result.output.goal" not in runner

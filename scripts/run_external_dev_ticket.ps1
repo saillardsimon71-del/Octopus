@@ -17,6 +17,12 @@ function Write-JsonAtomic([string]$Path, [object]$Value) {
     Move-Item -LiteralPath $tmp -Destination $Path -Force
 }
 
+function Limit-Text([object]$Value, [int]$MaxChars = 300) {
+    $text = [string]$Value
+    if ($text.Length -le $MaxChars) { return $text }
+    return $text.Substring(0, $MaxChars) + "..."
+}
+
 $repo = (git rev-parse --show-toplevel 2>$null | Out-String).Trim()
 if (-not $repo) { throw "Run this helper from inside the OCTOPUS repository." }
 Set-Location $repo
@@ -84,6 +90,7 @@ $receipt = [ordered]@{
     exit_code = $null
     log_path = (Repo-Relative $logPath)
     night_report_path = $null
+    worker_summary = $null
 }
 Write-JsonAtomic -Path $receiptPath -Value $receipt
 
@@ -118,6 +125,40 @@ $receipt.status = if ($code -eq 0) { "completed" } else { "failed" }
 $receipt.finished_at_utc = (Get-Date).ToUniversalTime().ToString("o")
 $receipt.exit_code = $code
 $receipt.night_report_path = $nightReport
+if ($nightReport) {
+    $report = Get-Content -LiteralPath (Join-Path $repo $nightReport) -Raw | ConvertFrom-Json
+    $tickets = @($report.tickets | Select-Object -First 3)
+    $changedPaths = @($tickets | ForEach-Object { @($_.result.output.changed_paths) } | Where-Object { $_ } | Sort-Object -Unique | Select-Object -First 30)
+    $tests = @($tickets | ForEach-Object { @($_.result.output.tests) } | Where-Object { $_ } | Select-Object -First 20 | ForEach-Object { Limit-Text $_ 300 })
+    $sourceCommit = [string]$report.final_head
+    $baseHead = [string]$report.base_head
+    $diffStat = @()
+    if ($baseHead -match '^[0-9a-fA-F]{40}$' -and $sourceCommit -match '^[0-9a-fA-F]{40}$') {
+        $diffArguments = @('diff', '--stat', '--compact-summary', $baseHead, $sourceCommit, '--')
+        if ($changedPaths.Count) { $diffArguments += $changedPaths }
+        $diffStat = @(& git @diffArguments 2>$null | Select-Object -First 20 | ForEach-Object { Limit-Text $_ 300 })
+    }
+    $ticketSummaries = @($tickets | ForEach-Object {
+        [ordered]@{
+            task_id = $_.task_id
+            status = Limit-Text $_.status 40
+            commit = [string]$_.result.output.commit
+            tests_passed = [bool]$_.result.output.tests_passed
+            gate_status = Limit-Text $_.result.output.gate_status 40
+            changed_paths = @($_.result.output.changed_paths | Select-Object -First 30)
+        }
+    })
+    $receipt.worker_summary = [ordered]@{
+        status = Limit-Text $report.status 60
+        base_head = $baseHead
+        source_commit = $sourceCommit
+        changed_paths = $changedPaths
+        diff_stat = $diffStat
+        tests = $tests
+        tickets = $ticketSummaries
+        summary_truncated = $true
+    }
+}
 Write-JsonAtomic -Path $receiptPath -Value $receipt
 
 if ($ResultPath) {

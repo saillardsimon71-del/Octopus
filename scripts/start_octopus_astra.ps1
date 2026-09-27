@@ -4,6 +4,10 @@ param(
     [string]$Phase = "B",
     [int]$MaxAstraTurns = 2,
     [int]$MaxRelayCycles = 6,
+    [int]$MaxHandoffChars = 6000,
+    [int]$MaxSnapshotChars = 8000,
+    [int]$MaxManifestChars = 6000,
+    [int]$MaxPreparedContextChars = 30000,
     [ValidateSet("medium", "high")]
     [string]$Reasoning = "medium",
     [switch]$SkipFetch,
@@ -22,6 +26,25 @@ function Write-JsonAtomic([string]$Path, [object]$Value) {
     $tmp = "$Path.tmp-$PID"
     $Value | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $tmp -Encoding UTF8
     Move-Item -LiteralPath $tmp -Destination $Path -Force
+}
+
+function Write-BoundedJsonAtomic([string]$Path, [object]$Value, [int]$MaxChars, [string]$Label) {
+    $json = $Value | ConvertTo-Json -Depth 20
+    if ($json.Length -gt $MaxChars) {
+        throw "$Label exceeds its $MaxChars character limit: $($json.Length)."
+    }
+    $parent = Split-Path -Parent $Path
+    if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+    $tmp = "$Path.tmp-$PID"
+    $json | Set-Content -LiteralPath $tmp -Encoding UTF8
+    Move-Item -LiteralPath $tmp -Destination $Path -Force
+    return $json
+}
+
+function Limit-Text([object]$Value, [int]$MaxChars = 500) {
+    $text = [string]$Value
+    if ($text.Length -le $MaxChars) { return $text }
+    return $text.Substring(0, $MaxChars) + "..."
 }
 
 function Read-TurnUsage([string]$JsonLog) {
@@ -68,31 +91,31 @@ if ($MaxRelayCycles -lt 0 -or $MaxRelayCycles -gt 20) {
 $phaseSpec = switch ($Phase) {
     "B" {
         [ordered]@{
-            documents = "docs/migrations/VIDEO_ENGINE_REMOVAL.md"
+            documents = @("docs/migrations/VIDEO_ENGINE_REMOVAL.md")
             mission = "Remove the legacy video engine while preserving shared consumers."
         }
     }
     "C" {
         [ordered]@{
-            documents = "docs/migrations/AGNES_VIDEO_REPLACEMENT.md"
+            documents = @("docs/migrations/AGNES_VIDEO_REPLACEMENT.md")
             mission = "Implement the bounded Agnes video adapter and its deterministic mocked HTTP tests. Never perform a live generation or use paid credentials."
         }
     }
     "D" {
         [ordered]@{
-            documents = "docs/migrations/OCTOPUS_HERMES_REPLACEMENT_MATRIX.md and docs/migrations/HERMES_COMPONENT_EXTRACTION.md"
+            documents = @("docs/migrations/OCTOPUS_HERMES_REPLACEMENT_MATRIX.md", "docs/migrations/HERMES_COMPONENT_EXTRACTION.md")
             mission = "Implement the Hermes P0 tool-registry replacement only. Preserve OCTOPUS policies and do not introduce a second registry or broad plugin discovery."
         }
     }
     "E" {
         [ordered]@{
-            documents = "docs/migrations/CODEX_START_2026-09-27.md"
+            documents = @("docs/migrations/CODEX_START_2026-09-27.md")
             mission = "Complete the necessary Hermes integration, remove verified blockers to correct OCTOPUS operation, and align the implementation with the supervised economic-workshop vision. Implement and validate corrections; do not stop after an audit report."
         }
     }
     "F" {
         [ordered]@{
-            documents = "docs/migrations/FINAL_READINESS_ANTI_CONTAMINATION.md"
+            documents = @("docs/migrations/FINAL_READINESS_ANTI_CONTAMINATION.md")
             mission = "Verify final readiness for a supervised economic dry run and prevent historical business context from becoming an active cold-start objective. Fix only reproduced blockers, add a deterministic contamination canary, and report READY or NOT READY."
         }
     }
@@ -171,6 +194,9 @@ $sessionStatePath = Join-Path $relayRoot "session.json"
 $handoffPath = Join-Path $relayRoot "handoff.json"
 $validationPath = Join-Path $relayRoot "validation.json"
 $usagePath = Join-Path $relayRoot "usage.json"
+$snapshotPath = Join-Path $relayRoot "snapshot.json"
+$contextManifestPath = Join-Path $relayRoot "context-manifest.json"
+$contextMetricsPath = Join-Path $relayRoot "context-metrics.json"
 $baselineStatePath = Join-Path $relayRoot "baseline.json"
 $baselineLogPath = Join-Path $relayRoot "baseline-pytest.log"
 $astraTurns = 0
@@ -179,6 +205,10 @@ $threadId = $null
 $modelInvoked = $false
 $calls = @()
 $lastResult = ""
+$lastCheckpointSummary = $null
+$lastValidationSummary = $null
+$lastWorkerSummary = $null
+$reviewContext = $null
 $previousTotals = @{}
 if (Test-Path -LiteralPath $usagePath -PathType Leaf) {
     $previousUsage = Get-Content -LiteralPath $usagePath -Raw | ConvertFrom-Json
@@ -198,7 +228,8 @@ $pytestVersion = (& $pythonExe -m pytest --version 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0) { throw "Could not determine pytest version." }
 $requirementsPath = Join-Path $repo "requirements-local.txt"
 $requirementsHash = if (Test-Path -LiteralPath $requirementsPath -PathType Leaf) {
-    (Get-FileHash -LiteralPath $requirementsPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $requirementsHashResult = Get-FileHash -LiteralPath $requirementsPath -Algorithm SHA256
+    ([string]$requirementsHashResult.Hash).ToLowerInvariant()
 } else { "missing" }
 $baselineFingerprint = "$head|$pythonExe|$pytestVersion|$requirementsHash"
 $baseline = $null
@@ -323,19 +354,183 @@ function Invoke-CodexStreaming(
     }
 }
 
-function Save-Handoff([string]$Result, [string]$NextDecision, [string[]]$Files = @()) {
-    $changed = if ($Files.Count) { @($Files | Select-Object -First 30) } else { @((git status --porcelain --untracked-files=all | ForEach-Object { if ($_.Length -gt 3) { $_.Substring(3) } }) | Select-Object -First 30) }
-    Write-JsonAtomic -Path $handoffPath -Value ([ordered]@{
-        version = 1
-        objective = $phaseSpec.mission
+function Get-ChangedPaths {
+    $tracked = @(git diff --name-only --relative HEAD -- | Where-Object { $_ })
+    $untracked = @(git ls-files --others --exclude-standard -- | Where-Object { $_ })
+    return @($tracked + $untracked | Sort-Object -Unique | Select-Object -First 30)
+}
+
+function Get-CompactDiffStat([string]$Base = "", [string]$Target = "", [string[]]$Paths = @()) {
+    $arguments = @("diff", "--stat", "--compact-summary")
+    if ($Base -and $Target) { $arguments += @($Base, $Target) }
+    $arguments += "--"
+    if ($Paths.Count) { $arguments += $Paths }
+    $lines = @(& git @arguments 2>$null | Select-Object -First 20 | ForEach-Object { Limit-Text $_ 300 })
+    return $lines
+}
+
+function Save-Handoff(
+    [string]$Result,
+    [string]$NextDecision,
+    [string[]]$Files = @(),
+    [string[]]$Decisions = @(),
+    [string[]]$Tests = @(),
+    [string[]]$PendingHostRequests = @(),
+    [string]$Blocked = ""
+) {
+    $changed = if ($Files.Count) { @($Files | Select-Object -First 30) } else { @(Get-ChangedPaths) }
+    $handoff = [ordered]@{
+        version = 2
+        objective = Limit-Text $phaseSpec.mission 1200
         phase = $Phase
         head = (git rev-parse HEAD | Out-String).Trim()
-        last_result = $Result
-        files = $changed
-        baseline = @{ exit_code = $baseline.exit_code; log_path = $baseline.log_path }
-        blocked = $null
-        next_decision = $NextDecision
+        decisions = @($Decisions | Select-Object -First 12 | ForEach-Object { Limit-Text $_ 500 })
+        files_modified = @($changed | ForEach-Object { Limit-Text $_ 300 })
+        tests = @($Tests | Select-Object -First 20 | ForEach-Object { Limit-Text $_ 300 })
+        pending_host_requests = @($PendingHostRequests | Select-Object -First 5 | ForEach-Object { Limit-Text $_ 200 })
+        last_result = Limit-Text $Result 1000
+        blocked = if ($Blocked) { Limit-Text $Blocked 800 } else { $null }
+        next_decision = Limit-Text $NextDecision 600
+    }
+    $null = Write-BoundedJsonAtomic -Path $handoffPath -Value $handoff -MaxChars $MaxHandoffChars -Label "Astra handoff"
+}
+
+function Save-ContextManifest {
+    $previousHashes = @{}
+    if (Test-Path -LiteralPath $contextManifestPath -PathType Leaf) {
+        try {
+            $previous = Get-Content -LiteralPath $contextManifestPath -Raw | ConvertFrom-Json -ErrorAction Stop
+            foreach ($document in @($previous.documents)) {
+                $previousHashes[[string]$document.path] = [string]$document.sha256
+            }
+        } catch {
+            $previousHashes = @{}
+        }
+    }
+
+    $documentSpecs = @(
+        [ordered]@{
+            path = "AGENTS.md"
+            role = "Project constitution, already injected by Codex"
+            read_policy = "do_not_reread"
+        }
+    )
+    foreach ($path in @($phaseSpec.documents)) {
+        $documentSpecs += [ordered]@{
+            path = $path
+            role = "Optional phase reference; objective is already in the host snapshot"
+            read_policy = "targeted_section_only_if_snapshot_is_insufficient"
+        }
+    }
+
+    $documents = foreach ($spec in $documentSpecs) {
+        $fullPath = Join-Path $repo $spec.path
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { throw "Context document missing: $($spec.path)" }
+        $hashResult = Get-FileHash -LiteralPath $fullPath -Algorithm SHA256
+        $hash = ([string]$hashResult.Hash).ToLowerInvariant()
+        $size = (Get-Item -LiteralPath $fullPath).Length
+        [ordered]@{
+            path = $spec.path
+            sha256 = $hash
+            bytes = $size
+            role = $spec.role
+            read_policy = $spec.read_policy
+            changed_since_previous_call = if ($previousHashes.ContainsKey($spec.path)) { $previousHashes[$spec.path] -ne $hash } else { $null }
+        }
+    }
+
+    $manifest = [ordered]@{
+        version = 1
+        phase = $Phase
+        rule = "No document is preloaded. Read one bounded section only when a missing fact is identified and state why. Never reread an unchanged document automatically."
+        documents = @($documents)
+    }
+    return Write-BoundedJsonAtomic -Path $contextManifestPath -Value $manifest -MaxChars $MaxManifestChars -Label "Astra context manifest"
+}
+
+function New-CompactReceipt([object]$Receipt) {
+    if (-not $Receipt) { return $null }
+    return [ordered]@{
+        request_id = Limit-Text $Receipt.request_id 100
+        base_head = [string]$Receipt.base_head
+        commit = [string]$Receipt.commit
+        kind = Limit-Text $Receipt.kind 40
+        message = Limit-Text $Receipt.message 200
+        paths = @($Receipt.paths | Select-Object -First 30 | ForEach-Object { Limit-Text $_ 300 })
+    }
+}
+
+function Write-AstraContext([string]$TaskPrompt) {
+    $manifestJson = Save-ContextManifest
+    $handoffJson = if (Test-Path -LiteralPath $handoffPath -PathType Leaf) { Get-Content -LiteralPath $handoffPath -Raw } else { "{}" }
+    if ($handoffJson.Length -gt $MaxHandoffChars) {
+        throw "Astra handoff exceeds its $MaxHandoffChars character limit: $($handoffJson.Length)."
+    }
+
+    $branch = (git branch --show-current | Out-String).Trim()
+    $currentHead = (git rev-parse HEAD | Out-String).Trim()
+    $changedFiles = @(Get-ChangedPaths)
+    $pendingRequests = @()
+    foreach ($candidate in @(
+        @{ name = "checkpoint"; path = $checkpointPath },
+        @{ name = "step"; path = $requestPath },
+        @{ name = "full_pytest"; path = $validationPath }
+    )) {
+        if (Test-Path -LiteralPath $candidate.path -PathType Leaf) { $pendingRequests += $candidate.name }
+    }
+
+    $snapshot = [ordered]@{
+        version = 1
+        phase = $Phase
+        objective = Limit-Text $phaseSpec.mission 1200
+        head = $currentHead
+        branch = $branch
+        dirty = $changedFiles.Count -gt 0
+        baseline = [ordered]@{
+            status = if ([int]$baseline.exit_code -eq 0) { "passed" } else { "failed" }
+            exit_code = [int]$baseline.exit_code
+            duration_seconds = $baseline.duration_seconds
+        }
+        changed_files = $changedFiles
+        diff_stat = @(Get-CompactDiffStat -Paths $changedFiles)
+        pending_requests = $pendingRequests
+        last_checkpoint = $script:lastCheckpointSummary
+        last_validation = $script:lastValidationSummary
+        last_worker = $script:lastWorkerSummary
+        review = $script:reviewContext
+        blocking_issue = $null
+    }
+    $snapshotJson = Write-BoundedJsonAtomic -Path $snapshotPath -Value $snapshot -MaxChars $MaxSnapshotChars -Label "Astra host snapshot"
+
+    $preparedPrompt = @"
+$TaskPrompt
+
+HOST_SNAPSHOT_JSON
+$snapshotJson
+
+CONTEXT_MANIFEST_JSON
+$manifestJson
+
+MINIMAL_HANDOFF_JSON
+$handoffJson
+"@
+    $agentsChars = (Get-Content -LiteralPath (Join-Path $repo "AGENTS.md") -Raw).Length
+    $estimatedInputChars = $preparedPrompt.Length + $agentsChars
+    if ($estimatedInputChars -gt $MaxPreparedContextChars) {
+        throw "Prepared Astra context exceeds its $MaxPreparedContextChars character limit: $estimatedInputChars."
+    }
+    Write-JsonAtomic -Path $contextMetricsPath -Value ([ordered]@{
+        version = 1
+        estimated_prompt_chars = $preparedPrompt.Length
+        implicit_instruction_chars = $agentsChars
+        estimated_input_chars = $estimatedInputChars
+        snapshot_chars = $snapshotJson.Length
+        handoff_chars = $handoffJson.Length
+        context_manifest_chars = $manifestJson.Length
+        context_file_count = 3
+        manifest_document_count = @($phaseSpec.documents).Count + 1
     })
+    return $preparedPrompt
 }
 
 function Save-UsageSummary {
@@ -359,14 +554,19 @@ function Invoke-HostValidation {
     $started = Get-Date
     & $pythonExe -m pytest -q --tb=short *> $validationLog
     $validationExit = $LASTEXITCODE
+    $summary = @((Get-Content -LiteralPath $validationLog -Tail 12) | ForEach-Object { Limit-Text $_ 300 })
+    $failures = @(Select-String -LiteralPath $validationLog -Pattern '^(FAILED|ERROR)\s+' | Select-Object -First 10 | ForEach-Object { Limit-Text $_.Line 300 })
     $result = [ordered]@{
         version = 1
         kind = 'full_pytest'
         head = (git rev-parse HEAD | Out-String).Trim()
+        status = if ($validationExit -eq 0) { 'passed' } else { 'failed' }
         exit_code = $validationExit
         duration_seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
         log_path = 'cache/astra-relay/validation-pytest.log'
-        summary = @((Get-Content -LiteralPath $validationLog -Tail 8) | ForEach-Object { [string]$_ })
+        summary = $summary
+        failing_tests = $failures
+        summary_truncated = $true
     }
     Write-JsonAtomic -Path (Join-Path $resultRoot 'validation-latest.json') -Value $result
     Move-Item -LiteralPath $validationPath -Destination (Join-Path $archiveRoot ('validation-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ') + '.json'))
@@ -405,7 +605,7 @@ function Invoke-AstraTurn([string]$Prompt, [string]$Reason) {
 
     try {
         $codexArguments = @(
-            "exec", "--json", "--strict-config", "--disable", "shell_snapshot",
+            "exec", "--json", "--ephemeral", "--strict-config", "--disable", "shell_snapshot",
             "--model", "gpt-6-astra", "-c", "model_reasoning_effort=$Reasoning", "--cd", $repo,
             "--output-last-message", $lastMessage
         )
@@ -450,18 +650,21 @@ function Invoke-AstraTurn([string]$Prompt, [string]$Reason) {
     }
 }
 
-$baselineBrief = (@($baseline.summary) | Select-Object -Last 4) -join ' | '
-if ($baselineBrief.Length -gt 800) { $baselineBrief = $baselineBrief.Substring($baselineBrief.Length - 800) }
-
-$initialPrompt = @"
-You are the GPT-6 Astra root constructor for OCTOPUS phase $Phase. Read $($phaseSpec.documents) only when needed.
-Mission: $($phaseSpec.mission)
-HEAD: $head. Host baseline: exit=$($baseline.exit_code), log=$($baseline.log_path), summary=$baselineBrief.
-Compact handoff: cache/astra-relay/handoff.json. Read it if present; inspect only relevant files.
-Use targeted tests while editing. For a long full suite, atomically publish cache/astra-relay/validation.json with {"version":1,"kind":"full_pytest"}, then end the turn. The host runs it after you exit and writes cache/astra-relay/results/validation-latest.json.
-For tested changes, publish checkpoint.json version 2 with request_id, base_head, message and exact changed paths, then end the turn. Host owns Git metadata writes. For a bounded Step task, publish one product_ticket and request.json from a clean tree, then end the turn.
-Do not launch Step, poll, wait for validation, or run a full suite inside Astra. Each follow-up is a fresh Astra call with a compact disk handoff; no thread resume. Stop after the requested boundary.
+$contextRules = @"
+The host snapshot, context manifest and minimal handoff are appended inline. They are authoritative. Do not reread their disk copies or reconstruct Git state, history, baseline, checkpoint or validation state.
+AGENTS.md is already injected. Do not read it again. Do not read a phase document automatically. If one exact fact is missing, name the missing fact and read only one relevant manifest-listed section. Never reread a document whose manifest hash is unchanged.
+Never read Astra JSONL, pytest logs, night-shift reports, generated files or lockfiles. If a failure cannot be diagnosed from the compact receipt, use one targeted search or an excerpt of at most 200 lines and 20000 characters. Do not combine whole-file reads in one command.
+Inspect source only by symbol, targeted search, bounded excerpt or one changed-file diff at a time. Use the host-provided changed paths and diff summary instead of broad repository discovery.
+Use targeted tests while editing. To request the full suite, atomically publish cache/astra-relay/validation.json with {"version":1,"kind":"full_pytest"}, then end the call. The host runs it after exit and returns only a bounded receipt.
+For tested direct changes, publish cache/astra-relay/checkpoint.json version 2 with request_id, base_head, message and exact changed paths, then end the call. For a qualified bounded Step task, publish one product_ticket and cache/astra-relay/request.json from a clean tree, then end the call.
+Do not launch Step, poll, wait, run full pytest or write Git metadata. A follow-up is a fresh ephemeral call. Stop after the requested boundary.
 "@
+
+function New-AstraTaskPrompt([string]$Task) {
+    return $Task + [Environment]::NewLine + [Environment]::NewLine + $contextRules
+}
+
+$initialPrompt = New-AstraTaskPrompt "Execute only the objective in the host snapshot for phase $Phase. Decide from the prepared state, inspect the minimum source needed, and conclude in this call unless a checkpoint, Step task or host validation genuinely requires one review call."
 
 if (Test-Path -LiteralPath $handoffPath -PathType Leaf) {
     $oldHandoff = Get-Content -LiteralPath $handoffPath -Raw | ConvertFrom-Json
@@ -484,10 +687,19 @@ while ($true) {
         & powershell -NoProfile -ExecutionPolicy Bypass -File $checkpointRunner -Repo $repo -CheckpointPath $checkpointPath -ResultPath $checkpointResultPath
         if ($LASTEXITCODE -ne 0) { throw "Host checkpoint failed. Request left in place: $checkpointPath" }
         $receipt = Get-Content -LiteralPath $checkpointResultPath -Raw | ConvertFrom-Json
+        $lastCheckpointSummary = New-CompactReceipt $receipt
+        $reviewContext = [ordered]@{
+            kind = 'checkpoint'
+            base_head = [string]$receipt.base_head
+            head = [string]$receipt.commit
+            changed_paths = @($receipt.paths)
+            diff_stat = @(Get-CompactDiffStat -Base $receipt.base_head -Target $receipt.commit -Paths @($receipt.paths))
+            review_policy = 'Inspect one changed-file diff at a time; do not reload phase documents.'
+        }
         $lastResult = "Checkpoint $($receipt.commit): $($receipt.message)"
-        Save-Handoff -Result $lastResult -NextDecision 'Review committed result or stop.' -Files @($receipt.paths)
+        Save-Handoff -Result $lastResult -NextDecision 'Review only the committed changed paths, then stop unless a reproduced defect requires action.' -Files @($receipt.paths) -Decisions @('Host committed the exact declared paths.')
         $nextReason = 'checkpoint review'
-        $nextPrompt = "Fresh Astra review. Read cache/astra-relay/handoff.json and cache/astra-relay/results/checkpoint-latest.json. Continue phase $Phase only if needed."
+        $nextPrompt = New-AstraTaskPrompt "Fresh checkpoint review for phase $Phase. The compact receipt and review range are in the inline snapshot. Inspect the actual diff only for the listed paths, one file at a time. Accept and conclude if correct; act only on a concrete defect."
     } elseif (Test-Path -LiteralPath $requestPath -PathType Leaf) {
         if ($relayCycles -ge $MaxRelayCycles) { throw "Relay cycle budget exhausted. Request untouched: $requestPath" }
         $relayCycles++
@@ -505,16 +717,44 @@ while ($true) {
         $resultPath = "cache/astra-relay/results/$requestId.json"
         & powershell -NoProfile -ExecutionPolicy Bypass -File $runner -Plan $plan -Hours $hours -RequestId $requestId -ResultPath $resultPath
         $workerExit = $LASTEXITCODE
+        $workerReceipt = Get-Content -LiteralPath (Join-Path $repo $resultPath) -Raw | ConvertFrom-Json
+        $lastWorkerSummary = $workerReceipt.worker_summary
+        $workerPaths = @($workerReceipt.worker_summary.changed_paths)
+        $reviewContext = [ordered]@{
+            kind = 'step'
+            base_head = [string]$workerReceipt.worker_summary.base_head
+            head = [string]$workerReceipt.worker_summary.source_commit
+            changed_paths = $workerPaths
+            diff_stat = @($workerReceipt.worker_summary.diff_stat)
+            review_policy = 'Use the compact worker receipt; inspect one changed-file diff at a time. Do not read the raw report or worker log.'
+        }
         $lastResult = "Step $requestId exited $workerExit; result=$resultPath"
-        Save-Handoff -Result $lastResult -NextDecision 'Review worker result and exact diff; publish worker_commit checkpoint only if acceptable.'
+        Save-Handoff -Result $lastResult -NextDecision 'Review the compact worker receipt and listed paths; publish worker_commit checkpoint only if acceptable.' -Files $workerPaths -Tests @($workerReceipt.worker_summary.tests)
         $nextReason = 'Step review'
-        $nextPrompt = "Fresh Astra Step review. Read cache/astra-relay/handoff.json and $resultPath; inspect the referenced report and actual diff. If acceptable, publish checkpoint.json version 2 with kind=worker_commit, base_head, source_commit, message and exact paths. End the turn."
+        $nextPrompt = New-AstraTaskPrompt "Fresh Step review for phase $Phase. Use only the compact worker receipt in the inline snapshot; do not open its raw report, evidence or log. Inspect the actual diff for each listed path. If acceptable, publish checkpoint.json version 2 with kind=worker_commit, base_head, source_commit, message and exact paths, then end the call."
     } elseif (Test-Path -LiteralPath $validationPath -PathType Leaf) {
         $validationResult = Invoke-HostValidation
+        $lastValidationSummary = [ordered]@{
+            kind = 'full_pytest'
+            head = [string]$validationResult.head
+            status = [string]$validationResult.status
+            exit_code = [int]$validationResult.exit_code
+            duration_seconds = $validationResult.duration_seconds
+            summary = @($validationResult.summary)
+            failing_tests = @($validationResult.failing_tests)
+            summary_truncated = $true
+        }
+        $reviewContext = [ordered]@{
+            kind = 'validation'
+            head = [string]$validationResult.head
+            status = [string]$validationResult.status
+            failing_tests = @($validationResult.failing_tests)
+            review_policy = 'A passing compact receipt is sufficient. On failure inspect only named tests and bounded source excerpts.'
+        }
         $lastResult = "Full pytest exited $($validationResult.exit_code); result=cache/astra-relay/results/validation-latest.json"
-        Save-Handoff -Result $lastResult -NextDecision 'Review concise host validation result and resolve actual failures.'
+        Save-Handoff -Result $lastResult -NextDecision 'Conclude on pass; on failure resolve only the named failing tests.' -Tests @("full pytest: $($validationResult.status), exit $($validationResult.exit_code), $($validationResult.duration_seconds)s")
         $nextReason = 'validation review'
-        $nextPrompt = 'Fresh Astra validation review. Read cache/astra-relay/handoff.json and cache/astra-relay/results/validation-latest.json. Inspect only relevant failing tests and bounded log excerpts.'
+        $nextPrompt = New-AstraTaskPrompt 'Fresh validation review. The bounded host receipt is in the inline snapshot. If it passed, conclude without reading any log or documentation. If it failed, inspect only the named failing tests and the smallest relevant source excerpt.'
     } elseif ($modelInvoked) {
         if ((git status --porcelain --untracked-files=all | Out-String).Trim()) { throw 'Astra ended with uncheckpointed changes.' }
         Save-SessionState -Status 'completed'
@@ -526,7 +766,8 @@ while ($true) {
         Write-Host "Astra call budget reached. Handoff: $handoffPath" -ForegroundColor Yellow
         break
     }
-    $turn = Invoke-AstraTurn -Prompt $nextPrompt -Reason $nextReason
+    $preparedPrompt = Write-AstraContext -TaskPrompt $nextPrompt
+    $turn = Invoke-AstraTurn -Prompt $preparedPrompt -Reason $nextReason
     $threadId = $turn.thread_id
     $modelInvoked = $true
     Save-SessionState -Status 'active'
