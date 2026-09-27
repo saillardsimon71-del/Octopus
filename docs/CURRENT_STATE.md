@@ -1,5 +1,48 @@
 # État actuel OCTOPUS - 2026-09-27
 
+## Phase F — readiness au checkpoint
+
+Verdict provisoire : **NOT READY**, validation complète du nouvel état encore attendue.
+Le baseline hôte sur `ad95f22c9f82cadb2cf3a1b320e9b9a7b47676b3` a terminé avec exit=0
+(`cache/astra-relay/baseline-pytest.log`) ; il ne valide pas les modifications suivantes.
+
+Contaminations reproduites : une mission sans business ni run parent injectait l'identité
+Podalux et une description affirmant des comptes connectés ; `NEXT_STEPS` prescrivait encore
+le pilote CSV. Le défaut de mission est désormais `octopus`, les scopes explicites et parents
+sont conservés, et le handler `podalux.mission` choisit explicitement son scope historique.
+Le protocole distingue maintenant le démarrage neutre de son exemple CSV historique.
+
+Inspection SQLite en lecture seule : le journal réel contient des objectifs actifs sous
+`octopus` et `cycle_0`, ainsi que des expériences historiques en cours sous `octopus` et
+`accessibility_outreach`. La base legacy contient 33 souvenirs et 37 handoffs. Rien n'a été
+supprimé, déplacé ou activé. Le handler ORBIT ne joint un contexte stratégique que sur
+références explicites ; les handoffs du runtime proviennent des sous-tâches de la mission
+courante. Les déclarations de ressources ne sont pas automatiquement injectées en objectifs.
+
+Canari déterministe : historique stratégique, mémoire, messages et ressources semés dans
+des DB temporaires ; capture des prompts planner, agent et synthèse. Échec observé avant
+correction pour le business omis, puis succès pour business omis, neuf et `octopus`.
+Les cas de scope legacy explicite et hérité restent testés. Ce canari vérifie l'injection
+de contexte, pas les choix d'un modèle live ni une preuve économique.
+
+Validation exécutée sans réseau ni ressource payante :
+- 320 tests réussis : prompt boundaries, runtime ReAct, business signal evidence,
+  strategy, economy, actions et resources ;
+- 197 tests réussis, 8 ignorés : prompt boundaries avec deux tests de scope supplémentaires,
+  tasks/worker, SEARCH structuré/DDGS/coûts et browser integration (tests browser ignorés).
+Ces groupes se recouvrent ; ne pas additionner leurs nombres comme des tests distincts.
+Diff relu et `git diff --check` sans erreur.
+
+Prochaine étape constructeur : checkpoint hôte, puis demander la suite complète via
+`validation.json` dans un appel Astra frais, avant le verdict final. Aucun dry run lancé.
+Le parcours proposé reste un business neuf, une mission neutre, SEARCH/BROWSE seulement,
+politique `zero_cost`, citations acquises puis revue humaine. Les anciennes expériences
+restent accessibles à un appel explicite d'economy/status/drive ou de mémoire : ce n'est
+pas un parcours de cold start. Les entrées legacy agent/message restent historiques.
+La disponibilité live du LLM gratuit (429 en E5) n'est pas démontrée par ces tests ; une
+indisponibilité doit arrêter la mission sans fallback payant. Prochaine observation après
+validation : source réellement acquise et signal qualifié, ou résultat `inconclusive`.
+
 ## Résumé
 
 OCTOPUS est un atelier économique supervisé techniquement avancé, mais sans activité commerciale

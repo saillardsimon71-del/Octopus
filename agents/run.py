@@ -173,7 +173,7 @@ def main():
     p_goal = sub.add_parser("goal", help="donne un objectif en langage naturel au groupe")
     p_goal.add_argument("text", nargs="+", help="l'objectif")
     p_mission = sub.add_parser("mission", help="objectif multi-agents (ORBIT planifie + délègue)")
-    p_mission.add_argument("--business", default=None, help="business du run et des coûts (défaut : podalux)")
+    p_mission.add_argument("--business", default=None, help="business du run et des coûts (défaut : octopus)")
     p_mission.add_argument("text", nargs="+", help="l'objectif")
     p_msg = sub.add_parser("msg", help="message à un agent (@ROLE) → réponse directe")
     p_msg.add_argument("role", help="rôle cible (ORBIT, SOUT, …)")

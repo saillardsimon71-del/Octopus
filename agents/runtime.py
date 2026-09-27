@@ -1411,7 +1411,10 @@ def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None
     allowed_tools = _normalize_allowed_tools(allowed_tools)
     if search_browse_selector not in {"first", "evidence_relevance", "business_signal_relevance"}:
         raise ValueError(f"search_browse_selector inconnu : {search_browse_selector}")
-    with journal.run(_business(business), "mission", label=goal,
+    # A cold mission has no inherited business objective. Existing runs and
+    # explicitly selected legacy businesses retain their scope.
+    mission_business = business or (journal.current_run().business if journal.current_run() else "octopus")
+    with journal.run(mission_business, "mission", label=goal,
                      budget_usd=None if journal.current_run() and journal.current_run().budgets
                      else deepseek.config.CYCLE_BUDGET_USD,
                      profile=profile):

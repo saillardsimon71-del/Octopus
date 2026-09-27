@@ -53,7 +53,8 @@ def agent_message(ctx):
 @handler("podalux.mission", resource="llm")
 def mission(ctx):
     from .runtime import run_mission
-    result = _run(ctx, lambda: run_mission(str(ctx.input["goal"]), max_steps_per_agent=int(ctx.input.get("max_steps", 8))))
+    result = _run(ctx, lambda: run_mission(str(ctx.input["goal"]), business=BUSINESS,
+                                         max_steps_per_agent=int(ctx.input.get("max_steps", 8))))
     output = {
         "rapport": result.get("rapport"),
         "subtasks": len(result.get("plan") or []),

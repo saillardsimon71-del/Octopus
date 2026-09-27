@@ -2,7 +2,7 @@
 
 État canonique: `docs/CURRENT_STATE.md`. Vision: `docs/VISION.md`.
 Protocole économique: `docs/HANDOFF_WORK.md`.
-Chantier constructeur actuel: `docs/migrations/CODEX_START_2026-09-27.md`.
+Chantier constructeur actuel: `docs/migrations/FINAL_READINESS_ANTI_CONTAMINATION.md`.
 
 ## P0 - Préparation technique avant la première activité
 
@@ -21,14 +21,17 @@ Chantier constructeur actuel: `docs/migrations/CODEX_START_2026-09-27.md`.
 
 ## P0 - Première expérience économique supervisée
 
-Après validation technique, suivre `docs/HANDOFF_WORK.md`:
+Après validation technique, suivre le démarrage neutre de `docs/HANDOFF_WORK.md`:
 
-1. vérifier l'offre sur quelques références réellement incomplètes et une source fabricant accessible;
-2. créer une expérience bornée: au plus cinq contacts revus, sept jours et quatre heures humaines;
-3. n'effectuer aucun contact, dépense ou action externe sans validation humaine explicite;
-4. si commande, produire et vérifier un lot de 20 références puis livrer le CSV sourcé;
-5. enregistrer séparément livraison, encaissement, acceptation, utilisation, coûts et minutes humaines;
-6. lire `python -m octopus economy outcome BUSINESS EXPERIMENT`, puis enregistrer une décision.
+1. définir avec l'humain un objectif neutre et des limites, dans un business neuf;
+2. chercher une opportunité testable via SEARCH/BROWSE, sans reprendre E5 ni un ancien pilote;
+3. qualifier seulement les sources acquises et consigner les inconnues, éventuellement `inconclusive`;
+4. soumettre le prochain test à la revue humaine avant contact, dépense ou action externe;
+5. si une expérience est autorisée, enregistrer séparément livraison, encaissement, acceptation,
+   utilisation, coûts et minutes humaines, puis lire `economy outcome` et décider.
+
+Le CSV, Podalux, la vidéo, les artisans et l'accessibilité sont des contextes historiques,
+pas des objectifs hérités. Un compte connecté ou un site existant ne choisit pas l'activité.
 
 Le dépôt ne prouve encore aucun paiement commercial. Ne pas inventer un client, un résultat ou une
 preuve pour compléter le rapport.

@@ -25,6 +25,63 @@ from octopus import journal
 TODAY = "2026-09-24"
 
 
+@pytest.mark.parametrize("business", [None, "dry_run_fresh", "octopus"])
+def test_neutral_cold_start_does_not_inherit_historical_business(monkeypatch, business):
+    """Capture every actual LLM message with historical SQLite state present."""
+    from agents import db
+    from octopus import resources, strategy
+
+    markers = ["Podalux", "video_canary", "product_csv_enrichment_canary",
+               "multibrand_shop_canary", "artisans_canary", "accessibility_canary",
+               "old_mission_canary", "existing_site_canary"]
+    history = " ".join(markers)
+    for scope in ("podalux", "octopus", "accessibility_outreach"):
+        objective = strategy.create("objective", scope, history, created_by="human", statement=history)
+        strategy.transition("objective", objective, scope, "active", actor="human")
+        strategy.create("hypothesis", scope, history, created_by="human",
+                        parent_id=objective, statement=history)
+    db.remember("ORBIT", "active_objective", history)
+    db.remember("SOUT", "active_hypothesis", history)
+    db.post("ORBIT", history)
+    for name in ("Netlify", "Gmail", "Stripe", "LinkedIn", "YouTube", "browser"):
+        resources.declare(name.lower(), "compte", name, created_by="human", notes=history)
+
+    seen = scripted(monkeypatch, [
+        {"tasks": [{"role": "SOUT", "task": "Identifier un besoin observable"}]},
+        {"final": "Aucune source acquise, résultat inconclusif"},
+        {"rapport": "Inconclusif", "business_signals": []},
+    ])
+    result = runtime.run_mission(
+        "Identifier une opportunité économique testable, sans objectif métier hérité",
+        business=business, allowed_tools={"search", "browse"},
+        business_signal_focus=True, business_signal_target=1,
+    )
+    assert len(seen) == 3  # planner, executing agent, synthesis
+    messages = json.dumps(seen, ensure_ascii=False).lower()
+    for marker in markers:
+        assert marker.lower() not in messages
+    assert result["business_signals"] == []
+    assert db.recall("ORBIT", "active_objective") == history
+    assert len(strategy.list_items("hypothesis", "octopus")) == 1
+
+
+@pytest.mark.parametrize("inherited", [False, True])
+def test_mission_preserves_explicit_or_parent_business(monkeypatch, inherited):
+    from contextlib import nullcontext
+
+    scopes = []
+
+    def capture(*args, **kwargs):
+        scopes.append(journal.current_run().business)
+        return {}
+
+    monkeypatch.setattr(runtime, "_run_mission", capture)
+    parent = journal.run("podalux", "mission") if inherited else nullcontext()
+    with parent:
+        runtime.run_mission("Explicit historical work", business=None if inherited else "podalux")
+    assert scopes == ["podalux"]
+
+
 @pytest.mark.parametrize("limit", [1200, 6000])
 def test_browse_view_exposes_heading_after_long_site_menu(limit):
     title = "Spreadsheet Product Data Extraction"
