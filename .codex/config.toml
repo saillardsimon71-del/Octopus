@@ -1,11 +1,9 @@
 # OCTOPUS project-local Codex policy.
 # This file is loaded only for a trusted project.
-# GPT-6 Astra is the only Codex model used for construction/review.
+# Astra model selection is enforced by the dedicated constructor launcher, not by project-local Codex policy.
 # Bounded cheap implementation is delegated through OCTOPUS/Kilo, never
 # through Codex-native subagents.
 
-model = "gpt-6-astra"
-model_reasoning_effort = "medium"
 model_reasoning_summary = "concise"
 model_verbosity = "low"
 model_auto_compact_token_limit = 120000
