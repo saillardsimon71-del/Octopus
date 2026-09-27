@@ -1,6 +1,6 @@
 param(
     [string]$CodexHome = "",
-    [ValidateSet("B", "C", "D", "E", "F")]
+    [ValidateSet("B", "C", "D", "E", "F", "G")]
     [string]$Phase = "B",
     [int]$MaxAstraTurns = 2,
     [int]$MaxRelayCycles = 6,
@@ -117,6 +117,12 @@ $phaseSpec = switch ($Phase) {
         [ordered]@{
             documents = @("docs/migrations/FINAL_READINESS_ANTI_CONTAMINATION.md")
             mission = "Verify final readiness for a supervised economic dry run and prevent historical business context from becoming an active cold-start objective. Fix only reproduced blockers, add a deterministic contamination canary, and report READY or NOT READY."
+        }
+    }
+    "G" {
+        [ordered]@{
+            documents = @("docs/migrations/OPERATIONALIZATION.md")
+            mission = "Make OCTOPUS operational through clean, stable runtime entry points without constructor phases or manual PowerShell choreography. Reuse existing runtime boundaries, fix only demonstrated blockers, preserve permissions, economy, and journal guarantees, and do not build the GUI or connect real accounts."
         }
     }
 }
