@@ -1,6 +1,6 @@
 param(
     [string]$CodexHome = "",
-    [ValidateSet("B", "C", "D", "E")]
+    [ValidateSet("B", "C", "D", "E", "F")]
     [string]$Phase = "B",
     [int]$MaxAstraTurns = 2,
     [int]$MaxRelayCycles = 6,
@@ -88,6 +88,12 @@ $phaseSpec = switch ($Phase) {
         [ordered]@{
             documents = "docs/migrations/CODEX_START_2026-09-27.md"
             mission = "Complete the necessary Hermes integration, remove verified blockers to correct OCTOPUS operation, and align the implementation with the supervised economic-workshop vision. Implement and validate corrections; do not stop after an audit report."
+        }
+    }
+    "F" {
+        [ordered]@{
+            documents = "docs/migrations/FINAL_READINESS_ANTI_CONTAMINATION.md"
+            mission = "Verify final readiness for a supervised economic dry run and prevent historical business context from becoming an active cold-start objective. Fix only reproduced blockers, add a deterministic contamination canary, and report READY or NOT READY."
         }
     }
 }
