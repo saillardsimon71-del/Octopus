@@ -355,6 +355,12 @@ def _tool_result_view(tool: str, result, max_chars: int | None = None) -> str:
         page = result.get("page") if isinstance(result.get("page"), dict) else result
         text = str(page.get("main_text") or result.get("texte") or "")
         limit = 6000 if max_chars is None else max(200, int(max_chars))
+        title = str(page.get("title") or "").strip()
+        # Body extraction can begin with several screens of site navigation.
+        # Keep a literal bounded window around a late heading, without changing
+        # the full acquisition used by the evidence gate.
+        heading = text.find(title) if title else -1
+        start = max(0, heading - min(200, limit // 4)) if heading >= limit // 2 else 0
         payload = {
             "url": str(page.get("final_url") or result.get("url") or ""),
             "source": str(result.get("source") or ""),
@@ -366,7 +372,9 @@ def _tool_result_view(tool: str, result, max_chars: int | None = None) -> str:
             "blocked": bool(page.get("blocked")),
             "error": page.get("error"),
             "text_chars": int(page.get("text_chars") or len(text)),
-            "texte": text[:limit],
+            "text_start_char": start,
+            "text_truncated": start > 0 or len(text) > limit,
+            "texte": text[start:start + limit],
         }
         return json.dumps(payload, ensure_ascii=False)
 

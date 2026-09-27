@@ -52,6 +52,12 @@ enveloppe OCTOPUS -> BROWSE -> qualification. Les moteurs DDGS restent dans la d
 pas dans OCTOPUS. Le choix de moteurs Web exclut les backends encyclopédiques du mode `auto`
 de DDGS pour préserver la politique business existante. Une URL découverte n'est pas acquise.
 
+E5, run 328: `keep_octopus` confirmé pour la projection BROWSE. Une navigation de plus de
+7 500 caractères masquait l'annonce dans le prompt. La vue bornée est corrigée autour du titre,
+avec offset/troncature explicites; l'acquisition complète reste la preuve canonique. Le pipeline
+head+tail de Hermes n'est pas importé. Validation ciblée: 225 tests. Annonce fermée et arrêt
+LLM gratuit sur 429: résultat économique `inconclusive`, aucun nouveau composant justifié.
+
 OCTOPUS actuel:
 - `agents/runtime.py::TOOLS`
 - `agents/runtime.py::_validate_tool_args`

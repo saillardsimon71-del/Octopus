@@ -8,9 +8,10 @@ Chantier constructeur actuel: `docs/migrations/CODEX_START_2026-09-27.md`.
 
 1. Checkpoint E acquis: `057fc6e`; routeur E5: `dbf30d2`. Conserver la revue avant transfert produit.
 2. Consommer le résultat de validation finale consigné dans `CURRENT_STATE`, sans relancer le baseline.
-3. Mission E5 déjà lancée: reprendre `cache/astra-relay/phase-e5-mission.json` et le log
-   associé, sans seconde exécution. Relire les sources et citations; ne pas confondre
-   son lancement ou le probe Python avec une preuve économique.
+3. E5 terminée `inconclusive`: annonce acquise mais fermée, arrêt LLM gratuit sur 429.
+   Ne pas relancer la mission. Correction de la vue BROWSE validée par 225 tests ciblés;
+   exécuter la validation complète finale du nouvel état après checkpoint.
+   Le prochain test économique proposé dans `CURRENT_STATE` reste soumis à revue humaine.
 4. Google seul via DDGS n'a pas fourni de résultat au probe; ne pas annoncer sa disponibilité.
 5. Réutiliser les décisions P0/P1 de la matrice Hermes, sans relancer l'audit historique.
 6. Extraire les commits produit relus hors de la branche du constructeur, puis mettre à jour la PR

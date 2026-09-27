@@ -72,6 +72,19 @@ proxies depuis le code produit. Profil de contrôle explicite (Codex 0.157.0):
 activation réseau reproduit les proxies morts. Le constructeur conserve sa configuration
 historique `sandbox_workspace_write.network_access`, maintenant à `true`.
 
+#### Observation E5: vue de page après navigation volumineuse
+
+Le run réel 328 a acquis une annonce fermée de consolidation CSV, mais les 6 000 premiers
+caractères transmis au modèle étaient des menus. Comparaison ciblée avec le pin Hermes:
+`plugins/web/ddgs/provider.py` est explicitement search-only; `tools/web_tools.py` applique
+une troncature head+tail et conserve le texte complet via son pipeline existant.
+Ce pipeline ne garantit pas de montrer le contenu situé entre menus et longues propositions.
+Décision `keep_octopus`: corriger la projection existante, sans ajouter un provider d'extraction,
+un stockage parallèle ou une dépendance. La fenêtre commence autour du titre acquis lorsqu'il
+est tardif, annonce son offset/troncature et ne modifie jamais le texte source. Les 225 tests
+ciblés passent; la relecture de la même acquisition rend besoin, budget et fermeture visibles.
+Il reste impossible d'en déduire un client disponible ou un paiement. Voir `CURRENT_STATE`.
+
 ### P0 — Computer Use
 
 Upstream:

@@ -175,7 +175,7 @@ capacité actuelle à rechercher une opportunité.
 
 ## Vérité économique
 
-### Observation E5 lancée le 2026-09-27
+### Observation E5 du 2026-09-27 — inconclusive
 
 Une seule mission réelle a été lancée depuis `dbf30d2` via `runtime.run_mission`,
 business `cycle_0`, sous un run journalisé `phase_e5_observation`. Profil `zero_cost`,
@@ -185,12 +185,48 @@ SEARCH/BROWSE couplée. Le goal demande au plus deux tâches de recherche; cette
 est une consigne au planner, dont la limite déterministe reste cinq tâches.
 Aucun contact, achat, publication ou test commercial ultérieur n'est autorisé.
 
-À ce checkpoint documentaire, la sortie finale n'est pas encore disponible. Ne pas
-relancer la mission: reprendre son résultat dans
-`cache/astra-relay/phase-e5-mission.json` et son diagnostic dans
-`cache/astra-relay/phase-e5-mission.log`. Le journal existant conserve les runs et appels.
-Examiner ensuite les acquisitions, citations, rejets, coût et inconnues avant de statuer.
-Un lancement n'est ni une qualification de signal ni une validation économique.
+Résultat du run 328: `execution_status=llm_unavailable`, `synthesis_status=degraded`.
+Les routes gratuites ont atteint des limites 429; aucun fallback payant déclenché.
+Le journal contient 7 appels LLM (5 réussis, 2 erreurs), coût enregistré 0 USD.
+Le statut technique `done` des runs ne signifie pas que la mission a réussi.
+Sortie conservée: `cache/astra-relay/phase-e5-mission.json`; diagnostic:
+`cache/astra-relay/phase-e5-mission.log`. Ne pas relancer cette mission automatiquement.
+
+Quatre SEARCH via DDGS sans erreur et quatre BROWSE ont ouvert une seule page distincte:
+[Spreadsheet Product Data Extraction](https://www.fr.freelancer.com/projects/data-cleansing/Spreadsheet-Product-Data-Extraction),
+acquise à `2026-09-27T14:38:51.322535+00:00`, HTTP 200, méthode `http:html_body`,
+27 950 caractères. Les moteurs individuels derrière DDGS ne sont pas attestés dans la sortie.
+Extraits littéraux vérifiés dans cette acquisition:
+
+- « I have multiple spreadsheets that hold product details scattered across different tabs and formats. »
+- « Completion will be accepted when I receive the consolidated file, error-free and ready for immediate upload into our system. »
+- « ₹100-400 INR / heure » et « Fermé ».
+
+Cela soutient l'existence d'une demande publiée de consolidation de données produit,
+avec budget annoncé; cela ne prouve ni paiement ni besoin encore disponible. Cette piste
+est rejetée comme opportunité immédiate parce que l'annonce est fermée. Les autres liens
+SEARCH n'ont pas été ouverts: aucune conclusion sur eux. Identité/accès à un acheteur actuel,
+fichiers, volume, marge, prix acceptable et canal utilisable restent inconnus.
+Aucun signal n'a été qualifié automatiquement; la synthèse et sa revue n'ont pas abouti.
+Conclusion de revue: `inconclusive`, aucune piste retenue.
+
+Obstacle observé et correction E5: le titre utile apparaissait au caractère 7 564,
+après la limite de 6 000 caractères de la vue BROWSE. Le modèle ne voyait que les menus.
+`runtime._tool_result_view` affiche maintenant une fenêtre littérale autour d'un titre
+tardif, avec offset et indicateur de troncature. L'acquisition complète et le gate de
+preuves restent inchangés. Relecture locale de la même acquisition: budget, statut fermé
+et besoin visibles dès la fenêtre commençant au caractère 7 364. Aucun nouvel appel LLM.
+Cette heuristique n'est pas un extracteur universel; sans titre trouvé, le préfixe est conservé.
+
+Validation: 5 nouveaux cas échouaient avant correction; 225 tests ciblés passent en 11,86 s
+(`cache/astra-relay/phase-e5-targeted.log`); diff relu et `git diff --check` réussi.
+La suite complète de 1 268 tests précède cette correction et ne la valide pas.
+La validation complète finale de ce nouvel état reste à exécuter après checkpoint.
+
+Prochain test économique proposé, non exécuté: sur une demande encore ouverte, faire
+valider humainement le destinataire, le canal et une offre de consolidation d'un petit lot
+CSV avec critères d'acceptation et prix explicites. Aucun contact sans autorisation humaine;
+ne pas extrapoler le budget INR de cette annonce fermée au pilote français.
 
 Le dépôt ne contient toujours aucune preuve de paiement commercial, de livraison acceptée ou
 d'utilisation client pour la première activité. Tests verts, commits, agents et missions ne sont

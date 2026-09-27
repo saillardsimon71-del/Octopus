@@ -14,12 +14,40 @@ Ne simule aucune performance live : tout est hors ligne et déterministe.
 """
 from __future__ import annotations
 
+import copy
+import json
+
 import pytest
 
 from agents import deepseek, runtime, search
 from octopus import journal
 
 TODAY = "2026-09-24"
+
+
+@pytest.mark.parametrize("limit", [1200, 6000])
+def test_browse_view_exposes_heading_after_long_site_menu(limit):
+    title = "Spreadsheet Product Data Extraction"
+    text = "Site navigation\n" * 600 + title + "\nClosed\nINR 100-400/hour\nConsolidate product spreadsheets."
+    result = {"page": {"title": title, "main_text": text, "text_chars": len(text)}}
+    original = copy.deepcopy(result)
+    view = json.loads(runtime._tool_result_view("browse", result, max_chars=limit))
+    assert "Closed" in view["texte"]
+    assert "INR 100-400/hour" in view["texte"]
+    assert len(view["texte"]) <= limit
+    start = view["text_start_char"]
+    assert view["texte"] == text[start:start + limit]
+    assert view["text_truncated"] is True
+    assert result == original  # evidence gate retains the entire acquired page
+
+
+@pytest.mark.parametrize("title", ["", "Absent heading", "Intro"])
+def test_browse_view_keeps_prefix_without_late_heading(title):
+    text = "Intro\n" + "body " * 400
+    view = json.loads(runtime._tool_result_view("browse", {"page": {
+        "title": title, "main_text": text}}, max_chars=1200))
+    assert view["texte"] == text[:1200]
+    assert view["text_start_char"] == 0
 
 
 @pytest.fixture
