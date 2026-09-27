@@ -26,7 +26,12 @@ TODAY = "2026-09-24"
 
 
 @pytest.mark.parametrize("business", [None, "dry_run_fresh", "octopus"])
-def test_neutral_cold_start_does_not_inherit_historical_business(monkeypatch, business):
+@pytest.mark.parametrize("allowed_tools", [None, {"search", "browse"}],
+                         ids=["default-tools", "read-only-web"])
+@pytest.mark.parametrize("business_signal_focus", [False, True],
+                         ids=["general-mission", "economic-signals"])
+def test_neutral_cold_start_does_not_inherit_historical_business(
+        monkeypatch, business, allowed_tools, business_signal_focus):
     """Capture every actual LLM message with historical SQLite state present."""
     from agents import db
     from octopus import resources, strategy
@@ -53,14 +58,19 @@ def test_neutral_cold_start_does_not_inherit_historical_business(monkeypatch, bu
     ])
     result = runtime.run_mission(
         "Identifier une opportunité économique testable, sans objectif métier hérité",
-        business=business, allowed_tools={"search", "browse"},
-        business_signal_focus=True, business_signal_target=1,
+        business=business, allowed_tools=allowed_tools,
+        business_signal_focus=business_signal_focus, business_signal_target=1,
     )
     assert len(seen) == 3  # planner, executing agent, synthesis
     messages = json.dumps(seen, ensure_ascii=False).lower()
     for marker in markers:
         assert marker.lower() not in messages
-    assert result["business_signals"] == []
+    assert result["execution_status"] == "completed"
+    assert result["synthesis_status"] == "validated"
+    if business_signal_focus:
+        assert result["business_signals"] == []
+    else:
+        assert "business_signals" not in result
     assert db.recall("ORBIT", "active_objective") == history
     assert len(strategy.list_items("hypothesis", "octopus")) == 1
 
