@@ -46,7 +46,7 @@ function Invoke-NativeCapture([string]$FilePath, [string[]]$Arguments) {
 function Test-ResumableSessionState([string]$Path, [string]$Head) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
     try { $state = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -ErrorAction Stop } catch { return $false }
-    if ([int]$state.version -ne 2) { return $false }
+    if ([int]$state.version -notin @(2, 3)) { return $false }
     if ([string]$state.status -notin @('active', 'failed')) { return $false }
     if ([string]$state.thread_id -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') { return $false }
     return [string]$state.current_head -eq $Head
@@ -311,5 +311,5 @@ if ($Failures.Count -gt 0) {
 }
 
 Write-Host 'READY FOR GPT-6 ASTRA RELAY' -ForegroundColor Green
-Write-Host 'Constructor mode: codex exec + exact thread resume + out-of-band Step.'
+Write-Host 'Constructor mode: fresh codex exec calls + compact handoff + out-of-band Step.'
 exit 0

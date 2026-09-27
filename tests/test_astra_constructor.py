@@ -209,7 +209,14 @@ def test_constructor_powershell_parses_and_disables_shell_snapshot():
     assert "[switch]$ValidateOnly" in launcher
     assert '[ValidateSet("B", "C", "D", "E")]' in launcher
     assert '[string]$Phase = "B"' in launcher
-    assert "MaxResumeInputTokens = 120000" in launcher
+    assert '[int]$MaxAstraTurns = 2' in launcher
+    assert '[string]$Reasoning = "medium"' in launcher
+    assert 'model_reasoning_effort=$Reasoning' in launcher
+    assert 'codexArguments += @("resume"' not in launcher
+    assert "Invoke-HostValidation" in launcher
+    assert "Read-TurnUsage" in launcher
+    assert "Save-Handoff" in launcher
+    assert "-ExistingThreadId" not in launcher
     assert "AGNES_VIDEO_REPLACEMENT.md" in launcher
     assert "OCTOPUS_HERMES_REPLACEMENT_MATRIX.md" in launcher
     assert "CODEX_START_2026-09-27.md" in launcher
@@ -273,6 +280,67 @@ $result = Invoke-CodexStreaming -Executable '{fake_codex}' -Arguments @() -JsonL
     assert stderr_log.read_text(encoding="utf-8").strip() == "diagnostic-stderr"
 
 
+def test_turn_usage_reads_completed_jsonl_without_copying_log(tmp_path: Path):
+    log = tmp_path / "turn.jsonl"
+    log.write_text(
+        '{"type":"thread.started","thread_id":"fresh"}\n'
+        '{"type":"turn.completed","usage":{"input_tokens":21,"cached_input_tokens":13,'
+        '"output_tokens":8,"reasoning_output_tokens":3}}\n',
+        encoding="utf-8",
+    )
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    command = f"""
+$tokens=$null;$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
+if($errors.Count){{throw ($errors|ForEach-Object Message)}}
+$fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Read-TurnUsage'}},$true)
+Invoke-Expression $fn.Extent.Text
+Read-TurnUsage '{log}' | ConvertTo-Json -Compress
+"""
+    result = run(POWERSHELL, "-NoProfile", "-Command", command)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout) == {
+        "input_tokens": 21,
+        "cached_input_tokens": 13,
+        "output_tokens": 8,
+        "reasoning_output_tokens": 3,
+    }
+
+
+def test_host_validation_accepts_only_fixed_full_pytest(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    relay = repo / "cache" / "astra-relay"
+    (relay / "results").mkdir(parents=True)
+    (relay / "requests").mkdir()
+    request = relay / "validation.json"
+    request.write_text('{"version":1,"kind":"full_pytest"}', encoding="utf-8")
+    fake_python = tmp_path / "fake-python.cmd"
+    fake_python.write_text("@echo off\necho 8 passed in 0.01s\nexit /b 0\n", encoding="ascii")
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    command = f"""
+$tokens=$null;$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
+if($errors.Count){{throw ($errors|ForEach-Object Message)}}
+foreach($name in @('Write-JsonAtomic','Invoke-HostValidation')){{
+  $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
+  Invoke-Expression $fn.Extent.Text
+}}
+$relayRoot='{relay}';$resultRoot=Join-Path $relayRoot 'results';$archiveRoot=Join-Path $relayRoot 'requests'
+$validationPath=Join-Path $relayRoot 'validation.json';$pythonExe='{fake_python}'
+$result=Invoke-HostValidation
+$result | ConvertTo-Json -Compress
+"""
+    result = run(POWERSHELL, "-NoProfile", "-Command", command, cwd=repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+    receipt = json.loads((relay / "results" / "validation-latest.json").read_text(encoding="utf-8-sig"))
+    assert receipt["exit_code"] == 0
+    assert receipt["summary"] == ["8 passed in 0.01s"]
+    assert not request.exists()
+    request.write_text('{"version":1,"kind":"arbitrary_command","command":"git reset --hard"}', encoding="utf-8")
+    rejected = run(POWERSHELL, "-NoProfile", "-Command", command, cwd=repo)
+    assert "Unsupported host validation request" in rejected.stderr
+
+
 def test_resumable_session_requires_matching_head_and_live_status(tmp_path: Path):
     session = tmp_path / "session.json"
     runner = tmp_path / "exercise-session.ps1"
@@ -289,6 +357,7 @@ Invoke-Expression $function.Extent.Text
 $path = '{session}'
 $cases = @(
     @{{ version = 2; status = 'active'; thread_id = '01a0da20-aa1d-7911-873a-bb0fad387446'; current_head = 'abc123' }},
+    @{{ version = 3; status = 'active'; thread_id = '01a0da20-aa1d-7911-873a-bb0fad387446'; current_head = 'abc123' }},
     @{{ version = 2; status = 'failed'; thread_id = '01a0da20-aa1d-7911-873a-bb0fad387446'; current_head = 'abc123' }},
     @{{ version = 2; status = 'completed'; thread_id = '01a0da20-aa1d-7911-873a-bb0fad387446'; current_head = 'abc123' }},
     @{{ version = 2; status = 'active'; thread_id = '01a0da20-aa1d-7911-873a-bb0fad387446'; current_head = 'wrong' }}
@@ -313,7 +382,7 @@ $results = foreach ($case in $cases) {{
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert json.loads(result.stdout.splitlines()[-1]) == [True, True, False, False]
+    assert json.loads(result.stdout.splitlines()[-1]) == [True, True, True, False, False]
 
 
 def test_preflight_does_not_query_remote_kilo_catalog():

@@ -2,9 +2,10 @@ param(
     [string]$CodexHome = "",
     [ValidateSet("B", "C", "D", "E")]
     [string]$Phase = "B",
-    [int]$MaxAstraTurns = 4,
+    [int]$MaxAstraTurns = 2,
     [int]$MaxRelayCycles = 6,
-    [int]$MaxResumeInputTokens = 120000,
+    [ValidateSet("medium", "high")]
+    [string]$Reasoning = "medium",
     [switch]$SkipFetch,
     [switch]$NewSession,
     [switch]$ResumeFailed,
@@ -23,27 +24,19 @@ function Write-JsonAtomic([string]$Path, [object]$Value) {
     Move-Item -LiteralPath $tmp -Destination $Path -Force
 }
 
-function Read-ThreadId([string]$JsonLog) {
+function Read-TurnUsage([string]$JsonLog) {
+    $usage = $null
     foreach ($line in Get-Content -LiteralPath $JsonLog -ErrorAction Stop) {
         if (-not $line.TrimStart().StartsWith("{")) { continue }
         try { $event = $line | ConvertFrom-Json } catch { continue }
-        if ($event.type -eq "thread.started" -and $event.thread_id) {
-            return [string]$event.thread_id
+        if ($event.type -eq "turn.completed" -and $event.usage) {
+            $usage = [ordered]@{}
+            foreach ($key in @('input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_output_tokens')) {
+                $usage[$key] = if ($null -ne $event.usage.$key) { [long]$event.usage.$key } else { 0 }
+            }
         }
     }
-    return $null
-}
-
-function Read-TurnInputTokens([string]$JsonLog) {
-    $tokens = $null
-    foreach ($line in Get-Content -LiteralPath $JsonLog -ErrorAction Stop) {
-        if (-not $line.TrimStart().StartsWith("{")) { continue }
-        try { $event = $line | ConvertFrom-Json } catch { continue }
-        if ($event.type -eq "turn.completed" -and $null -ne $event.usage.input_tokens) {
-            $tokens = [long]$event.usage.input_tokens
-        }
-    }
-    return $tokens
+    return $usage
 }
 
 function Resolve-CodexExecutable {
@@ -70,9 +63,6 @@ if ($MaxAstraTurns -lt 1 -or $MaxAstraTurns -gt 20) {
 }
 if ($MaxRelayCycles -lt 0 -or $MaxRelayCycles -gt 20) {
     throw "MaxRelayCycles must be between 0 and 20."
-}
-if ($MaxResumeInputTokens -lt 10000) {
-    throw "MaxResumeInputTokens must be at least 10000."
 }
 
 $phaseSpec = switch ($Phase) {
@@ -172,12 +162,26 @@ New-Item -ItemType Directory -Force -Path $relayRoot, $ticketRoot, $turnLogRoot,
 $requestPath = Join-Path $relayRoot "request.json"
 $checkpointPath = Join-Path $relayRoot "checkpoint.json"
 $sessionStatePath = Join-Path $relayRoot "session.json"
+$handoffPath = Join-Path $relayRoot "handoff.json"
+$validationPath = Join-Path $relayRoot "validation.json"
+$usagePath = Join-Path $relayRoot "usage.json"
 $baselineStatePath = Join-Path $relayRoot "baseline.json"
 $baselineLogPath = Join-Path $relayRoot "baseline-pytest.log"
 $astraTurns = 0
 $relayCycles = 0
 $threadId = $null
 $modelInvoked = $false
+$calls = @()
+$lastResult = ""
+$previousTotals = @{}
+if (Test-Path -LiteralPath $usagePath -PathType Leaf) {
+    $previousUsage = Get-Content -LiteralPath $usagePath -Raw | ConvertFrom-Json
+    if ($previousUsage.totals) {
+        foreach ($key in @('input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_output_tokens')) {
+            $previousTotals[$key] = [long]$previousUsage.totals.$key
+        }
+    }
+}
 
 $head = (git rev-parse HEAD | Out-String).Trim()
 $pythonExe = Join-Path $repo ".venv\Scripts\python.exe"
@@ -194,10 +198,6 @@ $baselineFingerprint = "$head|$pythonExe|$pytestVersion|$requirementsHash"
 $baseline = $null
 if (Test-Path -LiteralPath $baselineStatePath -PathType Leaf) {
     try { $baseline = Get-Content -LiteralPath $baselineStatePath -Raw | ConvertFrom-Json } catch { $baseline = $null }
-}
-
-if ((Test-Path -LiteralPath $checkpointPath -PathType Leaf) -and (-not $baseline -or -not $baseline.completed)) {
-    throw "Pending checkpoint recovery requires the baseline state from the original session."
 }
 
 if (-not (Test-Path -LiteralPath $checkpointPath -PathType Leaf) -and (-not $baseline -or [string]$baseline.fingerprint -ne $baselineFingerprint -or -not $baseline.completed)) {
@@ -233,41 +233,24 @@ if (Test-Path -LiteralPath $sessionStatePath -PathType Leaf) {
 
 $existingStatus = if ($existingSession) { [string]$existingSession.status } else { "" }
 if ($existingSession -and $existingStatus -eq "failed" -and -not $NewSession -and -not $ResumeFailed) {
-    throw "The previous Codex call failed. Inspect its log, then use -ResumeFailed to retry the exact thread or -NewSession to retire it."
+    throw "The previous Codex call failed. Inspect its log, then use -ResumeFailed for a fresh call or -NewSession."
 }
 
-if ($existingSession -and -not $NewSession -and (-not $existingStatus -or $existingStatus -eq "active" -or ($existingStatus -eq "failed" -and $ResumeFailed))) {
+if ($existingSession -and -not $NewSession -and $existingStatus -in @('active', 'failed')) {
     $existingPhase = if ($existingSession.phase) { [string]$existingSession.phase } else { "B" }
     if ($existingPhase -ne $Phase) {
         throw "The resumable Astra session belongs to phase $existingPhase. Use -NewSession for phase $Phase."
     }
-    $candidateThread = [string]$existingSession.thread_id
-    if ($candidateThread) {
-        $matchingLogs = @(Get-ChildItem -LiteralPath $turnLogRoot -Filter "*.jsonl" -File | Where-Object {
-            (Read-ThreadId $_.FullName) -eq $candidateThread
-        } | Sort-Object LastWriteTimeUtc -Descending)
-        $previousInputTokens = if ($matchingLogs.Count -gt 0) { Read-TurnInputTokens $matchingLogs[0].FullName } else { $null }
-        if (-not $ResumeFailed -and $null -ne $previousInputTokens -and $previousInputTokens -gt $MaxResumeInputTokens) {
-            Write-Host ("[quota] Retiring thread $candidateThread after $previousInputTokens input tokens; starting a compact thread.") -ForegroundColor Yellow
-        } else {
-            $threadId = $candidateThread
-            Write-Host ("[resume] Exact Astra thread: " + $threadId) -ForegroundColor Green
-        }
-    }
 }
 
-if ($existingSession -and -not $threadId) {
+if ($existingSession) {
     $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
-    Move-Item -LiteralPath $sessionStatePath -Destination (Join-Path $sessionArchiveRoot ("session-" + $stamp + ".json"))
-}
-
-if ((Test-Path -LiteralPath $requestPath -PathType Leaf) -or (Test-Path -LiteralPath $checkpointPath -PathType Leaf)) {
-    if (-not $threadId) { throw "Pending relay/checkpoint exists without a resumable exact Astra thread." }
+    Move-Item -LiteralPath $sessionStatePath -Destination (Join-Path $sessionArchiveRoot ("session-" + $stamp + "-" + $PID + ".json"))
 }
 
 function Save-SessionState([string]$Status) {
     Write-JsonAtomic -Path $sessionStatePath -Value ([ordered]@{
-        version = 2
+        version = 3
         status = $Status
         phase = $Phase
         thread_id = $script:threadId
@@ -334,7 +317,57 @@ function Invoke-CodexStreaming(
     }
 }
 
-function Invoke-AstraTurn([string]$Prompt, [string]$ExistingThreadId = "") {
+function Save-Handoff([string]$Result, [string]$NextDecision, [string[]]$Files = @()) {
+    $changed = if ($Files.Count) { @($Files | Select-Object -First 30) } else { @((git status --porcelain --untracked-files=all | ForEach-Object { if ($_.Length -gt 3) { $_.Substring(3) } }) | Select-Object -First 30) }
+    Write-JsonAtomic -Path $handoffPath -Value ([ordered]@{
+        version = 1
+        objective = $phaseSpec.mission
+        phase = $Phase
+        head = (git rev-parse HEAD | Out-String).Trim()
+        last_result = $Result
+        files = $changed
+        baseline = @{ exit_code = $baseline.exit_code; log_path = $baseline.log_path }
+        blocked = $null
+        next_decision = $NextDecision
+    })
+}
+
+function Save-UsageSummary {
+    $totals = [ordered]@{}
+    foreach ($key in @('input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_output_tokens')) {
+        $sum = [long]$previousTotals[$key]
+        foreach ($call in $script:calls) { if ($call.usage) { $sum += [long]$call.usage[$key] } }
+        $totals[$key] = $sum
+    }
+    Write-JsonAtomic -Path $usagePath -Value ([ordered]@{ version = 1; calls = $script:calls; totals = $totals })
+    return $totals
+}
+
+function Invoke-HostValidation {
+    if (-not (Test-Path -LiteralPath $validationPath -PathType Leaf)) { return $null }
+    $request = Get-Content -LiteralPath $validationPath -Raw | ConvertFrom-Json
+    if ([int]$request.version -ne 1 -or [string]$request.kind -ne 'full_pytest') {
+        throw 'Unsupported host validation request. Only full_pytest is allowed.'
+    }
+    $validationLog = Join-Path $relayRoot 'validation-pytest.log'
+    $started = Get-Date
+    & $pythonExe -m pytest -q --tb=short *> $validationLog
+    $validationExit = $LASTEXITCODE
+    $result = [ordered]@{
+        version = 1
+        kind = 'full_pytest'
+        head = (git rev-parse HEAD | Out-String).Trim()
+        exit_code = $validationExit
+        duration_seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+        log_path = 'cache/astra-relay/validation-pytest.log'
+        summary = @((Get-Content -LiteralPath $validationLog -Tail 8) | ForEach-Object { [string]$_ })
+    }
+    Write-JsonAtomic -Path (Join-Path $resultRoot 'validation-latest.json') -Value $result
+    Move-Item -LiteralPath $validationPath -Destination (Join-Path $archiveRoot ('validation-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ') + '.json'))
+    return $result
+}
+
+function Invoke-AstraTurn([string]$Prompt, [string]$Reason) {
     $script:astraTurns++
     if ($script:astraTurns -gt $MaxAstraTurns) {
         throw "Astra turn budget exhausted ($MaxAstraTurns). Stopping before another model call."
@@ -367,14 +400,10 @@ function Invoke-AstraTurn([string]$Prompt, [string]$ExistingThreadId = "") {
     try {
         $codexArguments = @(
             "exec", "--json", "--strict-config", "--disable", "shell_snapshot",
-            "--model", "gpt-6-astra", "--cd", $repo,
+            "--model", "gpt-6-astra", "-c", "model_reasoning_effort=$Reasoning", "--cd", $repo,
             "--output-last-message", $lastMessage
         )
-        if ($ExistingThreadId) {
-            $codexArguments += @("resume", $ExistingThreadId, $Prompt)
-        } else {
-            $codexArguments += $Prompt
-        }
+        $codexArguments += $Prompt
         $processResult = Invoke-CodexStreaming -Executable $CodexExe -Arguments $codexArguments -JsonLog $jsonLog -StderrLog $stderrLog
         $code = $processResult.exit_code
         $observedThread = $processResult.thread_id
@@ -383,6 +412,11 @@ function Invoke-AstraTurn([string]$Prompt, [string]$ExistingThreadId = "") {
         if ($null -eq $savedUserProfile) { Remove-Item Env:USERPROFILE -ErrorAction SilentlyContinue } else { $env:USERPROFILE = $savedUserProfile }
         if ($null -eq $savedGitConfigGlobal) { Remove-Item Env:GIT_CONFIG_GLOBAL -ErrorAction SilentlyContinue } else { $env:GIT_CONFIG_GLOBAL = $savedGitConfigGlobal }
     }
+    $usage = Read-TurnUsage $jsonLog
+    $script:calls += [ordered]@{ call = $script:astraTurns; reason = $Reason; thread_id = $observedThread; usage = $usage }
+    $null = Save-UsageSummary
+    $usageBrief = if ($usage) { $usage | ConvertTo-Json -Compress } else { 'unavailable' }
+    Write-Host ("ASTRA CALL {0}: {1}; usage={2}" -f $script:astraTurns, $Reason, $usageBrief)
     if ($code -ne 0) {
         if ($observedThread) {
             $script:threadId = $observedThread
@@ -392,9 +426,6 @@ function Invoke-AstraTurn([string]$Prompt, [string]$ExistingThreadId = "") {
     }
     if (-not $observedThread) {
         throw "Could not extract thread.started/thread_id from Codex JSONL: $jsonLog"
-    }
-    if ($ExistingThreadId -and $observedThread -ne $ExistingThreadId) {
-        throw "Codex resumed the wrong thread. Expected $ExistingThreadId, got $observedThread."
     }
     $script:modelInvoked = $true
 
@@ -413,149 +444,88 @@ function Invoke-AstraTurn([string]$Prompt, [string]$ExistingThreadId = "") {
     }
 }
 
-$baselineBrief = (@($baseline.summary) | Select-Object -Last 8) -join " | "
-if ($baselineBrief.Length -gt 1800) { $baselineBrief = $baselineBrief.Substring($baselineBrief.Length - 1800) }
+$baselineBrief = (@($baseline.summary) | Select-Object -Last 4) -join ' | '
+if ($baselineBrief.Length -gt 800) { $baselineBrief = $baselineBrief.Substring($baselineBrief.Length - 800) }
 
 $initialPrompt = @"
-You are the GPT-6 Astra root constructor for the bounded OCTOPUS maintenance window.
-Read root AGENTS.md (already injected) and $($phaseSpec.documents) once. Work on phase $Phase only. Do not rediscover the roadmap or rerun the baseline.
-
-The deterministic host already validated Git, auth, sandbox, pinned upstreams, and ran the full Python baseline outside the model loop:
-- head=$head
-- exit_code=$($baseline.exit_code)
-- log=$($baseline.log_path)
-- tail=$baselineBrief
-
+You are the GPT-6 Astra root constructor for OCTOPUS phase $Phase. Read $($phaseSpec.documents) only when needed.
 Mission: $($phaseSpec.mission)
-
-Read only the named phase document(s) and files directly needed for phase $Phase. Use rg, Git summaries, and bounded excerpts. Never dump a complete large diff, test log, generated file, lockfile, or file over 100 KB into model context. Redirect full test output to a log and inspect only its concise tail. Run targeted tests while editing; run the full suite only once after the phase changes are complete.
-
-Windows boundary: use PowerShell only. Read-only Git inspection is allowed. Never create/switch branches or run Git operations that write .git. For a tested phase, atomically publish checkpoint.json with version=2, request_id, base_head, message, and exact changed paths, then end the turn. The host commits those exact paths and resumes this exact thread.
-
-Delegate only a bounded mechanical task with a clean source tree by publishing one product_ticket plus request.json, then end the turn. Never launch Kilo/night-shift, poll, sleep, or perform predictable Git mechanics yourself.
+HEAD: $head. Host baseline: exit=$($baseline.exit_code), log=$($baseline.log_path), summary=$baselineBrief.
+Compact handoff: cache/astra-relay/handoff.json. Read it if present; inspect only relevant files.
+Use targeted tests while editing. For a long full suite, atomically publish cache/astra-relay/validation.json with {"version":1,"kind":"full_pytest"}, then end the turn. The host runs it after you exit and writes cache/astra-relay/results/validation-latest.json.
+For tested changes, publish checkpoint.json version 2 with request_id, base_head, message and exact changed paths, then end the turn. Host owns Git metadata writes. For a bounded Step task, publish one product_ticket and request.json from a clean tree, then end the turn.
+Do not launch Step, poll, wait for validation, or run a full suite inside Astra. Each follow-up is a fresh Astra call with a compact disk handoff; no thread resume. Stop after the requested boundary.
 "@
 
-if (-not $threadId) {
-    $first = Invoke-AstraTurn -Prompt $initialPrompt
-    $threadId = $first.thread_id
-    Save-SessionState -Status "active"
+if (Test-Path -LiteralPath $handoffPath -PathType Leaf) {
+    $oldHandoff = Get-Content -LiteralPath $handoffPath -Raw | ConvertFrom-Json
+    if ($NewSession -or [string]$oldHandoff.phase -ne $Phase) {
+        $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
+        Move-Item -LiteralPath $handoffPath -Destination (Join-Path $sessionArchiveRoot ("handoff-" + $stamp + "-" + $PID + ".json"))
+    }
+}
+if (-not (Test-Path -LiteralPath $handoffPath -PathType Leaf)) {
+    Save-Handoff -Result 'ready' -NextDecision 'Start bounded phase work.'
 }
 
+$nextReason = 'phase work'
+$nextPrompt = $initialPrompt
 while ($true) {
-    if (Test-Path -LiteralPath $checkpointPath) {
-        Write-Host ""
-        Write-Host "=== HOST GIT CHECKPOINT ===" -ForegroundColor Yellow
-        $checkpointResultPath = Join-Path $resultRoot "checkpoint-latest.json"
+    $pending = @($checkpointPath, $requestPath, $validationPath | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+    if ($pending.Count -gt 1) { throw 'Only one checkpoint, Step relay, or validation request may be pending.' }
+    if (Test-Path -LiteralPath $checkpointPath -PathType Leaf) {
+        $checkpointResultPath = Join-Path $resultRoot 'checkpoint-latest.json'
         & powershell -NoProfile -ExecutionPolicy Bypass -File $checkpointRunner -Repo $repo -CheckpointPath $checkpointPath -ResultPath $checkpointResultPath
         if ($LASTEXITCODE -ne 0) { throw "Host checkpoint failed. Request left in place: $checkpointPath" }
-        $checkpointReceipt = Get-Content -LiteralPath $checkpointResultPath -Raw | ConvertFrom-Json
-        $checkpointId = [string]$checkpointReceipt.request_id
-        $checkpointSha = [string]$checkpointReceipt.commit
-        $commitMessage = [string]$checkpointReceipt.message
-
-        $checkpointPrompt = @(
-            "HOST_CHECKPOINT_COMMITTED",
-            "request_id=$checkpointId",
-            "commit=$checkpointSha",
-            "message=$commitMessage",
-            "",
-            "The deterministic parent supervisor committed your tested workspace changes outside the Codex sandbox.",
-            "Do not attempt Git metadata writes. Continue phase $Phase from exactly where you stopped. Do not start another phase.",
-            "If direct changes reach another coherent tested checkpoint, publish checkpoint.json again. If a bounded Step task is justified, only publish request.json from a clean source tree."
-        ) -join [Environment]::NewLine
-
-        $next = Invoke-AstraTurn -Prompt $checkpointPrompt -ExistingThreadId $threadId
-        $threadId = $next.thread_id
-        Save-SessionState -Status "active"
-        continue
-    }
-
-    if (Test-Path -LiteralPath $requestPath) {
-        if ($relayCycles -ge $MaxRelayCycles) {
-            throw "Relay cycle budget exhausted ($MaxRelayCycles). Leaving request untouched: $requestPath"
-        }
+        $receipt = Get-Content -LiteralPath $checkpointResultPath -Raw | ConvertFrom-Json
+        $lastResult = "Checkpoint $($receipt.commit): $($receipt.message)"
+        Save-Handoff -Result $lastResult -NextDecision 'Review committed result or stop.' -Files @($receipt.paths)
+        $nextReason = 'checkpoint review'
+        $nextPrompt = "Fresh Astra review. Read cache/astra-relay/handoff.json and cache/astra-relay/results/checkpoint-latest.json. Continue phase $Phase only if needed."
+    } elseif (Test-Path -LiteralPath $requestPath -PathType Leaf) {
+        if ($relayCycles -ge $MaxRelayCycles) { throw "Relay cycle budget exhausted. Request untouched: $requestPath" }
         $relayCycles++
-
         $request = Get-Content -LiteralPath $requestPath -Raw | ConvertFrom-Json
-        if ([int]$request.version -ne 1) { throw "Unsupported relay request version." }
-
+        if ([int]$request.version -ne 1 -or [string]$request.request_id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$') { throw 'Invalid Step relay request.' }
         $requestId = [string]$request.request_id
-        if ($requestId -notmatch "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$") {
-            throw "Invalid relay request_id."
-        }
-
         $plan = [string]$request.plan_path
-        if (-not $plan) { throw "Relay request missing plan_path." }
-
+        if (-not $plan) { throw 'Relay request missing plan_path.' }
         $hours = if ($null -ne $request.hours) { [double]$request.hours } else { 1.0 }
-        if ($hours -le 0 -or $hours -gt 8) {
-            throw "Relay request hours must be >0 and <=8."
-        }
-
-        $sourceDirty = (git status --porcelain --untracked-files=all | Out-String).Trim()
-        if ($sourceDirty) {
-            throw "Astra published a Step relay request from a dirty source tree. Request a host checkpoint first."
-        }
-
-        $archivedRequest = Join-Path $archiveRoot ($requestId + ".json")
-        if (Test-Path -LiteralPath $archivedRequest) {
-            throw "RequestId has already been consumed: $requestId"
-        }
+        if ($hours -le 0 -or $hours -gt 8) { throw 'Relay request hours must be >0 and <=8.' }
+        if ((git status --porcelain --untracked-files=all | Out-String).Trim()) { throw 'Step relay requires a clean source tree.' }
+        $archivedRequest = Join-Path $archiveRoot ($requestId + '.json')
+        if (Test-Path -LiteralPath $archivedRequest) { throw "RequestId already consumed: $requestId" }
         Move-Item -LiteralPath $requestPath -Destination $archivedRequest
-
         $resultPath = "cache/astra-relay/results/$requestId.json"
-
-        Write-Host ""
-        Write-Host ("=== RELAY CYCLE {0}/{1}: {2} ===" -f $relayCycles, $MaxRelayCycles, $requestId) -ForegroundColor Cyan
-
         & powershell -NoProfile -ExecutionPolicy Bypass -File $runner -Plan $plan -Hours $hours -RequestId $requestId -ResultPath $resultPath
         $workerExit = $LASTEXITCODE
-
-        $reviewPrompt = @(
-            "RELAY_COMPLETED",
-            "request_id=$requestId",
-            "worker_exit_code=$workerExit",
-            "result_file=$resultPath",
-            "",
-            "Read the result file and its referenced night-shift report/log. Inspect the produced commit/worktree, actual diff, changed paths, acceptance evidence and tests. Review it yourself as root GPT-6 Astra.",
-            "If acceptable, publish checkpoint.json version 2 with kind=worker_commit, base_head, the full reviewed source_commit SHA, message, and exact changed paths, then end the turn. The host will fast-forward only that direct child commit and resume this exact thread.",
-            "If it is wrong or ambiguous, fix/take back the task according to CODEX_START; use kind=working_tree for tested direct changes.",
-            "If another bounded Step task is genuinely justified, publish one new relay request only from a clean source tree and end the turn. Otherwise keep working directly until the mission is complete or an explicit human stop condition is reached. Never poll a worker and never launch Kilo/night-shift yourself."
-        ) -join [Environment]::NewLine
-
-        $next = Invoke-AstraTurn -Prompt $reviewPrompt -ExistingThreadId $threadId
-        $threadId = $next.thread_id
-        Save-SessionState -Status "active"
-        continue
+        $lastResult = "Step $requestId exited $workerExit; result=$resultPath"
+        Save-Handoff -Result $lastResult -NextDecision 'Review worker result and exact diff; publish worker_commit checkpoint only if acceptable.'
+        $nextReason = 'Step review'
+        $nextPrompt = "Fresh Astra Step review. Read cache/astra-relay/handoff.json and $resultPath; inspect the referenced report and actual diff. If acceptable, publish checkpoint.json version 2 with kind=worker_commit, base_head, source_commit, message and exact paths. End the turn."
+    } elseif (Test-Path -LiteralPath $validationPath -PathType Leaf) {
+        $validationResult = Invoke-HostValidation
+        $lastResult = "Full pytest exited $($validationResult.exit_code); result=cache/astra-relay/results/validation-latest.json"
+        Save-Handoff -Result $lastResult -NextDecision 'Review concise host validation result and resolve actual failures.'
+        $nextReason = 'validation review'
+        $nextPrompt = 'Fresh Astra validation review. Read cache/astra-relay/handoff.json and cache/astra-relay/results/validation-latest.json. Inspect only relevant failing tests and bounded log excerpts.'
+    } elseif ($modelInvoked) {
+        if ((git status --porcelain --untracked-files=all | Out-String).Trim()) { throw 'Astra ended with uncheckpointed changes.' }
+        Save-SessionState -Status 'completed'
+        break
     }
 
-    if (-not $modelInvoked) {
-        $resumePrompt = @(
-            "HOST_RESUME",
-            "current_head=$head",
-            "baseline_exit_code=$($baseline.exit_code)",
-            "baseline_log=$($baseline.log_path)",
-            "",
-            "Resume the authorized maintenance from the exact prior state. Do not repeat repository discovery, broad reads, or the full baseline.",
-            "The host now owns all Git metadata writes. Use checkpoint schema version 2 with base_head and exact changed paths.",
-            "Continue phase $Phase with targeted reads and tests. Never poll or launch Kilo/night-shift yourself."
-        ) -join [Environment]::NewLine
-        $next = Invoke-AstraTurn -Prompt $resumePrompt -ExistingThreadId $threadId
-        $threadId = $next.thread_id
-        Save-SessionState -Status "active"
-        continue
+    if ($astraTurns -ge $MaxAstraTurns) {
+        Save-SessionState -Status 'active'
+        Write-Host "Astra call budget reached. Handoff: $handoffPath" -ForegroundColor Yellow
+        break
     }
-
-    $remainingDirty = (git status --porcelain --untracked-files=all | Out-String).Trim()
-    if ($remainingDirty) {
-        throw "Astra ended without checkpoint/relay while the repository is dirty. Refusing to stop silently."
-    }
-    Save-SessionState -Status "completed"
-    break
+    $turn = Invoke-AstraTurn -Prompt $nextPrompt -Reason $nextReason
+    $threadId = $turn.thread_id
+    $modelInvoked = $true
+    Save-SessionState -Status 'active'
 }
 
-Write-Host ""
-Write-Host "OCTOPUS Astra builder stopped cleanly: no pending relay or checkpoint." -ForegroundColor Green
-Write-Host ("Astra turns used: {0}/{1}" -f $astraTurns, $MaxAstraTurns)
-Write-Host ("Relay cycles used: {0}/{1}" -f $relayCycles, $MaxRelayCycles)
-Write-Host "Session state: $sessionStatePath"
+$totals = Save-UsageSummary
+Write-Host ("Astra calls: {0}/{1}; totals={2}" -f $astraTurns, $MaxAstraTurns, ($totals | ConvertTo-Json -Compress))
+Write-Host "Handoff: $handoffPath"

@@ -143,7 +143,7 @@ The benchmark branch is evidence, not a runtime dependency.
 Long Kilo/Step work must remain outside the Codex model process.
 
 The supported supervisor is \`scripts/start_octopus_astra.ps1\`.
-It launches Astra with \`codex exec --json\`, records the exact \`thread_id\`, consumes a bounded relay request, runs Step through \`run_external_dev_ticket.ps1\`, then performs exactly one \`codex exec resume <thread_id>\` for Astra review.
+It launches Astra with \`codex exec --json\`, consumes a bounded relay request, runs Step through \`run_external_dev_ticket.ps1\`, then starts one fresh Astra call for review when the call budget allows. Continuity is recorded in \`cache/astra-relay/handoff.json\`.
 
 No model call is active while Step works.
 
@@ -172,8 +172,9 @@ The runner:
 - leaves worker commits isolated for review.
 
 The supervisor:
-- verifies the resumed Codex \`thread_id\` equals the original;
-- caps Astra turns and relay cycles;
+- caps fresh Astra calls (two by default) and relay cycles;
+- runs requested full pytest validation outside the model from a fixed \`full_pytest\` request, with a compact result file;
+- records token usage per call and totals in \`cache/astra-relay/usage.json\`;
 - stops on any non-zero Codex call;
 - does not select a fallback model.
 
@@ -186,7 +187,7 @@ Astra plans/decides
   -> deterministic relay
   -> Step implements/tests
   -> deterministic relay
-  -> same Astra thread reviews
+  -> fresh Astra call reviews from compact handoff
 \`\`\`
 
 There is no human polling step and no resident LLM supervisor.
