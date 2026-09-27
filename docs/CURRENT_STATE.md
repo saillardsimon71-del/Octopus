@@ -164,8 +164,9 @@ capacité actuelle à rechercher une opportunité.
 
 ## Freins connus avant la première activité
 
-1. Mesurer maintenant SEARCH/BROWSE sur une source pertinente pour la mission économique,
-   puis faire relire les citations. Le probe technique Python ne valide pas le marché.
+1. E5 a acquis une demande réelle, mais fermée: aucune piste actuelle retenue. Le prochain
+   test proposé exige une demande ouverte et une revue humaine avant contact; ne pas relancer
+   la mission automatiquement. Voir les citations et inconnues ci-dessous.
 2. Google peut ne pas répondre: conserver les erreurs observables et les autres moteurs;
    ne pas inventer un résultat ni déclencher un fallback payant.
 3. Faire la revue avant transfert des commits E dans la branche produit.
