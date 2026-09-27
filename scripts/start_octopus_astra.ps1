@@ -304,7 +304,8 @@ function Invoke-CodexStreaming(
     [string]$Executable,
     [string[]]$Arguments,
     [string]$JsonLog,
-    [string]$StderrLog
+    [string]$StderrLog,
+    [string]$InputText = ""
 ) {
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     $jsonWriter = New-Object System.IO.StreamWriter($JsonLog, $false, $utf8)
@@ -317,7 +318,7 @@ function Invoke-CodexStreaming(
         # Windows PowerShell 5.1 converts native stderr into NativeCommandError.
         # It is diagnostic output, not a failed Codex process; the exit code is authoritative.
         $ErrorActionPreference = "Continue"
-        & $Executable @Arguments 2>&1 | ForEach-Object {
+        $handleLine = {
             if ($_ -is [System.Management.Automation.ErrorRecord]) {
                 $line = [string]$_.Exception.Message
                 $stderrWriter.WriteLine($line)
@@ -340,6 +341,11 @@ function Invoke-CodexStreaming(
                     try { Save-SessionState -Status "active" } finally { $ErrorActionPreference = "Continue" }
                 }
             }
+        }
+        if ($PSBoundParameters.ContainsKey('InputText')) {
+            $InputText | & $Executable @Arguments 2>&1 | ForEach-Object $handleLine
+        } else {
+            & $Executable @Arguments 2>&1 | ForEach-Object $handleLine
         }
         $exitCode = $LASTEXITCODE
     } finally {
@@ -609,8 +615,8 @@ function Invoke-AstraTurn([string]$Prompt, [string]$Reason) {
             "--model", "gpt-6-astra", "-c", "model_reasoning_effort=$Reasoning", "--cd", $repo,
             "--output-last-message", $lastMessage
         )
-        $codexArguments += $Prompt
-        $processResult = Invoke-CodexStreaming -Executable $CodexExe -Arguments $codexArguments -JsonLog $jsonLog -StderrLog $stderrLog
+        $codexArguments += "-"
+        $processResult = Invoke-CodexStreaming -Executable $CodexExe -Arguments $codexArguments -JsonLog $jsonLog -StderrLog $stderrLog -InputText $Prompt
         $code = $processResult.exit_code
         $observedThread = $processResult.thread_id
     } finally {

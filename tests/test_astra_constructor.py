@@ -325,6 +325,9 @@ def test_codex_stream_keeps_stderr_out_of_json_and_saves_thread_early(tmp_path: 
     fake_codex = tmp_path / "fake-codex.cmd"
     fake_codex.write_text(
         "@echo off\n"
+        'if not "%~1"=="-" exit /b 4\n'
+        "set /p prompt=\n"
+        'if not "%prompt%"=="line one final readiness" exit /b 5\n'
         'echo {"type":"thread.started","thread_id":"thread-test"}\n'
         "echo diagnostic-stderr 1>&2\n"
         'echo {"type":"turn.completed","usage":{"input_tokens":1}}\n'
@@ -347,7 +350,7 @@ Invoke-Expression $function.Extent.Text
 $script:threadId = ''
 $script:savedSession = ''
 function Save-SessionState([string]$Status) {{ $script:savedSession = "$Status|$script:threadId" }}
-$result = Invoke-CodexStreaming -Executable '{fake_codex}' -Arguments @() -JsonLog '{json_log}' -StderrLog '{stderr_log}'
+$result = Invoke-CodexStreaming -Executable '{fake_codex}' -Arguments @('-') -JsonLog '{json_log}' -StderrLog '{stderr_log}' -InputText 'line one final readiness'
 [ordered]@{{
     exit_code = $result.exit_code
     thread_id = $result.thread_id
