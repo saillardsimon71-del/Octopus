@@ -128,7 +128,8 @@ Sur le diff E de la branche constructeur, le 2026-09-27:
   workspace réseau activé: même page Python, 6250 caractères, HTTP 200, `usable=true`;
   aucun LLM ni écriture de données métier.
 
-Les modifications sont en attente de checkpoint Git hôte, pas fusionnées ni publiées.
+Les modifications E ont été commitées par l'hôte dans `057fc6e`, puis le routeur E5
+dans `dbf30d2`. Elles ne sont pas fusionnées dans `main`.
 Le changement `.codex/config.toml` appartient au constructeur et doit être exclu du
 transfert produit. La lecture seule réseau est une limite du mandat, pas un filtre HTTP
 implémenté par `network_access=true`. Cette validation ne prouve pas une opportunité client.
@@ -167,12 +168,29 @@ capacité actuelle à rechercher une opportunité.
    puis faire relire les citations. Le probe technique Python ne valide pas le marché.
 2. Google peut ne pas répondre: conserver les erreurs observables et les autres moteurs;
    ne pas inventer un résultat ni déclencher un fallback payant.
-3. Faire checkpoint et revue du diff E par l'hôte avant transfert dans la branche produit.
+3. Faire la revue avant transfert des commits E dans la branche produit.
 4. Le smoke test Agnes réel reste à faire séparément si la première activité utilise la vidéo.
 5. Les prochains commits produit doivent être extraits de la branche constructeur sans y inclure
    l'infrastructure Astra.
 
 ## Vérité économique
+
+### Observation E5 lancée le 2026-09-27
+
+Une seule mission réelle a été lancée depuis `dbf30d2` via `runtime.run_mission`,
+business `cycle_0`, sous un run journalisé `phase_e5_observation`. Profil `zero_cost`,
+plafond LLM partagé de 0 USD, allowlist `search,browse`, six étapes au maximum par
+sous-agent, cible d'un signal et sélection `business_signal_relevance` avec acquisition
+SEARCH/BROWSE couplée. Le goal demande au plus deux tâches de recherche; cette demande
+est une consigne au planner, dont la limite déterministe reste cinq tâches.
+Aucun contact, achat, publication ou test commercial ultérieur n'est autorisé.
+
+À ce checkpoint documentaire, la sortie finale n'est pas encore disponible. Ne pas
+relancer la mission: reprendre son résultat dans
+`cache/astra-relay/phase-e5-mission.json` et son diagnostic dans
+`cache/astra-relay/phase-e5-mission.log`. Le journal existant conserve les runs et appels.
+Examiner ensuite les acquisitions, citations, rejets, coût et inconnues avant de statuer.
+Un lancement n'est ni une qualification de signal ni une validation économique.
 
 Le dépôt ne contient toujours aucune preuve de paiement commercial, de livraison acceptée ou
 d'utilisation client pour la première activité. Tests verts, commits, agents et missions ne sont
