@@ -99,7 +99,7 @@ actuel. Sinon elle est différée ou rejetée.
 Pendant cette fenêtre, un worker Kilo/Step long ne doit jamais être lancé depuis le shell piloté par
 Astra. La délégation suit obligatoirement le relay déterministe du routeur de phase E: Astra publie
 un ticket borné puis termine son tour; le superviseur local exécute Step hors de la boucle modèle et
-reprend ensuite exactement la même thread Astra une seule fois pour la review.
+démarre ensuite un nouvel appel Astra frais une seule fois pour la review, en rechargeant uniquement le handoff compact et les résultats nécessaires.
 
 Pendant cette même fenêtre, ne jamais poursuivre sous un modèle de fallback. Le superviseur utilise `codex exec` avec `--model gpt-6-astra`; tout échec/rate-limit Codex arrête la chaîne au lieu de sélectionner un autre modèle.
 
