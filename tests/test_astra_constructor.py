@@ -211,6 +211,7 @@ def test_constructor_powershell_parses_and_disables_shell_snapshot():
     assert '[ValidateSet("B", "C", "D", "E", "F", "G")]' in launcher
     assert '[string]$Phase = "B"' in launcher
     assert '[int]$MaxAstraTurns = 2' in launcher
+    assert 'MaxAstraTurns must be 1 or 2' in launcher
     assert '[string]$Reasoning = "medium"' in launcher
     assert 'model_reasoning_effort=$Reasoning' in launcher
     assert '"--ephemeral"' in launcher
@@ -236,17 +237,33 @@ def test_constructor_context_is_bounded_and_does_not_preload_documents():
     assert "[int]$MaxHandoffChars = 6000" in launcher
     assert "[int]$MaxSnapshotChars = 8000" in launcher
     assert "[int]$MaxManifestChars = 6000" in launcher
+    assert "[int]$MaxHostPrepareChars = 4200" in launcher
     assert "[int]$MaxPreparedContextChars = 30000" in launcher
     assert "HOST_SNAPSHOT_JSON" in launcher
     assert "CONTEXT_MANIFEST_JSON" in launcher
     assert "MINIMAL_HANDOFF_JSON" in launcher
     assert "estimated_prompt_chars" in launcher
-    assert "context_file_count = 3" in launcher
+    assert "context_file_count = $contextFileCount" in launcher
     assert "Read $($phaseSpec.documents)" not in launcher
     assert "Read cache/astra-relay/handoff.json" not in launcher
     assert "referenced report and actual diff" not in launcher
     assert "Never reread a document whose manifest hash is unchanged" in launcher
-    assert "at most 200 lines and 20000 characters" in launcher
+    assert "capped at 200 lines and 20000 characters" in launcher
+    assert "HOST_REVIEW_PACKET_JSON" in launcher
+    assert "packet = 'call_1_prepare'" in launcher
+    assert "packet = 'call_2_review'" in launcher
+
+
+def test_astra_prompt_forbids_general_exploration_and_routes_mechanical_work_early():
+    launcher = (ROOT / "scripts" / "start_octopus_astra.ps1").read_text(encoding="utf-8")
+
+    assert "The shell-command budget is zero by default" in launcher
+    assert "General repository exploration is forbidden" in launcher
+    assert "Run no long test in Astra and never run a full suite" in launcher
+    assert "search for tests already supplied by HOST PREPARE" in launcher
+    assert "As soon as files, expected behavior, oracle/tests and limits can be stated" in launcher
+    assert "then end the call immediately" in launcher
+    assert "After publishing any Step, checkpoint or host-validation request" in launcher
 
 
 def test_context_manifest_marks_unchanged_documents(tmp_path: Path):
@@ -270,13 +287,14 @@ def test_context_manifest_marks_unchanged_documents(tmp_path: Path):
 $tokens=$null;$errors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
 if($errors.Count){{throw ($errors|ForEach-Object Message)}}
-foreach($name in @('Write-JsonAtomic','Write-BoundedJsonAtomic','Limit-Text','Get-ChangedPaths','Get-CompactDiffStat','Save-ContextManifest','Write-AstraContext')){{
+foreach($name in @('Write-JsonAtomic','Write-BoundedJsonAtomic','Limit-Text','Get-ChangedPaths','Get-CompactDiffStat','Invoke-BoundedRg','Find-AssociatedTests','Get-HostPreparation','Save-ContextManifest','Write-AstraContext')){{
   $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
   Invoke-Expression $fn.Extent.Text
 }}
 $repo='{repo}';$contextManifestPath='{manifest}';$snapshotPath='{snapshot}';$contextMetricsPath='{metrics}'
 $handoffPath='{relay / "handoff.json"}';$checkpointPath='{relay / "checkpoint.json"}';$requestPath='{relay / "request.json"}';$validationPath='{relay / "validation.json"}'
-$Phase='F';$MaxManifestChars=6000;$MaxSnapshotChars=8000;$MaxHandoffChars=6000;$MaxPreparedContextChars=30000
+$Phase='F';$MaxManifestChars=6000;$MaxSnapshotChars=8000;$MaxHandoffChars=6000;$MaxHostPrepareChars=4200;$MaxPreparedContextChars=30000
+$phaseSearches=@('contamination','readiness')
 $phaseSpec=@{{documents=@('docs/phase.md');mission='bounded mission'}};$baseline=@{{exit_code=0;duration_seconds=1}}
 $first=Write-AstraContext -TaskPrompt 'first';$second=Write-AstraContext -TaskPrompt 'second'
 @{{prompt=$second;manifest=(Get-Content -LiteralPath $contextManifestPath -Raw|ConvertFrom-Json);metrics=(Get-Content -LiteralPath $contextMetricsPath -Raw|ConvertFrom-Json)}}|ConvertTo-Json -Depth 20
@@ -293,6 +311,99 @@ $first=Write-AstraContext -TaskPrompt 'first';$second=Write-AstraContext -TaskPr
     assert "PHASE DOCUMENT MUST NOT BE PRELOADED" not in payload["prompt"]
     assert payload["metrics"]["context_file_count"] == 3
     assert payload["metrics"]["estimated_input_chars"] <= 30000
+
+
+def test_host_prepare_discovers_runtime_symbols_and_tests_with_hard_bounds(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    source = repo / "octopus" / "sample_engine.py"
+    source.parent.mkdir()
+    source.write_text("class SampleEngine:\n    pass\n", encoding="utf-8")
+    test_file = repo / "tests" / "test_sample_engine.py"
+    test_file.parent.mkdir()
+    test_file.write_text("from octopus.sample_engine import SampleEngine\n", encoding="utf-8")
+    git(repo, "add", "octopus/sample_engine.py", "tests/test_sample_engine.py")
+    git(repo, "commit", "-m", "sample runtime")
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    runner = tmp_path / "host-prepare.ps1"
+    runner.write_text(
+        f"""
+$tokens=$null;$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
+if($errors.Count){{throw ($errors|ForEach-Object Message)}}
+foreach($name in @('Limit-Text','Invoke-BoundedRg','Find-AssociatedTests','Get-HostPreparation')){{
+  $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
+  Invoke-Expression $fn.Extent.Text
+}}
+$repo='{repo}';$phaseSearches=@('SampleEngine');$MaxHostPrepareChars=4200
+$packet=Get-HostPreparation
+@{{packet=$packet;chars=($packet|ConvertTo-Json -Depth 10).Length}}|ConvertTo-Json -Depth 20
+""",
+        encoding="utf-8",
+    )
+
+    result = run(POWERSHELL, "-NoProfile", "-File", str(runner), cwd=repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["chars"] <= 4200
+    assert "octopus/sample_engine.py" in payload["packet"]["runtime_paths"]
+    assert any("class SampleEngine" in item for item in payload["packet"]["symbols_and_entrypoints"])
+    assert "tests/test_sample_engine.py" in payload["packet"]["likely_tests"]
+    assert len(payload["packet"]["targeted_searches"][0]["matches"]) <= 2
+
+
+def test_call_2_uses_only_compact_review_packet(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    (repo / "AGENTS.md").write_text("rules\n", encoding="utf-8")
+    relay = repo / "cache" / "astra-relay"
+    relay.mkdir(parents=True)
+    (relay / "handoff.json").write_text(
+        json.dumps(
+            {
+                "decisions": ["delegate bounded change"],
+                "last_result": "Step completed",
+                "next_decision": "review changed path",
+                "blocked": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    runner = tmp_path / "call-2.ps1"
+    runner.write_text(
+        f"""
+$tokens=$null;$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
+if($errors.Count){{throw ($errors|ForEach-Object Message)}}
+foreach($name in @('Write-JsonAtomic','Write-BoundedJsonAtomic','Limit-Text','Get-ChangedPaths','Get-CompactDiffStat','Write-AstraContext')){{
+  $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
+  Invoke-Expression $fn.Extent.Text
+}}
+$repo='{repo}';$snapshotPath='{relay / "snapshot.json"}';$contextMetricsPath='{relay / "metrics.json"}'
+$handoffPath='{relay / "handoff.json"}';$checkpointPath='{relay / "checkpoint.json"}';$requestPath='{relay / "request.json"}';$validationPath='{relay / "validation.json"}'
+$Phase='G';$MaxSnapshotChars=8000;$MaxHandoffChars=6000;$MaxPreparedContextChars=30000
+$phaseSpec=@{{documents=@('DO-NOT-READ.md');mission='not needed in review'}};$script:astraTurns=1
+$script:lastWorkerSummary=@{{status='completed';changed_paths=@('product.txt');tests=@('1 passed')}}
+$script:lastValidationSummary=$null
+$script:reviewContext=@{{kind='step';changed_paths=@('product.txt');diff_stat=@('product.txt | 1 +')}}
+$prompt=Write-AstraContext -TaskPrompt 'review only'
+@{{prompt=$prompt;snapshot=(Get-Content -LiteralPath $snapshotPath -Raw|ConvertFrom-Json);metrics=(Get-Content -LiteralPath $contextMetricsPath -Raw|ConvertFrom-Json)}}|ConvertTo-Json -Depth 20
+""",
+        encoding="utf-8",
+    )
+
+    result = run(POWERSHELL, "-NoProfile", "-File", str(runner), cwd=repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert "HOST_REVIEW_PACKET_JSON" in payload["prompt"]
+    assert "CONTEXT_MANIFEST_JSON" not in payload["prompt"]
+    assert "MINIMAL_HANDOFF_JSON" not in payload["prompt"]
+    assert payload["snapshot"]["packet"] == "call_2_review"
+    assert payload["snapshot"]["previous_decision"]["decisions"] == ["delegate bounded change"]
+    assert payload["snapshot"]["host_test_summary"]["source"] == "step_host"
+    assert payload["metrics"]["context_file_count"] == 1
+    assert payload["metrics"]["manifest_document_count"] == 0
 
 
 def test_handoff_rejects_massive_context(tmp_path: Path):
@@ -412,6 +523,37 @@ Read-TurnUsage '{log}' | ConvertTo-Json -Compress
     }
 
 
+def test_usage_separates_new_run_totals_from_lifetime_totals(tmp_path: Path):
+    usage = tmp_path / "usage.json"
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    command = f"""
+$tokens=$null;$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
+if($errors.Count){{throw ($errors|ForEach-Object Message)}}
+foreach($name in @('Write-JsonAtomic','Save-UsageSummary')){{
+  $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
+  Invoke-Expression $fn.Extent.Text
+}}
+$usagePath='{usage}'
+$previousLifetimeTotals=@{{input_tokens=100;cached_input_tokens=40;output_tokens=20;reasoning_output_tokens=5}}
+$script:calls=@()
+$newSession=Save-UsageSummary
+$script:calls=@(@{{usage=@{{input_tokens=7;cached_input_tokens=3;output_tokens=2;reasoning_output_tokens=1}}}})
+$afterCall=Save-UsageSummary
+@{{new_session=$newSession;after_call=$afterCall;file=(Get-Content -LiteralPath $usagePath -Raw|ConvertFrom-Json)}}|ConvertTo-Json -Depth 20
+"""
+    result = run(POWERSHELL, "-NoProfile", "-Command", command)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["new_session"]["run_totals"]["input_tokens"] == 0
+    assert payload["new_session"]["lifetime_totals"]["input_tokens"] == 100
+    assert payload["after_call"]["run_totals"]["input_tokens"] == 7
+    assert payload["after_call"]["lifetime_totals"]["input_tokens"] == 107
+    assert payload["file"]["version"] == 2
+    assert "totals" not in payload["file"]
+
+
 def test_host_validation_accepts_only_fixed_full_pytest(tmp_path: Path):
     repo = init_repo(tmp_path)
     relay = repo / "cache" / "astra-relay"
@@ -426,7 +568,7 @@ def test_host_validation_accepts_only_fixed_full_pytest(tmp_path: Path):
 $tokens=$null;$errors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
 if($errors.Count){{throw ($errors|ForEach-Object Message)}}
-foreach($name in @('Write-JsonAtomic','Limit-Text','Invoke-HostValidation')){{
+foreach($name in @('Write-JsonAtomic','Limit-Text','Get-PytestCounts','Invoke-HostValidation')){{
   $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
   Invoke-Expression $fn.Extent.Text
 }}
@@ -440,13 +582,53 @@ $result | ConvertTo-Json -Compress
     receipt = json.loads((relay / "results" / "validation-latest.json").read_text(encoding="utf-8-sig"))
     assert receipt["exit_code"] == 0
     assert receipt["status"] == "passed"
-    assert receipt["summary"] == ["8 passed in 0.01s"]
+    assert receipt["tests"] == {"passed": 8, "failed": 0, "skipped": 0}
     assert receipt["failing_tests"] == []
-    assert receipt["summary_truncated"] is True
+    assert receipt["output_truncated"] is True
+    assert "summary" not in receipt
     assert not request.exists()
     request.write_text('{"version":1,"kind":"arbitrary_command","command":"git reset --hard"}', encoding="utf-8")
     rejected = run(POWERSHELL, "-NoProfile", "-Command", command, cwd=repo)
     assert "Unsupported host validation request" in rejected.stderr
+
+
+def test_host_validation_injects_only_counts_and_bounded_failures(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    relay = repo / "cache" / "astra-relay"
+    (relay / "results").mkdir(parents=True)
+    (relay / "requests").mkdir()
+    (relay / "validation.json").write_text('{"version":1,"kind":"full_pytest"}', encoding="utf-8")
+    fake_python = tmp_path / "fake-failing-python.cmd"
+    fake_python.write_text(
+        "@echo off\n"
+        "for /L %%i in (1,1,12) do echo FAILED tests/test_%%i.py::test_case - bounded failure\n"
+        "echo 12 failed, 3 passed, 2 skipped in 1.00s\n"
+        "exit /b 1\n",
+        encoding="ascii",
+    )
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    command = f"""
+$tokens=$null;$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
+if($errors.Count){{throw ($errors|ForEach-Object Message)}}
+foreach($name in @('Write-JsonAtomic','Limit-Text','Get-PytestCounts','Invoke-HostValidation')){{
+  $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
+  Invoke-Expression $fn.Extent.Text
+}}
+$relayRoot='{relay}';$resultRoot=Join-Path $relayRoot 'results';$archiveRoot=Join-Path $relayRoot 'requests'
+$validationPath=Join-Path $relayRoot 'validation.json';$pythonExe='{fake_python}'
+Invoke-HostValidation | ConvertTo-Json -Depth 10 -Compress
+exit 0
+"""
+    result = run(POWERSHELL, "-NoProfile", "-Command", command, cwd=repo)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["exit_code"] == 1
+    assert receipt["tests"] == {"passed": 3, "failed": 12, "skipped": 2}
+    assert len(receipt["failing_tests"]) == 8
+    assert max(map(len, receipt["failing_tests"])) <= 240
+    assert "summary" not in receipt
 
 
 def test_resumable_session_requires_matching_head_and_live_status(tmp_path: Path):

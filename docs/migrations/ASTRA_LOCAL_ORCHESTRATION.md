@@ -19,8 +19,10 @@ This is **quality-first, free-when-qualified**, not free-at-any-cost.
 ## Canonical path
 
 ```text
+host prepare
+  -> bounded Git state, phase-targeted searches, runtime paths, symbols and likely tests
 GPT-6 Astra root
-  -> inspect repo + decide architecture/security/contracts
+  -> decide architecture/security/contracts from the prepared packet
   -> create a bounded development.task contract
   -> OCTOPUS DevWorker
        -> isolated worktree
@@ -174,34 +176,40 @@ The runner:
 The supervisor:
 - caps fresh Astra calls (two by default) and relay cycles;
 - runs requested full pytest validation outside the model from a fixed \`full_pytest\` request, with a compact result file;
-- records token usage per call and totals in \`cache/astra-relay/usage.json\`;
+- records token usage per call, \`run_totals\` for the current launcher run and cumulative \`lifetime_totals\` in \`cache/astra-relay/usage.json\`;
 - runs each Codex call with \`--ephemeral\`;
 - stops on any non-zero Codex call;
 - does not select a fallback model.
 
 ## Compact context protocol
 
-Before every Astra call, the host deterministically writes and injects:
+Before CALL 1, the host deterministically writes and injects:
 
 - \`snapshot.json\`: objective, branch, HEAD, dirty paths, compact baseline status and the current review range;
 - \`context-manifest.json\`: path, SHA-256, size, role and changed status for each possible reference document;
 - \`handoff.json\`: decisions, modified files, bounded test facts, pending host requests, blocker and next decision;
 - \`context-metrics.json\`: character counts for the prompt, snapshot, manifest, handoff and injected root instructions.
 
-The hard limits are 6000 characters for the handoff, 8000 for the snapshot, 6000 for the manifest and 30000 for the prepared context including root \`AGENTS.md\`. Exceeding a limit stops before an Astra call.
+For CALL 1, \`snapshot.json\` also contains HOST PREPARE: up to three predefined phase searches with two matches each, up to eight runtime paths, five symbols/entrypoints and eight likely tests discovered from source names and targeted test searches. Individual search results are capped at 220 characters and the HOST PREPARE object at 4200 characters.
+
+The hard limits are 6000 characters for the handoff, 8000 for the snapshot, 6000 for the manifest, 4200 for HOST PREPARE and 30000 for the prepared context including root \`AGENTS.md\`. Exceeding a limit stops before an Astra call.
 
 The phase document is not preloaded. Root \`AGENTS.md\` is already injected by Codex and must not be reread. An unchanged document is not read again automatically. If a missing fact requires source inspection, Astra names that fact and uses one targeted section. Astra does not read raw JSONL, full pytest logs, night-shift reports, generated files or lockfiles.
 
-CALL 2 receives the updated snapshot, minimal handoff and compact checkpoint, Step or validation receipt inline. Checkpoint and Step review uses the host-provided commit range and changed paths, with one bounded file diff at a time. A passing full-suite receipt requires no log read; a failing receipt contains at most ten named failure lines.
+CALL 2 does not repeat CALL 1 discovery and does not inject the context manifest or handoff as separate blocks. Its single review packet contains only current HEAD/branch, the previous decision, changed files, compact Step summary, compact host-test summary, diff summary, review kind and blocker. A validation receipt contains exit code, passed/failed/skipped counts, duration and at most eight failure lines capped at 240 characters. Raw pytest output is never injected.
+
+The Astra command budget is zero by default. Broad repository searches, recursive discovery, manual test discovery, full-file reads and long tests are forbidden. One targeted search or bounded excerpt is allowed only for a named missing fact. As soon as files, behavior, oracle/tests and limits form a mechanical contract, Astra publishes the Step ticket and ends the turn. Publishing a Step, checkpoint or validation request always ends the turn immediately.
 
 Astra then reviews the actual worker result/diff/tests and either integrates, takes back, delegates one further bounded task, or completes.
 
 This preserves the intended shape:
 
 \`\`\`text
-Astra plans/decides
+host prepares bounded evidence
+  -> Astra plans/decides
   -> deterministic relay
   -> Step implements/tests
+  -> host records bounded test/diff receipts
   -> deterministic relay
   -> fresh Astra call reviews from compact handoff
 \`\`\`

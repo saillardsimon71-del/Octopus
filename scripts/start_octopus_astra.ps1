@@ -7,6 +7,7 @@ param(
     [int]$MaxHandoffChars = 6000,
     [int]$MaxSnapshotChars = 8000,
     [int]$MaxManifestChars = 6000,
+    [int]$MaxHostPrepareChars = 4200,
     [int]$MaxPreparedContextChars = 30000,
     [ValidateSet("medium", "high")]
     [string]$Reasoning = "medium",
@@ -81,8 +82,8 @@ if (-not $CodexHome) { $CodexHome = Join-Path $HOME ".codex-octopus" }
 $CodexHome = [System.IO.Path]::GetFullPath($CodexHome).TrimEnd("\")
 $env:CODEX_HOME = $CodexHome
 
-if ($MaxAstraTurns -lt 1 -or $MaxAstraTurns -gt 20) {
-    throw "MaxAstraTurns must be between 1 and 20."
+if ($MaxAstraTurns -lt 1 -or $MaxAstraTurns -gt 2) {
+    throw "MaxAstraTurns must be 1 or 2."
 }
 if ($MaxRelayCycles -lt 0 -or $MaxRelayCycles -gt 20) {
     throw "MaxRelayCycles must be between 0 and 20."
@@ -125,6 +126,15 @@ $phaseSpec = switch ($Phase) {
             mission = "Make OCTOPUS operational through clean, stable runtime entry points without constructor phases or manual PowerShell choreography. Reuse existing runtime boundaries, fix only demonstrated blockers, preserve permissions, economy, and journal guarantees, and do not build the GUI or connect real accounts."
         }
     }
+}
+
+$phaseSearches = switch ($Phase) {
+    "B" { @('video_engine|VideoEngine', 'legacy.{0,20}video', 'video.{0,20}engine') }
+    "C" { @('Agnes|agnes', 'video.{0,20}adapter', 'video.{0,20}provider') }
+    "D" { @('Hermes|hermes', 'tool.?registry|ToolRegistry', 'tool.{0,20}adapter') }
+    "E" { @('Hermes|hermes', 'development\.task', 'GuardedComputeManager') }
+    "F" { @('cold.?start', 'contamination', 'readiness') }
+    "G" { @('entry.?point', 'operational', 'startup|supervisor') }
 }
 
 $setup = Join-Path $repo "scripts\setup_octopus_codex_home.ps1"
@@ -215,12 +225,13 @@ $lastCheckpointSummary = $null
 $lastValidationSummary = $null
 $lastWorkerSummary = $null
 $reviewContext = $null
-$previousTotals = @{}
+$previousLifetimeTotals = @{}
 if (Test-Path -LiteralPath $usagePath -PathType Leaf) {
     $previousUsage = Get-Content -LiteralPath $usagePath -Raw | ConvertFrom-Json
-    if ($previousUsage.totals) {
+    $storedLifetime = if ($previousUsage.lifetime_totals) { $previousUsage.lifetime_totals } else { $previousUsage.totals }
+    if ($storedLifetime) {
         foreach ($key in @('input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_output_tokens')) {
-            $previousTotals[$key] = [long]$previousUsage.totals.$key
+            $previousLifetimeTotals[$key] = [long]$storedLifetime.$key
         }
     }
 }
@@ -381,6 +392,91 @@ function Get-CompactDiffStat([string]$Base = "", [string]$Target = "", [string[]
     return $lines
 }
 
+function Invoke-BoundedRg([string]$Pattern, [string[]]$Roots, [int]$MaxResults = 4) {
+    $searchRoots = @($Roots | Where-Object { Test-Path -LiteralPath (Join-Path $repo $_) })
+    if (-not $searchRoots.Count -or -not (Get-Command rg -ErrorAction SilentlyContinue)) { return @() }
+    $arguments = @(
+        '--line-number', '--no-heading', '--color', 'never', '--smart-case',
+        '--glob', '*.py', '--glob', '*.ps1', '--glob', '*.toml', '--glob', '*.json',
+        '--glob', '!cache/**', '--glob', '!data/**', '--', $Pattern
+    ) + $searchRoots
+    return @(& rg @arguments 2>$null | Select-Object -First $MaxResults | ForEach-Object { Limit-Text $_ 220 })
+}
+
+function Find-AssociatedTests([string[]]$SourcePaths, [string[]]$SearchPatterns) {
+    $testFiles = if ((Test-Path -LiteralPath (Join-Path $repo 'tests')) -and (Get-Command rg -ErrorAction SilentlyContinue)) {
+        @(& rg --files tests --glob '*.py' 2>$null | ForEach-Object { ([string]$_).Replace('\', '/') } | Sort-Object -Unique)
+    } else {
+        @(git ls-files -- tests | Where-Object { $_ -like '*.py' } | Sort-Object -Unique)
+    }
+    if (-not $testFiles.Count) { return @() }
+    $found = New-Object System.Collections.Generic.List[string]
+    foreach ($path in @($SourcePaths)) {
+        if ($path -like 'tests/*' -and $testFiles -contains $path -and -not $found.Contains($path)) { [void]$found.Add($path) }
+        $stem = [System.IO.Path]::GetFileNameWithoutExtension($path)
+        if (-not $stem) { continue }
+        foreach ($test in @($testFiles | Where-Object { $_ -match [regex]::Escape($stem) } | Select-Object -First 4)) {
+            if (-not $found.Contains($test)) { [void]$found.Add($test) }
+        }
+    }
+    if (Get-Command rg -ErrorAction SilentlyContinue) {
+        foreach ($pattern in @($SearchPatterns)) {
+            $matches = @(& rg --files-with-matches --color never --glob '*.py' -- $pattern tests 2>$null | Select-Object -First 4)
+            foreach ($test in $matches) {
+                $normalized = ([string]$test).Replace('\', '/')
+                if (-not $found.Contains($normalized)) { [void]$found.Add($normalized) }
+            }
+        }
+    }
+    return @($found | Select-Object -First 16 | ForEach-Object { Limit-Text $_ 240 })
+}
+
+function Get-HostPreparation([string[]]$ChangedFiles = @()) {
+    $searches = @()
+    $runtimePaths = New-Object System.Collections.Generic.List[string]
+    foreach ($pattern in @($phaseSearches)) {
+        $matches = @(Invoke-BoundedRg -Pattern $pattern -Roots @('octopus', 'scripts') -MaxResults 2)
+        $searches += [ordered]@{
+            pattern = Limit-Text $pattern 100
+            matches = @($matches)
+        }
+        foreach ($line in $matches) {
+            if ($line -match '^([^:]+):\d+:') {
+                $path = $Matches[1].Replace('\', '/')
+                if ($path -notlike 'tests/*' -and -not $runtimePaths.Contains($path)) { [void]$runtimePaths.Add($path) }
+            }
+        }
+    }
+    foreach ($path in @($ChangedFiles)) {
+        if ($path -notlike 'tests/*' -and -not $runtimePaths.Contains($path)) { [void]$runtimePaths.Add($path) }
+    }
+    $boundedRuntimePaths = @($runtimePaths | Select-Object -First 8)
+    $symbols = if ($boundedRuntimePaths.Count) {
+        @(Invoke-BoundedRg -Pattern '^(class|def|function)\s+[A-Za-z_][A-Za-z0-9_-]*|__main__|add_parser\(' -Roots $boundedRuntimePaths -MaxResults 5)
+    } else { @() }
+    $testSources = @($boundedRuntimePaths + @($ChangedFiles) | Sort-Object -Unique)
+    $tests = @(Find-AssociatedTests -SourcePaths $testSources -SearchPatterns $phaseSearches | Select-Object -First 8)
+    $packet = [ordered]@{
+        search_scope = @('octopus', 'scripts', 'tests')
+        targeted_searches = $searches
+        runtime_paths = $boundedRuntimePaths
+        symbols_and_entrypoints = @($symbols)
+        likely_tests = $tests
+        limits = [ordered]@{
+            matches_per_search = 2
+            runtime_paths = 8
+            symbols = 5
+            tests = 8
+            text_chars_per_result = 220
+        }
+    }
+    $json = $packet | ConvertTo-Json -Depth 10
+    if ($json.Length -gt $MaxHostPrepareChars) {
+        throw "Astra host preparation exceeds its $MaxHostPrepareChars character limit: $($json.Length)."
+    }
+    return $packet
+}
+
 function Save-Handoff(
     [string]$Result,
     [string]$NextDecision,
@@ -472,8 +568,20 @@ function New-CompactReceipt([object]$Receipt) {
     }
 }
 
+function New-CompactWorkerSummary([object]$Summary) {
+    if (-not $Summary) { return $null }
+    return [ordered]@{
+        status = Limit-Text $Summary.status 60
+        base_head = [string]$Summary.base_head
+        source_commit = [string]$Summary.source_commit
+        changed_paths = @($Summary.changed_paths | Select-Object -First 20 | ForEach-Object { Limit-Text $_ 240 })
+        diff_stat = @($Summary.diff_stat | Select-Object -First 12 | ForEach-Object { Limit-Text $_ 240 })
+        tests = @($Summary.tests | Select-Object -First 12 | ForEach-Object { Limit-Text $_ 240 })
+        summary_truncated = $true
+    }
+}
+
 function Write-AstraContext([string]$TaskPrompt) {
-    $manifestJson = Save-ContextManifest
     $handoffJson = if (Test-Path -LiteralPath $handoffPath -PathType Leaf) { Get-Content -LiteralPath $handoffPath -Raw } else { "{}" }
     if ($handoffJson.Length -gt $MaxHandoffChars) {
         throw "Astra handoff exceeds its $MaxHandoffChars character limit: $($handoffJson.Length)."
@@ -482,6 +590,8 @@ function Write-AstraContext([string]$TaskPrompt) {
     $branch = (git branch --show-current | Out-String).Trim()
     $currentHead = (git rev-parse HEAD | Out-String).Trim()
     $changedFiles = @(Get-ChangedPaths)
+    $handoff = $handoffJson | ConvertFrom-Json
+    $isReviewCall = $script:astraTurns -ge 1
     $pendingRequests = @()
     foreach ($candidate in @(
         @{ name = "checkpoint"; path = $checkpointPath },
@@ -491,30 +601,68 @@ function Write-AstraContext([string]$TaskPrompt) {
         if (Test-Path -LiteralPath $candidate.path -PathType Leaf) { $pendingRequests += $candidate.name }
     }
 
-    $snapshot = [ordered]@{
-        version = 1
-        phase = $Phase
-        objective = Limit-Text $phaseSpec.mission 1200
-        head = $currentHead
-        branch = $branch
-        dirty = $changedFiles.Count -gt 0
-        baseline = [ordered]@{
-            status = if ([int]$baseline.exit_code -eq 0) { "passed" } else { "failed" }
-            exit_code = [int]$baseline.exit_code
-            duration_seconds = $baseline.duration_seconds
+    if ($isReviewCall) {
+        $reviewPaths = if ($script:reviewContext -and $script:reviewContext.changed_paths) { @($script:reviewContext.changed_paths) } else { $changedFiles }
+        $snapshot = [ordered]@{
+            version = 2
+            packet = 'call_2_review'
+            phase = $Phase
+            head = $currentHead
+            branch = $branch
+            previous_decision = [ordered]@{
+                decisions = @($handoff.decisions | Select-Object -First 12 | ForEach-Object { Limit-Text $_ 300 })
+                last_result = Limit-Text $handoff.last_result 600
+                next_decision = Limit-Text $handoff.next_decision 500
+            }
+            changed_files = @($reviewPaths | Select-Object -First 30)
+            step_summary = $script:lastWorkerSummary
+            host_test_summary = if ($script:lastValidationSummary) {
+                $script:lastValidationSummary
+            } elseif ($script:lastWorkerSummary) {
+                [ordered]@{ source = 'step_host'; tests = @($script:lastWorkerSummary.tests); output_truncated = $true }
+            } else { $null }
+            diff_summary = if ($script:reviewContext -and $script:reviewContext.diff_stat) { @($script:reviewContext.diff_stat) } else { @(Get-CompactDiffStat -Paths $reviewPaths) }
+            review_kind = if ($script:reviewContext) { $script:reviewContext.kind } else { $null }
+            blocking_issue = $handoff.blocked
         }
-        changed_files = $changedFiles
-        diff_stat = @(Get-CompactDiffStat -Paths $changedFiles)
-        pending_requests = $pendingRequests
-        last_checkpoint = $script:lastCheckpointSummary
-        last_validation = $script:lastValidationSummary
-        last_worker = $script:lastWorkerSummary
-        review = $script:reviewContext
-        blocking_issue = $null
+    } else {
+        $hostPreparation = Get-HostPreparation -ChangedFiles $changedFiles
+        $snapshot = [ordered]@{
+            version = 2
+            packet = 'call_1_prepare'
+            phase = $Phase
+            objective = Limit-Text $phaseSpec.mission 1200
+            head = $currentHead
+            branch = $branch
+            dirty = $changedFiles.Count -gt 0
+            baseline = [ordered]@{
+                status = if ([int]$baseline.exit_code -eq 0) { "passed" } else { "failed" }
+                exit_code = [int]$baseline.exit_code
+                duration_seconds = $baseline.duration_seconds
+            }
+            changed_files = $changedFiles
+            diff_stat = @(Get-CompactDiffStat -Paths $changedFiles)
+            pending_requests = $pendingRequests
+            previous_validation = $script:lastValidationSummary
+            host_prepare = $hostPreparation
+            blocking_issue = $handoff.blocked
+        }
     }
     $snapshotJson = Write-BoundedJsonAtomic -Path $snapshotPath -Value $snapshot -MaxChars $MaxSnapshotChars -Label "Astra host snapshot"
 
-    $preparedPrompt = @"
+    if ($isReviewCall) {
+        $manifestJson = ''
+        $preparedPrompt = @"
+$TaskPrompt
+
+HOST_REVIEW_PACKET_JSON
+$snapshotJson
+"@
+        $handoffMetricChars = 0
+        $contextFileCount = 1
+    } else {
+        $manifestJson = Save-ContextManifest
+        $preparedPrompt = @"
 $TaskPrompt
 
 HOST_SNAPSHOT_JSON
@@ -526,6 +674,9 @@ $manifestJson
 MINIMAL_HANDOFF_JSON
 $handoffJson
 "@
+        $handoffMetricChars = $handoffJson.Length
+        $contextFileCount = 3
+    }
     $agentsChars = (Get-Content -LiteralPath (Join-Path $repo "AGENTS.md") -Raw).Length
     $estimatedInputChars = $preparedPrompt.Length + $agentsChars
     if ($estimatedInputChars -gt $MaxPreparedContextChars) {
@@ -537,23 +688,41 @@ $handoffJson
         implicit_instruction_chars = $agentsChars
         estimated_input_chars = $estimatedInputChars
         snapshot_chars = $snapshotJson.Length
-        handoff_chars = $handoffJson.Length
+        handoff_chars = $handoffMetricChars
         context_manifest_chars = $manifestJson.Length
-        context_file_count = 3
-        manifest_document_count = @($phaseSpec.documents).Count + 1
+        context_file_count = $contextFileCount
+        manifest_document_count = if ($isReviewCall) { 0 } else { @($phaseSpec.documents).Count + 1 }
+        call_kind = if ($isReviewCall) { 'review' } else { 'prepare' }
     })
     return $preparedPrompt
 }
 
 function Save-UsageSummary {
-    $totals = [ordered]@{}
+    $runTotals = [ordered]@{}
+    $lifetimeTotals = [ordered]@{}
     foreach ($key in @('input_tokens', 'cached_input_tokens', 'output_tokens', 'reasoning_output_tokens')) {
-        $sum = [long]$previousTotals[$key]
-        foreach ($call in $script:calls) { if ($call.usage) { $sum += [long]$call.usage[$key] } }
-        $totals[$key] = $sum
+        $runSum = 0
+        foreach ($call in $script:calls) { if ($call.usage) { $runSum += [long]$call.usage[$key] } }
+        $runTotals[$key] = $runSum
+        $lifetimeTotals[$key] = [long]$previousLifetimeTotals[$key] + $runSum
     }
-    Write-JsonAtomic -Path $usagePath -Value ([ordered]@{ version = 1; calls = $script:calls; totals = $totals })
-    return $totals
+    Write-JsonAtomic -Path $usagePath -Value ([ordered]@{
+        version = 2
+        calls = $script:calls
+        run_totals = $runTotals
+        lifetime_totals = $lifetimeTotals
+    })
+    return [ordered]@{ run_totals = $runTotals; lifetime_totals = $lifetimeTotals }
+}
+
+function Get-PytestCounts([string[]]$Lines) {
+    $text = $Lines -join ' '
+    $counts = [ordered]@{}
+    foreach ($name in @('passed', 'failed', 'skipped')) {
+        $match = [regex]::Match($text, "(?<!\d)(\d+)\s+$name\b")
+        $counts[$name] = if ($match.Success) { [int]$match.Groups[1].Value } else { 0 }
+    }
+    return $counts
 }
 
 function Invoke-HostValidation {
@@ -566,8 +735,9 @@ function Invoke-HostValidation {
     $started = Get-Date
     & $pythonExe -m pytest -q --tb=short *> $validationLog
     $validationExit = $LASTEXITCODE
-    $summary = @((Get-Content -LiteralPath $validationLog -Tail 12) | ForEach-Object { Limit-Text $_ 300 })
-    $failures = @(Select-String -LiteralPath $validationLog -Pattern '^(FAILED|ERROR)\s+' | Select-Object -First 10 | ForEach-Object { Limit-Text $_.Line 300 })
+    $tail = @(Get-Content -LiteralPath $validationLog -Tail 20)
+    $counts = Get-PytestCounts -Lines $tail
+    $failures = @(Select-String -LiteralPath $validationLog -Pattern '^(FAILED|ERROR)\s+' | Select-Object -First 8 | ForEach-Object { Limit-Text $_.Line 240 })
     $result = [ordered]@{
         version = 1
         kind = 'full_pytest'
@@ -576,13 +746,34 @@ function Invoke-HostValidation {
         exit_code = $validationExit
         duration_seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
         log_path = 'cache/astra-relay/validation-pytest.log'
-        summary = $summary
+        tests = $counts
         failing_tests = $failures
-        summary_truncated = $true
+        output_truncated = $true
     }
     Write-JsonAtomic -Path (Join-Path $resultRoot 'validation-latest.json') -Value $result
     Move-Item -LiteralPath $validationPath -Destination (Join-Path $archiveRoot ('validation-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ') + '.json'))
     return $result
+}
+
+if (-not $lastValidationSummary) {
+    $previousValidationPath = Join-Path $resultRoot 'validation-latest.json'
+    if (Test-Path -LiteralPath $previousValidationPath -PathType Leaf) {
+        try {
+            $previousValidation = Get-Content -LiteralPath $previousValidationPath -Raw | ConvertFrom-Json -ErrorAction Stop
+            $lastValidationSummary = [ordered]@{
+                kind = Limit-Text $previousValidation.kind 40
+                head = [string]$previousValidation.head
+                status = Limit-Text $previousValidation.status 20
+                exit_code = [int]$previousValidation.exit_code
+                duration_seconds = $previousValidation.duration_seconds
+                tests = $previousValidation.tests
+                failing_tests = @($previousValidation.failing_tests | Select-Object -First 8 | ForEach-Object { Limit-Text $_ 240 })
+                output_truncated = $true
+            }
+        } catch {
+            $lastValidationSummary = $null
+        }
+    }
 }
 
 function Invoke-AstraTurn([string]$Prompt, [string]$Reason) {
@@ -663,20 +854,21 @@ function Invoke-AstraTurn([string]$Prompt, [string]$Reason) {
 }
 
 $contextRules = @"
-The host snapshot, context manifest and minimal handoff are appended inline. They are authoritative. Do not reread their disk copies or reconstruct Git state, history, baseline, checkpoint or validation state.
+CALL 1 includes the host snapshot, context manifest and minimal handoff. CALL 2 includes only HOST_REVIEW_PACKET_JSON. The supplied packet is authoritative. Do not reread its disk copies or reconstruct Git state, history, baseline, checkpoint or validation state.
 AGENTS.md is already injected. Do not read it again. Do not read a phase document automatically. If one exact fact is missing, name the missing fact and read only one relevant manifest-listed section. Never reread a document whose manifest hash is unchanged.
-Never read Astra JSONL, pytest logs, night-shift reports, generated files or lockfiles. If a failure cannot be diagnosed from the compact receipt, use one targeted search or an excerpt of at most 200 lines and 20000 characters. Do not combine whole-file reads in one command.
-Inspect source only by symbol, targeted search, bounded excerpt or one changed-file diff at a time. Use the host-provided changed paths and diff summary instead of broad repository discovery.
-Use targeted tests while editing. To request the full suite, atomically publish cache/astra-relay/validation.json with {"version":1,"kind":"full_pytest"}, then end the call. The host runs it after exit and returns only a bounded receipt.
+The shell-command budget is zero by default. General repository exploration is forbidden: no broad rg, Get-ChildItem, git ls-files, recursive discovery, or search for tests already supplied by HOST PREPARE. Never read complete large files. If one indispensable fact is still missing, state it first, then use at most one targeted search or one excerpt capped at 200 lines and 20000 characters.
+Never read Astra JSONL, pytest logs, night-shift reports, generated files or lockfiles. Inspect source only by symbol, a bounded excerpt, or one changed-file diff at a time. Use host-provided runtime paths, symbols, likely tests, changed paths and diff summaries.
+Run no long test in Astra and never run a full suite. A single micro-test is allowed only when required to define an oracle before delegation. For all other pytest validation, atomically publish cache/astra-relay/validation.json with {"version":1,"kind":"full_pytest"}, then end the call. The host runs it after exit and returns only exit code, counts, duration and a short failure list.
+As soon as files, expected behavior, oracle/tests and limits can be stated, publish the bounded product_ticket and cache/astra-relay/request.json, then end the call immediately. Do not inspect implementation details that Step can resolve mechanically.
 For tested direct changes, publish cache/astra-relay/checkpoint.json version 2 with request_id, base_head, message and exact changed paths, then end the call. For a qualified bounded Step task, publish one product_ticket and cache/astra-relay/request.json from a clean tree, then end the call.
-Do not launch Step, poll, wait, run full pytest or write Git metadata. A follow-up is a fresh ephemeral call. Stop after the requested boundary.
+Do not launch Step, poll, wait, run full pytest or write Git metadata. After publishing any Step, checkpoint or host-validation request, perform no further inspection or command. A follow-up is a fresh ephemeral call. Stop after the requested boundary.
 "@
 
 function New-AstraTaskPrompt([string]$Task) {
     return $Task + [Environment]::NewLine + [Environment]::NewLine + $contextRules
 }
 
-$initialPrompt = New-AstraTaskPrompt "Execute only the objective in the host snapshot for phase $Phase. Decide from the prepared state, inspect the minimum source needed, and conclude in this call unless a checkpoint, Step task or host validation genuinely requires one review call."
+$initialPrompt = New-AstraTaskPrompt "HOST PREPARE has already performed deterministic Git inspection, targeted searches, symbol discovery and likely-test discovery. Execute only the objective in the host snapshot for phase $Phase. Decide architecture, permissions and the bounded contract. Delegate to Step immediately when the mechanical ticket can be stated."
 
 if (Test-Path -LiteralPath $handoffPath -PathType Leaf) {
     $oldHandoff = Get-Content -LiteralPath $handoffPath -Raw | ConvertFrom-Json
@@ -730,7 +922,7 @@ while ($true) {
         & powershell -NoProfile -ExecutionPolicy Bypass -File $runner -Plan $plan -Hours $hours -RequestId $requestId -ResultPath $resultPath
         $workerExit = $LASTEXITCODE
         $workerReceipt = Get-Content -LiteralPath (Join-Path $repo $resultPath) -Raw | ConvertFrom-Json
-        $lastWorkerSummary = $workerReceipt.worker_summary
+        $lastWorkerSummary = New-CompactWorkerSummary $workerReceipt.worker_summary
         $workerPaths = @($workerReceipt.worker_summary.changed_paths)
         $reviewContext = [ordered]@{
             kind = 'step'
@@ -752,9 +944,9 @@ while ($true) {
             status = [string]$validationResult.status
             exit_code = [int]$validationResult.exit_code
             duration_seconds = $validationResult.duration_seconds
-            summary = @($validationResult.summary)
+            tests = $validationResult.tests
             failing_tests = @($validationResult.failing_tests)
-            summary_truncated = $true
+            output_truncated = $true
         }
         $reviewContext = [ordered]@{
             kind = 'validation'
@@ -785,6 +977,6 @@ while ($true) {
     Save-SessionState -Status 'active'
 }
 
-$totals = Save-UsageSummary
-Write-Host ("Astra calls: {0}/{1}; totals={2}" -f $astraTurns, $MaxAstraTurns, ($totals | ConvertTo-Json -Compress))
+$usageTotals = Save-UsageSummary
+Write-Host ("Astra calls: {0}/{1}; run_totals={2}; lifetime_totals={3}" -f $astraTurns, $MaxAstraTurns, ($usageTotals.run_totals | ConvertTo-Json -Compress), ($usageTotals.lifetime_totals | ConvertTo-Json -Compress))
 Write-Host "Handoff: $handoffPath"
