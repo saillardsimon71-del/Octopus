@@ -73,6 +73,41 @@ function Resolve-CodexExecutable {
     throw "Codex CLI not found."
 }
 
+function Resolve-StepRelayPlan([object]$Request, [string]$RequestId) {
+    $productTicket = [string]$Request.product_ticket
+    if (-not $productTicket) {
+        $legacyPlan = [string]$Request.plan_path
+        if (-not $legacyPlan) { throw 'Relay request missing product_ticket or plan_path.' }
+        return $legacyPlan
+    }
+
+    $productTicketPath = if ([System.IO.Path]::IsPathRooted($productTicket)) {
+        [System.IO.Path]::GetFullPath($productTicket)
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path $repo $productTicket))
+    }
+    $repoRoot = [System.IO.Path]::GetFullPath($repo).TrimEnd('\', '/') + '\'
+    if (-not $productTicketPath.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Product ticket must live under the OCTOPUS repository.'
+    }
+    if (-not (Test-Path -LiteralPath $productTicketPath -PathType Leaf)) {
+        throw "Product ticket not found: $productTicketPath"
+    }
+    $ticket = Get-Content -LiteralPath $productTicketPath -Raw | ConvertFrom-Json
+    foreach ($field in @('request_id', 'phase', 'base_head')) {
+        if ([string]$ticket.$field -cne [string]$Request.$field) {
+            throw "Product ticket $field does not match relay request."
+        }
+    }
+    $normalized = [ordered]@{ policy = 'product_ticket' }
+    foreach ($property in $ticket.PSObject.Properties) {
+        if ($property.Name -ne 'policy') { $normalized[$property.Name] = $property.Value }
+    }
+    $normalizedPath = Join-Path $ticketRoot ($RequestId + '.json')
+    Write-JsonAtomic -Path $normalizedPath -Value $normalized
+    return ('cache/astra-tickets/' + $RequestId + '.json')
+}
+
 $repo = (git rev-parse --show-toplevel 2>$null | Out-String).Trim()
 if (-not $repo) { throw "Run this launcher from inside the OCTOPUS repository." }
 $repo = [System.IO.Path]::GetFullPath($repo).TrimEnd("\")
@@ -910,8 +945,7 @@ while ($true) {
         $request = Get-Content -LiteralPath $requestPath -Raw | ConvertFrom-Json
         if ([int]$request.version -ne 1 -or [string]$request.request_id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$') { throw 'Invalid Step relay request.' }
         $requestId = [string]$request.request_id
-        $plan = [string]$request.plan_path
-        if (-not $plan) { throw 'Relay request missing plan_path.' }
+        $plan = Resolve-StepRelayPlan -Request $request -RequestId $requestId
         $hours = if ($null -ne $request.hours) { [double]$request.hours } else { 1.0 }
         if ($hours -le 0 -or $hours -gt 8) { throw 'Relay request hours must be >0 and <=8.' }
         if ((git status --porcelain --untracked-files=all | Out-String).Trim()) { throw 'Step relay requires a clean source tree.' }

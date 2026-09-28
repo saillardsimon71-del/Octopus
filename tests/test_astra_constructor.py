@@ -38,6 +38,189 @@ def init_repo(tmp_path: Path) -> Path:
     return repo
 
 
+def resolve_step_relay_plan(repo: Path, request: dict, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    runner = tmp_path / "resolve-step-relay-plan.ps1"
+    runner.write_text(
+        f"""
+$tokens=$null;$errors=$null
+$ErrorActionPreference='Stop'
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
+if($errors.Count){{throw ($errors|ForEach-Object Message)}}
+foreach($name in @('Write-JsonAtomic','Resolve-StepRelayPlan')){{
+  $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
+  if(-not $fn){{throw "$name is missing"}}
+  Invoke-Expression $fn.Extent.Text
+}}
+$repo='{repo}';$ticketRoot=Join-Path $repo 'cache/astra-tickets'
+$request=Get-Content -LiteralPath '{request_path}' -Raw|ConvertFrom-Json
+Resolve-StepRelayPlan -Request $request -RequestId ([string]$request.request_id)|ConvertTo-Json -Compress
+""",
+        encoding="utf-8",
+    )
+    return run(
+        POWERSHELL,
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(runner),
+        cwd=repo,
+    )
+
+
+def test_step_relay_v2_normalizes_product_ticket_and_prefers_it_over_legacy_plan(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    relay = repo / "cache" / "astra-relay"
+    relay.mkdir(parents=True)
+    base_head = git(repo, "rev-parse", "HEAD")
+    ticket = {
+        "version": 1,
+        "request_id": "phase-g-runtime-001",
+        "phase": "G",
+        "base_head": base_head,
+        "title": "Verify runtime startup",
+        "objective": "Verify the existing runtime entry point.",
+        "authorization": "Bounded phase G maintenance.",
+        "architecture": ["Reuse existing runtime boundaries."],
+        "starting_paths": ["octopus/__main__.py"],
+        "likely_tests": ["tests/test_gui.py"],
+        "scope": {"implementation": "Fix one reproduced blocker."},
+        "work": ["Reproduce before editing."],
+        "acceptance": ["Focused regression passes."],
+        "prohibitions": ["No external effects."],
+    }
+    (relay / "product_ticket.json").write_text(json.dumps(ticket), encoding="utf-8")
+    request = {
+        "version": 1,
+        "kind": "step",
+        "request_id": "phase-g-runtime-001",
+        "phase": "G",
+        "base_head": base_head,
+        "product_ticket": "cache/astra-relay/product_ticket.json",
+        "plan_path": "cache/astra-tickets/legacy-must-not-win.json",
+    }
+
+    result = resolve_step_relay_plan(repo, request, tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout) == "cache/astra-tickets/phase-g-runtime-001.json"
+    normalized = json.loads(
+        (repo / "cache" / "astra-tickets" / "phase-g-runtime-001.json").read_text(encoding="utf-8-sig")
+    )
+    assert normalized == {"policy": "product_ticket", **ticket}
+
+
+def test_step_relay_keeps_legacy_plan_path_unchanged(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    request = {
+        "version": 1,
+        "kind": "step",
+        "request_id": "legacy-001",
+        "plan_path": "cache/astra-tickets/existing-ticket.json",
+    }
+
+    result = resolve_step_relay_plan(repo, request, tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout) == "cache/astra-tickets/existing-ticket.json"
+    assert not (repo / "cache" / "astra-tickets" / "legacy-001.json").exists()
+
+
+def test_step_relay_rejects_product_ticket_outside_repo(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    outside_ticket = tmp_path / "outside-ticket.json"
+    outside_ticket.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "request_id": "outside-001",
+                "phase": "G",
+                "base_head": git(repo, "rev-parse", "HEAD"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    request = {
+        "version": 1,
+        "kind": "step",
+        "request_id": "outside-001",
+        "phase": "G",
+        "base_head": git(repo, "rev-parse", "HEAD"),
+        "product_ticket": str(outside_ticket),
+    }
+
+    result = resolve_step_relay_plan(repo, request, tmp_path)
+
+    assert result.returncode != 0
+    assert "Product ticket must live under the OCTOPUS repository" in result.stderr
+    assert not (repo / "cache" / "astra-tickets" / "outside-001.json").exists()
+
+
+def test_step_relay_rejects_product_ticket_inconsistent_with_request(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    relay = repo / "cache" / "astra-relay"
+    relay.mkdir(parents=True)
+    base_head = git(repo, "rev-parse", "HEAD")
+    request = {
+        "version": 1,
+        "kind": "step",
+        "request_id": "match-001",
+        "phase": "G",
+        "base_head": base_head,
+        "product_ticket": "cache/astra-relay/product_ticket.json",
+    }
+    normalized = repo / "cache" / "astra-tickets" / "match-001.json"
+
+    for field, wrong_value in (
+        ("request_id", "other-request"),
+        ("phase", "F"),
+        ("base_head", "0" * 40),
+    ):
+        ticket = {
+            "version": 1,
+            "request_id": "match-001",
+            "phase": "G",
+            "base_head": base_head,
+            "title": "Bounded ticket",
+        }
+        ticket[field] = wrong_value
+        (relay / "product_ticket.json").write_text(json.dumps(ticket), encoding="utf-8")
+        normalized.unlink(missing_ok=True)
+
+        result = resolve_step_relay_plan(repo, request, tmp_path)
+
+        assert result.returncode != 0
+        assert f"Product ticket {field} does not match relay request" in result.stderr
+        assert not normalized.exists()
+
+
+def test_step_relay_rejects_missing_ticket_or_plan(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    base_request = {
+        "version": 1,
+        "kind": "step",
+        "request_id": "missing-001",
+        "phase": "G",
+        "base_head": git(repo, "rev-parse", "HEAD"),
+    }
+
+    missing_ticket = resolve_step_relay_plan(
+        repo,
+        {**base_request, "product_ticket": "cache/astra-relay/missing.json"},
+        tmp_path,
+    )
+    missing_plan = resolve_step_relay_plan(repo, base_request, tmp_path)
+
+    assert missing_ticket.returncode != 0
+    assert "Product ticket not found" in missing_ticket.stderr
+    assert missing_plan.returncode != 0
+    assert "Relay request missing product_ticket or plan_path" in missing_plan.stderr
+    assert not (repo / "cache" / "astra-tickets" / "missing-001.json").exists()
+
+
 def checkpoint(repo: Path, paths: list[str], request_id: str = "phase-1") -> Path:
     relay = repo / "cache" / "astra-relay"
     relay.mkdir(parents=True)
