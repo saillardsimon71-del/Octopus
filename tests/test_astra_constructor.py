@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -941,6 +942,131 @@ $packet=Get-HostPreparation
     }
     assert payload["packet"]["allowed_edit_paths"] == []
     assert payload["packet"]["test_targets"] == []
+
+
+def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    (repo / ".gitignore").write_text("cache/\n__pycache__/\n*.pyc\n", encoding="utf-8")
+    (repo / "AGENTS.md").write_text("constructor rules\n", encoding="utf-8")
+    docs = repo / "docs" / "migrations"
+    docs.mkdir(parents=True)
+    (docs / "OPERATIONALIZATION.md").write_text("bounded runtime phase\n", encoding="utf-8")
+    package = repo / "octopus"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__main__.py").write_text(
+        "import argparse\n"
+        "\n"
+        "def cmd_worker(args):\n"
+        "    return 0\n"
+        "\n"
+        "def main(argv=None):\n"
+        "    parser = argparse.ArgumentParser(prog='octopus')\n"
+        "    sub = parser.add_subparsers(dest='cmd')\n"
+        "    sub.add_parser('worker')\n"
+        "    parser.parse_args(argv)\n"
+        "    return 0\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    raise SystemExit(main())\n",
+        encoding="utf-8",
+    )
+    (package / "worker.py").write_text(
+        "def load_handlers():\n"
+        "    return {}\n"
+        "\n"
+        "def run_one():\n"
+        "    return None\n"
+        "\n"
+        "def loop():\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    tests = repo / "tests"
+    tests.mkdir()
+    (tests / "test_tasks_worker.py").write_text(
+        "def test_worker_surface():\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    for name in (
+        "setup_octopus_codex_home.ps1",
+        "codex_preflight.ps1",
+        "run_external_dev_ticket.ps1",
+        "commit_astra_checkpoint.ps1",
+        "fetch_pinned_upstreams.ps1",
+    ):
+        (scripts / name).write_text("param()\nexit 0\n", encoding="utf-8")
+    git(repo, "add", ".gitignore", "AGENTS.md", "docs", "octopus", "scripts", "tests")
+    git(repo, "commit", "-m", "constructor fixture")
+
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_state = tmp_path / "fake-codex-state"
+    fake_state.mkdir()
+    (fake_bin / "codex.ps1").write_text(
+        "$countPath=Join-Path $env:FAKE_CODEX_STATE 'count.txt'\n"
+        "$count=if(Test-Path -LiteralPath $countPath){[int](Get-Content -LiteralPath $countPath -Raw)+1}else{1}\n"
+        "[IO.File]::WriteAllText($countPath,[string]$count)\n"
+        "$prompt=($input|Out-String)\n"
+        "[IO.File]::WriteAllText((Join-Path $env:FAKE_CODEX_STATE \"prompt-$count.txt\"),$prompt)\n"
+        "$index=[Array]::IndexOf([object[]]$args,'--output-last-message')\n"
+        "if($index -lt 0){exit 7}\n"
+        "$message=if($count -eq 1){"
+        "\"No relay boundary produced.`nASTRA_CONTINUE: Inspect worker execution and exact tests.\""
+        "}else{'Bounded discovery complete.'}\n"
+        "[IO.File]::WriteAllText([string]$args[$index+1],$message)\n"
+        "Write-Output ('{\"type\":\"thread.started\",\"thread_id\":\"thread-' + $count + '\"}')\n"
+        "Write-Output '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":2,\"cached_input_tokens\":0,\"output_tokens\":1,\"reasoning_output_tokens\":0}}'\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    local_app_data = tmp_path / "local-app-data"
+    local_app_data.mkdir()
+    env = os.environ.copy()
+    env["LOCALAPPDATA"] = str(local_app_data)
+    env["FAKE_CODEX_STATE"] = str(fake_state)
+    env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
+
+    launcher = str(ROOT / "scripts" / "start_octopus_astra.ps1").replace("'", "''")
+    codex_home = str(tmp_path / "codex-home").replace("'", "''")
+    command = (
+        "function Get-FileHash([string]$LiteralPath,[string]$Algorithm){"
+        "[pscustomobject]@{Hash=('0'*64)}}; "
+        f"& '{launcher}' -CodexHome '{codex_home}' -Phase G -MaxAstraTurns 2 "
+        "-MaxRelayCycles 0 -SkipFetch -NewSession"
+    )
+
+    result = subprocess.run(
+        [
+            POWERSHELL,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
+        cwd=repo,
+        env=env,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (fake_state / "count.txt").read_text(encoding="utf-8") == "2"
+    second_prompt = (fake_state / "prompt-2.txt").read_text(encoding="utf-8")
+    assert "HOST_CONTINUATION_PACKET_JSON" in second_prompt
+    assert "Inspect worker execution and exact tests." in second_prompt
+    assert "HOST_SNAPSHOT_JSON" not in second_prompt
+    assert "CONTEXT_MANIFEST_JSON" not in second_prompt
+    session = json.loads((repo / "cache" / "astra-relay" / "session.json").read_text(encoding="utf-8"))
+    assert session["status"] == "completed"
+    assert session["astra_turns_this_run"] == 2
 
 
 def test_call_2_uses_only_compact_review_packet(tmp_path: Path):

@@ -64,6 +64,16 @@ function Read-TurnUsage([string]$JsonLog) {
     return $usage
 }
 
+function Get-AstraContinuation([string]$LastMessagePath) {
+    if (-not (Test-Path -LiteralPath $LastMessagePath -PathType Leaf)) { return "" }
+    foreach ($line in Get-Content -LiteralPath $LastMessagePath) {
+        if ($line -match '^ASTRA_CONTINUE:\s*(\S.*)$') {
+            return Limit-Text $Matches[1] 600
+        }
+    }
+    return ""
+}
+
 function Resolve-CodexExecutable {
     $official = Join-Path $env:LOCALAPPDATA "Programs\OpenAI\Codex\bin\codex.exe"
     if (Test-Path -LiteralPath $official -PathType Leaf) {
@@ -368,6 +378,7 @@ $lastCheckpointSummary = $null
 $lastValidationSummary = $null
 $lastWorkerSummary = $null
 $reviewContext = $null
+$lastTurn = $null
 $previousLifetimeTotals = @{}
 if (Test-Path -LiteralPath $usagePath -PathType Leaf) {
     $previousUsage = Get-Content -LiteralPath $usagePath -Raw | ConvertFrom-Json
@@ -910,7 +921,9 @@ function Write-AstraContext([string]$TaskPrompt) {
     $currentHead = (git rev-parse HEAD | Out-String).Trim()
     $changedFiles = @(Get-ChangedPaths)
     $handoff = $handoffJson | ConvertFrom-Json
-    $isReviewCall = $script:astraTurns -ge 1
+    $isFollowUpCall = $script:astraTurns -ge 1
+    $isReviewCall = $isFollowUpCall -and $null -ne $script:reviewContext
+    $isContinuationCall = $isFollowUpCall -and -not $isReviewCall
     $pendingRequests = @()
     foreach ($candidate in @(
         @{ name = "checkpoint"; path = $checkpointPath },
@@ -942,6 +955,21 @@ function Write-AstraContext([string]$TaskPrompt) {
             } else { $null }
             diff_summary = if ($script:reviewContext -and $script:reviewContext.diff_stat) { @($script:reviewContext.diff_stat) } else { @(Get-CompactDiffStat -Paths $reviewPaths) }
             review_kind = if ($script:reviewContext) { $script:reviewContext.kind } else { $null }
+            blocking_issue = $handoff.blocked
+        }
+    } elseif ($isContinuationCall) {
+        $snapshot = [ordered]@{
+            version = 2
+            packet = 'call_2_continuation'
+            phase = $Phase
+            head = $currentHead
+            branch = $branch
+            previous_decision = [ordered]@{
+                decisions = @($handoff.decisions | Select-Object -First 12 | ForEach-Object { Limit-Text $_ 300 })
+                last_result = Limit-Text $handoff.last_result 1000
+                next_decision = Limit-Text $handoff.next_decision 600
+            }
+            changed_files = $changedFiles
             blocking_issue = $handoff.blocked
         }
     } else {
@@ -979,6 +1007,16 @@ $snapshotJson
 "@
         $handoffMetricChars = 0
         $contextFileCount = 1
+    } elseif ($isContinuationCall) {
+        $manifestJson = ''
+        $preparedPrompt = @"
+$TaskPrompt
+
+HOST_CONTINUATION_PACKET_JSON
+$snapshotJson
+"@
+        $handoffMetricChars = $handoffJson.Length
+        $contextFileCount = 1
     } else {
         $manifestJson = Save-ContextManifest
         $preparedPrompt = @"
@@ -1010,8 +1048,8 @@ $handoffJson
         handoff_chars = $handoffMetricChars
         context_manifest_chars = $manifestJson.Length
         context_file_count = $contextFileCount
-        manifest_document_count = if ($isReviewCall) { 0 } else { @($phaseSpec.documents).Count + 1 }
-        call_kind = if ($isReviewCall) { 'review' } else { 'prepare' }
+        manifest_document_count = if ($isFollowUpCall) { 0 } else { @($phaseSpec.documents).Count + 1 }
+        call_kind = if ($isReviewCall) { 'review' } elseif ($isContinuationCall) { 'continuation' } else { 'prepare' }
     })
     return $preparedPrompt
 }
@@ -1173,7 +1211,7 @@ function Invoke-AstraTurn([string]$Prompt, [string]$Reason) {
 }
 
 $contextRules = @"
-CALL 1 includes the host snapshot, context manifest and minimal handoff. CALL 2 includes only HOST_REVIEW_PACKET_JSON. The supplied packet is authoritative. Do not reread its disk copies or reconstruct Git state, history, baseline, checkpoint or validation state.
+CALL 1 includes the host snapshot, context manifest and minimal handoff. CALL 2 includes only HOST_REVIEW_PACKET_JSON or HOST_CONTINUATION_PACKET_JSON. The supplied packet is authoritative. Do not reread its disk copies or reconstruct Git state, history, baseline, checkpoint or validation state.
 AGENTS.md is already injected. Do not read it again. Do not read a phase document automatically. If one exact fact is missing, name the missing fact and read only one relevant manifest-listed section. Never reread a document whose manifest hash is unchanged.
 The shell-command budget is zero by default. General repository exploration is forbidden: no broad rg, Get-ChildItem, git ls-files, recursive discovery, or search for tests already supplied by HOST PREPARE as discovery hints. Never read complete large files. If one indispensable fact is still missing, state it first, then use at most one targeted search or one excerpt capped at 200 lines and 20000 characters.
 Never read Astra JSONL, pytest logs, night-shift reports, generated files or lockfiles. Inspect source only by symbol, a bounded excerpt, or one changed-file diff at a time. Use host-provided read_paths, symbols and discovery_hints only for discovery; use changed paths and diff summaries only for review.
@@ -1183,6 +1221,7 @@ After exact edit paths and existing sandbox-compatible pytest targets are known,
 As soon as files, expected behavior, oracle/tests and limits can be stated, publish the bounded product_ticket and cache/astra-relay/request.json, then end the call immediately. Do not inspect implementation details that Step can resolve mechanically.
 For tested direct changes, publish cache/astra-relay/checkpoint.json version 2 with request_id, base_head, message and exact changed paths, then end the call. For a qualified bounded Step task, publish one product_ticket and cache/astra-relay/request.json from a clean tree, then end the call.
 Do not launch Step, poll, wait, run full pytest or write Git metadata. After publishing any Step, checkpoint or host-validation request, perform no further inspection or command. A follow-up is a fresh ephemeral call. Stop after the requested boundary.
+If no Step, checkpoint or host-validation request was published and one more bounded discovery is required, end the final message with one line `ASTRA_CONTINUE: <next bounded action>`. Do not emit this marker when the phase work is complete or blocked on user input.
 "@
 
 function New-AstraTaskPrompt([string]$Task) {
@@ -1282,8 +1321,17 @@ while ($true) {
         $nextPrompt = New-AstraTaskPrompt 'Fresh validation review. The bounded host receipt is in the inline snapshot. If it passed, conclude without reading any log or documentation. If it failed, inspect only the named failing tests and the smallest relevant source excerpt.'
     } elseif ($modelInvoked) {
         if ((git status --porcelain --untracked-files=all | Out-String).Trim()) { throw 'Astra ended with uncheckpointed changes.' }
-        Save-SessionState -Status 'completed'
-        break
+        $continuation = if ($script:lastTurn) { Get-AstraContinuation -LastMessagePath $script:lastTurn.last_message } else { "" }
+        if ($continuation) {
+            $lastMessage = Get-Content -LiteralPath $script:lastTurn.last_message -Raw
+            Save-Handoff -Result $lastMessage -NextDecision $continuation -Decisions @('Astra requested one bounded continuation without a relay boundary.')
+            $reviewContext = $null
+            $nextReason = 'bounded continuation'
+            $nextPrompt = New-AstraTaskPrompt 'Continue only the bounded action in HOST_CONTINUATION_PACKET_JSON. Do not repeat the previous discovery. Publish the appropriate relay boundary as soon as the exact contract is known.'
+        } else {
+            Save-SessionState -Status 'completed'
+            break
+        }
     }
 
     if ($astraTurns -ge $MaxAstraTurns) {
@@ -1293,6 +1341,7 @@ while ($true) {
     }
     $preparedPrompt = Write-AstraContext -TaskPrompt $nextPrompt
     $turn = Invoke-AstraTurn -Prompt $preparedPrompt -Reason $nextReason
+    $lastTurn = $turn
     $threadId = $turn.thread_id
     $modelInvoked = $true
     Save-SessionState -Status 'active'
