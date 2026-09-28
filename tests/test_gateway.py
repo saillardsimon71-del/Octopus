@@ -175,6 +175,32 @@ def test_structured_cascade_has_bounded_call_count(transport, providers_up, monk
     ]
 
 
+def test_http_413_skips_same_provider_for_same_prompt_across_calls(transport, providers_up, monkeypatch):
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
+    prove("agent.plan", "kilo/auto-free")
+
+    class TooLarge(Exception):
+        status_code = 413
+
+    def handler(provider, request):
+        if provider["base_url"].endswith("/v1") and request["model"] in (
+            "groq/openai/gpt-oss-120b", "auto/best-free"
+        ):
+            return TooLarge("Request too large")
+        return ('{"plan": []}', Usage(prompt_tokens=50, completion_tokens=10))
+
+    transport.handler = handler
+    assert llm.complete("agent.plan", MSG, profile="zero_cost").text == '{"plan": []}'
+    llm._rate_limit_cooldowns.clear()
+    llm._provider_cooldowns.clear()
+    assert llm.complete("agent.plan", MSG, profile="zero_cost").text == '{"plan": []}'
+
+    assert transport.models.count("groq/openai/gpt-oss-120b") == 1
+    assert "auto/best-free" not in transport.models
+    assert len([row for row in calls() if row["status"] == "request_too_large"]) == 1
+
+
 def test_normal_zero_cost_routes_to_proven_local_model(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
     monkeypatch.setattr(deepseek, "_client", lambda: pytest.fail("le mode normal ne doit pas appeler DeepSeek directement"))
