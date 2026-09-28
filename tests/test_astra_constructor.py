@@ -948,6 +948,21 @@ $packet=Get-HostPreparation
     assert payload["packet"]["allowed_edit_paths"] == []
     assert payload["packet"]["test_targets"] == []
 
+    runner.write_text(runner.read_text(encoding="utf-8").replace(
+        f"$repo='{repo}'", f"$repo='{ROOT}'"), encoding="utf-8")
+    real_result = run(POWERSHELL, "-NoProfile", "-File", str(runner), cwd=ROOT)
+    assert real_result.returncode == 0, real_result.stdout + real_result.stderr
+    assert json.loads(real_result.stdout)["chars"] <= 4200
+
+    runner.write_text(runner.read_text(encoding="utf-8").replace(
+        f"$pythonExe='{sys.executable}'", "$pythonExe='missing-python-command'"), encoding="utf-8")
+    failed_probe = run(POWERSHELL, "-NoProfile", "-File", str(runner), cwd=ROOT)
+    assert failed_probe.returncode == 0, failed_probe.stdout + failed_probe.stderr
+    failed_payload = json.loads(failed_probe.stdout)
+    assert failed_payload["chars"] <= 4200
+    assert failed_payload["packet"]["blocker"]["reproduced"] is True
+    assert failed_payload["packet"]["blocker"]["error"]
+
 
 def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(tmp_path: Path):
     repo = init_repo(tmp_path)

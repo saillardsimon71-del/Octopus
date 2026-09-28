@@ -607,7 +607,7 @@ function Get-HostPreparation([string[]]$ChangedFiles = @()) {
                 }
                 if ($line -match '^\s*def\s+(main|cmd_worker|load_handlers|run_one|loop)\b' -or
                     $line -match '^\s*class\s+(Handler|TaskContext)\b') {
-                    [void]$symbols.Add(("{0}:{1}:{2}" -f $path, ($index + 1), $line.Trim()))
+                    [void]$symbols.Add(("{0}:{1}:{2}" -f $path, ($index + 1), (($line.Trim() -split '[(:]', 2)[0].Trim())))
                 }
             }
         }
@@ -671,7 +671,7 @@ function Get-HostPreparation([string[]]$ChangedFiles = @()) {
                 command = $probeCommand
                 status = $probeStatus
                 exit_code = $probeExitCode
-                output = Limit-Text $probeOutput 350
+                output = ''
             }
             blocker = if ($blockerReproduced) {
                 [ordered]@{
