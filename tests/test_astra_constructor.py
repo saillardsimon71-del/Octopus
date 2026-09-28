@@ -1,5 +1,6 @@
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 from octopus import night_shift
@@ -846,22 +847,59 @@ $first=Write-AstraContext -TaskPrompt 'first';$second=Write-AstraContext -TaskPr
     assert payload["metrics"]["estimated_input_chars"] <= 30000
 
 
-def test_phase_g_host_prepare_discovers_runtime_symbols_and_tests_with_hard_bounds(tmp_path: Path):
+def test_phase_g_host_prepare_contains_runtime_probe_and_relevant_tests_with_hard_bounds(tmp_path: Path):
     repo = init_repo(tmp_path)
-    source_paths = []
-    for index in range(8):
-        stem = f"operational_entrypoint_startup_supervisor_component_{index:02d}_{'x' * 32}"
-        source = repo / "octopus" / f"{stem}.py"
-        source.parent.mkdir(exist_ok=True)
-        source.write_text(
-            f"class RuntimeEntrypointStartupSupervisorComponent{index}{'X' * 100}:\n"
-            "    pass\n",
-            encoding="utf-8",
-        )
-        test_file = repo / "tests" / f"test_{stem}.py"
-        test_file.parent.mkdir(exist_ok=True)
-        test_file.write_text("def test_runtime():\n    assert True\n", encoding="utf-8")
-        source_paths.append(source.relative_to(repo).as_posix())
+    package = repo / "octopus"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__main__.py").write_text(
+        "import argparse\n"
+        "\n"
+        "def cmd_worker(args):\n"
+        "    return 0\n"
+        "\n"
+        "def main(argv=None):\n"
+        "    parser = argparse.ArgumentParser(prog='octopus')\n"
+        "    sub = parser.add_subparsers(dest='cmd', required=True)\n"
+        "    sub.add_parser(\"doctor\")\n"
+        "    sub.add_parser(\"worker\")\n"
+        "    sub.add_parser('strategy')\n"
+        "    parser.parse_args(argv)\n"
+        "    return 0\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    raise SystemExit(main())\n",
+        encoding="utf-8",
+    )
+    (package / "worker.py").write_text(
+        "class Handler:\n"
+        "    pass\n"
+        "\n"
+        "def load_handlers():\n"
+        "    return {}\n"
+        "\n"
+        "def run_one():\n"
+        "    return None\n"
+        "\n"
+        "def loop():\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    tests = repo / "tests"
+    tests.mkdir()
+    (tests / "test_tasks_worker.py").write_text(
+        "from octopus.__main__ import main\nfrom octopus import worker\n",
+        encoding="utf-8",
+    )
+    (tests / "test_economy_cli.py").write_text(
+        "from octopus.__main__ import main\n",
+        encoding="utf-8",
+    )
+    (tests / "test_gui.py").write_text("from octopus import worker\n", encoding="utf-8")
+    (tests / "test_astra_constructor.py").write_text(
+        "from octopus.__main__ import main\n",
+        encoding="utf-8",
+    )
     git(repo, "add", "octopus", "tests")
     git(repo, "commit", "-m", "phase G runtime surface")
     launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
@@ -875,8 +913,8 @@ foreach($name in @('Limit-Text','Invoke-BoundedRg','Find-AssociatedTests','Get-H
   $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
   Invoke-Expression $fn.Extent.Text
 }}
-$repo='{repo}';$phaseSearches=@('entry.?point','operational','startup|supervisor');$MaxHostPrepareChars=4200
-$packet=Get-HostPreparation -ChangedFiles @({','.join(repr(path) for path in source_paths)})
+$repo='{repo}';$Phase='G';$pythonExe='{sys.executable}';$phaseSearches=@('entry.?point','operational','startup|supervisor');$MaxHostPrepareChars=4200
+$packet=Get-HostPreparation
 @{{packet=$packet;chars=($packet|ConvertTo-Json -Depth 10).Length}}|ConvertTo-Json -Depth 20
 """,
         encoding="utf-8",
@@ -887,21 +925,22 @@ $packet=Get-HostPreparation -ChangedFiles @({','.join(repr(path) for path in sou
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout)
     assert payload["chars"] <= 4200
-    assert set(payload["packet"]["read_paths"]).issubset(source_paths)
-    assert payload["packet"]["read_paths"]
-    assert any("class RuntimeEntrypoint" in item for item in payload["packet"]["symbols_and_entrypoints"])
-    assert f"tests/test_{Path(source_paths[0]).stem}.py" in payload["packet"]["discovery_hints"]["likely_tests"]
+    assert payload["packet"]["runtime"]["entrypoint"] == "python -m octopus"
+    assert payload["packet"]["runtime"]["subcommands"] == ["doctor", "worker", "strategy"]
+    assert payload["packet"]["read_paths"] == ["octopus/__main__.py", "octopus/worker.py"]
+    assert any("def main" in item for item in payload["packet"]["symbols_and_entrypoints"])
+    assert any("def cmd_worker" in item for item in payload["packet"]["symbols_and_entrypoints"])
+    assert any("def run_one" in item for item in payload["packet"]["symbols_and_entrypoints"])
+    assert payload["packet"]["probe"]["command"] == "python -m octopus --help"
+    assert payload["packet"]["probe"]["status"] == "passed"
+    assert payload["packet"]["probe"]["exit_code"] == 0
+    assert payload["packet"]["blocker"]["reproduced"] is False
+    assert set(payload["packet"]["discovery_hints"]["likely_tests"]) == {
+        "tests/test_economy_cli.py",
+        "tests/test_tasks_worker.py",
+    }
     assert payload["packet"]["allowed_edit_paths"] == []
     assert payload["packet"]["test_targets"] == []
-    assert set(payload["packet"]["discovery_hints"]["targeted_searches"]) == {
-        "entry.?point",
-        "operational",
-        "startup|supervisor",
-    }
-    assert all(
-        len(matches) <= 1
-        for matches in payload["packet"]["discovery_hints"]["targeted_searches"].values()
-    )
 
 
 def test_call_2_uses_only_compact_review_packet(tmp_path: Path):

@@ -575,6 +575,108 @@ function Find-AssociatedTests([string[]]$SourcePaths, [string[]]$SearchPatterns)
 }
 
 function Get-HostPreparation([string[]]$ChangedFiles = @()) {
+    if ($Phase -eq 'G') {
+        $runtimePaths = @('octopus/__main__.py', 'octopus/worker.py')
+        $subcommands = New-Object System.Collections.Generic.List[string]
+        $symbols = New-Object System.Collections.Generic.List[string]
+        foreach ($path in $runtimePaths) {
+            $lines = @(Get-Content -LiteralPath (Join-Path $repo $path))
+            for ($index = 0; $index -lt $lines.Count; $index++) {
+                $line = [string]$lines[$index]
+                if ($path -eq 'octopus/__main__.py' -and $line -match '^\s*(?:p\s*=\s*)?sub\.add_parser\("([^"]+)"') {
+                    if (-not $subcommands.Contains($Matches[1])) { [void]$subcommands.Add($Matches[1]) }
+                }
+                if ($line -match '^\s*def\s+(main|cmd_worker|load_handlers|run_one|loop)\b' -or
+                    $line -match '^\s*class\s+(Handler|TaskContext)\b') {
+                    [void]$symbols.Add(("{0}:{1}:{2}" -f $path, ($index + 1), $line.Trim()))
+                }
+            }
+        }
+
+        $tests = @(Find-AssociatedTests -SourcePaths @() -SearchPatterns @(
+            'from octopus\.__main__ import main|from octopus import __main__',
+            'from octopus import worker|from octopus\.worker import'
+        ) | Where-Object { $_ -notmatch '(?i)(astra_constructor|gui)' } | Select-Object -First 8)
+
+        $probeCommand = 'python -m octopus --help'
+        $expectedProbe = 'exit 0 with argparse help; no command handler is executed'
+        $probeStatus = 'failed'
+        $probeExitCode = $null
+        $probeOutput = ''
+        $process = $null
+        try {
+            $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $startInfo.FileName = $pythonExe
+            $startInfo.Arguments = '-m octopus --help'
+            $startInfo.WorkingDirectory = $repo
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            $process = New-Object System.Diagnostics.Process
+            $process.StartInfo = $startInfo
+            [void]$process.Start()
+            if ($process.WaitForExit(10000)) {
+                $probeExitCode = $process.ExitCode
+                $probeStatus = if ($probeExitCode -eq 0) { 'passed' } else { 'failed' }
+            } else {
+                $process.Kill()
+                $probeStatus = 'timeout'
+            }
+            $probeOutput = ($process.StandardOutput.ReadToEnd() + "`n" +
+                $process.StandardError.ReadToEnd()).Trim() -replace '\s+', ' '
+        } catch {
+            $probeOutput = $_.Exception.Message
+        } finally {
+            if ($process) { $process.Dispose() }
+        }
+        if ($probeStatus -eq 'passed' -and $probeOutput -match 'usage:\s+octopus[^\{]*\{([^}]+)\}') {
+            foreach ($name in $Matches[1].Split(',')) {
+                $name = $name.Trim()
+                if ($name -and -not $subcommands.Contains($name)) { [void]$subcommands.Add($name) }
+            }
+        }
+
+        $blockerReproduced = $probeStatus -ne 'passed'
+        $testTargets = @()
+        if ($blockerReproduced) { $testTargets = @($tests) }
+        $packet = [ordered]@{
+            runtime = [ordered]@{
+                entrypoint = 'python -m octopus'
+                subcommands = @($subcommands)
+            }
+            read_paths = $runtimePaths
+            symbols_and_entrypoints = @($symbols)
+            probe = [ordered]@{
+                command = $probeCommand
+                status = $probeStatus
+                exit_code = $probeExitCode
+                output = Limit-Text $probeOutput 350
+            }
+            blocker = if ($blockerReproduced) {
+                [ordered]@{
+                    reproduced = $true
+                    invocation = $probeCommand
+                    error = Limit-Text $probeOutput 350
+                    expected_behavior = $expectedProbe
+                }
+            } else {
+                [ordered]@{
+                    reproduced = $false
+                    summary = 'No startup blocker reproduced by the local help probe.'
+                }
+            }
+            discovery_hints = [ordered]@{ likely_tests = $tests }
+            allowed_edit_paths = @()
+            test_targets = $testTargets
+        }
+        $json = $packet | ConvertTo-Json -Depth 10
+        if ($json.Length -gt $MaxHostPrepareChars) {
+            throw "Astra host preparation exceeds its $MaxHostPrepareChars character limit: $($json.Length)."
+        }
+        return $packet
+    }
+
     $searches = [ordered]@{}
     $runtimePaths = New-Object System.Collections.Generic.List[string]
     foreach ($pattern in @($phaseSearches)) {
