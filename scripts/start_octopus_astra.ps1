@@ -369,6 +369,7 @@ $contextMetricsPath = Join-Path $relayRoot "context-metrics.json"
 $baselineStatePath = Join-Path $relayRoot "baseline.json"
 $baselineLogPath = Join-Path $relayRoot "baseline-pytest.log"
 $astraTurns = 0
+$astraTurnsInCycle = 0
 $relayCycles = 0
 $threadId = $null
 $modelInvoked = $false
@@ -1144,7 +1145,8 @@ if (-not $lastValidationSummary) {
 
 function Invoke-AstraTurn([string]$Prompt, [string]$Reason) {
     $script:astraTurns++
-    if ($script:astraTurns -gt $MaxAstraTurns) {
+    $script:astraTurnsInCycle++
+    if ($script:astraTurnsInCycle -gt $MaxAstraTurns) {
         throw "Astra turn budget exhausted ($MaxAstraTurns). Stopping before another model call."
     }
 
@@ -1155,7 +1157,7 @@ function Invoke-AstraTurn([string]$Prompt, [string]$Reason) {
     $lastMessage = Join-Path $turnLogRoot ($base + "-last.txt")
 
     Write-Host ""
-    Write-Host ("=== GPT-6 ASTRA TURN {0}/{1} ===" -f $script:astraTurns, $MaxAstraTurns) -ForegroundColor Magenta
+    Write-Host ("=== GPT-6 ASTRA TURN {0}/{1} ===" -f $script:astraTurnsInCycle, $MaxAstraTurns) -ForegroundColor Magenta
 
     # Codex 0.157 discovers user skills from the OS home (~/.agents/skills)
     # independently of CODEX_HOME. Run only the Codex child with a sterile home
@@ -1220,7 +1222,7 @@ function Invoke-AstraTurn([string]$Prompt, [string]$Reason) {
 }
 
 $contextRules = @"
-CALL 1 includes the host snapshot, context manifest and minimal handoff. CALL 2 includes only HOST_REVIEW_PACKET_JSON or HOST_CONTINUATION_PACKET_JSON. The supplied packet is authoritative. Do not reread its disk copies or reconstruct Git state, history, baseline, checkpoint or validation state.
+The first call of the run includes the host snapshot, context manifest and minimal handoff. Every later call, including the first call of a new mini-session, includes only HOST_REVIEW_PACKET_JSON or HOST_CONTINUATION_PACKET_JSON. The supplied packet is authoritative. Do not reread its disk copies or reconstruct Git state, history, baseline, checkpoint or validation state.
 AGENTS.md is already injected. Do not read it again. Do not read a phase document automatically. If one exact fact is missing, name the missing fact and read only one relevant manifest-listed section. Never reread a document whose manifest hash is unchanged.
 The shell-command budget is zero by default. General repository exploration is forbidden: no broad rg, Get-ChildItem, git ls-files, recursive discovery, or search for tests already supplied by HOST PREPARE as discovery hints. Never read complete large files. If one indispensable fact is still missing, state it first, then use at most one targeted search or one excerpt capped at 200 lines and 20000 characters.
 Never read Astra JSONL, pytest logs, night-shift reports, generated files or lockfiles. Inspect source only by symbol, a bounded excerpt, or one changed-file diff at a time. Use host-provided read_paths, symbols and discovery_hints only for discovery; use changed paths and diff summaries only for review.
@@ -1343,10 +1345,22 @@ while ($true) {
         }
     }
 
-    if ($astraTurns -ge $MaxAstraTurns) {
-        Save-SessionState -Status 'active'
-        Write-Host "Astra call budget reached. Handoff: $handoffPath" -ForegroundColor Yellow
-        break
+    if ($astraTurnsInCycle -ge $MaxAstraTurns) {
+        if ($nextReason -eq 'bounded continuation') {
+            if ($relayCycles -ge $MaxRelayCycles) {
+                Save-SessionState -Status 'active'
+                Write-Host "Relay cycle budget reached. Handoff: $handoffPath" -ForegroundColor Yellow
+                break
+            }
+            $relayCycles++
+            $astraTurnsInCycle = 0
+        } elseif ($nextReason -eq 'Step review') {
+            $astraTurnsInCycle = 0
+        } else {
+            Save-SessionState -Status 'active'
+            Write-Host "Astra call budget reached. Handoff: $handoffPath" -ForegroundColor Yellow
+            break
+        }
     }
     $preparedPrompt = Write-AstraContext -TaskPrompt $nextPrompt
     $turn = Invoke-AstraTurn -Prompt $preparedPrompt -Reason $nextReason
@@ -1357,5 +1371,5 @@ while ($true) {
 }
 
 $usageTotals = Save-UsageSummary
-Write-Host ("Astra calls: {0}/{1}; run_totals={2}; lifetime_totals={3}" -f $astraTurns, $MaxAstraTurns, ($usageTotals.run_totals | ConvertTo-Json -Compress), ($usageTotals.lifetime_totals | ConvertTo-Json -Compress))
+Write-Host ("Astra calls: {0}; relay cycles: {1}/{2}; run_totals={3}; lifetime_totals={4}" -f $astraTurns, $relayCycles, $MaxRelayCycles, ($usageTotals.run_totals | ConvertTo-Json -Compress), ($usageTotals.lifetime_totals | ConvertTo-Json -Compress))
 Write-Host "Handoff: $handoffPath"

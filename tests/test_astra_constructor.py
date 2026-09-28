@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from octopus import night_shift
 
 
@@ -964,7 +966,25 @@ $packet=Get-HostPreparation
     assert failed_payload["packet"]["blocker"]["error"]
 
 
-def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("continuations", "max_relay_cycles", "expected_calls", "expected_status", "expected_relays", "step_on_second"),
+    [
+        (1, 0, 2, "completed", 0, False),
+        (2, 1, 3, "completed", 1, False),
+        (2, 0, 2, "active", 0, False),
+        (4, 1, 4, "active", 1, False),
+        (1, 1, 3, "completed", 1, True),
+    ],
+)
+def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(
+    tmp_path: Path,
+    continuations: int,
+    max_relay_cycles: int,
+    expected_calls: int,
+    expected_status: str,
+    expected_relays: int,
+    step_on_second: bool,
+):
     repo = init_repo(tmp_path)
     (repo / ".gitignore").write_text("cache/\n__pycache__/\n*.pyc\n", encoding="utf-8")
     (repo / "AGENTS.md").write_text("constructor rules\n", encoding="utf-8")
@@ -1019,8 +1039,45 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(t
         "fetch_pinned_upstreams.ps1",
     ):
         (scripts / name).write_text("param()\nexit 0\n", encoding="utf-8")
+    if step_on_second:
+        (scripts / "run_external_dev_ticket.ps1").write_text(
+            "param([string]$Plan,[double]$Hours,[string]$RequestId,[string]$ResultPath)\n"
+            "Copy-Item -LiteralPath $env:FAKE_STEP_RECEIPT -Destination $ResultPath\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
     git(repo, "add", ".gitignore", "AGENTS.md", "docs", "octopus", "scripts", "tests")
     git(repo, "commit", "-m", "constructor fixture")
+
+    if step_on_second:
+        base_head = git(repo, "rev-parse", "HEAD")
+        git(repo, "switch", "-c", "worker/constructor-test")
+        (repo / "product.txt").write_text("worker result\n", encoding="utf-8")
+        git(repo, "commit", "-am", "worker result")
+        source_commit = git(repo, "rev-parse", "HEAD")
+        git(repo, "switch", "prep/astra-local-orchestration")
+        receipt = {
+            "version": 1,
+            "request_id": "step-at-turn-limit",
+            "status": "completed",
+            "exit_code": 0,
+            "worker_summary": {
+                "status": "backlog_complete",
+                "base_head": base_head,
+                "source_commit": source_commit,
+                "changed_paths": ["product.txt"],
+                "diff_stat": ["product.txt | 2 +-"],
+                "tests": ["1 passed"],
+                "tickets": [{
+                    "status": "done",
+                    "commit": source_commit,
+                    "tests_passed": True,
+                    "gate_status": "ACCEPTED",
+                    "changed_paths": ["product.txt"],
+                }],
+            },
+        }
+        (tmp_path / "worker-receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
 
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
@@ -1034,9 +1091,13 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(t
         "[IO.File]::WriteAllText((Join-Path $env:FAKE_CODEX_STATE \"prompt-$count.txt\"),$prompt)\n"
         "$index=[Array]::IndexOf([object[]]$args,'--output-last-message')\n"
         "if($index -lt 0){exit 7}\n"
-        "$message=if($count -eq 1){"
+        "$message=if($count -eq 2 -and $env:FAKE_STEP_RECEIPT){"
+        "$request=Join-Path $env:FAKE_REPO 'cache/astra-relay/request.json';"
+        "[IO.File]::WriteAllText($request,'{\"version\":1,\"request_id\":\"step-at-turn-limit\",\"plan_path\":\"product.txt\"}');"
+        "'Step request published.'"
+        f"}}elseif($count -le {continuations}){{"
         "\"No relay boundary produced.`nASTRA_CONTINUE: Inspect worker execution and exact tests.\""
-        "}else{'Bounded discovery complete.'}\n"
+        "}else{'STABLE'}\n"
         "[IO.File]::WriteAllText([string]$args[$index+1],$message)\n"
         "Write-Output ('{\"type\":\"thread.started\",\"thread_id\":\"thread-' + $count + '\"}')\n"
         "Write-Output '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":2,\"cached_input_tokens\":0,\"output_tokens\":1,\"reasoning_output_tokens\":0}}'\n"
@@ -1049,6 +1110,9 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(t
     env["LOCALAPPDATA"] = str(local_app_data)
     env["FAKE_CODEX_STATE"] = str(fake_state)
     env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
+    if step_on_second:
+        env["FAKE_STEP_RECEIPT"] = str(tmp_path / "worker-receipt.json")
+        env["FAKE_REPO"] = str(repo)
 
     launcher = str(ROOT / "scripts" / "start_octopus_astra.ps1").replace("'", "''")
     codex_home = str(tmp_path / "codex-home").replace("'", "''")
@@ -1056,7 +1120,7 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(t
         "function Get-FileHash([string]$LiteralPath,[string]$Algorithm){"
         "[pscustomobject]@{Hash=('0'*64)}}; "
         f"& '{launcher}' -CodexHome '{codex_home}' -Phase G -MaxAstraTurns 2 "
-        "-MaxRelayCycles 0 -SkipFetch -NewSession"
+        f"-MaxRelayCycles {max_relay_cycles} -SkipFetch -NewSession"
     )
 
     result = subprocess.run(
@@ -1078,15 +1142,36 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(t
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert (fake_state / "count.txt").read_text(encoding="utf-8") == "2"
+    assert (fake_state / "count.txt").read_text(encoding="utf-8") == str(expected_calls)
     second_prompt = (fake_state / "prompt-2.txt").read_text(encoding="utf-8")
     assert "HOST_CONTINUATION_PACKET_JSON" in second_prompt
     assert "Inspect worker execution and exact tests." in second_prompt
     assert "HOST_SNAPSHOT_JSON" not in second_prompt
     assert "CONTEXT_MANIFEST_JSON" not in second_prompt
     session = json.loads((repo / "cache" / "astra-relay" / "session.json").read_text(encoding="utf-8"))
-    assert session["status"] == "completed"
-    assert session["astra_turns_this_run"] == 2
+    assert session["status"] == expected_status
+    assert session["astra_turns_this_run"] == expected_calls
+    assert session["relay_cycles_this_run"] == expected_relays
+    if expected_calls >= 3:
+        third_prompt = (fake_state / "prompt-3.txt").read_text(encoding="utf-8")
+        if step_on_second:
+            assert "HOST_REVIEW_PACKET_JSON" in third_prompt
+            assert "product.txt" in third_prompt
+        else:
+            assert "HOST_CONTINUATION_PACKET_JSON" in third_prompt
+            assert "Inspect worker execution and exact tests." in third_prompt
+        assert "HOST_SNAPSHOT_JSON" not in third_prompt
+        assert "CONTEXT_MANIFEST_JSON" not in third_prompt
+        assert "MINIMAL_HANDOFF_JSON" not in third_prompt
+    else:
+        assert not (fake_state / "prompt-3.txt").exists()
+    if expected_calls == 4:
+        fourth_prompt = (fake_state / "prompt-4.txt").read_text(encoding="utf-8")
+        assert "HOST_CONTINUATION_PACKET_JSON" in fourth_prompt
+        assert "HOST_SNAPSHOT_JSON" not in fourth_prompt
+    if expected_status == "active":
+        assert "Relay cycle budget reached" in result.stdout
+    assert not (fake_state / f"prompt-{expected_calls + 1}.txt").exists()
 
 
 def test_call_2_uses_only_compact_review_packet(tmp_path: Path):
