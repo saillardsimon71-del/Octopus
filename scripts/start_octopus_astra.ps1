@@ -575,23 +575,17 @@ function Find-AssociatedTests([string[]]$SourcePaths, [string[]]$SearchPatterns)
 }
 
 function Get-HostPreparation([string[]]$ChangedFiles = @()) {
-    $searches = @()
+    $searches = [ordered]@{}
     $runtimePaths = New-Object System.Collections.Generic.List[string]
     foreach ($pattern in @($phaseSearches)) {
-        $matches = @(Invoke-BoundedRg -Pattern $pattern -Roots @('octopus', 'scripts') -MaxResults 2)
-        $searches += [ordered]@{
-            pattern = Limit-Text $pattern 100
-            matches = @($matches)
-        }
+        $matches = @(Invoke-BoundedRg -Pattern $pattern -Roots @('octopus', 'scripts') -MaxResults 1 | ForEach-Object { Limit-Text $_ 160 })
+        $searches[(Limit-Text $pattern 100)] = @($matches)
         foreach ($line in $matches) {
             if ($line -match '^([^:]+):\d+:') {
                 $path = $Matches[1].Replace('\', '/')
                 if ($path -notlike 'tests/*' -and -not $runtimePaths.Contains($path)) { [void]$runtimePaths.Add($path) }
             }
         }
-    }
-    foreach ($path in @($ChangedFiles)) {
-        if ($path -notlike 'tests/*' -and -not $runtimePaths.Contains($path)) { [void]$runtimePaths.Add($path) }
     }
     $boundedRuntimePaths = @($runtimePaths | Select-Object -First 8)
     $symbols = if ($boundedRuntimePaths.Count) {
@@ -601,7 +595,6 @@ function Get-HostPreparation([string[]]$ChangedFiles = @()) {
     $tests = @(Find-AssociatedTests -SourcePaths $testSources -SearchPatterns $phaseSearches | Select-Object -First 8)
     $packet = [ordered]@{
         discovery_hints = [ordered]@{
-            search_scope = @('octopus', 'scripts', 'tests')
             targeted_searches = $searches
             likely_tests = $tests
         }
@@ -609,13 +602,6 @@ function Get-HostPreparation([string[]]$ChangedFiles = @()) {
         allowed_edit_paths = @()
         test_targets = @()
         symbols_and_entrypoints = @($symbols)
-        limits = [ordered]@{
-            matches_per_search = 2
-            runtime_paths = 8
-            symbols = 5
-            tests = 8
-            text_chars_per_result = 220
-        }
     }
     $json = $packet | ConvertTo-Json -Depth 10
     if ($json.Length -gt $MaxHostPrepareChars) {

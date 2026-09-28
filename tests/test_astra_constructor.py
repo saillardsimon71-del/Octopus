@@ -846,16 +846,24 @@ $first=Write-AstraContext -TaskPrompt 'first';$second=Write-AstraContext -TaskPr
     assert payload["metrics"]["estimated_input_chars"] <= 30000
 
 
-def test_host_prepare_discovers_runtime_symbols_and_tests_with_hard_bounds(tmp_path: Path):
+def test_phase_g_host_prepare_discovers_runtime_symbols_and_tests_with_hard_bounds(tmp_path: Path):
     repo = init_repo(tmp_path)
-    source = repo / "octopus" / "sample_engine.py"
-    source.parent.mkdir()
-    source.write_text("class SampleEngine:\n    pass\n", encoding="utf-8")
-    test_file = repo / "tests" / "test_sample_engine.py"
-    test_file.parent.mkdir()
-    test_file.write_text("from octopus.sample_engine import SampleEngine\n", encoding="utf-8")
-    git(repo, "add", "octopus/sample_engine.py", "tests/test_sample_engine.py")
-    git(repo, "commit", "-m", "sample runtime")
+    source_paths = []
+    for index in range(8):
+        stem = f"operational_entrypoint_startup_supervisor_component_{index:02d}_{'x' * 32}"
+        source = repo / "octopus" / f"{stem}.py"
+        source.parent.mkdir(exist_ok=True)
+        source.write_text(
+            f"class RuntimeEntrypointStartupSupervisorComponent{index}{'X' * 100}:\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
+        test_file = repo / "tests" / f"test_{stem}.py"
+        test_file.parent.mkdir(exist_ok=True)
+        test_file.write_text("def test_runtime():\n    assert True\n", encoding="utf-8")
+        source_paths.append(source.relative_to(repo).as_posix())
+    git(repo, "add", "octopus", "tests")
+    git(repo, "commit", "-m", "phase G runtime surface")
     launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
     runner = tmp_path / "host-prepare.ps1"
     runner.write_text(
@@ -867,8 +875,8 @@ foreach($name in @('Limit-Text','Invoke-BoundedRg','Find-AssociatedTests','Get-H
   $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
   Invoke-Expression $fn.Extent.Text
 }}
-$repo='{repo}';$phaseSearches=@('SampleEngine');$MaxHostPrepareChars=4200
-$packet=Get-HostPreparation
+$repo='{repo}';$phaseSearches=@('entry.?point','operational','startup|supervisor');$MaxHostPrepareChars=4200
+$packet=Get-HostPreparation -ChangedFiles @({','.join(repr(path) for path in source_paths)})
 @{{packet=$packet;chars=($packet|ConvertTo-Json -Depth 10).Length}}|ConvertTo-Json -Depth 20
 """,
         encoding="utf-8",
@@ -879,12 +887,21 @@ $packet=Get-HostPreparation
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout)
     assert payload["chars"] <= 4200
-    assert "octopus/sample_engine.py" in payload["packet"]["read_paths"]
-    assert any("class SampleEngine" in item for item in payload["packet"]["symbols_and_entrypoints"])
-    assert "tests/test_sample_engine.py" in payload["packet"]["discovery_hints"]["likely_tests"]
+    assert set(payload["packet"]["read_paths"]).issubset(source_paths)
+    assert payload["packet"]["read_paths"]
+    assert any("class RuntimeEntrypoint" in item for item in payload["packet"]["symbols_and_entrypoints"])
+    assert f"tests/test_{Path(source_paths[0]).stem}.py" in payload["packet"]["discovery_hints"]["likely_tests"]
     assert payload["packet"]["allowed_edit_paths"] == []
     assert payload["packet"]["test_targets"] == []
-    assert len(payload["packet"]["discovery_hints"]["targeted_searches"][0]["matches"]) <= 2
+    assert set(payload["packet"]["discovery_hints"]["targeted_searches"]) == {
+        "entry.?point",
+        "operational",
+        "startup|supervisor",
+    }
+    assert all(
+        len(matches) <= 1
+        for matches in payload["packet"]["discovery_hints"]["targeted_searches"].values()
+    )
 
 
 def test_call_2_uses_only_compact_review_packet(tmp_path: Path):
