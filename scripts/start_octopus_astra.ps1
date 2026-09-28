@@ -100,20 +100,53 @@ function Resolve-StepRelayPlan([object]$Request, [string]$RequestId) {
             throw "Product ticket $field does not match relay request."
         }
     }
+    $currentHead = (& git -C $repo rev-parse HEAD 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]$ticket.base_head -cne $currentHead) {
+        throw 'Product ticket base_head must match the current constructor HEAD.'
+    }
 
-    $allowedPaths = @($ticket.allowed_paths | Where-Object { $null -ne $_ })
-    if (-not $allowedPaths.Count) {
-        $allowedPaths = @($ticket.starting_paths | Where-Object { $null -ne $_ })
+    $allowedEditProperty = $ticket.PSObject.Properties['allowed_edit_paths']
+    $allowedPathsProperty = $ticket.PSObject.Properties['allowed_paths']
+    $allowedPaths = @(if ($allowedEditProperty) {
+        $allowedEditProperty.Value | Where-Object { $null -ne $_ }
+    } elseif ($allowedPathsProperty) {
+        $allowedPathsProperty.Value | Where-Object { $null -ne $_ }
+    })
+    $testTargetsProperty = $ticket.PSObject.Properties['test_targets']
+    $testTargets = @(if ($testTargetsProperty) {
+        $testTargetsProperty.Value | Where-Object { $null -ne $_ }
+    })
+    $missingDispatchFields = @()
+    if (-not $allowedPaths.Count) { $missingDispatchFields += 'allowed_edit_paths (or explicit canonical allowed_paths)' }
+    if (-not $testTargets.Count) { $missingDispatchFields += 'test_targets' }
+    if ($missingDispatchFields.Count) {
+        throw ('Product ticket is not dispatchable to Step: explicit ' + ($missingDispatchFields -join ' and ') + ' required. starting_paths and likely_tests are discovery hints only.')
     }
-    if (-not $allowedPaths.Count) {
-        throw 'Product ticket requires allowed_paths or starting_paths.'
+    foreach ($path in $allowedPaths) {
+        if (-not ($path -is [string]) -or -not $path.Trim()) {
+            throw 'Product ticket allowed_edit_paths must contain non-empty repository-relative strings.'
+        }
+        $normalizedPath = $path.Replace('\', '/').Trim()
+        $pathParts = @($normalizedPath.Split('/'))
+        if ($normalizedPath.StartsWith('/') -or $pathParts[0].Contains(':') -or @($pathParts | Where-Object { $_ -in @('', '.', '..') }).Count) {
+            throw "Product ticket contains an invalid allowed_edit_paths entry: $path"
+        }
     }
-    $testTargets = @($ticket.test_targets | Where-Object { $null -ne $_ })
-    if (-not $testTargets.Count) {
-        $testTargets = @($ticket.likely_tests | Where-Object { $null -ne $_ })
-    }
-    if (-not $testTargets.Count) {
-        throw 'Product ticket requires test_targets or likely_tests.'
+    foreach ($target in $testTargets) {
+        if (-not ($target -is [string]) -or -not $target.Trim()) {
+            throw 'Product ticket test_targets must contain non-empty strings executable in the Step sandbox.'
+        }
+        $targetPath = $target.Split('::', 2)[0].Replace('\', '/')
+        if (-not $targetPath.StartsWith('tests/') -or -not $targetPath.EndsWith('.py')) {
+            throw "Product ticket test target is not compatible with the Step pytest sandbox: $target"
+        }
+        if ([System.IO.Path]::IsPathRooted($targetPath)) {
+            throw "Product ticket test target is not available in the Step sandbox: $target"
+        }
+        $resolvedTarget = [System.IO.Path]::GetFullPath((Join-Path $repo $targetPath))
+        if (-not $resolvedTarget.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $resolvedTarget -PathType Leaf)) {
+            throw "Product ticket test target is not available in the Step sandbox: $target"
+        }
     }
 
     $goalParts = @(
@@ -567,11 +600,15 @@ function Get-HostPreparation([string[]]$ChangedFiles = @()) {
     $testSources = @($boundedRuntimePaths + @($ChangedFiles) | Sort-Object -Unique)
     $tests = @(Find-AssociatedTests -SourcePaths $testSources -SearchPatterns $phaseSearches | Select-Object -First 8)
     $packet = [ordered]@{
-        search_scope = @('octopus', 'scripts', 'tests')
-        targeted_searches = $searches
-        runtime_paths = $boundedRuntimePaths
+        discovery_hints = [ordered]@{
+            search_scope = @('octopus', 'scripts', 'tests')
+            targeted_searches = $searches
+            likely_tests = $tests
+        }
+        read_paths = $boundedRuntimePaths
+        allowed_edit_paths = @()
+        test_targets = @()
         symbols_and_entrypoints = @($symbols)
-        likely_tests = $tests
         limits = [ordered]@{
             matches_per_search = 2
             runtime_paths = 8
@@ -1050,9 +1087,11 @@ function Invoke-AstraTurn([string]$Prompt, [string]$Reason) {
 $contextRules = @"
 CALL 1 includes the host snapshot, context manifest and minimal handoff. CALL 2 includes only HOST_REVIEW_PACKET_JSON. The supplied packet is authoritative. Do not reread its disk copies or reconstruct Git state, history, baseline, checkpoint or validation state.
 AGENTS.md is already injected. Do not read it again. Do not read a phase document automatically. If one exact fact is missing, name the missing fact and read only one relevant manifest-listed section. Never reread a document whose manifest hash is unchanged.
-The shell-command budget is zero by default. General repository exploration is forbidden: no broad rg, Get-ChildItem, git ls-files, recursive discovery, or search for tests already supplied by HOST PREPARE. Never read complete large files. If one indispensable fact is still missing, state it first, then use at most one targeted search or one excerpt capped at 200 lines and 20000 characters.
-Never read Astra JSONL, pytest logs, night-shift reports, generated files or lockfiles. Inspect source only by symbol, a bounded excerpt, or one changed-file diff at a time. Use host-provided runtime paths, symbols, likely tests, changed paths and diff summaries.
+The shell-command budget is zero by default. General repository exploration is forbidden: no broad rg, Get-ChildItem, git ls-files, recursive discovery, or search for tests already supplied by HOST PREPARE as discovery hints. Never read complete large files. If one indispensable fact is still missing, state it first, then use at most one targeted search or one excerpt capped at 200 lines and 20000 characters.
+Never read Astra JSONL, pytest logs, night-shift reports, generated files or lockfiles. Inspect source only by symbol, a bounded excerpt, or one changed-file diff at a time. Use host-provided read_paths, symbols and discovery_hints only for discovery; use changed paths and diff summaries only for review.
 Run no long test in Astra and never run a full suite. A single micro-test is allowed only when required to define an oracle before delegation. For all other pytest validation, atomically publish cache/astra-relay/validation.json with {"version":1,"kind":"full_pytest"}, then end the call. The host runs it after exit and returns only exit code, counts, duration and a short failure list.
+HOST PREPARE discovery_hints and read_paths are read-only discovery inputs. They are never edit authorization or Step test oracles. If allowed_edit_paths or test_targets are empty, keep discovery on Astra/host and do not publish a Step request.
+After exact edit paths and existing sandbox-compatible pytest targets are known, publish a second mechanical product_ticket with explicit allowed_edit_paths and test_targets. Never copy starting_paths or likely_tests into those fields.
 As soon as files, expected behavior, oracle/tests and limits can be stated, publish the bounded product_ticket and cache/astra-relay/request.json, then end the call immediately. Do not inspect implementation details that Step can resolve mechanically.
 For tested direct changes, publish cache/astra-relay/checkpoint.json version 2 with request_id, base_head, message and exact changed paths, then end the call. For a qualified bounded Step task, publish one product_ticket and cache/astra-relay/request.json from a clean tree, then end the call.
 Do not launch Step, poll, wait, run full pytest or write Git metadata. After publishing any Step, checkpoint or host-validation request, perform no further inspection or command. A follow-up is a fresh ephemeral call. Stop after the requested boundary.
@@ -1062,7 +1101,7 @@ function New-AstraTaskPrompt([string]$Task) {
     return $Task + [Environment]::NewLine + [Environment]::NewLine + $contextRules
 }
 
-$initialPrompt = New-AstraTaskPrompt "HOST PREPARE has already performed deterministic Git inspection, targeted searches, symbol discovery and likely-test discovery. Execute only the objective in the host snapshot for phase $Phase. Decide architecture, permissions and the bounded contract. Delegate to Step immediately when the mechanical ticket can be stated."
+$initialPrompt = New-AstraTaskPrompt "HOST PREPARE has already performed deterministic Git inspection and supplied read-only discovery hints. Execute only the objective in the host snapshot for phase $Phase. Decide architecture, permissions and the bounded contract. Keep discovery on Astra/host until exact edit paths and Step-compatible test targets are known, then publish the second mechanical ticket."
 
 if (Test-Path -LiteralPath $handoffPath -PathType Leaf) {
     $oldHandoff = Get-Content -LiteralPath $handoffPath -Raw | ConvertFrom-Json

@@ -73,6 +73,47 @@ Resolve-StepRelayPlan -Request $request -RequestId ([string]$request.request_id)
     )
 
 
+def gate_step_relay_dispatch(repo: Path, request: dict, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    request_path = tmp_path / "dispatch-request.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    runner = tmp_path / "gate-step-relay-dispatch.ps1"
+    runner.write_text(
+        f"""
+$tokens=$null;$errors=$null
+$ErrorActionPreference='Stop'
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
+if($errors.Count){{throw ($errors|ForEach-Object Message)}}
+foreach($name in @('Write-JsonAtomic','Resolve-StepRelayPlan')){{
+  $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
+  if(-not $fn){{throw "$name is missing"}}
+  Invoke-Expression $fn.Extent.Text
+}}
+$repo='{repo}';$ticketRoot=Join-Path $repo 'cache/astra-tickets'
+$request=Get-Content -LiteralPath '{request_path}' -Raw|ConvertFrom-Json
+$workerCalls=0;$astraCalls=0
+try {{
+  $plan=Resolve-StepRelayPlan -Request $request -RequestId ([string]$request.request_id)
+  $workerCalls++
+  $astraCalls++
+  @{{accepted=$true;plan=$plan;worker_calls=$workerCalls;astra_calls=$astraCalls}}|ConvertTo-Json -Compress
+}} catch {{
+  @{{accepted=$false;error=$_.Exception.Message;worker_calls=$workerCalls;astra_calls=$astraCalls}}|ConvertTo-Json -Compress
+}}
+""",
+        encoding="utf-8",
+    )
+    return run(
+        POWERSHELL,
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(runner),
+        cwd=repo,
+    )
+
+
 def gate_worker_review(
     repo: Path,
     request_id: str,
@@ -120,6 +161,11 @@ def test_step_relay_v2_normalizes_product_ticket_and_prefers_it_over_legacy_plan
     repo = init_repo(tmp_path)
     relay = repo / "cache" / "astra-relay"
     relay.mkdir(parents=True)
+    test_target = repo / "tests" / "test_runtime.py"
+    test_target.parent.mkdir()
+    test_target.write_text("def test_runtime():\n    assert True\n", encoding="utf-8")
+    git(repo, "add", "tests/test_runtime.py")
+    git(repo, "commit", "-m", "runtime oracle")
     base_head = git(repo, "rev-parse", "HEAD")
     ticket = {
         "version": 1,
@@ -130,8 +176,10 @@ def test_step_relay_v2_normalizes_product_ticket_and_prefers_it_over_legacy_plan
         "objective": "Verify the existing runtime entry point.",
         "authorization": "Bounded phase G maintenance.",
         "architecture": ["Reuse existing runtime boundaries."],
-        "starting_paths": ["octopus/__main__.py"],
+        "starting_paths": ["scripts/start_octopus_astra.ps1"],
         "likely_tests": ["tests/test_gui.py"],
+        "allowed_edit_paths": ["octopus/runtime.py"],
+        "test_targets": ["tests/test_runtime.py"],
         "scope": {"implementation": "Fix one reproduced blocker."},
         "work": ["Reproduce before editing."],
         "acceptance": ["Focused regression passes."],
@@ -165,8 +213,8 @@ def test_step_relay_v2_normalizes_product_ticket_and_prefers_it_over_legacy_plan
     validated = night_shift.validate_plan(normalized)
     assert len(validated["tickets"]) == 1
     work_ticket = validated["tickets"][0]
-    assert work_ticket["allowed_paths"] == ticket["starting_paths"]
-    assert work_ticket["test_targets"] == ticket["likely_tests"]
+    assert work_ticket["allowed_paths"] == ticket["allowed_edit_paths"]
+    assert work_ticket["test_targets"] == ticket["test_targets"]
     assert work_ticket["acceptance_criteria"] == ticket["acceptance"]
     assert ticket["objective"] in work_ticket["goal"]
     assert ticket["scope"]["implementation"] in work_ticket["goal"]
@@ -179,6 +227,83 @@ def test_step_relay_v2_normalizes_product_ticket_and_prefers_it_over_legacy_plan
             "expected": True,
         }
     ]
+
+
+def test_phase_g_discovery_ticket_fails_closed_before_worker_or_astra(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    relay = repo / "cache" / "astra-relay"
+    relay.mkdir(parents=True)
+    base_head = git(repo, "rev-parse", "HEAD")
+    ticket = {
+        "version": 1,
+        "request_id": "phase-g-runtime-entrypoint-001-reissue",
+        "phase": "G",
+        "base_head": base_head,
+        "title": "Verify the existing runtime startup",
+        "objective": "Fix only a demonstrated startup blocker.",
+        "starting_paths": [
+            "scripts/start_octopus_astra.ps1",
+            "scripts/fetch_pinned_upstreams.ps1",
+        ],
+        "likely_tests": ["tests/test_astra_constructor.py", "tests/test_gui.py"],
+        "scope": {
+            "discovery": "Starting paths are search hints, not evidence of a runtime defect."
+        },
+    }
+    (relay / "product_ticket.json").write_text(json.dumps(ticket), encoding="utf-8")
+    request = {
+        "version": 1,
+        "kind": "step",
+        "request_id": ticket["request_id"],
+        "phase": "G",
+        "base_head": base_head,
+        "product_ticket": "cache/astra-relay/product_ticket.json",
+    }
+
+    result = gate_step_relay_dispatch(repo, request, tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] is False
+    assert payload["worker_calls"] == 0
+    assert payload["astra_calls"] == 0
+    assert "allowed_edit_paths" in payload["error"]
+    assert "test_targets" in payload["error"]
+    assert not (repo / "cache" / "astra-tickets" / f"{ticket['request_id']}.json").exists()
+
+
+def test_step_relay_rejects_test_target_missing_from_step_sandbox(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    relay = repo / "cache" / "astra-relay"
+    relay.mkdir(parents=True)
+    base_head = git(repo, "rev-parse", "HEAD")
+    ticket = {
+        "version": 1,
+        "request_id": "phase-g-missing-oracle-001",
+        "phase": "G",
+        "base_head": base_head,
+        "objective": "Fix one reproduced runtime blocker.",
+        "allowed_edit_paths": ["octopus/runtime.py"],
+        "test_targets": ["tests/test_runtime_missing.py::test_startup"],
+    }
+    (relay / "product_ticket.json").write_text(json.dumps(ticket), encoding="utf-8")
+    request = {
+        "version": 1,
+        "kind": "step",
+        "request_id": ticket["request_id"],
+        "phase": "G",
+        "base_head": base_head,
+        "product_ticket": "cache/astra-relay/product_ticket.json",
+    }
+
+    result = gate_step_relay_dispatch(repo, request, tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] is False
+    assert payload["worker_calls"] == 0
+    assert payload["astra_calls"] == 0
+    assert "not available in the Step sandbox" in payload["error"]
 
 
 def test_bounded_json_writer_uses_utf8_without_bom(tmp_path: Path):
@@ -287,6 +412,45 @@ def test_step_relay_rejects_product_ticket_inconsistent_with_request(tmp_path: P
         assert result.returncode != 0
         assert f"Product ticket {field} does not match relay request" in result.stderr
         assert not normalized.exists()
+
+
+def test_step_relay_rejects_product_ticket_not_based_on_current_head(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    stale_head = git(repo, "rev-parse", "HEAD")
+    test_target = repo / "tests" / "test_runtime.py"
+    test_target.parent.mkdir()
+    test_target.write_text("def test_runtime():\n    assert True\n", encoding="utf-8")
+    git(repo, "add", "tests/test_runtime.py")
+    git(repo, "commit", "-m", "advance constructor head")
+    relay = repo / "cache" / "astra-relay"
+    relay.mkdir(parents=True)
+    ticket = {
+        "version": 1,
+        "request_id": "stale-head-001",
+        "phase": "G",
+        "base_head": stale_head,
+        "objective": "Fix one reproduced runtime blocker.",
+        "allowed_edit_paths": ["octopus/runtime.py"],
+        "test_targets": ["tests/test_runtime.py"],
+    }
+    (relay / "product_ticket.json").write_text(json.dumps(ticket), encoding="utf-8")
+    request = {
+        "version": 1,
+        "kind": "step",
+        "request_id": ticket["request_id"],
+        "phase": "G",
+        "base_head": stale_head,
+        "product_ticket": "cache/astra-relay/product_ticket.json",
+    }
+
+    result = gate_step_relay_dispatch(repo, request, tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] is False
+    assert payload["worker_calls"] == 0
+    assert payload["astra_calls"] == 0
+    assert "base_head must match the current constructor HEAD" in payload["error"]
 
 
 def test_step_relay_rejects_missing_ticket_or_plan(tmp_path: Path):
@@ -630,6 +794,9 @@ def test_astra_prompt_forbids_general_exploration_and_routes_mechanical_work_ear
     assert "As soon as files, expected behavior, oracle/tests and limits can be stated" in launcher
     assert "then end the call immediately" in launcher
     assert "After publishing any Step, checkpoint or host-validation request" in launcher
+    assert "discovery_hints and read_paths are read-only discovery inputs" in launcher
+    assert "publish a second mechanical product_ticket" in launcher
+    assert "Use host-provided runtime paths, symbols, likely tests" not in launcher
 
 
 def test_context_manifest_marks_unchanged_documents(tmp_path: Path):
@@ -712,10 +879,12 @@ $packet=Get-HostPreparation
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout)
     assert payload["chars"] <= 4200
-    assert "octopus/sample_engine.py" in payload["packet"]["runtime_paths"]
+    assert "octopus/sample_engine.py" in payload["packet"]["read_paths"]
     assert any("class SampleEngine" in item for item in payload["packet"]["symbols_and_entrypoints"])
-    assert "tests/test_sample_engine.py" in payload["packet"]["likely_tests"]
-    assert len(payload["packet"]["targeted_searches"][0]["matches"]) <= 2
+    assert "tests/test_sample_engine.py" in payload["packet"]["discovery_hints"]["likely_tests"]
+    assert payload["packet"]["allowed_edit_paths"] == []
+    assert payload["packet"]["test_targets"] == []
+    assert len(payload["packet"]["discovery_hints"]["targeted_searches"][0]["matches"]) <= 2
 
 
 def test_call_2_uses_only_compact_review_packet(tmp_path: Path):
