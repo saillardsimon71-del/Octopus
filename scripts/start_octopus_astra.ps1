@@ -68,7 +68,8 @@ function Get-AstraContinuation([string]$LastMessagePath) {
     if (-not (Test-Path -LiteralPath $LastMessagePath -PathType Leaf)) { return "" }
     foreach ($line in Get-Content -LiteralPath $LastMessagePath) {
         if ($line -match '^ASTRA_CONTINUE:\s*(\S.*)$') {
-            return Limit-Text $Matches[1] 600
+            if ($Matches[1].Length -gt 600) { throw 'ASTRA_CONTINUE exceeds its 600 character limit.' }
+            return $Matches[1]
         }
     }
     return ""
@@ -380,6 +381,8 @@ $lastValidationSummary = $null
 $lastWorkerSummary = $null
 $reviewContext = $null
 $lastTurn = $null
+$hostDiscoveryResult = $null
+$hostDiscoveryCache = @{}
 $previousLifetimeTotals = @{}
 if (Test-Path -LiteralPath $usagePath -PathType Leaf) {
     $previousUsage = Get-Content -LiteralPath $usagePath -Raw | ConvertFrom-Json
@@ -584,6 +587,128 @@ function Find-AssociatedTests([string[]]$SourcePaths, [string[]]$SearchPatterns)
         }
     }
     return @($found | Select-Object -First 16 | ForEach-Object { Limit-Text $_ 240 })
+}
+
+function Invoke-HostDiscovery([string]$Continuation) {
+    if (-not $Continuation.StartsWith('HOST_DISCOVERY_JSON ')) {
+        if ($Continuation -match '(?i)\bHOST PREPARE\b|\bhost-side\b') {
+            $modules = @([regex]::Matches($Continuation, '(?<![A-Za-z0-9_.])octopus(?:\.[A-Za-z_][A-Za-z0-9_]*){1,4}(?![A-Za-z0-9_.])') |
+                ForEach-Object { $_.Value } | Sort-Object -Unique)
+            $hasNarrowScope = $modules.Count -eq 1 -and $Continuation.Length -le 350 -and
+                $Continuation -notmatch '(?i)\b(tous?|tout|all|entire|whole|recursive|recursif|all_files)\b' -and
+                $Continuation -match ('(?i)\bpour\s+' + [regex]::Escape($modules[0]) + '\s+et\s+ses\s+tests\.?$')
+            if ($hasNarrowScope) {
+                $requestJson = [ordered]@{ version = 1; kind = 'module_tests'; module = $modules[0] } | ConvertTo-Json -Compress
+                return Invoke-HostDiscovery -Continuation ('HOST_DISCOVERY_JSON ' + $requestJson)
+            }
+            throw 'Host discovery rejected: free-text HOST PREPARE request must name one octopus module and its tests with narrow scope.'
+        }
+        return $null
+    }
+    try { $request = $Continuation.Substring(20) | ConvertFrom-Json -ErrorAction Stop } catch {
+        throw 'Host discovery rejected: invalid JSON request.'
+    }
+    if ($request -isnot [pscustomobject]) {
+        throw 'Host discovery rejected: request must be a JSON object.'
+    }
+    $kind = [string]$request.kind
+    $fields = if ($kind -ceq 'symbol_tests') { @('version', 'kind', 'module', 'symbol') } else { @('version', 'kind', 'module') }
+    if ($kind -cnotin @('symbol_tests', 'module_tests') -or
+        @($request.PSObject.Properties.Name | Where-Object { $_ -notin $fields }).Count -or
+        @($fields | Where-Object { $_ -notin $request.PSObject.Properties.Name }).Count -or
+        $request.version -is [string] -or [string]$request.version -cne '1' -or
+        [string]$request.module -cnotmatch '^octopus(?:\.[A-Za-z_][A-Za-z0-9_]*){1,4}$' -or
+        ($kind -ceq 'symbol_tests' -and [string]$request.symbol -cnotmatch '^[A-Za-z_][A-Za-z0-9_]{0,79}$')) {
+        throw 'Host discovery rejected: only one exact octopus module_tests or symbol_tests lookup is authorized.'
+    }
+    $module = [string]$request.module
+    $symbol = [string]$request.symbol
+    $source = $module.Replace('.', '/') + '.py'
+    $sourcePath = Join-Path $repo $source
+    if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+        throw "Host discovery rejected: module does not exist: $module"
+    }
+    $sourceItem = Get-Item -LiteralPath $sourcePath
+    if ($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw "Host discovery rejected: linked module is outside the authorized lookup: $module"
+    }
+    if ($sourceItem.Length -gt 102400) {
+        throw "Host discovery rejected: module exceeds the 100 KiB read limit: $module"
+    }
+    if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
+        throw 'Host discovery rejected: rg is required for bounded test lookup.'
+    }
+    $head = (git rev-parse HEAD | Out-String).Trim()
+    $key = "$head|$kind|$module|$symbol"
+    if ($script:hostDiscoveryCache.ContainsKey($key)) {
+        $cached = $script:hostDiscoveryCache[$key]
+        $result = [ordered]@{}
+        foreach ($field in $cached.Keys) { $result[$field] = $cached[$field] }
+        $result.cached = $true
+        return $result
+    }
+    if ($kind -ceq 'symbol_tests') {
+        $pattern = '^\s*(?:(?:async\s+)?def\s+|class\s+)?' + $symbol + '\b(?:\s*=|\s*\(|\s*:)'
+        $match = Select-String -LiteralPath $sourcePath -Pattern $pattern -List -Context 0,8
+        if (-not $match) { throw "Host discovery rejected: symbol not found: $module.$symbol" }
+        $excerpt = @($match.Line) + @($match.Context.PostContext)
+        $excerpt = Limit-Text (($excerpt | Select-Object -First 9) -join "`n") 1600
+    } else {
+        $symbols = @(& rg --line-number --no-heading --max-count 12 -- '^(?:(?:async\s+)?def\s+|class\s+|[A-Z][A-Z0-9_]*\s*=)' $source 2>$null |
+            Select-Object -First 12 | ForEach-Object { Limit-Text $_ 180 })
+        if (-not $symbols.Count) { throw "Host discovery rejected: no top-level symbols found: $module" }
+    }
+    $tests = New-Object System.Collections.Generic.List[string]
+    if (Test-Path -LiteralPath (Join-Path $repo 'tests') -PathType Container) {
+        foreach ($literal in @($symbol, $module, [System.IO.Path]::GetFileNameWithoutExtension($source)) | Where-Object { $_ } | Select-Object -Unique) {
+            foreach ($test in @(& rg --files-with-matches --fixed-strings --glob 'test_*.py' --glob '!test_astra_constructor.py' -- $literal tests 2>$null | Select-Object -First 6)) {
+                $path = ([string]$test).Replace('\', '/')
+                if ($path -match '^tests/[A-Za-z0-9_./-]+\.py$' -and -not $tests.Contains($path)) {
+                    [void]$tests.Add($path)
+                }
+            }
+        }
+    }
+    $testExcerpts = @()
+    $literals = @($symbol, $module, [System.IO.Path]::GetFileNameWithoutExtension($source) | Where-Object { $_ })
+    foreach ($test in @($tests | Select-Object -First 2)) {
+        $testPath = Join-Path $repo $test
+        $testItem = Get-Item -LiteralPath $testPath
+        if ($testItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint -or $testItem.Length -gt 102400) { continue }
+        $testMatch = Select-String -LiteralPath $testPath -SimpleMatch -Pattern $literals -List -Context 0,4
+        if ($testMatch) {
+            $lines = @($testMatch.Line) + @($testMatch.Context.PostContext)
+            $testExcerpts += [ordered]@{
+                path = $test
+                line = [int]$testMatch.LineNumber
+                excerpt = Limit-Text (($lines | Select-Object -First 5) -join "`n") 600
+            }
+        }
+    }
+    $result = [ordered]@{
+        kind = $kind
+        module = $module
+        source = $source
+        likely_tests = @($tests | Select-Object -First 8)
+        test_excerpts = $testExcerpts
+        test_evidence = 'Existing tests with a literal module or symbol reference; excerpts are discovery only, not qualified pytest targets.'
+        allowed_edit_paths = @()
+        test_targets = @()
+        cached = $false
+    }
+    if ($kind -ceq 'symbol_tests') {
+        $result.symbol = $symbol
+        $result.line = [int]$match.LineNumber
+        $result.excerpt = $excerpt
+    } else {
+        $result.symbols = $symbols
+    }
+    $resultLength = ($result | ConvertTo-Json -Depth 10).Length
+    if ($resultLength -gt $MaxHostPrepareChars) {
+        throw "Host discovery rejected: result exceeds the $MaxHostPrepareChars character limit: $resultLength"
+    }
+    $script:hostDiscoveryCache[$key] = $result
+    return $result
 }
 
 function Get-HostPreparation([string[]]$ChangedFiles = @()) {
@@ -982,6 +1107,7 @@ function Write-AstraContext([string]$TaskPrompt) {
             changed_files = $changedFiles
             blocking_issue = $handoff.blocked
         }
+        if ($script:hostDiscoveryResult) { $snapshot.host_discovery = $script:hostDiscoveryResult }
     } else {
         $hostPreparation = Get-HostPreparation -ChangedFiles $changedFiles
         $snapshot = [ordered]@{
@@ -1232,7 +1358,7 @@ After exact edit paths and existing sandbox-compatible pytest targets are known,
 As soon as files, expected behavior, oracle/tests and limits can be stated, publish the bounded product_ticket and cache/astra-relay/request.json, then end the call immediately. Do not inspect implementation details that Step can resolve mechanically.
 For tested direct changes, publish cache/astra-relay/checkpoint.json version 2 with request_id, base_head, message and exact changed paths, then end the call. For a qualified bounded Step task, publish one product_ticket and cache/astra-relay/request.json from a clean tree, then end the call.
 Do not launch Step, poll, wait, run full pytest or write Git metadata. After publishing any Step, checkpoint or host-validation request, perform no further inspection or command. A follow-up is a fresh ephemeral call. Stop after the requested boundary.
-If no Step, checkpoint or host-validation request was published and one more bounded discovery is required, end the final message with one line `ASTRA_CONTINUE: <next bounded action>`. Do not emit this marker when the phase work is complete or blocked on user input.
+If no Step, checkpoint or host-validation request was published and one more bounded discovery is required, end the final message with one line `ASTRA_CONTINUE: <next bounded action>`. For host-side discovery use `ASTRA_CONTINUE: HOST_DISCOVERY_JSON {"version":1,"kind":"module_tests","module":"octopus.builtin_handlers"}` or `ASTRA_CONTINUE: HOST_DISCOVERY_JSON {"version":1,"kind":"symbol_tests","module":"octopus.businesses","symbol":"ENGINE_HANDLERS"}` with the exact module or symbol needed. The host returns only bounded facts and candidate tests; it does not infer expected behavior, allowed edit paths or test targets. Do not emit this marker when the phase work is complete or blocked on user input.
 "@
 
 function New-AstraTaskPrompt([string]$Task) {
@@ -1362,6 +1488,7 @@ while ($true) {
             break
         }
     }
+    $script:hostDiscoveryResult = if ($nextReason -eq 'bounded continuation') { Invoke-HostDiscovery -Continuation $continuation } else { $null }
     $preparedPrompt = Write-AstraContext -TaskPrompt $nextPrompt
     $turn = Invoke-AstraTurn -Prompt $preparedPrompt -Reason $nextReason
     $lastTurn = $turn

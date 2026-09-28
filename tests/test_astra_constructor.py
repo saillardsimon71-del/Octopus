@@ -967,13 +967,18 @@ $packet=Get-HostPreparation
 
 
 @pytest.mark.parametrize(
-    ("continuations", "max_relay_cycles", "expected_calls", "expected_status", "expected_relays", "step_on_second"),
+    ("continuations", "max_relay_cycles", "expected_calls", "expected_status", "expected_relays", "step_on_second", "host_discovery", "terminal"),
     [
-        (1, 0, 2, "completed", 0, False),
-        (2, 1, 3, "completed", 1, False),
-        (2, 0, 2, "active", 0, False),
-        (4, 1, 4, "active", 1, False),
-        (1, 1, 3, "completed", 1, True),
+        (1, 0, 2, "completed", 0, False, "", "STABLE"),
+        (2, 1, 3, "completed", 1, False, "", "STABLE"),
+        (2, 0, 2, "active", 0, False, "", "STABLE"),
+        (4, 1, 4, "active", 1, False, "", "STABLE"),
+        (1, 1, 3, "completed", 1, True, "", "STABLE"),
+        (2, 1, 3, "completed", 1, False, "second", "STABLE"),
+        (2, 1, 3, "completed", 1, False, "repeat", "STABLE"),
+        (2, 1, 3, "completed", 1, False, "module", "STABLE"),
+        (2, 1, 3, "completed", 1, False, "legacy", "STABLE"),
+        (1, 1, 2, "completed", 0, False, "", "BLOCKED"),
     ],
 )
 def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(
@@ -984,6 +989,8 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(
     expected_status: str,
     expected_relays: int,
     step_on_second: bool,
+    host_discovery: str,
+    terminal: str,
 ):
     repo = init_repo(tmp_path)
     (repo / ".gitignore").write_text("cache/\n__pycache__/\n*.pyc\n", encoding="utf-8")
@@ -1022,6 +1029,13 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(
         "    return 0\n",
         encoding="utf-8",
     )
+    if host_discovery:
+        (package / "builtin_handlers.py").write_text(
+            "def cost_report(ctx):\n    return ctx\n", encoding="utf-8"
+        )
+        (package / "businesses.py").write_text(
+            'ENGINE_HANDLERS = ("octopus.builtin_handlers",)\n', encoding="utf-8"
+        )
     tests = repo / "tests"
     tests.mkdir()
     (tests / "test_tasks_worker.py").write_text(
@@ -1029,6 +1043,14 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(
         "    assert True\n",
         encoding="utf-8",
     )
+    if host_discovery:
+        (tests / "test_builtin_handlers.py").write_text(
+            "from octopus import builtin_handlers\n"
+            "from octopus.businesses import ENGINE_HANDLERS\n"
+            "def test_engine_handlers():\n"
+            "    assert ENGINE_HANDLERS and builtin_handlers.cost_report(1) == 1\n",
+            encoding="utf-8",
+        )
     scripts = repo / "scripts"
     scripts.mkdir()
     for name in (
@@ -1095,9 +1117,18 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(
         "$request=Join-Path $env:FAKE_REPO 'cache/astra-relay/request.json';"
         "[IO.File]::WriteAllText($request,'{\"version\":1,\"request_id\":\"step-at-turn-limit\",\"plan_path\":\"product.txt\"}');"
         "'Step request published.'"
+        "}elseif($env:FAKE_HOST_DISCOVERY -and ($count -eq 2 -or ($count -eq 1 -and $env:FAKE_HOST_DISCOVERY -eq 'repeat'))){"
+        "if($env:FAKE_HOST_DISCOVERY -eq 'legacy'){"
+        "'ASTRA_CONTINUE: Faire préciser par HOST PREPARE le comportement attendu et les entrées de découverte ciblées pour octopus.builtin_handlers et ses tests.'"
+        "}else{"
+        "$kind=if($env:FAKE_HOST_DISCOVERY -eq 'module'){'module_tests'}else{'symbol_tests'};"
+        "$target=if($kind -eq 'module_tests'){'octopus.builtin_handlers'}else{'octopus.businesses'};"
+        "$suffix=if($kind -eq 'module_tests'){''}else{',\"symbol\":\"ENGINE_HANDLERS\"'};"
+        "'ASTRA_CONTINUE: HOST_DISCOVERY_JSON {\"version\":1,\"kind\":\"' + $kind + '\",\"module\":\"' + $target + '\"' + $suffix + '}'"
+        "}"
         f"}}elseif($count -le {continuations}){{"
         "\"No relay boundary produced.`nASTRA_CONTINUE: Inspect worker execution and exact tests.\""
-        "}else{'STABLE'}\n"
+        "}else{$env:FAKE_TERMINAL}\n"
         "[IO.File]::WriteAllText([string]$args[$index+1],$message)\n"
         "Write-Output ('{\"type\":\"thread.started\",\"thread_id\":\"thread-' + $count + '\"}')\n"
         "Write-Output '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":2,\"cached_input_tokens\":0,\"output_tokens\":1,\"reasoning_output_tokens\":0}}'\n"
@@ -1109,7 +1140,10 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(
     env = os.environ.copy()
     env["LOCALAPPDATA"] = str(local_app_data)
     env["FAKE_CODEX_STATE"] = str(fake_state)
+    env["FAKE_TERMINAL"] = terminal
     env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
+    if host_discovery:
+        env["FAKE_HOST_DISCOVERY"] = host_discovery
     if step_on_second:
         env["FAKE_STEP_RECEIPT"] = str(tmp_path / "worker-receipt.json")
         env["FAKE_REPO"] = str(repo)
@@ -1145,7 +1179,11 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(
     assert (fake_state / "count.txt").read_text(encoding="utf-8") == str(expected_calls)
     second_prompt = (fake_state / "prompt-2.txt").read_text(encoding="utf-8")
     assert "HOST_CONTINUATION_PACKET_JSON" in second_prompt
-    assert "Inspect worker execution and exact tests." in second_prompt
+    if host_discovery == "repeat":
+        second_packet = json.loads(second_prompt.split("HOST_CONTINUATION_PACKET_JSON\n", 1)[1])
+        assert second_packet["host_discovery"]["cached"] is False
+    else:
+        assert "Inspect worker execution and exact tests." in second_prompt
     assert "HOST_SNAPSHOT_JSON" not in second_prompt
     assert "CONTEXT_MANIFEST_JSON" not in second_prompt
     session = json.loads((repo / "cache" / "astra-relay" / "session.json").read_text(encoding="utf-8"))
@@ -1159,7 +1197,24 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(
             assert "product.txt" in third_prompt
         else:
             assert "HOST_CONTINUATION_PACKET_JSON" in third_prompt
-            assert "Inspect worker execution and exact tests." in third_prompt
+            if host_discovery:
+                packet = json.loads(third_prompt.split("HOST_CONTINUATION_PACKET_JSON\n", 1)[1])
+                discovery = packet["host_discovery"]
+                if host_discovery in ("module", "legacy"):
+                    assert discovery["module"] == "octopus.builtin_handlers"
+                    assert any("def cost_report" in entry for entry in discovery["symbols"])
+                else:
+                    assert discovery["module"] == "octopus.businesses"
+                    assert discovery["symbol"] == "ENGINE_HANDLERS"
+                    assert "ENGINE_HANDLERS =" in discovery["excerpt"]
+                assert "tests/test_builtin_handlers.py" in discovery["likely_tests"]
+                assert any("assert ENGINE_HANDLERS" in item["excerpt"] for item in discovery["test_excerpts"])
+                assert discovery["allowed_edit_paths"] == []
+                assert discovery["test_targets"] == []
+                assert discovery["cached"] is (host_discovery == "repeat")
+                assert len(third_prompt) < 8000
+            else:
+                assert "Inspect worker execution and exact tests." in third_prompt
         assert "HOST_SNAPSHOT_JSON" not in third_prompt
         assert "CONTEXT_MANIFEST_JSON" not in third_prompt
         assert "MINIMAL_HANDOFF_JSON" not in third_prompt
@@ -1172,6 +1227,80 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(
     if expected_status == "active":
         assert "Relay cycle budget reached" in result.stdout
     assert not (fake_state / f"prompt-{expected_calls + 1}.txt").exists()
+
+
+@pytest.mark.parametrize("discovery_request", [
+    'HOST_DISCOVERY_JSON {"version":1,"kind":"symbol_tests","module":"octopus...secrets","symbol":"ENGINE_HANDLERS"}',
+    'HOST_DISCOVERY_JSON {"version":1,"kind":"all_files","module":"octopus.builtin_handlers","symbol":"ENGINE_HANDLERS"}',
+    'HOST_DISCOVERY_JSON {"version":1,"kind":"symbol_tests","module":"octopus.builtin_handlers","symbol":"ENGINE_HANDLERS","limit":99999}',
+    'Faire préciser par HOST PREPARE octopus.businesses et octopus.builtin_handlers.',
+    'Faire préciser par HOST PREPARE tous les fichiers du dépôt.',
+    'Faire préciser par HOST PREPARE tous les fichiers pour octopus.builtin_handlers et ses tests.',
+])
+def test_host_discovery_rejects_unsafe_or_unbounded_request(tmp_path: Path, discovery_request: str):
+    repo = init_repo(tmp_path)
+    package = repo / "octopus"
+    package.mkdir()
+    (package / "builtin_handlers.py").write_text("def cost_report(ctx):\n    return ctx\n", encoding="utf-8")
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    runner = tmp_path / "reject-host-discovery.ps1"
+    runner.write_text(
+        f"""
+$tokens=$null;$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
+if($errors.Count){{throw ($errors|ForEach-Object Message)}}
+foreach($name in @('Limit-Text','Invoke-HostDiscovery')){{
+  $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
+  if(-not $fn){{throw "$name is missing"}}
+  Invoke-Expression $fn.Extent.Text
+}}
+$repo='{repo}';$script:hostDiscoveryCache=@{{}};$MaxHostPrepareChars=4200
+try {{
+  Invoke-HostDiscovery -Continuation '{discovery_request}' | Out-Null
+  throw 'unsafe request was accepted'
+}} catch {{
+  if($_.Exception.Message -eq 'unsafe request was accepted'){{throw}}
+  Write-Output $_.Exception.Message
+}}
+""",
+        encoding="utf-8",
+    )
+    result = run(POWERSHELL, "-NoProfile", "-File", str(runner), cwd=repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Host discovery rejected" in result.stdout
+
+
+def test_host_discovery_reads_actual_builtin_handlers_within_budget(tmp_path: Path):
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    runner = tmp_path / "actual-host-discovery.ps1"
+    runner.write_text(
+        f"""
+$tokens=$null;$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
+if($errors.Count){{throw ($errors|ForEach-Object Message)}}
+foreach($name in @('Limit-Text','Invoke-HostDiscovery')){{
+  $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
+  Invoke-Expression $fn.Extent.Text
+}}
+$repo='{ROOT}';$script:hostDiscoveryCache=@{{}};$MaxHostPrepareChars=4200
+$packet=Invoke-HostDiscovery -Continuation 'HOST_DISCOVERY_JSON {{"version":1,"kind":"module_tests","module":"octopus.builtin_handlers"}}'
+function rg {{throw 'discovery search was repeated'}}
+$repeat=Invoke-HostDiscovery -Continuation 'HOST_DISCOVERY_JSON {{"version":1,"kind":"module_tests","module":"octopus.builtin_handlers"}}'
+@{{packet=$packet;repeat=$repeat;chars=($packet|ConvertTo-Json -Depth 10).Length}}|ConvertTo-Json -Depth 20
+""",
+        encoding="utf-8",
+    )
+    result = run(POWERSHELL, "-NoProfile", "-File", str(runner))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    discovery = payload["packet"]
+    assert payload["chars"] <= 4200
+    assert any("def cost_report" in item for item in discovery["symbols"])
+    assert "tests/test_businesses.py" in discovery["likely_tests"]
+    assert "tests/test_astra_constructor.py" not in discovery["likely_tests"]
+    assert discovery["allowed_edit_paths"] == discovery["test_targets"] == []
+    assert payload["repeat"]["cached"] is True
+    assert payload["repeat"]["symbols"] == discovery["symbols"]
 
 
 def test_call_2_uses_only_compact_review_packet(tmp_path: Path):
