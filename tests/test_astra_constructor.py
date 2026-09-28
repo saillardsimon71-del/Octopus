@@ -977,6 +977,7 @@ $packet=Get-HostPreparation
         (2, 1, 3, "completed", 1, False, "second", "STABLE"),
         (2, 1, 3, "completed", 1, False, "repeat", "STABLE"),
         (2, 1, 3, "completed", 1, False, "module", "STABLE"),
+        (2, 1, 3, "completed", 1, False, "handler", "STABLE"),
         (2, 1, 3, "completed", 1, False, "legacy", "STABLE"),
         (1, 1, 2, "completed", 0, False, "", "BLOCKED"),
     ],
@@ -1033,6 +1034,11 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(
         (package / "builtin_handlers.py").write_text(
             "def cost_report(ctx):\n    return ctx\n", encoding="utf-8"
         )
+        if host_discovery == "handler":
+            (package / "agent_handlers.py").write_text(
+                '@handler("agent.react_step")\ndef react_step(ctx):\n    return ctx\n',
+                encoding="utf-8",
+            )
         (package / "businesses.py").write_text(
             'ENGINE_HANDLERS = ("octopus.builtin_handlers",)\n', encoding="utf-8"
         )
@@ -1051,6 +1057,13 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(
             "    assert ENGINE_HANDLERS and builtin_handlers.cost_report(1) == 1\n",
             encoding="utf-8",
         )
+        if host_discovery == "handler":
+            (tests / "test_agent_handlers.py").write_text(
+                'from octopus import agent_handlers\n'
+                'def test_react_step():\n'
+                '    assert "agent.react_step" and agent_handlers.react_step(1) == 1\n',
+                encoding="utf-8",
+            )
     scripts = repo / "scripts"
     scripts.mkdir()
     for name in (
@@ -1121,10 +1134,11 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(
         "if($env:FAKE_HOST_DISCOVERY -eq 'legacy'){"
         "'ASTRA_CONTINUE: Faire préciser par HOST PREPARE le comportement attendu et les entrées de découverte ciblées pour octopus.builtin_handlers et ses tests.'"
         "}else{"
-        "$kind=if($env:FAKE_HOST_DISCOVERY -eq 'module'){'module_tests'}else{'symbol_tests'};"
+        "$kind=if($env:FAKE_HOST_DISCOVERY -eq 'module'){'module_tests'}elseif($env:FAKE_HOST_DISCOVERY -eq 'handler'){'handler_tests'}else{'symbol_tests'};"
         "$target=if($kind -eq 'module_tests'){'octopus.builtin_handlers'}else{'octopus.businesses'};"
         "$suffix=if($kind -eq 'module_tests'){''}else{',\"symbol\":\"ENGINE_HANDLERS\"'};"
-        "'ASTRA_CONTINUE: HOST_DISCOVERY_JSON {\"version\":1,\"kind\":\"' + $kind + '\",\"module\":\"' + $target + '\"' + $suffix + '}'"
+        "if($kind -eq 'handler_tests'){'ASTRA_CONTINUE: HOST_DISCOVERY_JSON {\"version\":1,\"kind\":\"handler_tests\",\"handler\":\"agent.react_step\"}'}"
+        "else{'ASTRA_CONTINUE: HOST_DISCOVERY_JSON {\"version\":1,\"kind\":\"' + $kind + '\",\"module\":\"' + $target + '\"' + $suffix + '}'}"
         "}"
         f"}}elseif($count -le {continuations}){{"
         "\"No relay boundary produced.`nASTRA_CONTINUE: Inspect worker execution and exact tests.\""
@@ -1200,15 +1214,25 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(
             if host_discovery:
                 packet = json.loads(third_prompt.split("HOST_CONTINUATION_PACKET_JSON\n", 1)[1])
                 discovery = packet["host_discovery"]
-                if host_discovery in ("module", "legacy"):
+                if host_discovery == "handler":
+                    assert discovery["handler"] == "agent.react_step"
+                    assert discovery["module"] == "octopus.agent_handlers"
+                    assert discovery["source"] == "octopus/agent_handlers.py"
+                    assert discovery["function"] == "react_step"
+                    assert discovery["line"] == 1
+                    assert '@handler("agent.react_step")' in discovery["excerpt"]
+                    assert discovery["ambiguous"] is False
+                    assert "tests/test_agent_handlers.py" in discovery["likely_tests"]
+                elif host_discovery in ("module", "legacy"):
                     assert discovery["module"] == "octopus.builtin_handlers"
                     assert any("def cost_report" in entry for entry in discovery["symbols"])
                 else:
                     assert discovery["module"] == "octopus.businesses"
                     assert discovery["symbol"] == "ENGINE_HANDLERS"
                     assert "ENGINE_HANDLERS =" in discovery["excerpt"]
-                assert "tests/test_builtin_handlers.py" in discovery["likely_tests"]
-                assert any("assert ENGINE_HANDLERS" in item["excerpt"] for item in discovery["test_excerpts"])
+                if host_discovery != "handler":
+                    assert "tests/test_builtin_handlers.py" in discovery["likely_tests"]
+                    assert any("assert ENGINE_HANDLERS" in item["excerpt"] for item in discovery["test_excerpts"])
                 assert discovery["allowed_edit_paths"] == []
                 assert discovery["test_targets"] == []
                 assert discovery["cached"] is (host_discovery == "repeat")
@@ -1233,6 +1257,10 @@ def test_discovery_continuation_uses_remaining_astra_turn_with_compact_handoff(
     'HOST_DISCOVERY_JSON {"version":1,"kind":"symbol_tests","module":"octopus...secrets","symbol":"ENGINE_HANDLERS"}',
     'HOST_DISCOVERY_JSON {"version":1,"kind":"all_files","module":"octopus.builtin_handlers","symbol":"ENGINE_HANDLERS"}',
     'HOST_DISCOVERY_JSON {"version":1,"kind":"symbol_tests","module":"octopus.builtin_handlers","symbol":"ENGINE_HANDLERS","limit":99999}',
+    'HOST_DISCOVERY_JSON {"version":1,"kind":"handler_tests","handler":"agent.*"}',
+    'HOST_DISCOVERY_JSON {"version":1,"kind":"handler_tests","handler":"agent.react_step","module":"octopus.builtin_handlers"}',
+    'HOST_DISCOVERY_JSON {"version":1,"kind":"handler_tests","handler":"../agent.react_step"}',
+    'HOST_DISCOVERY_JSON {"version":1,"kind":"handler_tests","handler":""}',
     'Faire préciser par HOST PREPARE octopus.businesses et octopus.builtin_handlers.',
     'Faire préciser par HOST PREPARE tous les fichiers du dépôt.',
     'Faire préciser par HOST PREPARE tous les fichiers pour octopus.builtin_handlers et ses tests.',
@@ -1301,6 +1329,86 @@ $repeat=Invoke-HostDiscovery -Continuation 'HOST_DISCOVERY_JSON {{"version":1,"k
     assert discovery["allowed_edit_paths"] == discovery["test_targets"] == []
     assert payload["repeat"]["cached"] is True
     assert payload["repeat"]["symbols"] == discovery["symbols"]
+
+
+@pytest.mark.parametrize("case", ["found", "missing", "ambiguous"])
+def test_handler_discovery_is_exact_bounded_and_cached(tmp_path: Path, case: str):
+    repo = init_repo(tmp_path)
+    package = repo / "octopus"
+    package.mkdir()
+    (package / "catalog.py").write_text(
+        'TASK = "agent.react_step"\n', encoding="utf-8"
+    )
+    if case != "missing":
+        (package / "agent_handlers.py").write_text(
+            '@handler("agent.react_step")\n'
+            'def react_step(ctx):\n'
+            '    return ctx\n',
+            encoding="utf-8",
+        )
+    if case == "ambiguous":
+        (package / "other_handlers.py").write_text(
+            "@handler('agent.react_step')\n"
+            "def other_step(ctx):\n"
+            "    return ctx\n",
+            encoding="utf-8",
+        )
+    tests = repo / "tests"
+    tests.mkdir()
+    (tests / "test_agent_handlers.py").write_text(
+        'from octopus import agent_handlers\n'
+        'def test_react_step():\n'
+        '    assert "agent.react_step" and agent_handlers.react_step(1) == 1\n',
+        encoding="utf-8",
+    )
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    runner = tmp_path / "handler-discovery.ps1"
+    runner.write_text(
+        f"""
+$ErrorActionPreference='Stop'
+$tokens=$null;$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
+if($errors.Count){{throw ($errors|ForEach-Object Message)}}
+foreach($name in @('Limit-Text','Invoke-HostDiscovery')){{
+  $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
+  Invoke-Expression $fn.Extent.Text
+}}
+$repo='{repo}';$script:hostDiscoveryCache=@{{}};$MaxHostPrepareChars=4200
+$request='HOST_DISCOVERY_JSON {{"version":1,"kind":"handler_tests","handler":"agent.react_step"}}'
+try {{
+  $packet=Invoke-HostDiscovery -Continuation $request
+  function rg {{throw 'handler discovery search was repeated'}}
+  $repeat=Invoke-HostDiscovery -Continuation $request
+  @{{packet=$packet;repeat=$repeat;chars=($packet|ConvertTo-Json -Depth 10).Length}}|ConvertTo-Json -Depth 20
+}} catch {{
+  @{{error=$_.Exception.Message}}|ConvertTo-Json -Depth 5
+}}
+""",
+        encoding="utf-8",
+    )
+    result = run(POWERSHELL, "-NoProfile", "-File", str(runner), cwd=repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    if case == "missing":
+        assert "handler_not_found: agent.react_step" in payload["error"]
+    elif case == "ambiguous":
+        assert "handler_ambiguous: agent.react_step" in payload["error"]
+        assert "octopus/agent_handlers.py:1" in payload["error"]
+        assert "octopus/other_handlers.py:1" in payload["error"]
+    else:
+        discovery = payload["packet"]
+        assert payload["chars"] <= 4200
+        assert discovery["kind"] == "handler_tests"
+        assert discovery["handler"] == "agent.react_step"
+        assert discovery["module"] == "octopus.agent_handlers"
+        assert discovery["source"] == "octopus/agent_handlers.py"
+        assert discovery["function"] == "react_step"
+        assert discovery["line"] == 1
+        assert discovery["ambiguous"] is False
+        assert "tests/test_agent_handlers.py" in discovery["likely_tests"]
+        assert discovery["allowed_edit_paths"] == discovery["test_targets"] == []
+        assert payload["repeat"]["cached"] is True
+        assert payload["repeat"]["source"] == discovery["source"]
 
 
 def test_call_2_uses_only_compact_review_packet(tmp_path: Path):

@@ -612,34 +612,39 @@ function Invoke-HostDiscovery([string]$Continuation) {
         throw 'Host discovery rejected: request must be a JSON object.'
     }
     $kind = [string]$request.kind
-    $fields = if ($kind -ceq 'symbol_tests') { @('version', 'kind', 'module', 'symbol') } else { @('version', 'kind', 'module') }
-    if ($kind -cnotin @('symbol_tests', 'module_tests') -or
+    $fields = if ($kind -ceq 'handler_tests') { @('version', 'kind', 'handler') } elseif ($kind -ceq 'symbol_tests') { @('version', 'kind', 'module', 'symbol') } else { @('version', 'kind', 'module') }
+    if ($kind -cnotin @('symbol_tests', 'module_tests', 'handler_tests') -or
         @($request.PSObject.Properties.Name | Where-Object { $_ -notin $fields }).Count -or
         @($fields | Where-Object { $_ -notin $request.PSObject.Properties.Name }).Count -or
         $request.version -is [string] -or [string]$request.version -cne '1' -or
-        [string]$request.module -cnotmatch '^octopus(?:\.[A-Za-z_][A-Za-z0-9_]*){1,4}$' -or
+        ($kind -cne 'handler_tests' -and [string]$request.module -cnotmatch '^octopus(?:\.[A-Za-z_][A-Za-z0-9_]*){1,4}$') -or
+        ($kind -ceq 'handler_tests' -and [string]$request.handler -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*){1,4}$') -or
+        ($kind -ceq 'handler_tests' -and ([string]$request.handler).Length -gt 80) -or
         ($kind -ceq 'symbol_tests' -and [string]$request.symbol -cnotmatch '^[A-Za-z_][A-Za-z0-9_]{0,79}$')) {
-        throw 'Host discovery rejected: only one exact octopus module_tests or symbol_tests lookup is authorized.'
+        throw 'Host discovery rejected: only one exact octopus module_tests, symbol_tests or handler_tests lookup is authorized.'
     }
     $module = [string]$request.module
     $symbol = [string]$request.symbol
-    $source = $module.Replace('.', '/') + '.py'
-    $sourcePath = Join-Path $repo $source
-    if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
-        throw "Host discovery rejected: module does not exist: $module"
-    }
-    $sourceItem = Get-Item -LiteralPath $sourcePath
-    if ($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-        throw "Host discovery rejected: linked module is outside the authorized lookup: $module"
-    }
-    if ($sourceItem.Length -gt 102400) {
-        throw "Host discovery rejected: module exceeds the 100 KiB read limit: $module"
+    $handler = [string]$request.handler
+    if ($kind -cne 'handler_tests') {
+        $source = $module.Replace('.', '/') + '.py'
+        $sourcePath = Join-Path $repo $source
+        if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+            throw "Host discovery rejected: module does not exist: $module"
+        }
+        $sourceItem = Get-Item -LiteralPath $sourcePath
+        if ($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            throw "Host discovery rejected: linked module is outside the authorized lookup: $module"
+        }
+        if ($sourceItem.Length -gt 102400) {
+            throw "Host discovery rejected: module exceeds the 100 KiB read limit: $module"
+        }
     }
     if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
         throw 'Host discovery rejected: rg is required for bounded test lookup.'
     }
     $head = (git rev-parse HEAD | Out-String).Trim()
-    $key = "$head|$kind|$module|$symbol"
+    $key = "$head|$kind|$module|$symbol|$handler"
     if ($script:hostDiscoveryCache.ContainsKey($key)) {
         $cached = $script:hostDiscoveryCache[$key]
         $result = [ordered]@{}
@@ -647,7 +652,42 @@ function Invoke-HostDiscovery([string]$Continuation) {
         $result.cached = $true
         return $result
     }
-    if ($kind -ceq 'symbol_tests') {
+    if ($kind -ceq 'handler_tests') {
+        $registrations = New-Object System.Collections.Generic.List[object]
+        $candidatePaths = @(& rg --files-with-matches --fixed-strings --glob '*.py' -- $handler octopus 2>$null | Select-Object -First 65)
+        if ($candidatePaths.Count -gt 64) { throw "Host discovery rejected: handler_ambiguous: too many candidate files for $handler" }
+        $pattern = '^\s*@handler\(\s*(["''])' + [regex]::Escape($handler) + '\1\s*(?:,|\))'
+        foreach ($path in $candidatePaths) {
+            $normalized = ([string]$path).Replace('\', '/')
+            if ($normalized -cnotmatch '^octopus/(?:[A-Za-z_][A-Za-z0-9_]*/)*[A-Za-z_][A-Za-z0-9_]*\.py$') { continue }
+            $item = Get-Item -LiteralPath (Join-Path $repo $normalized)
+            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint -or $item.Length -gt 102400) {
+                throw "Host discovery rejected: handler source is linked or exceeds the 100 KiB read limit: $normalized"
+            }
+            foreach ($hit in @(Select-String -LiteralPath (Join-Path $repo $normalized) -Pattern $pattern -Context 0,5)) {
+                $function = ''
+                foreach ($line in @($hit.Context.PostContext)) {
+                    if ($line -match '^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(') { $function = $Matches[1]; break }
+                }
+                $registrations.Add([ordered]@{
+                    source = $normalized
+                    module = ($normalized.Substring(0, $normalized.Length - 3)).Replace('/', '.')
+                    function = $function
+                    line = [int]$hit.LineNumber
+                    excerpt = Limit-Text ((@($hit.Line) + @($hit.Context.PostContext) | Select-Object -First 6) -join "`n") 600
+                }) | Out-Null
+            }
+        }
+        if (-not $registrations.Count) { throw "Host discovery rejected: handler_not_found: $handler" }
+        if ($registrations.Count -gt 1) {
+            $locations = @($registrations | Select-Object -First 8 | ForEach-Object { "$($_.source):$($_.line)" }) -join ', '
+            throw "Host discovery rejected: handler_ambiguous: $handler at $locations"
+        }
+        $owner = $registrations[0]
+        $module = $owner.module
+        $source = $owner.source
+        $symbol = $handler
+    } elseif ($kind -ceq 'symbol_tests') {
         $pattern = '^\s*(?:(?:async\s+)?def\s+|class\s+)?' + $symbol + '\b(?:\s*=|\s*\(|\s*:)'
         $match = Select-String -LiteralPath $sourcePath -Pattern $pattern -List -Context 0,8
         if (-not $match) { throw "Host discovery rejected: symbol not found: $module.$symbol" }
@@ -691,12 +731,18 @@ function Invoke-HostDiscovery([string]$Continuation) {
         source = $source
         likely_tests = @($tests | Select-Object -First 8)
         test_excerpts = $testExcerpts
-        test_evidence = 'Existing tests with a literal module or symbol reference; excerpts are discovery only, not qualified pytest targets.'
+        test_evidence = 'Existing tests with a literal module, symbol or handler reference; excerpts are discovery only, not qualified pytest targets.'
         allowed_edit_paths = @()
         test_targets = @()
         cached = $false
     }
-    if ($kind -ceq 'symbol_tests') {
+    if ($kind -ceq 'handler_tests') {
+        $result.handler = $handler
+        $result.function = $owner.function
+        $result.line = $owner.line
+        $result.excerpt = $owner.excerpt
+        $result.ambiguous = $false
+    } elseif ($kind -ceq 'symbol_tests') {
         $result.symbol = $symbol
         $result.line = [int]$match.LineNumber
         $result.excerpt = $excerpt
@@ -1358,7 +1404,7 @@ After exact edit paths and existing sandbox-compatible pytest targets are known,
 As soon as files, expected behavior, oracle/tests and limits can be stated, publish the bounded product_ticket and cache/astra-relay/request.json, then end the call immediately. Do not inspect implementation details that Step can resolve mechanically.
 For tested direct changes, publish cache/astra-relay/checkpoint.json version 2 with request_id, base_head, message and exact changed paths, then end the call. For a qualified bounded Step task, publish one product_ticket and cache/astra-relay/request.json from a clean tree, then end the call.
 Do not launch Step, poll, wait, run full pytest or write Git metadata. After publishing any Step, checkpoint or host-validation request, perform no further inspection or command. A follow-up is a fresh ephemeral call. Stop after the requested boundary.
-If no Step, checkpoint or host-validation request was published and one more bounded discovery is required, end the final message with one line `ASTRA_CONTINUE: <next bounded action>`. For host-side discovery use `ASTRA_CONTINUE: HOST_DISCOVERY_JSON {"version":1,"kind":"module_tests","module":"octopus.builtin_handlers"}` or `ASTRA_CONTINUE: HOST_DISCOVERY_JSON {"version":1,"kind":"symbol_tests","module":"octopus.businesses","symbol":"ENGINE_HANDLERS"}` with the exact module or symbol needed. The host returns only bounded facts and candidate tests; it does not infer expected behavior, allowed edit paths or test targets. Do not emit this marker when the phase work is complete or blocked on user input.
+If no Step, checkpoint or host-validation request was published and one more bounded discovery is required, end the final message with one line `ASTRA_CONTINUE: <next bounded action>`. For host-side discovery use `ASTRA_CONTINUE: HOST_DISCOVERY_JSON {"version":1,"kind":"module_tests","module":"octopus.builtin_handlers"}`, `ASTRA_CONTINUE: HOST_DISCOVERY_JSON {"version":1,"kind":"symbol_tests","module":"octopus.businesses","symbol":"ENGINE_HANDLERS"}`, or `ASTRA_CONTINUE: HOST_DISCOVERY_JSON {"version":1,"kind":"handler_tests","handler":"agent.react_step"}` for one exact module, Python symbol or registered handler type. The host returns only bounded facts and candidate tests; it does not infer expected behavior, allowed edit paths or test targets. Do not emit this marker when the phase work is complete or blocked on user input.
 "@
 
 function New-AstraTaskPrompt([string]$Task) {
