@@ -850,6 +850,10 @@ $first=Write-AstraContext -TaskPrompt 'first';$second=Write-AstraContext -TaskPr
 
 def test_phase_g_host_prepare_contains_runtime_probe_and_relevant_tests_with_hard_bounds(tmp_path: Path):
     repo = init_repo(tmp_path)
+    phase_doc = repo / "docs" / "migrations" / "OPERATIONALIZATION.md"
+    phase_doc.parent.mkdir(parents=True)
+    phase_doc.write_text("# Phase G\n\n## Autonomous runtime evidence - task 79\n"
+                         "Task 79 took 1963.9 s; HTTP 413 repeated.\n\n## Other\nignore me\n", encoding="utf-8")
     package = repo / "octopus"
     package.mkdir()
     (package / "__init__.py").write_text("", encoding="utf-8")
@@ -927,6 +931,7 @@ $packet=Get-HostPreparation
     payload = json.loads(result.stdout)
     assert payload["chars"] <= 4200
     assert payload["packet"]["runtime"]["entrypoint"] == "python -m octopus"
+    assert payload["packet"]["runtime_observation"] == "Task 79 took 1963.9 s; HTTP 413 repeated."
     assert payload["packet"]["runtime"]["subcommands"] == ["doctor", "worker", "strategy"]
     assert payload["packet"]["read_paths"] == ["octopus/__main__.py", "octopus/worker.py"]
     assert any("def main" in item for item in payload["packet"]["symbols_and_entrypoints"])

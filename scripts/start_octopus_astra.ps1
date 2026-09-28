@@ -587,6 +587,14 @@ function Find-AssociatedTests([string[]]$SourcePaths, [string[]]$SearchPatterns)
 
 function Get-HostPreparation([string[]]$ChangedFiles = @()) {
     if ($Phase -eq 'G') {
+        $observation = ''
+        $phaseDocument = Join-Path $repo 'docs/migrations/OPERATIONALIZATION.md'
+        if (Test-Path -LiteralPath $phaseDocument -PathType Leaf) {
+            $documentText = Get-Content -LiteralPath $phaseDocument -Raw
+            if ($documentText -match '(?s)## Autonomous runtime evidence[^\r\n]*\r?\n(.*?)(?=\r?\n## |\z)') {
+                $observation = Limit-Text $Matches[1].Trim() 1100
+            }
+        }
         $runtimePaths = @('octopus/__main__.py', 'octopus/worker.py')
         $subcommands = New-Object System.Collections.Generic.List[string]
         $symbols = New-Object System.Collections.Generic.List[string]
@@ -652,6 +660,7 @@ function Get-HostPreparation([string[]]$ChangedFiles = @()) {
         $testTargets = @()
         if ($blockerReproduced) { $testTargets = @($tests) }
         $packet = [ordered]@{
+            runtime_observation = $observation
             runtime = [ordered]@{
                 entrypoint = 'python -m octopus'
                 subcommands = @($subcommands)
