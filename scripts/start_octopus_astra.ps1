@@ -6,9 +6,9 @@ param(
     [int]$MaxRelayCycles = 6,
     [int]$MaxHandoffChars = 6000,
     [int]$MaxSnapshotChars = 8000,
-    [int]$MaxManifestChars = 6000,
-    [int]$MaxHostPrepareChars = 4200,
     [int]$MaxPreparedContextChars = 30000,
+    [int]$MaxRunMinutes = 180,
+    [int]$MaxRunTokens = 300000,
     [ValidateSet("medium", "high")]
     [string]$Reasoning = "medium",
     [switch]$SkipFetch,
@@ -49,6 +49,15 @@ function Limit-Text([object]$Value, [int]$MaxChars = 500) {
     return $text.Substring(0, $MaxChars) + "..."
 }
 
+function Get-LocalSha256([string]$Path) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+        finally { $stream.Dispose() }
+    } finally { $sha.Dispose() }
+}
+
 function Read-TurnUsage([string]$JsonLog) {
     $usage = $null
     foreach ($line in Get-Content -LiteralPath $JsonLog -ErrorAction Stop) {
@@ -75,6 +84,26 @@ function Get-AstraContinuation([string]$LastMessagePath) {
     return ""
 }
 
+function Get-AstraStatus([string]$LastMessagePath) {
+    if (-not (Test-Path -LiteralPath $LastMessagePath -PathType Leaf)) { return '' }
+    foreach ($line in Get-Content -LiteralPath $LastMessagePath) {
+        if ($line -match '^ASTRA_STATUS:\s*(STABLE|BLOCKED)\s*$') { return $Matches[1] }
+    }
+    return ''
+}
+
+function Get-AstraState([string]$LastMessagePath) {
+    if (-not (Test-Path -LiteralPath $LastMessagePath -PathType Leaf)) { return $null }
+    foreach ($line in Get-Content -LiteralPath $LastMessagePath) {
+        if ($line.StartsWith('ASTRA_STATE_JSON ')) {
+            $json = $line.Substring(17)
+            if ($json.Length -gt 4000) { throw 'ASTRA_STATE_JSON exceeds its 4000 character limit.' }
+            return $json | ConvertFrom-Json -ErrorAction Stop
+        }
+    }
+    return $null
+}
+
 function Resolve-CodexExecutable {
     $official = Join-Path $env:LOCALAPPDATA "Programs\OpenAI\Codex\bin\codex.exe"
     if (Test-Path -LiteralPath $official -PathType Leaf) {
@@ -88,9 +117,7 @@ function Resolve-CodexExecutable {
 function Resolve-StepRelayPlan([object]$Request, [string]$RequestId) {
     $productTicket = [string]$Request.product_ticket
     if (-not $productTicket) {
-        $legacyPlan = [string]$Request.plan_path
-        if (-not $legacyPlan) { throw 'Relay request missing product_ticket or plan_path.' }
-        return $legacyPlan
+        throw 'Relay request requires a bounded product_ticket.'
     }
 
     $productTicketPath = if ([System.IO.Path]::IsPathRooted($productTicket)) {
@@ -142,6 +169,30 @@ function Resolve-StepRelayPlan([object]$Request, [string]$RequestId) {
         if ($normalizedPath.StartsWith('/') -or $pathParts[0].Contains(':') -or @($pathParts | Where-Object { $_ -in @('', '.', '..') }).Count) {
             throw "Product ticket contains an invalid allowed_edit_paths entry: $path"
         }
+        if ($pathParts[0] -in @('.git', '.venv', 'cache', 'data', '.codex')) {
+            throw "Product ticket edit path targets protected repository state: $path"
+        }
+        $resolved = [System.IO.Path]::GetFullPath((Join-Path $repo $normalizedPath))
+        if (-not $resolved.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Product ticket edit path escapes the repository: $path"
+        }
+        $cursor = Split-Path -Parent $resolved
+        while ($cursor.Length -ge $repo.Length) {
+            if (Test-Path -LiteralPath $cursor) {
+                $item = Get-Item -LiteralPath $cursor -Force
+                if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                    throw "Product ticket edit path traverses a link: $path"
+                }
+            }
+            if ($cursor -eq $repo) { break }
+            $cursor = Split-Path -Parent $cursor
+        }
+        if (Test-Path -LiteralPath $resolved) {
+            $item = Get-Item -LiteralPath $resolved -Force
+            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                throw "Product ticket edit path is a link: $path"
+            }
+        }
     }
     foreach ($target in $testTargets) {
         if (-not ($target -is [string]) -or -not $target.Trim()) {
@@ -157,6 +208,15 @@ function Resolve-StepRelayPlan([object]$Request, [string]$RequestId) {
         $resolvedTarget = [System.IO.Path]::GetFullPath((Join-Path $repo $targetPath))
         if (-not $resolvedTarget.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $resolvedTarget -PathType Leaf)) {
             throw "Product ticket test target is not available in the Step sandbox: $target"
+        }
+        $cursor = $resolvedTarget
+        while ($cursor.Length -ge $repo.Length) {
+            $item = Get-Item -LiteralPath $cursor -Force
+            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                throw "Product ticket test target traverses a link: $target"
+            }
+            if ($cursor -eq $repo) { break }
+            $cursor = Split-Path -Parent $cursor
         }
     }
 
@@ -210,6 +270,12 @@ function Resolve-StepRelayPlan([object]$Request, [string]$RequestId) {
         acceptance_criteria = @($ticket.acceptance)
         acceptance_contract = $acceptanceContract
     }
+    if ($workTicket.max_steps -lt 1 -or $workTicket.max_steps -gt 50 -or
+        $workTicket.max_files_changed -lt 1 -or $workTicket.max_files_changed -gt [math]::Min(20, $allowedPaths.Count) -or
+        $workTicket.max_lines_added -lt 1 -or $workTicket.max_lines_added -gt 5000 -or
+        $workTicket.max_lines_deleted -lt 1 -or $workTicket.max_lines_deleted -gt 5000) {
+        throw 'Product ticket exceeds bounded Step work limits.'
+    }
     $normalized = [ordered]@{
         name = [string]$ticket.request_id
         policy = 'product_ticket'
@@ -242,6 +308,7 @@ if ($MaxAstraTurns -lt 1 -or $MaxAstraTurns -gt 2) {
 if ($MaxRelayCycles -lt 0 -or $MaxRelayCycles -gt 20) {
     throw "MaxRelayCycles must be between 0 and 20."
 }
+if ($MaxRunMinutes -lt 1 -or $MaxRunTokens -lt 1) { throw 'Run time and token budgets must be positive.' }
 
 $phaseSpec = switch ($Phase) {
     "B" {
@@ -280,15 +347,6 @@ $phaseSpec = switch ($Phase) {
             mission = "Make OCTOPUS operational through clean, stable runtime entry points without constructor phases or manual PowerShell choreography. Reuse existing runtime boundaries, fix only demonstrated blockers, preserve permissions, economy, and journal guarantees, and do not build the GUI or connect real accounts."
         }
     }
-}
-
-$phaseSearches = switch ($Phase) {
-    "B" { @('video_engine|VideoEngine', 'legacy.{0,20}video', 'video.{0,20}engine') }
-    "C" { @('Agnes|agnes', 'video.{0,20}adapter', 'video.{0,20}provider') }
-    "D" { @('Hermes|hermes', 'tool.?registry|ToolRegistry', 'tool.{0,20}adapter') }
-    "E" { @('Hermes|hermes', 'development\.task', 'GuardedComputeManager') }
-    "F" { @('cold.?start', 'contamination', 'readiness') }
-    "G" { @('entry.?point', 'operational', 'startup|supervisor') }
 }
 
 $setup = Join-Path $repo "scripts\setup_octopus_codex_home.ps1"
@@ -365,7 +423,6 @@ $handoffPath = Join-Path $relayRoot "handoff.json"
 $validationPath = Join-Path $relayRoot "validation.json"
 $usagePath = Join-Path $relayRoot "usage.json"
 $snapshotPath = Join-Path $relayRoot "snapshot.json"
-$contextManifestPath = Join-Path $relayRoot "context-manifest.json"
 $contextMetricsPath = Join-Path $relayRoot "context-metrics.json"
 $baselineStatePath = Join-Path $relayRoot "baseline.json"
 $baselineLogPath = Join-Path $relayRoot "baseline-pytest.log"
@@ -381,8 +438,6 @@ $lastValidationSummary = $null
 $lastWorkerSummary = $null
 $reviewContext = $null
 $lastTurn = $null
-$hostDiscoveryResult = $null
-$hostDiscoveryCache = @{}
 $previousLifetimeTotals = @{}
 if (Test-Path -LiteralPath $usagePath -PathType Leaf) {
     $previousUsage = Get-Content -LiteralPath $usagePath -Raw | ConvertFrom-Json
@@ -550,360 +605,6 @@ function Get-CompactDiffStat([string]$Base = "", [string]$Target = "", [string[]
     return $lines
 }
 
-function Invoke-BoundedRg([string]$Pattern, [string[]]$Roots, [int]$MaxResults = 4) {
-    $searchRoots = @($Roots | Where-Object { Test-Path -LiteralPath (Join-Path $repo $_) })
-    if (-not $searchRoots.Count -or -not (Get-Command rg -ErrorAction SilentlyContinue)) { return @() }
-    $arguments = @(
-        '--line-number', '--no-heading', '--color', 'never', '--smart-case',
-        '--glob', '*.py', '--glob', '*.ps1', '--glob', '*.toml', '--glob', '*.json',
-        '--glob', '!cache/**', '--glob', '!data/**', '--', $Pattern
-    ) + $searchRoots
-    return @(& rg @arguments 2>$null | Select-Object -First $MaxResults | ForEach-Object { Limit-Text $_ 220 })
-}
-
-function Find-AssociatedTests([string[]]$SourcePaths, [string[]]$SearchPatterns) {
-    $testFiles = if ((Test-Path -LiteralPath (Join-Path $repo 'tests')) -and (Get-Command rg -ErrorAction SilentlyContinue)) {
-        @(& rg --files tests --glob '*.py' 2>$null | ForEach-Object { ([string]$_).Replace('\', '/') } | Sort-Object -Unique)
-    } else {
-        @(git ls-files -- tests | Where-Object { $_ -like '*.py' } | Sort-Object -Unique)
-    }
-    if (-not $testFiles.Count) { return @() }
-    $found = New-Object System.Collections.Generic.List[string]
-    foreach ($path in @($SourcePaths)) {
-        if ($path -like 'tests/*' -and $testFiles -contains $path -and -not $found.Contains($path)) { [void]$found.Add($path) }
-        $stem = [System.IO.Path]::GetFileNameWithoutExtension($path)
-        if (-not $stem) { continue }
-        foreach ($test in @($testFiles | Where-Object { $_ -match [regex]::Escape($stem) } | Select-Object -First 4)) {
-            if (-not $found.Contains($test)) { [void]$found.Add($test) }
-        }
-    }
-    if (Get-Command rg -ErrorAction SilentlyContinue) {
-        foreach ($pattern in @($SearchPatterns)) {
-            $matches = @(& rg --files-with-matches --color never --glob '*.py' -- $pattern tests 2>$null | Select-Object -First 4)
-            foreach ($test in $matches) {
-                $normalized = ([string]$test).Replace('\', '/')
-                if (-not $found.Contains($normalized)) { [void]$found.Add($normalized) }
-            }
-        }
-    }
-    return @($found | Select-Object -First 16 | ForEach-Object { Limit-Text $_ 240 })
-}
-
-function Invoke-HostDiscovery([string]$Continuation) {
-    if (-not $Continuation.StartsWith('HOST_DISCOVERY_JSON ')) {
-        if ($Continuation -match '(?i)\bHOST PREPARE\b|\bhost-side\b') {
-            $modules = @([regex]::Matches($Continuation, '(?<![A-Za-z0-9_.])octopus(?:\.[A-Za-z_][A-Za-z0-9_]*){1,4}(?![A-Za-z0-9_.])') |
-                ForEach-Object { $_.Value } | Sort-Object -Unique)
-            $hasNarrowScope = $modules.Count -eq 1 -and $Continuation.Length -le 350 -and
-                $Continuation -notmatch '(?i)\b(tous?|tout|all|entire|whole|recursive|recursif|all_files)\b' -and
-                $Continuation -match ('(?i)\bpour\s+' + [regex]::Escape($modules[0]) + '\s+et\s+ses\s+tests\.?$')
-            if ($hasNarrowScope) {
-                $requestJson = [ordered]@{ version = 1; kind = 'module_tests'; module = $modules[0] } | ConvertTo-Json -Compress
-                return Invoke-HostDiscovery -Continuation ('HOST_DISCOVERY_JSON ' + $requestJson)
-            }
-            throw 'Host discovery rejected: free-text HOST PREPARE request must name one octopus module and its tests with narrow scope.'
-        }
-        return $null
-    }
-    try { $request = $Continuation.Substring(20) | ConvertFrom-Json -ErrorAction Stop } catch {
-        throw 'Host discovery rejected: invalid JSON request.'
-    }
-    if ($request -isnot [pscustomobject]) {
-        throw 'Host discovery rejected: request must be a JSON object.'
-    }
-    $kind = [string]$request.kind
-    $fields = if ($kind -ceq 'handler_tests') { @('version', 'kind', 'handler') } elseif ($kind -ceq 'symbol_tests') { @('version', 'kind', 'module', 'symbol') } else { @('version', 'kind', 'module') }
-    if ($kind -cnotin @('symbol_tests', 'module_tests', 'handler_tests') -or
-        @($request.PSObject.Properties.Name | Where-Object { $_ -notin $fields }).Count -or
-        @($fields | Where-Object { $_ -notin $request.PSObject.Properties.Name }).Count -or
-        $request.version -is [string] -or [string]$request.version -cne '1' -or
-        ($kind -cne 'handler_tests' -and [string]$request.module -cnotmatch '^octopus(?:\.[A-Za-z_][A-Za-z0-9_]*){1,4}$') -or
-        ($kind -ceq 'handler_tests' -and [string]$request.handler -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*){1,4}$') -or
-        ($kind -ceq 'handler_tests' -and ([string]$request.handler).Length -gt 80) -or
-        ($kind -ceq 'symbol_tests' -and [string]$request.symbol -cnotmatch '^[A-Za-z_][A-Za-z0-9_]{0,79}$')) {
-        throw 'Host discovery rejected: only one exact octopus module_tests, symbol_tests or handler_tests lookup is authorized.'
-    }
-    $module = [string]$request.module
-    $symbol = [string]$request.symbol
-    $handler = [string]$request.handler
-    if ($kind -cne 'handler_tests') {
-        $source = $module.Replace('.', '/') + '.py'
-        $sourcePath = Join-Path $repo $source
-        if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
-            throw "Host discovery rejected: module does not exist: $module"
-        }
-        $sourceItem = Get-Item -LiteralPath $sourcePath
-        if ($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-            throw "Host discovery rejected: linked module is outside the authorized lookup: $module"
-        }
-        if ($sourceItem.Length -gt 102400) {
-            throw "Host discovery rejected: module exceeds the 100 KiB read limit: $module"
-        }
-    }
-    if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
-        throw 'Host discovery rejected: rg is required for bounded test lookup.'
-    }
-    $head = (git rev-parse HEAD | Out-String).Trim()
-    $key = "$head|$kind|$module|$symbol|$handler"
-    if ($script:hostDiscoveryCache.ContainsKey($key)) {
-        $cached = $script:hostDiscoveryCache[$key]
-        $result = [ordered]@{}
-        foreach ($field in $cached.Keys) { $result[$field] = $cached[$field] }
-        $result.cached = $true
-        return $result
-    }
-    if ($kind -ceq 'handler_tests') {
-        $registrations = New-Object System.Collections.Generic.List[object]
-        $candidatePaths = @(& rg --files-with-matches --fixed-strings --glob '*.py' -- $handler octopus 2>$null | Select-Object -First 65)
-        if ($candidatePaths.Count -gt 64) { throw "Host discovery rejected: handler_ambiguous: too many candidate files for $handler" }
-        $pattern = '^\s*@handler\(\s*(["''])' + [regex]::Escape($handler) + '\1\s*(?:,|\))'
-        foreach ($path in $candidatePaths) {
-            $normalized = ([string]$path).Replace('\', '/')
-            if ($normalized -cnotmatch '^octopus/(?:[A-Za-z_][A-Za-z0-9_]*/)*[A-Za-z_][A-Za-z0-9_]*\.py$') { continue }
-            $item = Get-Item -LiteralPath (Join-Path $repo $normalized)
-            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint -or $item.Length -gt 102400) {
-                throw "Host discovery rejected: handler source is linked or exceeds the 100 KiB read limit: $normalized"
-            }
-            foreach ($hit in @(Select-String -LiteralPath (Join-Path $repo $normalized) -Pattern $pattern -Context 0,5)) {
-                $function = ''
-                foreach ($line in @($hit.Context.PostContext)) {
-                    if ($line -match '^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(') { $function = $Matches[1]; break }
-                }
-                $registrations.Add([ordered]@{
-                    source = $normalized
-                    module = ($normalized.Substring(0, $normalized.Length - 3)).Replace('/', '.')
-                    function = $function
-                    line = [int]$hit.LineNumber
-                    excerpt = Limit-Text ((@($hit.Line) + @($hit.Context.PostContext) | Select-Object -First 6) -join "`n") 600
-                }) | Out-Null
-            }
-        }
-        if (-not $registrations.Count) { throw "Host discovery rejected: handler_not_found: $handler" }
-        if ($registrations.Count -gt 1) {
-            $locations = @($registrations | Select-Object -First 8 | ForEach-Object { "$($_.source):$($_.line)" }) -join ', '
-            throw "Host discovery rejected: handler_ambiguous: $handler at $locations"
-        }
-        $owner = $registrations[0]
-        $module = $owner.module
-        $source = $owner.source
-        $symbol = $handler
-    } elseif ($kind -ceq 'symbol_tests') {
-        $pattern = '^\s*(?:(?:async\s+)?def\s+|class\s+)?' + $symbol + '\b(?:\s*=|\s*\(|\s*:)'
-        $match = Select-String -LiteralPath $sourcePath -Pattern $pattern -List -Context 0,8
-        if (-not $match) { throw "Host discovery rejected: symbol not found: $module.$symbol" }
-        $excerpt = @($match.Line) + @($match.Context.PostContext)
-        $excerpt = Limit-Text (($excerpt | Select-Object -First 9) -join "`n") 1600
-    } else {
-        $symbols = @(& rg --line-number --no-heading --max-count 12 -- '^(?:(?:async\s+)?def\s+|class\s+|[A-Z][A-Z0-9_]*\s*=)' $source 2>$null |
-            Select-Object -First 12 | ForEach-Object { Limit-Text $_ 180 })
-        if (-not $symbols.Count) { throw "Host discovery rejected: no top-level symbols found: $module" }
-    }
-    $tests = New-Object System.Collections.Generic.List[string]
-    if (Test-Path -LiteralPath (Join-Path $repo 'tests') -PathType Container) {
-        foreach ($literal in @($symbol, $module, [System.IO.Path]::GetFileNameWithoutExtension($source)) | Where-Object { $_ } | Select-Object -Unique) {
-            foreach ($test in @(& rg --files-with-matches --fixed-strings --glob 'test_*.py' --glob '!test_astra_constructor.py' -- $literal tests 2>$null | Select-Object -First 6)) {
-                $path = ([string]$test).Replace('\', '/')
-                if ($path -match '^tests/[A-Za-z0-9_./-]+\.py$' -and -not $tests.Contains($path)) {
-                    [void]$tests.Add($path)
-                }
-            }
-        }
-    }
-    $testExcerpts = @()
-    $literals = @($symbol, $module, [System.IO.Path]::GetFileNameWithoutExtension($source) | Where-Object { $_ })
-    foreach ($test in @($tests | Select-Object -First 2)) {
-        $testPath = Join-Path $repo $test
-        $testItem = Get-Item -LiteralPath $testPath
-        if ($testItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint -or $testItem.Length -gt 102400) { continue }
-        $testMatch = Select-String -LiteralPath $testPath -SimpleMatch -Pattern $literals -List -Context 0,4
-        if ($testMatch) {
-            $lines = @($testMatch.Line) + @($testMatch.Context.PostContext)
-            $testExcerpts += [ordered]@{
-                path = $test
-                line = [int]$testMatch.LineNumber
-                excerpt = Limit-Text (($lines | Select-Object -First 5) -join "`n") 600
-            }
-        }
-    }
-    $result = [ordered]@{
-        kind = $kind
-        module = $module
-        source = $source
-        likely_tests = @($tests | Select-Object -First 8)
-        test_excerpts = $testExcerpts
-        test_evidence = 'Existing tests with a literal module, symbol or handler reference; excerpts are discovery only, not qualified pytest targets.'
-        allowed_edit_paths = @()
-        test_targets = @()
-        cached = $false
-    }
-    if ($kind -ceq 'handler_tests') {
-        $result.handler = $handler
-        $result.function = $owner.function
-        $result.line = $owner.line
-        $result.excerpt = $owner.excerpt
-        $result.ambiguous = $false
-    } elseif ($kind -ceq 'symbol_tests') {
-        $result.symbol = $symbol
-        $result.line = [int]$match.LineNumber
-        $result.excerpt = $excerpt
-    } else {
-        $result.symbols = $symbols
-    }
-    $resultLength = ($result | ConvertTo-Json -Depth 10).Length
-    if ($resultLength -gt $MaxHostPrepareChars) {
-        throw "Host discovery rejected: result exceeds the $MaxHostPrepareChars character limit: $resultLength"
-    }
-    $script:hostDiscoveryCache[$key] = $result
-    return $result
-}
-
-function Get-HostPreparation([string[]]$ChangedFiles = @()) {
-    if ($Phase -eq 'G') {
-        $observation = ''
-        $phaseDocument = Join-Path $repo 'docs/migrations/OPERATIONALIZATION.md'
-        if (Test-Path -LiteralPath $phaseDocument -PathType Leaf) {
-            $documentText = Get-Content -LiteralPath $phaseDocument -Raw
-            if ($documentText -match '(?s)## Autonomous runtime evidence[^\r\n]*\r?\n(.*?)(?=\r?\n## |\z)') {
-                $observation = Limit-Text $Matches[1].Trim() 1100
-            }
-        }
-        $runtimePaths = @('octopus/__main__.py', 'octopus/worker.py')
-        $subcommands = New-Object System.Collections.Generic.List[string]
-        $symbols = New-Object System.Collections.Generic.List[string]
-        foreach ($path in $runtimePaths) {
-            $lines = @(Get-Content -LiteralPath (Join-Path $repo $path))
-            for ($index = 0; $index -lt $lines.Count; $index++) {
-                $line = [string]$lines[$index]
-                if ($path -eq 'octopus/__main__.py' -and $line -match '^\s*(?:p\s*=\s*)?sub\.add_parser\("([^"]+)"') {
-                    if (-not $subcommands.Contains($Matches[1])) { [void]$subcommands.Add($Matches[1]) }
-                }
-                if ($line -match '^\s*def\s+(main|cmd_worker|load_handlers|run_one|loop)\b' -or
-                    $line -match '^\s*class\s+(Handler|TaskContext)\b') {
-                    [void]$symbols.Add(("{0}:{1}:{2}" -f $path, ($index + 1), (($line.Trim() -split '[(:]', 2)[0].Trim())))
-                }
-            }
-        }
-
-        $tests = @(Find-AssociatedTests -SourcePaths @() -SearchPatterns @(
-            'from octopus\.__main__ import main|from octopus import __main__',
-            'from octopus import worker|from octopus\.worker import'
-        ) | Where-Object { $_ -notmatch '(?i)(astra_constructor|gui)' } | Select-Object -First 8)
-
-        $probeCommand = 'python -m octopus --help'
-        $expectedProbe = 'exit 0 with argparse help; no command handler is executed'
-        $probeStatus = 'failed'
-        $probeExitCode = $null
-        $probeOutput = ''
-        $process = $null
-        try {
-            $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-            $startInfo.FileName = $pythonExe
-            $startInfo.Arguments = '-m octopus --help'
-            $startInfo.WorkingDirectory = $repo
-            $startInfo.UseShellExecute = $false
-            $startInfo.CreateNoWindow = $true
-            $startInfo.RedirectStandardOutput = $true
-            $startInfo.RedirectStandardError = $true
-            $process = New-Object System.Diagnostics.Process
-            $process.StartInfo = $startInfo
-            [void]$process.Start()
-            if ($process.WaitForExit(10000)) {
-                $probeExitCode = $process.ExitCode
-                $probeStatus = if ($probeExitCode -eq 0) { 'passed' } else { 'failed' }
-            } else {
-                $process.Kill()
-                $probeStatus = 'timeout'
-            }
-            $probeOutput = ($process.StandardOutput.ReadToEnd() + "`n" +
-                $process.StandardError.ReadToEnd()).Trim() -replace '\s+', ' '
-        } catch {
-            $probeOutput = $_.Exception.Message
-        } finally {
-            if ($process) { $process.Dispose() }
-        }
-        if ($probeStatus -eq 'passed' -and $probeOutput -match 'usage:\s+octopus[^\{]*\{([^}]+)\}') {
-            foreach ($name in $Matches[1].Split(',')) {
-                $name = $name.Trim()
-                if ($name -and -not $subcommands.Contains($name)) { [void]$subcommands.Add($name) }
-            }
-        }
-
-        $blockerReproduced = $probeStatus -ne 'passed'
-        $testTargets = @()
-        if ($blockerReproduced) { $testTargets = @($tests) }
-        $packet = [ordered]@{
-            runtime_observation = $observation
-            runtime = [ordered]@{
-                entrypoint = 'python -m octopus'
-                subcommands = @($subcommands)
-            }
-            read_paths = $runtimePaths
-            symbols_and_entrypoints = @($symbols)
-            probe = [ordered]@{
-                command = $probeCommand
-                status = $probeStatus
-                exit_code = $probeExitCode
-                output = ''
-            }
-            blocker = if ($blockerReproduced) {
-                [ordered]@{
-                    reproduced = $true
-                    invocation = $probeCommand
-                    error = Limit-Text $probeOutput 350
-                    expected_behavior = $expectedProbe
-                }
-            } else {
-                [ordered]@{
-                    reproduced = $false
-                    summary = 'No startup blocker reproduced by the local help probe.'
-                }
-            }
-            discovery_hints = [ordered]@{ likely_tests = $tests }
-            allowed_edit_paths = @()
-            test_targets = $testTargets
-        }
-        $json = $packet | ConvertTo-Json -Depth 10
-        if ($json.Length -gt $MaxHostPrepareChars) {
-            throw "Astra host preparation exceeds its $MaxHostPrepareChars character limit: $($json.Length)."
-        }
-        return $packet
-    }
-
-    $searches = [ordered]@{}
-    $runtimePaths = New-Object System.Collections.Generic.List[string]
-    foreach ($pattern in @($phaseSearches)) {
-        $matches = @(Invoke-BoundedRg -Pattern $pattern -Roots @('octopus', 'scripts') -MaxResults 1 | ForEach-Object { Limit-Text $_ 160 })
-        $searches[(Limit-Text $pattern 100)] = @($matches)
-        foreach ($line in $matches) {
-            if ($line -match '^([^:]+):\d+:') {
-                $path = $Matches[1].Replace('\', '/')
-                if ($path -notlike 'tests/*' -and -not $runtimePaths.Contains($path)) { [void]$runtimePaths.Add($path) }
-            }
-        }
-    }
-    $boundedRuntimePaths = @($runtimePaths | Select-Object -First 8)
-    $symbols = if ($boundedRuntimePaths.Count) {
-        @(Invoke-BoundedRg -Pattern '^(class|def|function)\s+[A-Za-z_][A-Za-z0-9_-]*|__main__|add_parser\(' -Roots $boundedRuntimePaths -MaxResults 5)
-    } else { @() }
-    $testSources = @($boundedRuntimePaths + @($ChangedFiles) | Sort-Object -Unique)
-    $tests = @(Find-AssociatedTests -SourcePaths $testSources -SearchPatterns $phaseSearches | Select-Object -First 8)
-    $packet = [ordered]@{
-        discovery_hints = [ordered]@{
-            targeted_searches = $searches
-            likely_tests = $tests
-        }
-        read_paths = $boundedRuntimePaths
-        allowed_edit_paths = @()
-        test_targets = @()
-        symbols_and_entrypoints = @($symbols)
-    }
-    $json = $packet | ConvertTo-Json -Depth 10
-    if ($json.Length -gt $MaxHostPrepareChars) {
-        throw "Astra host preparation exceeds its $MaxHostPrepareChars character limit: $($json.Length)."
-    }
-    return $packet
-}
-
 function Save-Handoff(
     [string]$Result,
     [string]$NextDecision,
@@ -911,76 +612,60 @@ function Save-Handoff(
     [string[]]$Decisions = @(),
     [string[]]$Tests = @(),
     [string[]]$PendingHostRequests = @(),
-    [string]$Blocked = ""
+    [string]$Blocked = "",
+    [object]$State = $null
 ) {
     $changed = if ($Files.Count) { @($Files | Select-Object -First 30) } else { @(Get-ChangedPaths) }
+    $previous = if (Test-Path -LiteralPath $handoffPath -PathType Leaf) {
+        Get-Content -LiteralPath $handoffPath -Raw | ConvertFrom-Json
+    } else { $null }
+    $facts = if ($State) { @($State.facts) } else { @($previous.facts) }
+    $hypotheses = if ($State) { @($State.hypotheses) } else { @($previous.hypotheses) }
+    $inspectedByPath = [ordered]@{}
+    foreach ($item in @($previous.inspected)) {
+        if ($item -and $item.path) { $inspectedByPath[[string]$item.path] = $item }
+    }
+    foreach ($item in @($State.inspected)) {
+        if (-not $item -or -not $item.path) { continue }
+        $key = [string]$item.path
+        if ($inspectedByPath.Contains($key) -and -not $item.refresh) {
+            $inspectedByPath[$key] = [ordered]@{ path = $key; sha256 = $inspectedByPath[$key].sha256; summary = $item.summary }
+        } else {
+            $inspectedByPath[$key] = $item
+        }
+    }
+    $inspected = @($inspectedByPath.Values)
+    $remaining = if ($State) { @($State.remaining) } else { @($previous.remaining) }
+    $tickets = if ($State) { @($State.tickets) } else { @($previous.tickets) }
+    $stateTests = if ($State) { @($State.tests) } else { @($previous.tests) }
+    $verifiedInspected = @()
+    foreach ($item in @($inspected | Select-Object -First 12)) {
+        $path = ([string]$item.path).Replace('\', '/')
+        if ($path -notmatch '^[A-Za-z0-9_./-]+$' -or $path.StartsWith('/') -or @($path.Split('/') | Where-Object { $_ -in @('', '.', '..') }).Count) { continue }
+        $fullPath = [System.IO.Path]::GetFullPath((Join-Path $repo $path))
+        if (-not $fullPath.StartsWith($repo + '\', [System.StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { continue }
+        $hash = if ($item.refresh -or -not $item.sha256) { Get-LocalSha256 -Path $fullPath } else { [string]$item.sha256 }
+        $verifiedInspected += [ordered]@{ path = $path; sha256 = $hash; summary = Limit-Text $item.summary 180 }
+    }
     $handoff = [ordered]@{
-        version = 2
+        version = 3
         objective = Limit-Text $phaseSpec.mission 1200
         phase = $Phase
         head = (git rev-parse HEAD | Out-String).Trim()
+        facts = @($facts | Select-Object -First 8 | ForEach-Object { Limit-Text $_ 200 })
+        hypotheses = @($hypotheses | Select-Object -First 5 | ForEach-Object { Limit-Text $_ 200 })
+        inspected = $verifiedInspected
+        tickets = @($tickets | Select-Object -First 5 | ForEach-Object { Limit-Text $_ 120 })
+        remaining = @($remaining | Select-Object -First 8 | ForEach-Object { Limit-Text $_ 200 })
         decisions = @($Decisions | Select-Object -First 12 | ForEach-Object { Limit-Text $_ 500 })
         files_modified = @($changed | ForEach-Object { Limit-Text $_ 300 })
-        tests = @($Tests | Select-Object -First 20 | ForEach-Object { Limit-Text $_ 300 })
+        tests = @(@($Tests) + @($stateTests) | Select-Object -First 12 | ForEach-Object { Limit-Text $_ 200 })
         pending_host_requests = @($PendingHostRequests | Select-Object -First 5 | ForEach-Object { Limit-Text $_ 200 })
-        last_result = Limit-Text $Result 1000
+        last_result = if ($State -and $Result -match 'ASTRA_STATE_JSON') { '' } else { Limit-Text $Result 1000 }
         blocked = if ($Blocked) { Limit-Text $Blocked 800 } else { $null }
         next_decision = Limit-Text $NextDecision 600
     }
     $null = Write-BoundedJsonAtomic -Path $handoffPath -Value $handoff -MaxChars $MaxHandoffChars -Label "Astra handoff"
-}
-
-function Save-ContextManifest {
-    $previousHashes = @{}
-    if (Test-Path -LiteralPath $contextManifestPath -PathType Leaf) {
-        try {
-            $previous = Get-Content -LiteralPath $contextManifestPath -Raw | ConvertFrom-Json -ErrorAction Stop
-            foreach ($document in @($previous.documents)) {
-                $previousHashes[[string]$document.path] = [string]$document.sha256
-            }
-        } catch {
-            $previousHashes = @{}
-        }
-    }
-
-    $documentSpecs = @(
-        [ordered]@{
-            path = "AGENTS.md"
-            role = "Project constitution, already injected by Codex"
-            read_policy = "do_not_reread"
-        }
-    )
-    foreach ($path in @($phaseSpec.documents)) {
-        $documentSpecs += [ordered]@{
-            path = $path
-            role = "Optional phase reference; objective is already in the host snapshot"
-            read_policy = "targeted_section_only_if_snapshot_is_insufficient"
-        }
-    }
-
-    $documents = foreach ($spec in $documentSpecs) {
-        $fullPath = Join-Path $repo $spec.path
-        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { throw "Context document missing: $($spec.path)" }
-        $hashResult = Get-FileHash -LiteralPath $fullPath -Algorithm SHA256
-        $hash = ([string]$hashResult.Hash).ToLowerInvariant()
-        $size = (Get-Item -LiteralPath $fullPath).Length
-        [ordered]@{
-            path = $spec.path
-            sha256 = $hash
-            bytes = $size
-            role = $spec.role
-            read_policy = $spec.read_policy
-            changed_since_previous_call = if ($previousHashes.ContainsKey($spec.path)) { $previousHashes[$spec.path] -ne $hash } else { $null }
-        }
-    }
-
-    $manifest = [ordered]@{
-        version = 1
-        phase = $Phase
-        rule = "No document is preloaded. Read one bounded section only when a missing fact is identified and state why. Never reread an unchanged document automatically."
-        documents = @($documents)
-    }
-    return Write-BoundedJsonAtomic -Path $contextManifestPath -Value $manifest -MaxChars $MaxManifestChars -Label "Astra context manifest"
 }
 
 function New-CompactReceipt([object]$Receipt) {
@@ -1093,145 +778,53 @@ function Assert-ValidWorkerReviewReceipt(
 }
 
 function Write-AstraContext([string]$TaskPrompt) {
-    $handoffJson = if (Test-Path -LiteralPath $handoffPath -PathType Leaf) { Get-Content -LiteralPath $handoffPath -Raw } else { "{}" }
-    if ($handoffJson.Length -gt $MaxHandoffChars) {
-        throw "Astra handoff exceeds its $MaxHandoffChars character limit: $($handoffJson.Length)."
-    }
-
+    $handoffJson = if (Test-Path -LiteralPath $handoffPath -PathType Leaf) { Get-Content -LiteralPath $handoffPath -Raw } else { '{}' }
+    if ($handoffJson.Length -gt $MaxHandoffChars) { throw "Astra handoff exceeds its $MaxHandoffChars character limit." }
     $branch = (git branch --show-current | Out-String).Trim()
     $currentHead = (git rev-parse HEAD | Out-String).Trim()
-    $changedFiles = @(Get-ChangedPaths)
-    $handoff = $handoffJson | ConvertFrom-Json
-    $isFollowUpCall = $script:astraTurns -ge 1
-    $isReviewCall = $isFollowUpCall -and $null -ne $script:reviewContext
-    $isContinuationCall = $isFollowUpCall -and -not $isReviewCall
-    $pendingRequests = @()
-    foreach ($candidate in @(
-        @{ name = "checkpoint"; path = $checkpointPath },
-        @{ name = "step"; path = $requestPath },
-        @{ name = "full_pytest"; path = $validationPath }
-    )) {
-        if (Test-Path -LiteralPath $candidate.path -PathType Leaf) { $pendingRequests += $candidate.name }
+    $packet = [ordered]@{
+        version = 3
+        phase = $Phase
+        objective = Limit-Text $phaseSpec.mission 1200
+        head = $currentHead
+        branch = $branch
+        handoff = $handoffJson | ConvertFrom-Json
+        review = $script:reviewContext
+        step_summary = $script:lastWorkerSummary
+        validation = $script:lastValidationSummary
     }
-
-    if ($isReviewCall) {
-        $reviewPaths = if ($script:reviewContext -and $script:reviewContext.changed_paths) { @($script:reviewContext.changed_paths) } else { $changedFiles }
-        $snapshot = [ordered]@{
-            version = 2
-            packet = 'call_2_review'
-            phase = $Phase
-            head = $currentHead
-            branch = $branch
-            previous_decision = [ordered]@{
-                decisions = @($handoff.decisions | Select-Object -First 12 | ForEach-Object { Limit-Text $_ 300 })
-                last_result = Limit-Text $handoff.last_result 600
-                next_decision = Limit-Text $handoff.next_decision 500
-            }
-            changed_files = @($reviewPaths | Select-Object -First 30)
-            step_summary = $script:lastWorkerSummary
-            host_test_summary = if ($script:lastValidationSummary) {
-                $script:lastValidationSummary
-            } elseif ($script:lastWorkerSummary) {
-                [ordered]@{ source = 'step_host'; tests = @($script:lastWorkerSummary.tests); output_truncated = $true }
-            } else { $null }
-            diff_summary = if ($script:reviewContext -and $script:reviewContext.diff_stat) { @($script:reviewContext.diff_stat) } else { @(Get-CompactDiffStat -Paths $reviewPaths) }
-            review_kind = if ($script:reviewContext) { $script:reviewContext.kind } else { $null }
-            blocking_issue = $handoff.blocked
-        }
-    } elseif ($isContinuationCall) {
-        $snapshot = [ordered]@{
-            version = 2
-            packet = 'call_2_continuation'
-            phase = $Phase
-            head = $currentHead
-            branch = $branch
-            previous_decision = [ordered]@{
-                decisions = @($handoff.decisions | Select-Object -First 12 | ForEach-Object { Limit-Text $_ 300 })
-                last_result = Limit-Text $handoff.last_result 1000
-                next_decision = Limit-Text $handoff.next_decision 600
-            }
-            changed_files = $changedFiles
-            blocking_issue = $handoff.blocked
-        }
-        if ($script:hostDiscoveryResult) { $snapshot.host_discovery = $script:hostDiscoveryResult }
-    } else {
-        $hostPreparation = Get-HostPreparation -ChangedFiles $changedFiles
-        $snapshot = [ordered]@{
-            version = 2
-            packet = 'call_1_prepare'
-            phase = $Phase
-            objective = Limit-Text $phaseSpec.mission 1200
-            head = $currentHead
-            branch = $branch
-            dirty = $changedFiles.Count -gt 0
-            baseline = [ordered]@{
-                status = if ([int]$baseline.exit_code -eq 0) { "passed" } else { "failed" }
-                exit_code = [int]$baseline.exit_code
-                duration_seconds = $baseline.duration_seconds
-            }
-            changed_files = $changedFiles
-            diff_stat = @(Get-CompactDiffStat -Paths $changedFiles)
-            pending_requests = $pendingRequests
-            previous_validation = $script:lastValidationSummary
-            host_prepare = $hostPreparation
-            blocking_issue = $handoff.blocked
+    $inspectedStatus = @()
+    foreach ($item in @($packet.handoff.inspected)) {
+        $path = ([string]$item.path).Replace('\', '/')
+        if ($path -notmatch '^[A-Za-z0-9_./-]+$' -or $path.StartsWith('/') -or @($path.Split('/') | Where-Object { $_ -in @('', '.', '..') }).Count) { continue }
+        $fullPath = [System.IO.Path]::GetFullPath((Join-Path $repo $path))
+        if (-not $fullPath.StartsWith($repo + '\', [System.StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { continue }
+        $current = Get-LocalSha256 -Path $fullPath
+        $inspectedStatus += [ordered]@{ path = $path; changed_since_inspection = $current -ne [string]$item.sha256 }
+    }
+    $packet.inspected_status = $inspectedStatus
+    if ($script:astraTurns -eq 0) {
+        $packet.baseline = [ordered]@{
+            status = if ([int]$baseline.exit_code -eq 0) { 'passed' } else { 'failed' }
+            exit_code = [int]$baseline.exit_code
+            duration_seconds = $baseline.duration_seconds
         }
     }
-    $snapshotJson = Write-BoundedJsonAtomic -Path $snapshotPath -Value $snapshot -MaxChars $MaxSnapshotChars -Label "Astra host snapshot"
-
-    if ($isReviewCall) {
-        $manifestJson = ''
-        $preparedPrompt = @"
-$TaskPrompt
-
-HOST_REVIEW_PACKET_JSON
-$snapshotJson
-"@
-        $handoffMetricChars = 0
-        $contextFileCount = 1
-    } elseif ($isContinuationCall) {
-        $manifestJson = ''
-        $preparedPrompt = @"
-$TaskPrompt
-
-HOST_CONTINUATION_PACKET_JSON
-$snapshotJson
-"@
-        $handoffMetricChars = $handoffJson.Length
-        $contextFileCount = 1
-    } else {
-        $manifestJson = Save-ContextManifest
-        $preparedPrompt = @"
-$TaskPrompt
-
-HOST_SNAPSHOT_JSON
-$snapshotJson
-
-CONTEXT_MANIFEST_JSON
-$manifestJson
-
-MINIMAL_HANDOFF_JSON
-$handoffJson
-"@
-        $handoffMetricChars = $handoffJson.Length
-        $contextFileCount = 3
-    }
-    $agentsChars = (Get-Content -LiteralPath (Join-Path $repo "AGENTS.md") -Raw).Length
+    $packetJson = Write-BoundedJsonAtomic -Path $snapshotPath -Value $packet -MaxChars $MaxSnapshotChars -Label 'Astra context packet'
+    $preparedPrompt = "$TaskPrompt`n`nHOST_CONTEXT_JSON`n$packetJson"
+    $agentsChars = (Get-Content -LiteralPath (Join-Path $repo 'AGENTS.md') -Raw).Length
     $estimatedInputChars = $preparedPrompt.Length + $agentsChars
     if ($estimatedInputChars -gt $MaxPreparedContextChars) {
         throw "Prepared Astra context exceeds its $MaxPreparedContextChars character limit: $estimatedInputChars."
     }
     Write-JsonAtomic -Path $contextMetricsPath -Value ([ordered]@{
-        version = 1
+        version = 2
         estimated_prompt_chars = $preparedPrompt.Length
         implicit_instruction_chars = $agentsChars
         estimated_input_chars = $estimatedInputChars
-        snapshot_chars = $snapshotJson.Length
-        handoff_chars = $handoffMetricChars
-        context_manifest_chars = $manifestJson.Length
-        context_file_count = $contextFileCount
-        manifest_document_count = if ($isFollowUpCall) { 0 } else { @($phaseSpec.documents).Count + 1 }
-        call_kind = if ($isReviewCall) { 'review' } elseif ($isContinuationCall) { 'continuation' } else { 'prepare' }
+        packet_chars = $packetJson.Length
+        handoff_chars = $handoffJson.Length
+        call_kind = if ($script:reviewContext) { 'review' } elseif ($script:astraTurns) { 'continuation' } else { 'initial' }
     })
     return $preparedPrompt
 }
@@ -1269,6 +862,15 @@ function Invoke-HostValidation {
     $request = Get-Content -LiteralPath $validationPath -Raw | ConvertFrom-Json
     if ([int]$request.version -ne 1 -or [string]$request.kind -ne 'full_pytest') {
         throw 'Unsupported host validation request. Only full_pytest is allowed.'
+    }
+    $currentHead = (git rev-parse HEAD | Out-String).Trim()
+    $previousPath = Join-Path $resultRoot 'validation-latest.json'
+    if (Test-Path -LiteralPath $previousPath -PathType Leaf) {
+        $previous = Get-Content -LiteralPath $previousPath -Raw | ConvertFrom-Json
+        if ([string]$previous.head -eq $currentHead -and -not (git status --porcelain --untracked-files=all | Out-String).Trim()) {
+            Move-Item -LiteralPath $validationPath -Destination (Join-Path $archiveRoot ('validation-' + (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ') + '.json'))
+            return $previous
+        }
     }
     $validationLog = Join-Path $relayRoot 'validation-pytest.log'
     $started = Get-Date
@@ -1394,24 +996,16 @@ function Invoke-AstraTurn([string]$Prompt, [string]$Reason) {
 }
 
 $contextRules = @"
-The first call of the run includes the host snapshot, context manifest and minimal handoff. Every later call, including the first call of a new mini-session, includes only HOST_REVIEW_PACKET_JSON or HOST_CONTINUATION_PACKET_JSON. The supplied packet is authoritative. Do not reread its disk copies or reconstruct Git state, history, baseline, checkpoint or validation state.
-AGENTS.md is already injected. Do not read it again. Do not read a phase document automatically. If one exact fact is missing, name the missing fact and read only one relevant manifest-listed section. Never reread a document whose manifest hash is unchanged.
-The shell-command budget is zero by default. General repository exploration is forbidden: no broad rg, Get-ChildItem, git ls-files, recursive discovery, or search for tests already supplied by HOST PREPARE as discovery hints. Never read complete large files. If one indispensable fact is still missing, state it first, then use at most one targeted search or one excerpt capped at 200 lines and 20000 characters.
-Never read Astra JSONL, pytest logs, night-shift reports, generated files or lockfiles. Inspect source only by symbol, a bounded excerpt, or one changed-file diff at a time. Use host-provided read_paths, symbols and discovery_hints only for discovery; use changed paths and diff summaries only for review.
-Run no long test in Astra and never run a full suite. A single micro-test is allowed only when required to define an oracle before delegation. For all other pytest validation, atomically publish cache/astra-relay/validation.json with {"version":1,"kind":"full_pytest"}, then end the call. The host runs it after exit and returns only exit code, counts, duration and a short failure list.
-HOST PREPARE discovery_hints and read_paths are read-only discovery inputs. They are never edit authorization or Step test oracles. If allowed_edit_paths or test_targets are empty, keep discovery on Astra/host and do not publish a Step request.
-After exact edit paths and existing sandbox-compatible pytest targets are known, publish a second mechanical product_ticket with explicit allowed_edit_paths and test_targets. Never copy starting_paths or likely_tests into those fields.
-As soon as files, expected behavior, oracle/tests and limits can be stated, publish the bounded product_ticket and cache/astra-relay/request.json, then end the call immediately. Do not inspect implementation details that Step can resolve mechanically.
-For tested direct changes, publish cache/astra-relay/checkpoint.json version 2 with request_id, base_head, message and exact changed paths, then end the call. For a qualified bounded Step task, publish one product_ticket and cache/astra-relay/request.json from a clean tree, then end the call.
-Do not launch Step, poll, wait, run full pytest or write Git metadata. After publishing any Step, checkpoint or host-validation request, perform no further inspection or command. A follow-up is a fresh ephemeral call. Stop after the requested boundary.
-If no Step, checkpoint or host-validation request was published and one more bounded discovery is required, end the final message with one line `ASTRA_CONTINUE: <next bounded action>`. For host-side discovery use `ASTRA_CONTINUE: HOST_DISCOVERY_JSON {"version":1,"kind":"module_tests","module":"octopus.builtin_handlers"}`, `ASTRA_CONTINUE: HOST_DISCOVERY_JSON {"version":1,"kind":"symbol_tests","module":"octopus.businesses","symbol":"ENGINE_HANDLERS"}`, or `ASTRA_CONTINUE: HOST_DISCOVERY_JSON {"version":1,"kind":"handler_tests","handler":"agent.react_step"}` for one exact module, Python symbol or registered handler type. The host returns only bounded facts and candidate tests; it does not infer expected behavior, allowed edit paths or test targets. Do not emit this marker when the phase work is complete or blocked on user input.
+You are the architecture and review owner. Explore this local repository directly with bounded PowerShell commands. You may inspect several relevant files per turn using rg, bounded Get-Content excerpts, git status/log/diff, and short local pytest targets. Treat zero or multiple search matches as facts to investigate, never as a fatal discovery error. Limit each command output to 200 lines or 20000 characters; do not read large files whole. Do not repeat unchanged excerpts already recorded in the handoff. Never use network, external accounts, economic runtime, push or merge.
+When the objective, exact repository-relative edit paths, test targets and constraints are clear, publish one bounded product_ticket and cache/astra-relay/request.json, then end the turn. The host validates paths and tests before Step runs. Do not run Step yourself. After Step, inspect its compact receipt and the relevant diff, then publish a checkpoint request if accepted. The host handles Git writes and full pytest.
+For a verified terminal state, end with ASTRA_STATUS: STABLE or ASTRA_STATUS: BLOCKED. Otherwise the host continues automatically; ASTRA_CONTINUE: followed by one compact next action is optional. Before a terminal marker or Step request, write one line ASTRA_STATE_JSON {"facts":[],"hypotheses":[],"inspected":[{"path":"repo/relative.py","summary":"short fact"}],"tests":[],"tickets":[],"remaining":[]}. Set refresh=true on an inspected entry only when you reread a changed file. Keep the state under 4000 characters. The host hashes inspected files and returns changed_since_inspection in the next packet. Do not reread unchanged files. The host starts fresh calls across mini-sessions up to MaxRelayCycles.
 "@
 
 function New-AstraTaskPrompt([string]$Task) {
     return $Task + [Environment]::NewLine + [Environment]::NewLine + $contextRules
 }
 
-$initialPrompt = New-AstraTaskPrompt "HOST PREPARE has already performed deterministic Git inspection and supplied read-only discovery hints. Execute only the objective in the host snapshot for phase $Phase. Decide architecture, permissions and the bounded contract. Keep discovery on Astra/host until exact edit paths and Step-compatible test targets are known, then publish the second mechanical ticket."
+$initialPrompt = New-AstraTaskPrompt "Work on the phase $Phase objective in HOST_CONTEXT_JSON. Inspect the repository directly, then delegate bounded implementation to Step and review it."
 
 if (Test-Path -LiteralPath $handoffPath -PathType Leaf) {
     $oldHandoff = Get-Content -LiteralPath $handoffPath -Raw | ConvertFrom-Json
@@ -1426,6 +1020,7 @@ if (-not (Test-Path -LiteralPath $handoffPath -PathType Leaf)) {
 
 $nextReason = 'phase work'
 $nextPrompt = $initialPrompt
+$runStarted = Get-Date
 while ($true) {
     $pending = @($checkpointPath, $requestPath, $validationPath | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
     if ($pending.Count -gt 1) { throw 'Only one checkpoint, Step relay, or validation request may be pending.' }
@@ -1444,7 +1039,8 @@ while ($true) {
             review_policy = 'Inspect one changed-file diff at a time; do not reload phase documents.'
         }
         $lastResult = "Checkpoint $($receipt.commit): $($receipt.message)"
-        Save-Handoff -Result $lastResult -NextDecision 'Review only the committed changed paths, then stop unless a reproduced defect requires action.' -Files @($receipt.paths) -Decisions @('Host committed the exact declared paths.')
+        $astraState = if ($script:lastTurn) { Get-AstraState -LastMessagePath $script:lastTurn.last_message } else { $null }
+        Save-Handoff -Result $lastResult -NextDecision 'Review only the committed changed paths, then stop unless a reproduced defect requires action.' -Files @($receipt.paths) -Decisions @('Host committed the exact declared paths.') -State $astraState
         $nextReason = 'checkpoint review'
         $nextPrompt = New-AstraTaskPrompt "Fresh checkpoint review for phase $Phase. The compact receipt and review range are in the inline snapshot. Inspect the actual diff only for the listed paths, one file at a time. Accept and conclude if correct; act only on a concrete defect."
     } elseif (Test-Path -LiteralPath $requestPath -PathType Leaf) {
@@ -1476,9 +1072,10 @@ while ($true) {
             review_policy = 'Use the compact worker receipt; inspect one changed-file diff at a time. Do not read the raw report or worker log.'
         }
         $lastResult = "Step $requestId exited $workerExit; result=$resultPath"
-        Save-Handoff -Result $lastResult -NextDecision 'Review the compact worker receipt and listed paths; publish worker_commit checkpoint only if acceptable.' -Files $workerPaths -Tests @($validatedWorkerSummary.tests)
+        $astraState = if ($script:lastTurn) { Get-AstraState -LastMessagePath $script:lastTurn.last_message } else { $null }
+        Save-Handoff -Result $lastResult -NextDecision 'Review the compact worker receipt and listed paths; publish worker_commit checkpoint only if acceptable.' -Files $workerPaths -Tests @($validatedWorkerSummary.tests) -State $astraState
         $nextReason = 'Step review'
-        $nextPrompt = New-AstraTaskPrompt "Fresh Step review for phase $Phase. Use only the compact worker receipt in the inline snapshot; do not open its raw report, evidence or log. Inspect the actual diff for each listed path. If acceptable, publish checkpoint.json version 2 with kind=worker_commit, base_head, source_commit, message and exact paths, then end the call."
+        $nextPrompt = New-AstraTaskPrompt "Fresh Step review for phase $Phase. Use the compact worker receipt in HOST_CONTEXT_JSON; do not open its raw report, evidence or log. Inspect the actual diff for each listed path. If acceptable, publish checkpoint.json version 2 with kind=worker_commit, base_head, source_commit, message and exact paths, then end the call."
     } elseif (Test-Path -LiteralPath $validationPath -PathType Leaf) {
         $validationResult = Invoke-HostValidation
         $lastValidationSummary = [ordered]@{
@@ -1499,26 +1096,53 @@ while ($true) {
             review_policy = 'A passing compact receipt is sufficient. On failure inspect only named tests and bounded source excerpts.'
         }
         $lastResult = "Full pytest exited $($validationResult.exit_code); result=cache/astra-relay/results/validation-latest.json"
-        Save-Handoff -Result $lastResult -NextDecision 'Conclude on pass; on failure resolve only the named failing tests.' -Tests @("full pytest: $($validationResult.status), exit $($validationResult.exit_code), $($validationResult.duration_seconds)s")
+        $astraState = if ($script:lastTurn) { Get-AstraState -LastMessagePath $script:lastTurn.last_message } else { $null }
+        Save-Handoff -Result $lastResult -NextDecision 'Conclude on pass; on failure resolve only the named failing tests.' -Tests @("full pytest: $($validationResult.status), exit $($validationResult.exit_code), $($validationResult.duration_seconds)s") -State $astraState
         $nextReason = 'validation review'
         $nextPrompt = New-AstraTaskPrompt 'Fresh validation review. The bounded host receipt is in the inline snapshot. If it passed, conclude without reading any log or documentation. If it failed, inspect only the named failing tests and the smallest relevant source excerpt.'
     } elseif ($modelInvoked) {
         if ((git status --porcelain --untracked-files=all | Out-String).Trim()) { throw 'Astra ended with uncheckpointed changes.' }
-        $continuation = if ($script:lastTurn) { Get-AstraContinuation -LastMessagePath $script:lastTurn.last_message } else { "" }
-        if ($continuation) {
+        $status = if ($script:lastTurn) { Get-AstraStatus -LastMessagePath $script:lastTurn.last_message } else { '' }
+        $forcedContinuation = ''
+        if ($status -eq 'STABLE') {
+            $currentHead = (git rev-parse HEAD | Out-String).Trim()
+            if ($script:lastWorkerSummary -and [string]$script:lastWorkerSummary.source_commit -ne $currentHead) {
+                $status = ''
+                $forcedContinuation = 'Review the Step diff and publish its checkpoint before STABLE.'
+            } elseif (-not $script:lastValidationSummary -or [string]$script:lastValidationSummary.head -ne $currentHead) {
+                Write-JsonAtomic -Path $validationPath -Value ([ordered]@{ version = 1; kind = 'full_pytest' })
+                $lastMessage = Get-Content -LiteralPath $script:lastTurn.last_message -Raw
+                $astraState = Get-AstraState -LastMessagePath $script:lastTurn.last_message
+                Save-Handoff -Result $lastMessage -NextDecision 'Host full pytest before STABLE.' -State $astraState
+                continue
+            } elseif ([string]$script:lastValidationSummary.status -ne 'passed') {
+                $status = ''
+                $forcedContinuation = 'Full pytest failed; resolve the reported failures before STABLE.'
+            }
+        }
+        if ($status) {
             $lastMessage = Get-Content -LiteralPath $script:lastTurn.last_message -Raw
-            Save-Handoff -Result $lastMessage -NextDecision $continuation -Decisions @('Astra requested one bounded continuation without a relay boundary.')
-            $reviewContext = $null
-            $nextReason = 'bounded continuation'
-            $nextPrompt = New-AstraTaskPrompt 'Continue only the bounded action in HOST_CONTINUATION_PACKET_JSON. Do not repeat the previous discovery. Publish the appropriate relay boundary as soon as the exact contract is known.'
-        } else {
-            Save-SessionState -Status 'completed'
+            $astraState = Get-AstraState -LastMessagePath $script:lastTurn.last_message
+            Save-Handoff -Result $lastMessage -NextDecision $status -State $astraState
+            $terminalStatus = if ($status -eq 'BLOCKED') { 'blocked' } else { 'completed' }
+            Save-SessionState -Status $terminalStatus
             break
         }
+        $continuation = if ($script:lastTurn) { Get-AstraContinuation -LastMessagePath $script:lastTurn.last_message } else { "" }
+        if ($forcedContinuation) { $continuation = $forcedContinuation }
+        if (-not $continuation) { $continuation = 'Continue the phase objective from the compact handoff.' }
+        $lastMessage = Get-Content -LiteralPath $script:lastTurn.last_message -Raw
+        $astraState = Get-AstraState -LastMessagePath $script:lastTurn.last_message
+        Save-Handoff -Result $lastMessage -NextDecision $continuation -State $astraState
+        $reviewContext = $null
+        $nextReason = 'bounded continuation'
+        $nextPrompt = New-AstraTaskPrompt 'Continue the next action in HOST_CONTEXT_JSON. Use the handoff to avoid repeated reads.'
     }
 
     if ($astraTurnsInCycle -ge $MaxAstraTurns) {
-        if ($nextReason -eq 'bounded continuation') {
+        if ($nextReason -eq 'Step review') {
+            $astraTurnsInCycle = 0
+        } else {
             if ($relayCycles -ge $MaxRelayCycles) {
                 Save-SessionState -Status 'active'
                 Write-Host "Relay cycle budget reached. Handoff: $handoffPath" -ForegroundColor Yellow
@@ -1526,15 +1150,17 @@ while ($true) {
             }
             $relayCycles++
             $astraTurnsInCycle = 0
-        } elseif ($nextReason -eq 'Step review') {
-            $astraTurnsInCycle = 0
-        } else {
-            Save-SessionState -Status 'active'
-            Write-Host "Astra call budget reached. Handoff: $handoffPath" -ForegroundColor Yellow
-            break
         }
     }
-    $script:hostDiscoveryResult = if ($nextReason -eq 'bounded continuation') { Invoke-HostDiscovery -Continuation $continuation } else { $null }
+    $usedTokens = 0
+    foreach ($call in $script:calls) {
+        if ($call.usage) { $usedTokens += [long]$call.usage.input_tokens + [long]$call.usage.output_tokens }
+    }
+    if ($usedTokens -ge $MaxRunTokens -or ((Get-Date) - $runStarted).TotalMinutes -ge $MaxRunMinutes) {
+        Save-SessionState -Status 'active'
+        Write-Host "Astra run budget reached. Handoff: $handoffPath" -ForegroundColor Yellow
+        break
+    }
     $preparedPrompt = Write-AstraContext -TaskPrompt $nextPrompt
     $turn = Invoke-AstraTurn -Prompt $preparedPrompt -Reason $nextReason
     $lastTurn = $turn

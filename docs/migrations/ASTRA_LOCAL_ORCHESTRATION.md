@@ -19,22 +19,16 @@ This is **quality-first, free-when-qualified**, not free-at-any-cost.
 ## Canonical path
 
 ```text
-host prepare
-  -> bounded Git state, phase-targeted searches, runtime paths, symbols and likely tests
-GPT-6 Astra root
-  -> decide architecture/security/contracts from the prepared packet
-  -> create a bounded development.task contract
-  -> OCTOPUS DevWorker
-       -> isolated worktree
-       -> explicit allowed_paths
-       -> secrets/config/Git internals denied
-       -> Kilo worker pinned by OCTOPUS
-       -> OCTOPUS runs the approved tests
-       -> scope/radius/security validation
-       -> local task commit in isolated worktree
-  -> Astra reviews actual diff + evidence
-  -> Astra accepts, requests one targeted correction, or takes the task back
+Astra reads and searches the local repository directly with bounded output
+  -> Astra defines a product ticket with exact edit paths and pytest targets
+  -> host validates the ticket, branch, HEAD, paths, tests and budgets
+  -> Step implements in an isolated worktree and runs the approved tests
+  -> host validates the compact receipt and actual commit diff
+  -> fresh Astra call reviews the diff, requests a checkpoint or continues
 ```
+
+A zero-result or multi-result local search remains ordinary evidence for Astra.
+The host does not prepare phase-specific symbol or handler lookups.
 
 No global `SKILL.md`, no global Codex `AGENTS.md` injection, no second planner, no second journal and no external orchestration package.
 
@@ -154,17 +148,22 @@ The execpolicy is defense in depth, not the primary boundary.
 
 Relay request:
 
-\`\`\`json
+```json
 {
   "version": 1,
   "request_id": "unique-id",
-  "plan_path": "cache/astra-tickets/task.json",
+  "phase": "G",
+  "base_head": "current-full-commit-sha",
+  "product_ticket": "cache/astra-tickets/task.json",
   "hours": 1.0
 }
-\`\`\`
+```
 
-The plan must use \`policy: product_ticket\`.
-New deterministic tests/oracles must be created and committed by Astra before delegation because product tickets cannot modify tests/protected trust-boundary files.
+The product ticket supplies the objective, exact repository-relative `allowed_edit_paths`,
+existing `test_targets`, acceptance criteria and work limits. The host validates these
+when the request is dispatched. The Step product policy still forbids editing test
+oracles and protected governance paths. Astra may create and checkpoint an oracle
+before delegation when none exists.
 
 The runner:
 - requires a clean source repository;
@@ -183,35 +182,36 @@ The supervisor:
 
 ## Compact context protocol
 
-Before CALL 1, the host deterministically writes and injects:
+Each Astra call receives one `HOST_CONTEXT_JSON` packet with objective, phase,
+branch, HEAD, compact handoff, and any Step or validation receipt. Only the first
+call includes the baseline status. The host does not inject a repository snapshot,
+context manifest, phase search results or raw test logs.
 
-- \`snapshot.json\`: objective, branch, HEAD, dirty paths, compact baseline status and the current review range;
-- \`context-manifest.json\`: path, SHA-256, size, role and changed status for each possible reference document;
-- \`handoff.json\`: decisions, modified files, bounded test facts, pending host requests, blocker and next decision;
-- \`context-metrics.json\`: character counts for the prompt, snapshot, manifest, handoff and injected root instructions.
+Astra can make several relevant local reads and searches during one call. Each
+command output is limited to 200 lines or 20000 characters. Long tests and external
+network access are disabled in Astra. Full pytest runs through a fixed host
+validation request. Publishing a Step, checkpoint or validation request ends the
+turn; the host processes it and starts a fresh review call.
 
-For CALL 1, \`snapshot.json\` also contains HOST PREPARE: up to three predefined phase searches with two matches each, up to eight runtime paths, five symbols/entrypoints and eight likely tests discovered from source names and targeted test searches. Individual search results are capped at 220 characters and the HOST PREPARE object at 4200 characters.
+Astra supplies `ASTRA_STATE_JSON` with concise facts, hypotheses, inspected paths,
+tests, ticket IDs and remaining criteria. The host hashes inspected files and
+returns `changed_since_inspection` in the next packet. Astra rereads changed
+files and marks their entries `refresh=true`; unchanged excerpts stay cached.
+The host continues automatically unless Astra
+declares a terminal state; `ASTRA_CONTINUE` may name the next local action.
+`ASTRA_STATUS: STABLE` and `ASTRA_STATUS: BLOCKED` are terminal decisions.
+`STABLE` requires an integrated Step checkpoint and passing full pytest on
+the current HEAD; the host requests that validation automatically if needed.
+The next call begins automatically, including after a 2/2 mini-session, until
+`MaxRelayCycles` is reached.
 
-The hard limits are 6000 characters for the handoff, 8000 for the snapshot, 6000 for the manifest, 4200 for HOST PREPARE and 30000 for the prepared context including root \`AGENTS.md\`. Exceeding a limit stops before an Astra call.
+The handoff is capped at 6000 characters, the context packet at 8000, and the
+prepared context including root `AGENTS.md` at 30000. Run-level minute and
+reported-token budgets are checked before each model call. The host records
+character counts and actual model usage. These run-level checks do not interrupt
+an individual call already in progress.
 
-The phase document is not preloaded. Root \`AGENTS.md\` is already injected by Codex and must not be reread. An unchanged document is not read again automatically. If a missing fact requires source inspection, Astra names that fact and uses one targeted section. Astra does not read raw JSONL, full pytest logs, night-shift reports, generated files or lockfiles.
-
-CALL 2 does not repeat CALL 1 discovery and does not inject the context manifest or handoff as separate blocks. Its single review packet contains only current HEAD/branch, the previous decision, changed files, compact Step summary, compact host-test summary, diff summary, review kind and blocker. A validation receipt contains exit code, passed/failed/skipped counts, duration and at most eight failure lines capped at 240 characters. Raw pytest output is never injected.
-
-The Astra command budget is zero by default. Broad repository searches, recursive discovery, manual test discovery, full-file reads and long tests are forbidden. One targeted search or bounded excerpt is allowed only for a named missing fact. As soon as files, behavior, oracle/tests and limits form a mechanical contract, Astra publishes the Step ticket and ends the turn. Publishing a Step, checkpoint or validation request always ends the turn immediately.
-
-Astra then reviews the actual worker result/diff/tests and either integrates, takes back, delegates one further bounded task, or completes.
-
-This preserves the intended shape:
-
-\`\`\`text
-host prepares bounded evidence
-  -> Astra plans/decides
-  -> deterministic relay
-  -> Step implements/tests
-  -> host records bounded test/diff receipts
-  -> deterministic relay
-  -> fresh Astra call reviews from compact handoff
-\`\`\`
-
+The host keeps the existing hard boundaries: authorized branch and HEAD, clean
+source tree for Step, explicit edit paths and test targets, no push or merge,
+no external economic action, bounded worker scope, and verified diff review.
 There is no human polling step and no resident LLM supervisor.

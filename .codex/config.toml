@@ -15,8 +15,7 @@ model_auto_compact_token_limit_scope = "total"
 approval_policy = "on-request"
 approvals_reviewer = "user"
 
-# Astra receives a prepared local workspace. Source retrieval and long workers
-# happen outside the model process.
+# Astra inspects local source directly. Step executes bounded edits through the host.
 sandbox_mode = "workspace-write"
 web_search = "disabled"
 
@@ -26,9 +25,7 @@ web_search = "disabled"
 windows.sandbox = "unelevated"
 
 [sandbox_workspace_write]
-# Phase E authorizes read-only HTTP/HTTPS probes and source acquisition.
-# Network access itself does not authorize publication, contact or spending.
-network_access = true
+network_access = false
 
 [agents]
 enabled = false
