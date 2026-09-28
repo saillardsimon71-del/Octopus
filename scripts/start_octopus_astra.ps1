@@ -100,9 +100,83 @@ function Resolve-StepRelayPlan([object]$Request, [string]$RequestId) {
             throw "Product ticket $field does not match relay request."
         }
     }
-    $normalized = [ordered]@{ policy = 'product_ticket' }
-    foreach ($property in $ticket.PSObject.Properties) {
-        if ($property.Name -ne 'policy') { $normalized[$property.Name] = $property.Value }
+
+    $allowedPaths = @($ticket.allowed_paths | Where-Object { $null -ne $_ })
+    if (-not $allowedPaths.Count) {
+        $allowedPaths = @($ticket.starting_paths | Where-Object { $null -ne $_ })
+    }
+    if (-not $allowedPaths.Count) {
+        throw 'Product ticket requires allowed_paths or starting_paths.'
+    }
+    $testTargets = @($ticket.test_targets | Where-Object { $null -ne $_ })
+    if (-not $testTargets.Count) {
+        $testTargets = @($ticket.likely_tests | Where-Object { $null -ne $_ })
+    }
+    if (-not $testTargets.Count) {
+        throw 'Product ticket requires test_targets or likely_tests.'
+    }
+
+    $goalParts = @(
+        "Request: $([string]$ticket.request_id)",
+        "Base head: $([string]$ticket.base_head)",
+        "Title: $([string]$ticket.title)",
+        "Objective: $([string]$ticket.objective)",
+        "Authorization: $([string]$ticket.authorization)"
+    )
+    if (@($ticket.architecture).Count) {
+        $goalParts += 'Architecture:'
+        $goalParts += @($ticket.architecture | ForEach-Object { '- ' + [string]$_ })
+    }
+    if ($ticket.scope) {
+        $goalParts += 'Scope: ' + ($ticket.scope | ConvertTo-Json -Depth 10 -Compress)
+    }
+    if (@($ticket.work).Count) {
+        $goalParts += 'Work:'
+        $goalParts += @($ticket.work | ForEach-Object { '- ' + [string]$_ })
+    }
+    if (@($ticket.prohibitions).Count) {
+        $goalParts += 'Prohibitions:'
+        $goalParts += @($ticket.prohibitions | ForEach-Object { '- ' + [string]$_ })
+    }
+
+    $acceptanceContract = $ticket.acceptance_contract
+    if (-not $acceptanceContract) {
+        $acceptanceContract = [ordered]@{
+            version = 1
+            id = ([string]$ticket.request_id + '_tests')
+            artifact_type = 'code'
+            probe = [ordered]@{ kind = 'none' }
+            must = @([ordered]@{
+                id = 'tests_green'
+                fact = 'tests.passed'
+                op = 'equals'
+                expected = $true
+            })
+        }
+    }
+    $workTicket = [ordered]@{
+        goal = ($goalParts | Where-Object { $_ }) -join [Environment]::NewLine
+        allowed_paths = $allowedPaths
+        test_targets = $testTargets
+        max_steps = if ($null -ne $ticket.max_steps) { [int]$ticket.max_steps } else { 20 }
+        max_files_changed = if ($null -ne $ticket.max_files_changed) { [int]$ticket.max_files_changed } else { $allowedPaths.Count }
+        max_lines_added = if ($null -ne $ticket.max_lines_added) { [int]$ticket.max_lines_added } else { 2500 }
+        max_lines_deleted = if ($null -ne $ticket.max_lines_deleted) { [int]$ticket.max_lines_deleted } else { 2500 }
+        noop_allowed = if ($null -ne $ticket.noop_allowed) { [bool]$ticket.noop_allowed } else { $false }
+        acceptance_criteria = @($ticket.acceptance)
+        acceptance_contract = $acceptanceContract
+    }
+    $normalized = [ordered]@{
+        name = [string]$ticket.request_id
+        policy = 'product_ticket'
+        version = $ticket.version
+        request_id = [string]$ticket.request_id
+        phase = [string]$ticket.phase
+        base_head = [string]$ticket.base_head
+        objective = [string]$ticket.objective
+        scope = $ticket.scope
+        prohibitions = @($ticket.prohibitions)
+        tickets = @($workTicket)
     }
     $normalizedPath = Join-Path $ticketRoot ($RequestId + '.json')
     Write-JsonAtomic -Path $normalizedPath -Value $normalized
@@ -617,6 +691,90 @@ function New-CompactWorkerSummary([object]$Summary) {
     }
 }
 
+function Assert-ValidWorkerReviewReceipt(
+    [object]$Receipt,
+    [int]$WorkerExit,
+    [string]$RequestId,
+    [string]$Repository
+) {
+    if ($WorkerExit -ne 0) {
+        throw "External worker failed with code $WorkerExit. Astra review was not started."
+    }
+    if (-not $Receipt -or [int]$Receipt.version -ne 1) {
+        throw 'External worker receipt is missing or unsupported. Astra review was not started.'
+    }
+    if ([string]$Receipt.request_id -cne $RequestId) {
+        throw 'External worker receipt request_id mismatch. Astra review was not started.'
+    }
+    if ([string]$Receipt.status -ne 'completed' -or [int]$Receipt.exit_code -ne 0) {
+        throw 'External worker receipt does not record a successful completion. Astra review was not started.'
+    }
+
+    $summary = $Receipt.worker_summary
+    if (-not $summary) {
+        throw 'External worker receipt has no worker_summary. Astra review was not started.'
+    }
+    $baseHead = ([string]$summary.base_head).Trim().ToLowerInvariant()
+    $sourceCommit = ([string]$summary.source_commit).Trim().ToLowerInvariant()
+    if ($baseHead -notmatch '^[0-9a-f]{40}$' -or $sourceCommit -notmatch '^[0-9a-f]{40}$') {
+        throw 'External worker summary requires full base_head and source_commit SHAs. Astra review was not started.'
+    }
+
+    $declaredPaths = @()
+    foreach ($value in @($summary.changed_paths)) {
+        $path = ([string]$value).Replace('\', '/').Trim()
+        $parts = @($path.Split('/'))
+        if (-not $path -or $path.StartsWith('/') -or $parts[0].Contains(':') -or @($parts | Where-Object { $_ -in @('', '.', '..') }).Count) {
+            throw 'External worker summary contains an invalid changed_paths entry. Astra review was not started.'
+        }
+        $declaredPaths += $path
+    }
+    if (-not $declaredPaths.Count) {
+        throw 'External worker summary requires non-empty changed_paths. Astra review was not started.'
+    }
+    $uniqueDeclaredPaths = @($declaredPaths | Sort-Object -Unique)
+    if ($uniqueDeclaredPaths.Count -ne $declaredPaths.Count) {
+        throw 'External worker summary contains duplicate changed_paths. Astra review was not started.'
+    }
+    if (-not @($summary.tests).Count) {
+        throw 'External worker summary requires a non-empty tests summary. Astra review was not started.'
+    }
+
+    $tickets = @($summary.tickets)
+    if ($tickets.Count -ne 1) {
+        throw 'External worker summary requires exactly one bounded ticket result. Astra review was not started.'
+    }
+    $ticket = $tickets[0]
+    if ([string]$ticket.status -ne 'done' -or -not [bool]$ticket.tests_passed -or [string]$ticket.gate_status -ne 'ACCEPTED') {
+        throw 'External worker ticket is not done with passing tests and an ACCEPTED gate. Astra review was not started.'
+    }
+    if (([string]$ticket.commit).Trim().ToLowerInvariant() -ne $sourceCommit) {
+        throw 'External worker ticket commit differs from source_commit. Astra review was not started.'
+    }
+    $ticketPaths = @($ticket.changed_paths | ForEach-Object { ([string]$_).Replace('\', '/').Trim() } | Sort-Object -Unique)
+    if (@(Compare-Object -ReferenceObject $uniqueDeclaredPaths -DifferenceObject $ticketPaths).Count) {
+        throw 'External worker ticket paths differ from worker_summary.changed_paths. Astra review was not started.'
+    }
+
+    $currentHead = (& git -C $Repository rev-parse HEAD 2>$null | Out-String).Trim().ToLowerInvariant()
+    if ($LASTEXITCODE -ne 0 -or $currentHead -ne $baseHead) {
+        throw 'External worker base_head differs from the current constructor HEAD. Astra review was not started.'
+    }
+    $resolvedCommit = (& git -C $Repository rev-parse "$sourceCommit^{commit}" 2>$null | Out-String).Trim().ToLowerInvariant()
+    if ($LASTEXITCODE -ne 0 -or $resolvedCommit -ne $sourceCommit) {
+        throw 'External worker source_commit does not resolve exactly. Astra review was not started.'
+    }
+    $ancestry = ((& git -C $Repository rev-list --parents -n 1 $sourceCommit 2>$null | Out-String).Trim() -split '\s+')
+    if ($LASTEXITCODE -ne 0 -or $ancestry.Count -ne 2 -or $ancestry[1].ToLowerInvariant() -ne $baseHead) {
+        throw 'External worker source_commit is not a direct child of base_head. Astra review was not started.'
+    }
+    $actualPaths = @(& git -C $Repository diff --no-renames --name-only --relative $baseHead $sourceCommit -- 2>$null | Where-Object { $_ } | Sort-Object -Unique)
+    if ($LASTEXITCODE -ne 0 -or @(Compare-Object -ReferenceObject $uniqueDeclaredPaths -DifferenceObject $actualPaths).Count) {
+        throw 'External worker changed_paths differ from the source commit diff. Astra review was not started.'
+    }
+    return $summary
+}
+
 function Write-AstraContext([string]$TaskPrompt) {
     $handoffJson = if (Test-Path -LiteralPath $handoffPath -PathType Leaf) { Get-Content -LiteralPath $handoffPath -Raw } else { "{}" }
     if ($handoffJson.Length -gt $MaxHandoffChars) {
@@ -957,18 +1115,19 @@ while ($true) {
         & powershell -NoProfile -ExecutionPolicy Bypass -File $runner -Plan $plan -Hours $hours -RequestId $requestId -ResultPath $resultPath
         $workerExit = $LASTEXITCODE
         $workerReceipt = Get-Content -LiteralPath (Join-Path $repo $resultPath) -Raw | ConvertFrom-Json
-        $lastWorkerSummary = New-CompactWorkerSummary $workerReceipt.worker_summary
-        $workerPaths = @($workerReceipt.worker_summary.changed_paths)
+        $validatedWorkerSummary = Assert-ValidWorkerReviewReceipt -Receipt $workerReceipt -WorkerExit $workerExit -RequestId $requestId -Repository $repo
+        $lastWorkerSummary = New-CompactWorkerSummary $validatedWorkerSummary
+        $workerPaths = @($validatedWorkerSummary.changed_paths)
         $reviewContext = [ordered]@{
             kind = 'step'
-            base_head = [string]$workerReceipt.worker_summary.base_head
-            head = [string]$workerReceipt.worker_summary.source_commit
+            base_head = [string]$validatedWorkerSummary.base_head
+            head = [string]$validatedWorkerSummary.source_commit
             changed_paths = $workerPaths
-            diff_stat = @($workerReceipt.worker_summary.diff_stat)
+            diff_stat = @($validatedWorkerSummary.diff_stat)
             review_policy = 'Use the compact worker receipt; inspect one changed-file diff at a time. Do not read the raw report or worker log.'
         }
         $lastResult = "Step $requestId exited $workerExit; result=$resultPath"
-        Save-Handoff -Result $lastResult -NextDecision 'Review the compact worker receipt and listed paths; publish worker_commit checkpoint only if acceptable.' -Files $workerPaths -Tests @($workerReceipt.worker_summary.tests)
+        Save-Handoff -Result $lastResult -NextDecision 'Review the compact worker receipt and listed paths; publish worker_commit checkpoint only if acceptable.' -Files $workerPaths -Tests @($validatedWorkerSummary.tests)
         $nextReason = 'Step review'
         $nextPrompt = New-AstraTaskPrompt "Fresh Step review for phase $Phase. Use only the compact worker receipt in the inline snapshot; do not open its raw report, evidence or log. Inspect the actual diff for each listed path. If acceptable, publish checkpoint.json version 2 with kind=worker_commit, base_head, source_commit, message and exact paths, then end the call."
     } elseif (Test-Path -LiteralPath $validationPath -PathType Leaf) {

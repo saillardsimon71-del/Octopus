@@ -2,6 +2,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from octopus import night_shift
+
 
 ROOT = Path(__file__).resolve().parents[1]
 POWERSHELL = "powershell"
@@ -71,6 +73,49 @@ Resolve-StepRelayPlan -Request $request -RequestId ([string]$request.request_id)
     )
 
 
+def gate_worker_review(
+    repo: Path,
+    request_id: str,
+    receipt: dict,
+    worker_exit: int,
+    tmp_path: Path,
+) -> subprocess.CompletedProcess[str]:
+    receipt_path = tmp_path / "worker-receipt.json"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    runner = tmp_path / "gate-worker-review.ps1"
+    runner.write_text(
+        f"""
+$tokens=$null;$errors=$null
+$ErrorActionPreference='Stop'
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
+if($errors.Count){{throw ($errors|ForEach-Object Message)}}
+$fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-ValidWorkerReviewReceipt'}},$true)
+if(-not $fn){{throw 'Assert-ValidWorkerReviewReceipt is missing'}}
+Invoke-Expression $fn.Extent.Text
+$script:astraCalls=0
+try {{
+  $receipt=Get-Content -LiteralPath '{receipt_path}' -Raw|ConvertFrom-Json
+  $summary=Assert-ValidWorkerReviewReceipt -Receipt $receipt -WorkerExit {worker_exit} -RequestId '{request_id}' -Repository '{repo}'
+  $script:astraCalls++
+  @{{astra_calls=$script:astraCalls;accepted=$true;summary=$summary}}|ConvertTo-Json -Depth 20 -Compress
+}} catch {{
+  @{{astra_calls=$script:astraCalls;accepted=$false;error=$_.Exception.Message}}|ConvertTo-Json -Depth 20 -Compress
+}}
+""",
+        encoding="utf-8",
+    )
+    return run(
+        POWERSHELL,
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(runner),
+        cwd=repo,
+    )
+
+
 def test_step_relay_v2_normalizes_product_ticket_and_prefers_it_over_legacy_plan(tmp_path: Path):
     repo = init_repo(tmp_path)
     relay = repo / "cache" / "astra-relay"
@@ -110,7 +155,30 @@ def test_step_relay_v2_normalizes_product_ticket_and_prefers_it_over_legacy_plan
     normalized_path = repo / "cache" / "astra-tickets" / "phase-g-runtime-001.json"
     assert not normalized_path.read_bytes().startswith(b"\xef\xbb\xbf")
     normalized = json.loads(normalized_path.read_text(encoding="utf-8"))
-    assert normalized == {"policy": "product_ticket", **ticket}
+    assert normalized["name"] == ticket["request_id"]
+    assert normalized["policy"] == "product_ticket"
+    assert normalized["request_id"] == ticket["request_id"]
+    assert normalized["base_head"] == ticket["base_head"]
+    assert normalized["objective"] == ticket["objective"]
+    assert normalized["scope"] == ticket["scope"]
+    assert normalized["prohibitions"] == ticket["prohibitions"]
+    validated = night_shift.validate_plan(normalized)
+    assert len(validated["tickets"]) == 1
+    work_ticket = validated["tickets"][0]
+    assert work_ticket["allowed_paths"] == ticket["starting_paths"]
+    assert work_ticket["test_targets"] == ticket["likely_tests"]
+    assert work_ticket["acceptance_criteria"] == ticket["acceptance"]
+    assert ticket["objective"] in work_ticket["goal"]
+    assert ticket["scope"]["implementation"] in work_ticket["goal"]
+    assert ticket["prohibitions"][0] in work_ticket["goal"]
+    assert work_ticket["acceptance_contract"]["must"] == [
+        {
+            "id": "tests_green",
+            "fact": "tests.passed",
+            "op": "equals",
+            "expected": True,
+        }
+    ]
 
 
 def test_bounded_json_writer_uses_utf8_without_bom(tmp_path: Path):
@@ -243,6 +311,97 @@ def test_step_relay_rejects_missing_ticket_or_plan(tmp_path: Path):
     assert missing_plan.returncode != 0
     assert "Relay request missing product_ticket or plan_path" in missing_plan.stderr
     assert not (repo / "cache" / "astra-tickets" / "missing-001.json").exists()
+
+
+def test_step_failure_before_summary_blocks_astra_review(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    request_id = "step-failed-001"
+    receipt = {
+        "version": 1,
+        "request_id": request_id,
+        "status": "failed",
+        "exit_code": 2,
+        "worker_summary": None,
+    }
+
+    result = gate_worker_review(repo, request_id, receipt, 2, tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] is False
+    assert payload["astra_calls"] == 0
+    assert "failed with code 2" in payload["error"]
+
+
+def test_invalid_worker_summary_fails_closed_before_astra_review(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    request_id = "invalid-summary-001"
+    receipt = {
+        "version": 1,
+        "request_id": request_id,
+        "status": "completed",
+        "exit_code": 0,
+        "worker_summary": {
+            "status": "backlog_complete",
+            "base_head": git(repo, "rev-parse", "HEAD"),
+            "source_commit": "0" * 40,
+            "changed_paths": [],
+            "diff_stat": [],
+            "tests": [],
+            "tickets": [],
+        },
+    }
+
+    result = gate_worker_review(repo, request_id, receipt, 0, tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] is False
+    assert payload["astra_calls"] == 0
+    assert "changed_paths" in payload["error"]
+
+
+def test_valid_compact_worker_receipt_allows_one_astra_review(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    request_id = "valid-summary-001"
+    base_head = git(repo, "rev-parse", "HEAD")
+    git(repo, "switch", "-c", "worker/valid-summary")
+    (repo / "product.txt").write_text("worker result\n", encoding="utf-8")
+    git(repo, "commit", "-am", "worker: valid summary")
+    source_commit = git(repo, "rev-parse", "HEAD")
+    git(repo, "switch", "prep/astra-local-orchestration")
+    receipt = {
+        "version": 1,
+        "request_id": request_id,
+        "status": "completed",
+        "exit_code": 0,
+        "worker_summary": {
+            "status": "backlog_complete",
+            "base_head": base_head,
+            "source_commit": source_commit,
+            "changed_paths": ["product.txt"],
+            "diff_stat": ["product.txt | 2 +-"],
+            "tests": ["1 passed"],
+            "tickets": [
+                {
+                    "task_id": 1,
+                    "status": "done",
+                    "commit": source_commit,
+                    "tests_passed": True,
+                    "gate_status": "ACCEPTED",
+                    "changed_paths": ["product.txt"],
+                }
+            ],
+        },
+    }
+
+    result = gate_worker_review(repo, request_id, receipt, 0, tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] is True
+    assert payload["astra_calls"] == 1
+    assert payload["summary"]["source_commit"] == source_commit
 
 
 def checkpoint(repo: Path, paths: list[str], request_id: str = "phase-1") -> Path:
