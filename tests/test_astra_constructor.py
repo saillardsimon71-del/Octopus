@@ -107,10 +107,34 @@ def test_step_relay_v2_normalizes_product_ticket_and_prefers_it_over_legacy_plan
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(result.stdout) == "cache/astra-tickets/phase-g-runtime-001.json"
-    normalized = json.loads(
-        (repo / "cache" / "astra-tickets" / "phase-g-runtime-001.json").read_text(encoding="utf-8-sig")
-    )
+    normalized_path = repo / "cache" / "astra-tickets" / "phase-g-runtime-001.json"
+    assert not normalized_path.read_bytes().startswith(b"\xef\xbb\xbf")
+    normalized = json.loads(normalized_path.read_text(encoding="utf-8"))
     assert normalized == {"policy": "product_ticket", **ticket}
+
+
+def test_bounded_json_writer_uses_utf8_without_bom(tmp_path: Path):
+    output = tmp_path / "bounded.json"
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    runner = tmp_path / "write-bounded-json.ps1"
+    runner.write_text(
+        f"""
+$tokens=$null;$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
+if($errors.Count){{throw ($errors|ForEach-Object Message)}}
+$fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Write-BoundedJsonAtomic'}},$true)
+Invoke-Expression $fn.Extent.Text
+$null=Write-BoundedJsonAtomic -Path '{output}' -Value @{{kind='step';label='bounded'}} -MaxChars 200 -Label 'test JSON'
+""",
+        encoding="utf-8",
+    )
+
+    result = run(POWERSHELL, "-NoProfile", "-File", str(runner), cwd=tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    raw = output.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    assert json.loads(raw.decode("utf-8")) == {"kind": "step", "label": "bounded"}
 
 
 def test_step_relay_keeps_legacy_plan_path_unchanged(tmp_path: Path):

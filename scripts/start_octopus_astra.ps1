@@ -25,7 +25,8 @@ function Write-JsonAtomic([string]$Path, [object]$Value) {
         New-Item -ItemType Directory -Force -Path $parent | Out-Null
     }
     $tmp = "$Path.tmp-$PID"
-    $Value | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $tmp -Encoding UTF8
+    $json = $Value | ConvertTo-Json -Depth 20
+    [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
     Move-Item -LiteralPath $tmp -Destination $Path -Force
 }
 
@@ -37,7 +38,7 @@ function Write-BoundedJsonAtomic([string]$Path, [object]$Value, [int]$MaxChars, 
     $parent = Split-Path -Parent $Path
     if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
     $tmp = "$Path.tmp-$PID"
-    $json | Set-Content -LiteralPath $tmp -Encoding UTF8
+    [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
     Move-Item -LiteralPath $tmp -Destination $Path -Force
     return $json
 }
