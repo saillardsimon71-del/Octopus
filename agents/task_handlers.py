@@ -373,6 +373,7 @@ def orbit_mission(ctx):
         search_browse_selector=str(ctx.input.get("search_browse_selector") or "first"),
         business_signal_focus=signal_focus,
         business_signal_target=max(1, int(ctx.input.get("business_signal_target", 3))),
+        max_duration_s=float(ctx.input.get("max_duration_s", 900)),
     ))
     synthesis_status = result.get("synthesis_status", "degraded")
     output = {

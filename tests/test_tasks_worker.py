@@ -428,6 +428,36 @@ def test_human_in_the_loop_resumes_after_answer(handlers):
     assert statuses == ["waiting_human", "done"]
 
 
+def test_idle_worker_wakes_for_task_and_human_answer_without_repeating_step(handlers):
+    computed = []
+
+    @worker.handler("test.continuous")
+    def continuous(ctx):
+        value = ctx.memo("acquired", lambda: computed.append(ctx.id) or "source")
+        return {"value": value, "answer": ctx.ask_human("review", "Continue?")}
+
+    journal.connect().close()
+    stop = threading.Event()
+    thread = threading.Thread(target=worker.loop, kwargs={"stop": stop, "poll_s": 0.01,
+        "max_tasks": 2, **QUIET}, daemon=True)
+    thread.start()
+    try:
+        task_id = worker.enqueue("b", "test.continuous")
+        deadline = time.monotonic() + 5
+        while tasks.get(task_id)["status"] != "waiting_human" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert tasks.get(task_id)["status"] == "waiting_human"
+        assert computed == [task_id]
+        tasks.answer(tasks.pending_human_requests()[0]["id"], "yes")
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert tasks.get(task_id)["output"] == {"value": "source", "answer": "yes"}
+        assert computed == [task_id]
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+
+
 def test_unanswered_request_expires(handlers):
     @worker.handler("test.wait")
     def wait(ctx):

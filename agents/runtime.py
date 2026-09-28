@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextvars
 import copy
 import json
+import math
 import re
 import time
 import unicodedata
@@ -1273,8 +1274,9 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
     lockstep_selection = None
     for i in range(max_steps):
         if cancel.requested():
-            db.post(role, "arrêt demandé par l'humain — fin de l'agent")
-            return {"role": role, "steps": steps, "final": "(arrêt demandé)", "execution_status": "cancelled"}
+            status = "timeout" if cancel.timed_out() else "cancelled"
+            db.post(role, "durée maximale atteinte" if status == "timeout" else "arrêt demandé par l'humain")
+            return {"role": role, "steps": steps, "final": "(timeout)" if status == "timeout" else "(arrêt demandé)", "execution_status": status}
         # Garde-budget : on arrête l'agent si le budget du run est atteint.
         if _budget_exhausted():
             db.post(role, "budget dépassé — arrêt du run")
@@ -1316,8 +1318,9 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
                 db.post(role, f"refus outil {tool} : {refusal}")
             result_str = _tool_result_view(tool, result)
         except cancel.Cancelled:
-            db.post(role, "arrêt demandé par l'humain — fin de l'agent")
-            return {"role": role, "steps": steps, "final": "(arrêt demandé)", "execution_status": "cancelled"}
+            status = "timeout" if cancel.timed_out() else "cancelled"
+            db.post(role, "durée maximale atteinte" if status == "timeout" else "arrêt demandé par l'humain")
+            return {"role": role, "steps": steps, "final": "(timeout)" if status == "timeout" else "(arrêt demandé)", "execution_status": status}
         except Exception as e:
             result_str = f"erreur : {str(e)[:2048]}"
         if (
@@ -1403,12 +1406,14 @@ def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None
                 search_browse_lockstep: bool = False,
                 search_browse_selector: str = "first",
                 business_signal_focus: bool = False,
-                business_signal_target: int = 3) -> dict:
+                business_signal_target: int = 3, max_duration_s: float = 900) -> dict:
     """ORBIT planifie puis délègue aux rôles (multi-agents via le runtime).
 
     Le profil explicite est hérité par les runs agents imbriqués via le journal.
     """
     allowed_tools = _normalize_allowed_tools(allowed_tools)
+    if not math.isfinite(max_duration_s) or max_duration_s <= 0:
+        raise ValueError("max_duration_s doit être une durée finie strictement positive")
     if search_browse_selector not in {"first", "evidence_relevance", "business_signal_relevance"}:
         raise ValueError(f"search_browse_selector inconnu : {search_browse_selector}")
     # A cold mission has no inherited business objective. Existing runs and
@@ -1418,7 +1423,7 @@ def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None
                      budget_usd=None if journal.current_run() and journal.current_run().budgets
                      else deepseek.config.CYCLE_BUDGET_USD,
                      profile=profile):
-        with cancel.scope(), web_guard.session(), _search_cache():
+        with cancel.scope(max_duration_s=max_duration_s), web_guard.session(), _search_cache():
             return _run_mission(
                 goal, max_steps_per_agent, allowed_tools,
                 search_browse_lockstep=search_browse_lockstep,
@@ -1480,7 +1485,8 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     from .search import SEARCH_PURPOSE_BUSINESS, SEARCH_PURPOSE_GENERAL
     pro = deepseek.config.MODEL_PRO
     if cancel.requested():
-        return _mission_unavailable([], [], "cancelled", "Arrêt demandé")
+        return _mission_unavailable([], [], "timeout" if cancel.timed_out() else "cancelled",
+                                    "Durée maximale atteinte" if cancel.timed_out() else "Arrêt demandé")
     current = journal.current_run()
     planner_roles = GENERIC_ROLES if current is not None and current.business != DEFAULT_BUSINESS else ROLES
     role_catalog = "\n".join(f"- {name}: {desc}" for name, desc in planner_roles.items())
@@ -1519,6 +1525,9 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     tasks = [t for t in proposed if isinstance(t, dict)][:MAX_PLAN_TASKS]
     if len(proposed) > len(tasks):
         db.post("ORBIT", f"plan tronqué : {len(proposed)} sous-tâches proposées, {len(tasks)} gardées")
+    if cancel.requested():
+        status = "timeout" if cancel.timed_out() else "cancelled"
+        return _mission_unavailable(tasks, [], status, "Durée maximale atteinte" if status == "timeout" else "Arrêt demandé")
     # Replan unique de granularité (H3 #68/#69) : une mission multi-signaux concentrée dans
     # une seule sous-tâche plafonne chaque voie de découverte au budget d'étapes d'un agent.
     # Le feedback ne porte que sur la faisabilité du plan par rapport au budget ; il ne
@@ -1553,8 +1562,9 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     results = []
     for t in tasks:
         if cancel.requested():
-            db.post("ORBIT", "mission arrêtée par l'humain")
-            return _mission_unavailable(tasks, results, "cancelled", "Arrêt demandé")
+            status = "timeout" if cancel.timed_out() else "cancelled"
+            db.post("ORBIT", "mission interrompue : " + status)
+            return _mission_unavailable(tasks, results, status, "Durée maximale atteinte" if status == "timeout" else "Arrêt demandé")
         role = t.get("role", "ORBIT")
         if role not in ROLES:
             role = "ORBIT"
@@ -1595,7 +1605,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                         "final": r.get("final"), "steps": r.get("steps"),
                         "execution_status": r.get("execution_status", "unknown"),
                         "execution_error": r.get("execution_error")})
-        if r.get("execution_status") in {"cancelled", "budget_exceeded", "llm_unavailable"}:
+        if r.get("execution_status") in {"cancelled", "timeout", "budget_exceeded", "llm_unavailable"}:
             return _mission_unavailable(tasks, results, r["execution_status"],
                                         r.get("execution_error") or r.get("final"))
 
@@ -1604,8 +1614,9 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         return _mission_unavailable(tasks, results, "no_work", "Aucun travail exécuté")
 
     if cancel.requested():
-        db.post("ORBIT", "mission arrêtée par l'humain avant la synthèse")
-        return _mission_unavailable(tasks, results, "cancelled", "Arrêt demandé")
+        status = "timeout" if cancel.timed_out() else "cancelled"
+        db.post("ORBIT", "mission interrompue avant la synthèse : " + status)
+        return _mission_unavailable(tasks, results, status, "Durée maximale atteinte" if status == "timeout" else "Arrêt demandé")
     signal_schema = ""
     if business_signal_focus:
         signal_schema = (
@@ -1676,6 +1687,9 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             "synthesis_error": error,
         }
 
+    if cancel.requested():
+        status = "timeout" if cancel.timed_out() else "cancelled"
+        return _mission_unavailable(tasks, results, status, "Durée maximale atteinte" if status == "timeout" else "Arrêt demandé")
     rapport = syn.get("rapport", "")
     if not isinstance(rapport, str) or not rapport.strip():
         return _mission_unavailable(tasks, results, "invalid_synthesis", "Rapport absent ou vide")
@@ -1686,9 +1700,15 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             syn.get("business_signals"),
             results,
         )
+        if cancel.requested():
+            status = "timeout" if cancel.timed_out() else "cancelled"
+            return _mission_unavailable(tasks, results, status, "Durée maximale atteinte" if status == "timeout" else "Arrêt demandé")
         # Couche de MESURE après #94 : la revue ne filtre ni ne modifie les signaux ;
         # elle ajoute une lecture indépendante de leur actionnabilité actuelle.
         business_signal_reviews = _review_business_signals(business_signals, results)
+    if cancel.requested():
+        status = "timeout" if cancel.timed_out() else "cancelled"
+        return _mission_unavailable(tasks, results, status, "Durée maximale atteinte" if status == "timeout" else "Arrêt demandé")
     actionable_business_signal_count = sum(
         1 for review in business_signal_reviews
         if review.get("classification") == "actionable_now"

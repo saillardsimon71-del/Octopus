@@ -15,6 +15,64 @@ REAL_QUERIES = [  # run ORBIT du 16/09, 14:07-14:10
 ]
 
 
+def test_mission_duration_stops_before_next_subtask_and_keeps_degraded_result(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(runtime.cancel.time, "monotonic", lambda: clock[0])
+
+    def planner(*args, **kwargs):
+        clock[0] = 2.0
+        return {"tasks": [{"role": "SOUT", "task": "collecte"}]}
+
+    monkeypatch.setattr(deepseek, "call_json", planner)
+    monkeypatch.setattr(runtime, "run_agent", lambda *args, **kwargs: pytest.fail("late subtask started"))
+    result = runtime.run_mission("objectif", max_duration_s=1)
+    assert result["execution_status"] == "timeout"
+    assert result["synthesis_status"] == "degraded"
+    assert result["results"] == []
+
+
+def test_mission_duration_stops_before_business_signal_replan(monkeypatch):
+    clock = [0.0]
+    calls = []
+    monkeypatch.setattr(runtime.cancel.time, "monotonic", lambda: clock[0])
+
+    def planner(*args, **kwargs):
+        calls.append(args[1])
+        clock[0] = 2.0
+        return {"tasks": [{"role": "SOUT", "task": "collecte"}]}
+
+    monkeypatch.setattr(deepseek, "call_json", planner)
+    result = runtime.run_mission("objectif", business_signal_focus=True, max_duration_s=1)
+    assert result["execution_status"] == "timeout"
+    assert calls == ["planification"]
+
+
+def test_mission_duration_does_not_validate_late_synthesis(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(runtime.cancel.time, "monotonic", lambda: clock[0])
+
+    def call_json(agent, task, model, messages, **kwargs):
+        if task == "planification":
+            return {"tasks": [{"role": "SOUT", "task": "collecte"}]}
+        clock[0] = 2.0
+        return {"rapport": "late"}
+
+    monkeypatch.setattr(deepseek, "call_json", call_json)
+    monkeypatch.setattr(runtime, "run_agent", lambda *args, **kwargs: {
+        "steps": [{"tool": "test"}], "final": "source", "execution_status": "completed"})
+    result = runtime.run_mission("objectif", max_duration_s=1)
+    assert result["execution_status"] == "timeout"
+    assert result["synthesis_status"] == "degraded"
+    assert result["results"][0]["final"] == "source"
+
+
+@pytest.mark.parametrize("duration", [0, -1, float("nan"), float("inf")])
+def test_mission_rejects_invalid_duration_before_planning(monkeypatch, duration):
+    monkeypatch.setattr(deepseek, "call_json", lambda *args, **kwargs: pytest.fail("planner called"))
+    with pytest.raises(ValueError, match="max_duration_s"):
+        runtime.run_mission("objectif", max_duration_s=duration)
+
+
 def test_registry_is_the_single_runtime_source(monkeypatch):
     from agents.tool_registry import ToolRegistry
 
