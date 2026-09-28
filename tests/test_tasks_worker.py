@@ -23,6 +23,39 @@ def handlers(monkeypatch):
 
 # --- file -----------------------------------------------------------------------------------
 
+@pytest.mark.parametrize("options", [
+    {"max_tasks": 0}, {"max_tasks": -1}, {"max_tasks": 1.5}, {"max_tasks": True},
+    {"poll_s": 0}, {"poll_s": -1}, {"poll_s": float("nan")},
+    {"poll_s": float("inf")}, {"poll_s": float("-inf")},
+])
+def test_worker_loop_rejects_invalid_bounds_before_claim(monkeypatch, options):
+    def unexpected_run(*args, **kwargs):
+        pytest.fail("invalid worker bounds must not claim or execute a task")
+
+    monkeypatch.setattr(worker, "run_one", unexpected_run)
+    with pytest.raises(ValueError):
+        worker.loop(**options, **QUIET)
+
+
+@pytest.mark.parametrize("options", [
+    ["--max-tasks", "0"], ["--max-tasks", "-1"],
+    ["--poll", "0"], ["--poll", "-1"], ["--poll", "nan"],
+    ["--poll", "inf"], ["--poll=-inf"],
+])
+@pytest.mark.parametrize("mode", [[], ["--once"]])
+def test_worker_cli_rejects_invalid_bounds_before_loading(monkeypatch, capsys, options, mode):
+    from octopus.__main__ import main
+
+    def unexpected_load(*args, **kwargs):
+        pytest.fail("invalid worker arguments must not load handlers")
+
+    monkeypatch.setattr(worker, "load_handlers", unexpected_load)
+    with pytest.raises(SystemExit) as exc:
+        main(["worker", *mode, *options])
+    assert exc.value.code == 2
+    assert "strictement positif" in capsys.readouterr().err
+
+
 def test_claim_order_priority_and_delay():
     low = tasks.enqueue("b", "k", {"n": 1})
     high = tasks.enqueue("b", "k", {"n": 2}, priority=5)
@@ -459,10 +492,14 @@ def test_podalux_agent_message_task(handlers, monkeypatch):
     assert worker.run_one("w", **QUIET)["output"] == {"role": "ORBIT", "final": "Bonjour !", "steps": 0}
 
 
-def test_cli_roundtrip(handlers, capsys):
+@pytest.mark.parametrize("mode", [["--once"], ["--max-tasks", "1", "--poll", "0.01"]])
+def test_cli_roundtrip(handlers, capsys, mode):
     from octopus.__main__ import main
     assert main(["enqueue", "octopus", "octopus.cost_report"]) == 0
-    assert main(["worker", "--once"]) == 0
+    assert main(["enqueue", "octopus", "octopus.cost_report"]) == 0
+    assert main(["worker", *mode]) == 0
+    assert len(tasks.list_tasks(status="done")) == 1
+    assert len(tasks.list_tasks(status="queued")) == 1
     assert main(["tasks"]) == 0
     out = capsys.readouterr().out
     assert "tâche #1 en file" in out and "done" in out

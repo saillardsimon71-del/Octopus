@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import platform
 import shutil
@@ -319,8 +320,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("doctor", help="verification de l'installation")
     p = sub.add_parser("worker", help="execute les taches de la file")
     p.add_argument("--once", action="store_true", help="une seule tache puis sortie")
-    p.add_argument("--max-tasks", type=int, default=None)
-    p.add_argument("--poll", type=float, default=2.0)
+    p.add_argument("--max-tasks", type=int, default=None, help="nombre de taches strictement positif")
+    p.add_argument("--poll", type=float, default=2.0, help="intervalle fini strictement positif, en secondes")
     p = sub.add_parser("night-shift", help="canary autonome borné, sans push ni merge vers main")
     p.add_argument("--repo", default=".", help="racine Git propre à utiliser comme base")
     p.add_argument("--plan", default=None, help="plan JSON; défaut: octopus/config/night_shift.json")
@@ -385,6 +386,11 @@ def main(argv: list[str] | None = None) -> int:
     from . import strategy_cli
     strategy_cli.add_parser(sub)
     args = parser.parse_args(argv)
+    if args.cmd == "worker":
+        if args.max_tasks is not None and args.max_tasks <= 0:
+            parser.error("worker --max-tasks doit etre strictement positif")
+        if not math.isfinite(args.poll) or args.poll <= 0:
+            parser.error("worker --poll doit etre fini et strictement positif")
     commands = {"report": cmd_report, "bench": cmd_bench, "models": cmd_models, "doctor": cmd_doctor,
                 "worker": cmd_worker, "night-shift": cmd_night_shift, "night-stop": cmd_night_stop,
                 "night-resume": cmd_night_resume, "promotion": cmd_promotion, "enqueue": cmd_enqueue,

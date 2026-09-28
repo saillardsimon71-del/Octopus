@@ -219,6 +219,10 @@ def _safe(fn):
 def loop(owner: str | None = None, *, poll_s: float = 2.0, lease_s: float = 60, stop: threading.Event | None = None,
          max_tasks: int | None = None, log: Callable[[str], None] = print) -> int:
     """Boucle du worker. S'arrête sur `stop`, après `max_tasks` tâches, ou Ctrl+C."""
+    if max_tasks is not None and (type(max_tasks) is not int or max_tasks <= 0):
+        raise ValueError("max_tasks doit etre un entier strictement positif")
+    if not math.isfinite(poll_s) or poll_s <= 0:
+        raise ValueError("poll_s doit etre une duree finie strictement positive")
     owner = owner or default_owner()
     stop = stop or threading.Event()
     done = 0
