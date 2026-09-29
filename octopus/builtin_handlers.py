@@ -36,19 +36,18 @@ def strategy_review(ctx):
 
 @handler("economy.cycle", max_attempts=2, retry_delay_s=300)
 def economy_cycle(ctx):
-    """Boucle économique sans LLM : verdict des expériences en cours, réinvestissement selon la politique.
-
-    Récurrente : `python -m octopus schedule <business> economy.cycle --every 86400`. Avec
-    `--input '{"drive": true, "mission_budget_usd": 0.05}'`, relance aussi une mission ORBIT d'exploration
-    (budget LLM plafonné par tâche) quand aucune n'est active : consentement explicite à l'autonomie.
-    """
     from . import economy
+    for flag in ("drive", "portfolio"):
+        if flag in ctx.input and not isinstance(ctx.input[flag], bool):
+            raise ValueError(f"{flag} must be a bool")
     budget = float(ctx.input.get("mission_budget_usd", 0.05))
-    if ctx.input.get("portfolio"):  # tous les businesses, y compris ceux ouverts par les agents
-        results = economy.portfolio_cycle(drive_all=bool(ctx.input.get("drive")), budget_usd=budget)
+    drive = ctx.input.get("drive", False)
+    portfolio = ctx.input.get("portfolio", False)
+    if portfolio:  # tous les businesses, y compris ceux ouverts par les agents
+        results = economy.portfolio_cycle(drive_all=drive, budget_usd=budget)
         ctx.emit("economy.portfolio.done", {"businesses": [r["business"] for r in results]})
         return {"portfolio": results}
-    result = economy.cycle(ctx.business, drive_orbit=bool(ctx.input.get("drive")), budget_usd=budget)
+    result = economy.cycle(ctx.business, drive_orbit=drive, budget_usd=budget)
     ctx.emit("economy.cycle.done", {"evaluated": len(result["evaluated"]), "reinvest": result["reinvest"]["status"]})
     return result
 
