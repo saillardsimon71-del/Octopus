@@ -20,6 +20,7 @@ remotion/out/
 __pycache__/
 *.pyc
 .pytest_cache/
+/Microsoft/Windows/PowerShell/ModuleAnalysisCache
 
 # Journaux et sauvegardes locales
 cycle_gui.log

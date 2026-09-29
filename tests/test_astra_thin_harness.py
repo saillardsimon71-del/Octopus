@@ -15,13 +15,13 @@ def git(repo, *args):
     return result.stdout.strip()
 
 
-def run_fake_harness(tmp_path, terminal="STABLE", relays=2, tokens=300000, total_tokens=1000000, unsafe=False, step_failure=False, large_context=False, proofs="full", resume=False):
+def run_fake_harness(tmp_path, terminal="STABLE", relays=2, tokens=300000, total_tokens=1000000, unsafe=False, step_failure=False, large_context=False, proofs="full", resume=False, powershell_cache=False):
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init", "-b", "prep/astra-local-orchestration")
     git(repo, "config", "user.name", "Constructor Test")
     git(repo, "config", "user.email", "constructor@example.invalid")
-    (repo / ".gitignore").write_text("cache/\n__pycache__/\n*.pyc\n", encoding="utf-8")
+    (repo / ".gitignore").write_text((ROOT / ".gitignore").read_text(encoding="utf-8"), encoding="utf-8")
     (repo / "AGENTS.md").write_text("Local test rules.\n", encoding="utf-8")
     (repo / "docs" / "migrations").mkdir(parents=True)
     (repo / "docs" / "migrations" / "OPERATIONALIZATION.md").write_text(
@@ -114,6 +114,11 @@ $index=[Array]::IndexOf([object[]]$args,'--output-last-message')
 if($index -lt 0){exit 7}
 if($args -contains 'resume'){exit 8}
 $repo=$env:FAKE_REPO
+if($env:FAKE_POWERSHELL_CACHE -eq '1'){
+  $cache=Join-Path $repo 'Microsoft/Windows/PowerShell/ModuleAnalysisCache'
+  New-Item -ItemType Directory -Force -Path (Split-Path $cache) | Out-Null
+  [IO.File]::WriteAllText($cache,'PSMODULECACHE')
+}
 if($env:FAKE_TERMINAL -eq 'CONTINUE_FOREVER' -or ($env:FAKE_TERMINAL -in @('CONTINUE','BLOCKED_EARLY') -and $count -le 2)){
   $message=if($env:FAKE_TERMINAL -eq 'BLOCKED_EARLY' -and $count -eq 2){'ASTRA_STATUS: BLOCKED'}else{'ASTRA_CONTINUE: next bounded action'}
 }elseif($env:FAKE_TERMINAL -eq 'CONTINUE' -and $count -eq 3){
@@ -206,6 +211,7 @@ exit 0
         "FAKE_STEP_FAILURE": "1" if step_failure else "0",
         "FAKE_LARGE_CONTEXT": "1" if large_context else "0",
         "FAKE_PROOFS": proofs,
+        "FAKE_POWERSHELL_CACHE": "1" if powershell_cache else "0",
         "PATH": str(fake_bin) + os.pathsep + env["PATH"],
     })
     launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
@@ -297,6 +303,13 @@ def test_phase_g_resume_reuses_handoff_without_new_session(tmp_path):
     assert packet["handoff"]["next_decision"] == "Phase G missing criteria: F"
     assert packet["handoff"]["facts"] == ["prior finding"]
     assert len(packet["handoff"]["criteria"]) == 9
+
+
+def test_powershell_module_cache_does_not_block_astra_continuation(tmp_path):
+    repo, state, result = run_fake_harness(tmp_path, terminal="BLOCKED_EARLY", powershell_cache=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (state / "count.txt").read_text(encoding="utf-8") == "2"
+    assert git(repo, "status", "--porcelain") == ""
 
 
 def test_baseline_failure_receipt_gets_astra_review(tmp_path):
