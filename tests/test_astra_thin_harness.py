@@ -15,7 +15,7 @@ def git(repo, *args):
     return result.stdout.strip()
 
 
-def run_fake_harness(tmp_path, terminal="STABLE", relays=2, tokens=300000, unsafe=False):
+def run_fake_harness(tmp_path, terminal="STABLE", relays=2, tokens=300000, unsafe=False, step_failure=False):
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init", "-b", "prep/astra-local-orchestration")
@@ -53,6 +53,15 @@ $ErrorActionPreference='Stop'
 $repo=(git rev-parse --show-toplevel).Trim()
 $branch=(git branch --show-current).Trim()
 $base=(git rev-parse HEAD).Trim()
+$sha=[System.Security.Cryptography.SHA256]::Create()
+try{$hash=[BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes((Join-Path $repo $Plan)))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+if($env:FAKE_STEP_FAILURE -eq '1'){
+  $receipt=@{version=1;request_id=$RequestId;plan_path=$Plan;plan_sha256=$hash;status='failed';execution_status='baseline_failed';exit_code=0;worker_summary=@{
+    status='backlog_complete';base_head=$base;source_commit=$base;changed_paths=@();uncommitted_paths=@();tests=@('tests/test_runtime.py');failure='oracle baseline failed';tickets=@(@{status='failed';changed_paths=@();error='oracle baseline failed'})
+  }}
+  [IO.File]::WriteAllText((Join-Path $repo $ResultPath),($receipt|ConvertTo-Json -Depth 12))
+  exit 0
+}
 git switch -c "worker/fake-$RequestId" | Out-Null
 Set-Content -LiteralPath 'octopus/transport.py' -Value "def value():`n    return 2  # proxy path"
 git add octopus/transport.py
@@ -61,7 +70,7 @@ $source=(git rev-parse HEAD).Trim()
 python -m pytest -q tests/test_runtime.py --tb=short | Out-Null
 if($LASTEXITCODE -ne 0){throw 'Step test failed'}
 git switch $branch | Out-Null
-$receipt=@{version=1;request_id=$RequestId;status='completed';exit_code=0;worker_summary=@{
+$receipt=@{version=1;request_id=$RequestId;plan_path=$Plan;plan_sha256=$hash;status='completed';execution_status='success';exit_code=0;worker_summary=@{
   status='backlog_complete';base_head=$base;source_commit=$source
   changed_paths=@('octopus/transport.py');diff_stat=@('1 file changed')
   tests=@('1 passed');tickets=@(@{status='done';commit=$source;tests_passed=$true;gate_status='ACCEPTED';changed_paths=@('octopus/transport.py')})
@@ -106,12 +115,17 @@ if($count -eq 1){
 }elseif($count -eq 2){
   $marker="HOST_CONTEXT_JSON`n"
   $packet=$prompt.Substring($prompt.LastIndexOf($marker)+$marker.Length)|ConvertFrom-Json
+  if($packet.review.execution_status -eq 'baseline_failed'){
+    [IO.File]::WriteAllText((Join-Path $env:FAKE_STATE 'failure-review.txt'),($packet.step_summary|ConvertTo-Json -Depth 10))
+    $message='ASTRA_STATUS: BLOCKED'
+  }else{
   $diff=git diff $packet.review.base_head $packet.review.head -- octopus/transport.py|Out-String
   [IO.File]::WriteAllText((Join-Path $env:FAKE_STATE 'review.txt'),$diff)
   $message="ASTRA_STATE_JSON {`"facts`": [`"Step returned passing test and a direct-child commit`"],`"hypotheses`":[],`"inspected`": [{`"path`":`"octopus/transport.py`",`"summary`":`"reviewed runtime path`"}],`"tests`": [`"1 passed`"],`"tickets`": [`"step-runtime`"],`"remaining`": [`"final review`"]}"
   if($env:FAKE_TERMINAL -ne 'AUTO'){
     $checkpoint=@{version=2;request_id='checkpoint-step-runtime';base_head=$packet.review.base_head;kind='worker_commit';source_commit=$packet.review.head;message='fake Step repair';paths=@('octopus/transport.py')}
     [IO.File]::WriteAllText((Join-Path $repo 'cache/astra-relay/checkpoint.json'),($checkpoint|ConvertTo-Json -Depth 10))
+  }
   }
 }elseif($env:FAKE_TERMINAL -eq 'AUTO' -and $count -eq 3){
   $checkpoint=@{version=2;request_id='checkpoint-step-runtime';base_head=(git rev-parse HEAD).Trim();kind='worker_commit';source_commit=(git rev-parse 'worker/fake-step-runtime').Trim();message='fake Step repair';paths=@('octopus/transport.py')}
@@ -147,6 +161,7 @@ exit 0
         "FAKE_REPO": str(repo),
         "FAKE_TERMINAL": terminal,
         "FAKE_UNSAFE": "1" if unsafe else "0",
+        "FAKE_STEP_FAILURE": "1" if step_failure else "0",
         "PATH": str(fake_bin) + os.pathsep + env["PATH"],
     })
     launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
@@ -195,6 +210,19 @@ def test_generic_discovery_step_review_and_multi_cycle(tmp_path, terminal, expec
     assert git(repo, "status", "--porcelain") == ""
 
 
+def test_baseline_failure_receipt_gets_astra_review(tmp_path):
+    repo, state, result = run_fake_harness(tmp_path, step_failure=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (state / "count.txt").read_text(encoding="utf-8") == "2"
+    review = json.loads((state / "failure-review.txt").read_text(encoding="utf-8"))
+    assert review["execution_status"] == "baseline_failed"
+    assert review["changed_paths"] == []
+    assert "oracle baseline failed" in review["failure"]
+    session = json.loads((repo / "cache/astra-relay/session.json").read_text(encoding="utf-8"))
+    assert session["status"] == "blocked"
+    assert git(repo, "status", "--porcelain") == ""
+
+
 def test_relay_budget_stops_without_extra_astra_call(tmp_path):
     repo, state, result = run_fake_harness(tmp_path, terminal="EXHAUST", relays=1)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -213,9 +241,9 @@ def test_unsafe_ticket_fails_before_step(tmp_path):
 
 
 def test_token_budget_stops_before_next_astra_call(tmp_path):
-    repo, state, result = run_fake_harness(tmp_path, tokens=5)
+    repo, state, result = run_fake_harness(tmp_path, terminal="EXHAUST", relays=2, tokens=5)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Astra run budget reached" in result.stdout
-    assert (state / "count.txt").read_text(encoding="utf-8") == "1"
+    assert (state / "count.txt").read_text(encoding="utf-8") == "3"
     session = json.loads((repo / "cache/astra-relay/session.json").read_text(encoding="utf-8"))
     assert session["status"] == "active"

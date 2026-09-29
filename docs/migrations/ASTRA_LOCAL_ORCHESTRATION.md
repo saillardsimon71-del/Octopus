@@ -171,6 +171,7 @@ The runner:
 - refuses accidental replay of the same plan;
 - records logs/result/night-shift report;
 - leaves worker commits isolated for review.
+- returns a compact `execution_status` and failure reason even when Step never starts; empty `changed_paths` is valid when no commit was made.
 
 The supervisor:
 - caps fresh Astra calls (two by default) and relay cycles;
@@ -179,6 +180,8 @@ The supervisor:
 - runs each Codex call with \`--ephemeral\`;
 - stops on any non-zero Codex call;
 - does not select a fallback model.
+- validates ticket hash, authorized paths and commit ancestry before every Astra review, including failed runs;
+- sends valid failures back to Astra for a bounded decision, while protocol or path violations stop the relay.
 
 ## Compact context protocol
 
@@ -186,9 +189,12 @@ Each Astra call receives one `HOST_CONTEXT_JSON` packet with objective, phase,
 branch, HEAD, compact handoff, and any Step or validation receipt. Only the first
 call includes the baseline status. The host does not inject a repository snapshot,
 context manifest, phase search results or raw test logs.
+Stable phase documents are represented by path and SHA-256. Astra reads only needed
+sections, keeps summaries in the handoff, and has a per-call read and output budget.
 
-Astra can make several relevant local reads and searches during one call. Each
-command output is limited to 200 lines or 20000 characters. Long tests and external
+Astra can make at most 12 repository reads with 40000 characters of combined tool
+output during one call. Each output is limited to 100 lines or 8000 characters.
+Long tests and external
 network access are disabled in Astra. Full pytest runs through a fixed host
 validation request. Publishing a Step, checkpoint or validation request ends the
 turn; the host processes it and starts a fresh review call.

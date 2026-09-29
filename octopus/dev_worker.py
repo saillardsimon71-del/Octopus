@@ -1147,6 +1147,8 @@ def _docker_test_args(
         "-e", "HOME=/tmp",
         "-e", "USERPROFILE=/tmp",
         "-e", "XDG_CONFIG_HOME=/tmp",
+        "-e", "OCTOPUS_HOME=/tmp/octopus-state",
+        "-e", "PODALUX_ROOT=/tmp/podalux-state",
         "-e", "PYTHONUTF8=1",
         "-e", "PYTHONDONTWRITEBYTECODE=1",
         "-e", "TZ=UTC",

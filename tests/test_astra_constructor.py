@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -125,6 +126,19 @@ def gate_worker_review(
     worker_exit: int,
     tmp_path: Path,
 ) -> subprocess.CompletedProcess[str]:
+    plan_dir = repo / "cache" / "astra-tickets"
+    plan_dir.mkdir(parents=True, exist_ok=True)
+    plan_path = plan_dir / f"{request_id}.json"
+    if not plan_path.exists():
+        plan_path.write_text(json.dumps({
+            "request_id": request_id,
+            "base_head": receipt.get("worker_summary", {}).get("base_head", git(repo, "rev-parse", "HEAD"))
+            if receipt.get("worker_summary") else git(repo, "rev-parse", "HEAD"),
+            "tickets": [{"allowed_paths": receipt.get("allowed_paths", ["product.txt"])}],
+        }), encoding="utf-8")
+    receipt.setdefault("plan_path", f"cache/astra-tickets/{request_id}.json")
+    receipt.setdefault("plan_sha256", hashlib.sha256(plan_path.read_bytes()).hexdigest())
+    receipt.setdefault("execution_status", "success" if receipt.get("status") == "completed" else "step_not_started")
     receipt_path = tmp_path / "worker-receipt.json"
     receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
     launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
@@ -135,9 +149,11 @@ $tokens=$null;$errors=$null
 $ErrorActionPreference='Stop'
 $ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
 if($errors.Count){{throw ($errors|ForEach-Object Message)}}
-$fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Assert-ValidWorkerReviewReceipt'}},$true)
-if(-not $fn){{throw 'Assert-ValidWorkerReviewReceipt is missing'}}
-Invoke-Expression $fn.Extent.Text
+foreach($name in @('Get-LocalSha256','Assert-ValidWorkerReviewReceipt')){{
+  $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
+  if(-not $fn){{throw "$name is missing"}}
+  Invoke-Expression $fn.Extent.Text
+}}
 $script:astraCalls=0
 try {{
   $receipt=Get-Content -LiteralPath '{receipt_path}' -Raw|ConvertFrom-Json
@@ -564,7 +580,7 @@ def test_step_relay_rejects_missing_ticket_or_plan(tmp_path: Path):
     assert not (repo / "cache" / "astra-tickets" / "missing-001.json").exists()
 
 
-def test_step_failure_before_summary_blocks_astra_review(tmp_path: Path):
+def test_step_failure_without_summary_is_protocol_error(tmp_path: Path):
     repo = init_repo(tmp_path)
     request_id = "step-failed-001"
     receipt = {
@@ -581,7 +597,7 @@ def test_step_failure_before_summary_blocks_astra_review(tmp_path: Path):
     payload = json.loads(result.stdout)
     assert payload["accepted"] is False
     assert payload["astra_calls"] == 0
-    assert "failed with code 2" in payload["error"]
+    assert "no worker_summary" in payload["error"]
 
 
 def test_invalid_worker_summary_fails_closed_before_astra_review(tmp_path: Path):
@@ -609,7 +625,7 @@ def test_invalid_worker_summary_fails_closed_before_astra_review(tmp_path: Path)
     payload = json.loads(result.stdout)
     assert payload["accepted"] is False
     assert payload["astra_calls"] == 0
-    assert "changed_paths" in payload["error"]
+    assert "tests summary" in payload["error"]
 
 
 def test_valid_compact_worker_receipt_allows_one_astra_review(tmp_path: Path):
@@ -653,6 +669,163 @@ def test_valid_compact_worker_receipt_allows_one_astra_review(tmp_path: Path):
     assert payload["accepted"] is True
     assert payload["astra_calls"] == 1
     assert payload["summary"]["source_commit"] == source_commit
+
+
+@pytest.mark.parametrize("execution_status", [
+    "baseline_failed", "step_not_started", "step_failed", "tests_failed", "timeout",
+])
+def test_structured_worker_failure_reaches_astra_with_no_changes(tmp_path: Path, execution_status: str):
+    repo = init_repo(tmp_path)
+    head = git(repo, "rev-parse", "HEAD")
+    receipt = {
+        "version": 1,
+        "request_id": f"failure-{execution_status}",
+        "status": "failed",
+        "execution_status": execution_status,
+        "exit_code": 1,
+        "worker_summary": {
+            "status": "backlog_complete",
+            "base_head": head,
+            "source_commit": head,
+            "changed_paths": [],
+            "tests": ["tests/test_tasks_worker.py"],
+            "tickets": [{"status": "failed", "changed_paths": [], "error": "baseline failed"}],
+            "failure": "baseline failed",
+        },
+    }
+    result = gate_worker_review(repo, receipt["request_id"], receipt, 1, tmp_path)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] is True
+    assert payload["astra_calls"] == 1
+    assert payload["summary"]["changed_paths"] == []
+
+
+def test_worker_failure_before_report_reaches_astra(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    head = git(repo, "rev-parse", "HEAD")
+    receipt = {
+        "version": 1, "request_id": "before-report-001", "status": "failed",
+        "execution_status": "step_not_started", "exit_code": 2,
+        "worker_summary": {
+            "status": "worker_failed_before_report", "base_head": head,
+            "source_commit": head, "changed_paths": [], "uncommitted_paths": [],
+            "tests": ["tests/test_tasks_worker.py"], "tickets": [],
+            "failure": "preflight failed",
+        },
+    }
+    result = gate_worker_review(repo, "before-report-001", receipt, 2, tmp_path)
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] is True
+    assert payload["astra_calls"] == 1
+
+
+def test_explicit_noop_success_reaches_astra_without_commit(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    head = git(repo, "rev-parse", "HEAD")
+    receipt = {
+        "version": 1, "request_id": "noop-001", "status": "completed",
+        "execution_status": "success", "exit_code": 0,
+        "worker_summary": {
+            "base_head": head, "source_commit": head, "changed_paths": [],
+            "tests": ["1 passed"],
+            "tickets": [{"status": "done", "noop": True, "tests_passed": True,
+                         "gate_status": "ACCEPTED", "changed_paths": [], "commit": ""}],
+        },
+    }
+    result = gate_worker_review(repo, "noop-001", receipt, 0, tmp_path)
+    assert json.loads(result.stdout)["astra_calls"] == 1
+
+
+def test_worker_commit_outside_ticket_is_fatal(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    base = git(repo, "rev-parse", "HEAD")
+    (repo / "outside.txt").write_text("outside\n", encoding="utf-8")
+    git(repo, "add", "outside.txt")
+    git(repo, "commit", "-m", "outside ticket")
+    source = git(repo, "rev-parse", "HEAD")
+    git(repo, "reset", "--hard", base)
+    receipt = {
+        "version": 1, "request_id": "outside-001", "status": "completed",
+        "execution_status": "success", "exit_code": 0,
+        "worker_summary": {
+            "base_head": base, "source_commit": source,
+            "changed_paths": ["outside.txt"], "tests": ["1 passed"],
+            "tickets": [{"status": "done", "tests_passed": True, "gate_status": "ACCEPTED",
+                         "commit": source, "changed_paths": ["outside.txt"]}],
+        },
+    }
+    result = gate_worker_review(repo, "outside-001", receipt, 0, tmp_path)
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] is False
+    assert payload["astra_calls"] == 0
+    assert "authorized ticket" in payload["error"]
+
+
+def test_worker_uncommitted_protected_path_is_fatal(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    head = git(repo, "rev-parse", "HEAD")
+    receipt = {
+        "version": 1, "request_id": "protected-001", "status": "failed",
+        "execution_status": "policy_rejected", "exit_code": 0,
+        "worker_summary": {
+            "base_head": head, "source_commit": head, "changed_paths": [],
+            "uncommitted_paths": ["scripts/start_octopus_astra.ps1"],
+            "tests": ["tests/test_tasks_worker.py"],
+            "tickets": [{"status": "failed", "changed_paths": []}],
+        },
+    }
+    result = gate_worker_review(repo, "protected-001", receipt, 0, tmp_path)
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] is False
+    assert payload["astra_calls"] == 0
+    assert "uncommitted path" in payload["error"]
+
+
+def test_external_runner_emits_baseline_failure_receipt_and_review_continues(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    request_id = "baseline-failure-001"
+    head = git(repo, "rev-parse", "HEAD")
+    plan_dir = repo / "cache" / "astra-tickets"
+    plan_dir.mkdir(parents=True)
+    (plan_dir / f"{request_id}.json").write_text(json.dumps({
+        "policy": "product_ticket", "request_id": request_id, "base_head": head,
+        "tickets": [{"allowed_paths": ["product.txt"],
+                     "test_targets": ["tests/test_tasks_worker.py"]}],
+    }), encoding="utf-8")
+    report = {
+        "base_head": head, "final_head": head, "status": "backlog_complete",
+        "tickets": [{"task_id": 1, "status": "failed", "result": {
+            "output": None, "error": "DevWorkerError: oracle baseline invalide avant Kilo (run 1): ModuleNotFoundError: requests",
+        }}],
+    }
+    source_report = tmp_path / "report.json"
+    source_report.write_text(json.dumps(report), encoding="utf-8")
+    report_dir = repo / "data" / "night-shift-reports"
+    report_dir.mkdir(parents=True)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "python.cmd").write_text(
+        f'@echo off\ncopy /Y "{source_report}" "{report_dir / "fake-run.json"}" >NUL\nexit /b 0\n',
+        encoding="ascii",
+    )
+    result = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+         str(ROOT / "scripts" / "run_external_dev_ticket.ps1"),
+         "-Plan", f"cache/astra-tickets/{request_id}.json",
+         "-RequestId", request_id,
+         "-ResultPath", f"cache/astra-relay/results/{request_id}.json"],
+        cwd=repo, env={**os.environ, "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"]},
+        text=True, encoding="utf-8", errors="replace", capture_output=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    receipt = json.loads((repo / "cache" / "astra-relay" / "results" / f"{request_id}.json").read_text(encoding="utf-8-sig"))
+    assert receipt["status"] == "failed"
+    assert receipt["execution_status"] == "baseline_failed"
+    assert receipt["worker_summary"]["changed_paths"] == []
+    assert receipt["worker_summary"]["tests"] == ["tests/test_tasks_worker.py"]
+    review = gate_worker_review(repo, request_id, receipt, 0, tmp_path)
+    assert json.loads(review.stdout)["astra_calls"] == 1
 
 
 def checkpoint(repo: Path, paths: list[str], request_id: str = "phase-1") -> Path:
@@ -703,6 +876,67 @@ def test_host_checkpoint_commits_only_declared_paths(tmp_path: Path):
     assert receipt["request_id"] == "phase-1"
     assert receipt["commit"] == git(repo, "rev-parse", "HEAD")
     assert not request.exists()
+
+
+def test_offline_sandbox_fake_step_review_checkpoint(tmp_path: Path):
+    from octopus import dev_worker
+
+    if run("docker", "image", "inspect", dev_worker.DEFAULT_TEST_SANDBOX_IMAGE).returncode:
+        pytest.skip("local Docker sandbox image unavailable")
+    repo = init_repo(tmp_path)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_product.py").write_text(
+        "from pathlib import Path\n"
+        "def test_product():\n"
+        "    assert Path('product.txt').read_text().strip() in {'before', 'after'}\n",
+        encoding="utf-8",
+    )
+    (repo / ".gitignore").write_text("cache/\n__pycache__/\n", encoding="utf-8")
+    git(repo, "add", ".gitignore", "tests/test_product.py")
+    git(repo, "commit", "-m", "add immutable oracle")
+    base = git(repo, "rev-parse", "HEAD")
+    command = [sys.executable, "-m", "pytest", "-q", "tests/test_product.py"]
+    host = run(*command, cwd=repo)
+    baseline, baseline_green = dev_worker._run_tests(repo, [command], sandbox="docker")
+    assert host.returncode == 0, host.stdout + host.stderr
+    assert baseline_green, baseline[-2000:]
+
+    git(repo, "switch", "-c", "fake-step")
+    (repo / "product.txt").write_text("after\n", encoding="utf-8")
+    git(repo, "commit", "-am", "step: bounded change")
+    source = git(repo, "rev-parse", "HEAD")
+    targeted, targeted_green = dev_worker._run_tests(repo, [command], sandbox="docker")
+    assert targeted_green, targeted[-2000:]
+    git(repo, "switch", "prep/astra-local-orchestration")
+
+    receipt = {
+        "version": 1, "request_id": "fake-step-001", "status": "completed",
+        "execution_status": "success", "exit_code": 0,
+        "worker_summary": {
+            "status": "backlog_complete", "base_head": base,
+            "source_commit": source, "changed_paths": ["product.txt"],
+            "tests": ["1 passed"],
+            "tickets": [{"status": "done", "commit": source, "tests_passed": True,
+                         "gate_status": "ACCEPTED", "changed_paths": ["product.txt"]}],
+        },
+    }
+    review = gate_worker_review(repo, "fake-step-001", receipt, 0, tmp_path)
+    assert json.loads(review.stdout)["astra_calls"] == 1
+    checkpoint_path = repo / "cache" / "astra-relay" / "checkpoint.json"
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path.write_text(json.dumps({
+        "version": 2, "request_id": "fake-step-001", "kind": "worker_commit",
+        "base_head": base, "source_commit": source,
+        "message": "step: bounded change", "paths": ["product.txt"],
+    }), encoding="utf-8")
+    result = run(
+        POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+        str(ROOT / "scripts" / "commit_astra_checkpoint.ps1"),
+        "-Repo", str(repo), "-CheckpointPath", str(checkpoint_path), cwd=repo,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert git(repo, "rev-parse", "HEAD") == source
+    assert git(repo, "status", "--porcelain") == ""
 
 
 def test_host_checkpoint_rejects_undeclared_changes(tmp_path: Path):
@@ -851,6 +1085,7 @@ def test_constructor_powershell_parses_and_disables_shell_snapshot():
 def test_call_2_uses_only_compact_review_packet(tmp_path: Path):
     repo = init_repo(tmp_path)
     (repo / "AGENTS.md").write_text("rules\n", encoding="utf-8")
+    (repo / "DO-NOT-READ.md").write_text("stable document content " * 1500, encoding="utf-8")
     relay = repo / "cache" / "astra-relay"
     relay.mkdir(parents=True)
     (relay / "handoff.json").write_text(
@@ -871,7 +1106,7 @@ def test_call_2_uses_only_compact_review_packet(tmp_path: Path):
 $tokens=$null;$errors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
 if($errors.Count){{throw ($errors|ForEach-Object Message)}}
-foreach($name in @('Write-JsonAtomic','Write-BoundedJsonAtomic','Limit-Text','Get-ChangedPaths','Get-CompactDiffStat','Write-AstraContext')){{
+foreach($name in @('Write-JsonAtomic','Write-BoundedJsonAtomic','Limit-Text','Get-LocalSha256','Get-ChangedPaths','Get-CompactDiffStat','Write-AstraContext')){{
   $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
   Invoke-Expression $fn.Extent.Text
 }}
@@ -899,6 +1134,11 @@ $prompt=Write-AstraContext -TaskPrompt 'review only'
     assert payload["snapshot"]["step_summary"]["tests"] == ["1 passed"]
     assert payload["metrics"]["call_kind"] == "review"
     assert payload["metrics"]["packet_chars"] < 8000
+    assert payload["metrics"]["estimated_input_chars"] < 15000
+    assert payload["snapshot"]["document_refs"][0]["sha256"] == hashlib.sha256(
+        (repo / "DO-NOT-READ.md").read_bytes()
+    ).hexdigest()
+    assert "stable document content" not in payload["prompt"]
 
 
 def test_handoff_rejects_massive_context(tmp_path: Path):

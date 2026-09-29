@@ -8,7 +8,7 @@ param(
     [int]$MaxSnapshotChars = 8000,
     [int]$MaxPreparedContextChars = 30000,
     [int]$MaxRunMinutes = 180,
-    [int]$MaxRunTokens = 300000,
+    [int]$MaxRunTokens = 100000,
     [ValidateSet("medium", "high")]
     [string]$Reasoning = "medium",
     [switch]$SkipFetch,
@@ -698,9 +698,12 @@ function New-CompactWorkerSummary([object]$Summary) {
     if (-not $Summary) { return $null }
     return [ordered]@{
         status = Limit-Text $Summary.status 60
+        execution_status = Limit-Text $Summary.execution_status 40
+        failure = Limit-Text $Summary.failure 1200
         base_head = [string]$Summary.base_head
         source_commit = [string]$Summary.source_commit
         changed_paths = @($Summary.changed_paths | Select-Object -First 20 | ForEach-Object { Limit-Text $_ 240 })
+        uncommitted_paths = @($Summary.uncommitted_paths | Select-Object -First 20 | ForEach-Object { Limit-Text $_ 240 })
         diff_stat = @($Summary.diff_stat | Select-Object -First 12 | ForEach-Object { Limit-Text $_ 240 })
         tests = @($Summary.tests | Select-Object -First 12 | ForEach-Object { Limit-Text $_ 240 })
         summary_truncated = $true
@@ -713,17 +716,35 @@ function Assert-ValidWorkerReviewReceipt(
     [string]$RequestId,
     [string]$Repository
 ) {
-    if ($WorkerExit -ne 0) {
-        throw "External worker failed with code $WorkerExit. Astra review was not started."
-    }
     if (-not $Receipt -or [int]$Receipt.version -ne 1) {
         throw 'External worker receipt is missing or unsupported. Astra review was not started.'
     }
     if ([string]$Receipt.request_id -cne $RequestId) {
         throw 'External worker receipt request_id mismatch. Astra review was not started.'
     }
-    if ([string]$Receipt.status -ne 'completed' -or [int]$Receipt.exit_code -ne 0) {
-        throw 'External worker receipt does not record a successful completion. Astra review was not started.'
+    $planRelative = ([string]$Receipt.plan_path).Replace('\', '/')
+    if ($planRelative -notmatch '^cache/astra-tickets/[A-Za-z0-9._-]+\.json$') {
+        throw 'External worker receipt plan_path is invalid. Astra review was not started.'
+    }
+    $planPath = Join-Path $Repository $planRelative
+    if (-not (Test-Path -LiteralPath $planPath -PathType Leaf) -or
+        (Get-LocalSha256 -Path $planPath) -ne [string]$Receipt.plan_sha256) {
+        throw 'External worker ticket plan integrity mismatch. Astra review was not started.'
+    }
+    $plan = Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json
+    if ([string]$plan.request_id -cne $RequestId -or @($plan.tickets).Count -ne 1) {
+        throw 'External worker ticket plan identity mismatch. Astra review was not started.'
+    }
+    if ([int]$Receipt.exit_code -ne $WorkerExit) {
+        throw 'External worker receipt exit_code mismatch. Astra review was not started.'
+    }
+    $executionStatus = [string]$Receipt.execution_status
+    if ($executionStatus -notin @('baseline_failed', 'step_not_started', 'step_failed', 'tests_failed', 'success', 'policy_rejected', 'timeout')) {
+        throw 'External worker receipt has an invalid execution_status. Astra review was not started.'
+    }
+    if (($executionStatus -eq 'success' -and [string]$Receipt.status -ne 'completed') -or
+        ($executionStatus -ne 'success' -and [string]$Receipt.status -ne 'failed')) {
+        throw 'External worker receipt status conflicts with execution_status. Astra review was not started.'
     }
 
     $summary = $Receipt.worker_summary
@@ -745,44 +766,71 @@ function Assert-ValidWorkerReviewReceipt(
         }
         $declaredPaths += $path
     }
-    if (-not $declaredPaths.Count) {
-        throw 'External worker summary requires non-empty changed_paths. Astra review was not started.'
-    }
     $uniqueDeclaredPaths = @($declaredPaths | Sort-Object -Unique)
     if ($uniqueDeclaredPaths.Count -ne $declaredPaths.Count) {
         throw 'External worker summary contains duplicate changed_paths. Astra review was not started.'
     }
-    if (-not @($summary.tests).Count) {
+    $allowedPaths = @($plan.tickets[0].allowed_paths | ForEach-Object { ([string]$_).Replace('\', '/') })
+    foreach ($path in $uniqueDeclaredPaths) {
+        if ($path -cnotin $allowedPaths) {
+            throw 'External worker changed_paths exceed the authorized ticket. Astra review was not started.'
+        }
+    }
+    $uncommitted = @($summary.uncommitted_paths | Where-Object { $null -ne $_ })
+    if ($executionStatus -eq 'success' -and $uncommitted.Count) {
+        throw 'External worker success has uncommitted paths. Astra review was not started.'
+    }
+    foreach ($value in $uncommitted) {
+        $path = ([string]$value).Replace('\', '/').Trim()
+        if (-not $path -or $path -cnotin $allowedPaths) {
+            throw 'External worker uncommitted path exceeds the authorized ticket. Astra review was not started.'
+        }
+    }
+    if ($executionStatus -eq 'success' -and -not @($summary.tests).Count) {
         throw 'External worker summary requires a non-empty tests summary. Astra review was not started.'
     }
 
     $tickets = @($summary.tickets)
-    if ($tickets.Count -ne 1) {
-        throw 'External worker summary requires exactly one bounded ticket result. Astra review was not started.'
+    if ($tickets.Count -gt 1 -or ($executionStatus -eq 'success' -and $tickets.Count -ne 1)) {
+        throw 'External worker summary has an invalid bounded ticket count. Astra review was not started.'
     }
-    $ticket = $tickets[0]
-    if ([string]$ticket.status -ne 'done' -or -not [bool]$ticket.tests_passed -or [string]$ticket.gate_status -ne 'ACCEPTED') {
-        throw 'External worker ticket is not done with passing tests and an ACCEPTED gate. Astra review was not started.'
-    }
-    if (([string]$ticket.commit).Trim().ToLowerInvariant() -ne $sourceCommit) {
-        throw 'External worker ticket commit differs from source_commit. Astra review was not started.'
-    }
-    $ticketPaths = @($ticket.changed_paths | ForEach-Object { ([string]$_).Replace('\', '/').Trim() } | Sort-Object -Unique)
-    if (@(Compare-Object -ReferenceObject $uniqueDeclaredPaths -DifferenceObject $ticketPaths).Count) {
-        throw 'External worker ticket paths differ from worker_summary.changed_paths. Astra review was not started.'
+    if ($tickets.Count -eq 1) {
+        $ticket = $tickets[0]
+        if ($executionStatus -eq 'success' -and ([string]$ticket.status -ne 'done' -or -not [bool]$ticket.tests_passed -or [string]$ticket.gate_status -ne 'ACCEPTED')) {
+            throw 'External worker success lacks passing tests and an ACCEPTED gate. Astra review was not started.'
+        }
+        if ($executionStatus -eq 'success' -and -not [bool]$ticket.noop -and ([string]$ticket.commit).Trim().ToLowerInvariant() -ne $sourceCommit) {
+            throw 'External worker ticket commit differs from source_commit. Astra review was not started.'
+        }
+        $ticketPaths = @($ticket.changed_paths | ForEach-Object { ([string]$_).Replace('\', '/').Trim() } | Sort-Object -Unique)
+        if (@(Compare-Object -ReferenceObject $uniqueDeclaredPaths -DifferenceObject $ticketPaths).Count) {
+            throw 'External worker ticket paths differ from worker_summary.changed_paths. Astra review was not started.'
+        }
+        if ($executionStatus -ne 'success' -and [string]$ticket.status -eq 'done') {
+            throw 'External worker failure conflicts with a done ticket. Astra review was not started.'
+        }
     }
 
     $currentHead = (& git -C $Repository rev-parse HEAD 2>$null | Out-String).Trim().ToLowerInvariant()
     if ($LASTEXITCODE -ne 0 -or $currentHead -ne $baseHead) {
         throw 'External worker base_head differs from the current constructor HEAD. Astra review was not started.'
     }
+    if ([string]$plan.base_head -ne $baseHead) {
+        throw 'External worker base_head differs from the ticket plan. Astra review was not started.'
+    }
     $resolvedCommit = (& git -C $Repository rev-parse "$sourceCommit^{commit}" 2>$null | Out-String).Trim().ToLowerInvariant()
     if ($LASTEXITCODE -ne 0 -or $resolvedCommit -ne $sourceCommit) {
         throw 'External worker source_commit does not resolve exactly. Astra review was not started.'
     }
-    $ancestry = ((& git -C $Repository rev-list --parents -n 1 $sourceCommit 2>$null | Out-String).Trim() -split '\s+')
-    if ($LASTEXITCODE -ne 0 -or $ancestry.Count -ne 2 -or $ancestry[1].ToLowerInvariant() -ne $baseHead) {
-        throw 'External worker source_commit is not a direct child of base_head. Astra review was not started.'
+    if ($sourceCommit -ne $baseHead) {
+        $ancestry = ((& git -C $Repository rev-list --parents -n 1 $sourceCommit 2>$null | Out-String).Trim() -split '\s+')
+        if ($LASTEXITCODE -ne 0 -or $ancestry.Count -ne 2 -or $ancestry[1].ToLowerInvariant() -ne $baseHead) {
+            throw 'External worker source_commit is not a direct child of base_head. Astra review was not started.'
+        }
+    } elseif ($declaredPaths.Count) {
+        throw 'External worker declares changed_paths without a source commit diff. Astra review was not started.'
+    } elseif ($executionStatus -eq 'success' -and -not [bool]$ticket.noop) {
+        throw 'External worker success without changes requires an explicit noop. Astra review was not started.'
     }
     $actualPaths = @(& git -C $Repository diff --no-renames --name-only --relative $baseHead $sourceCommit -- 2>$null | Where-Object { $_ } | Sort-Object -Unique)
     if ($LASTEXITCODE -ne 0 -or @(Compare-Object -ReferenceObject $uniqueDeclaredPaths -DifferenceObject $actualPaths).Count) {
@@ -807,6 +855,13 @@ function Write-AstraContext([string]$TaskPrompt) {
         step_summary = $script:lastWorkerSummary
         validation = $script:lastValidationSummary
     }
+    $packet.document_refs = @($phaseSpec.documents | Where-Object { $_ } | Select-Object -First 3 | ForEach-Object {
+        $path = [string]$_
+        $full = Join-Path $repo $path
+        if (Test-Path -LiteralPath $full -PathType Leaf) {
+            [ordered]@{ path = $path; sha256 = Get-LocalSha256 -Path $full }
+        }
+    })
     $inspectedStatus = @()
     foreach ($item in @($packet.handoff.inspected)) {
         $path = ([string]$item.path).Replace('\', '/')
@@ -1010,7 +1065,7 @@ function Invoke-AstraTurn([string]$Prompt, [string]$Reason) {
 }
 
 $contextRules = @"
-You are the architecture and review owner. Explore this local repository directly with bounded PowerShell commands. You may inspect several relevant files per turn using rg, bounded Get-Content excerpts, git status/log/diff, and short local pytest targets. Treat zero or multiple search matches as facts to investigate, never as a fatal discovery error. Limit each command output to 200 lines or 20000 characters; do not read large files whole. Do not repeat unchanged excerpts already recorded in the handoff. Never use network, external accounts, economic runtime, push or merge.
+You are the architecture and review owner. Explore this local repository with rg, bounded excerpts, git diff, and short tests. Treat zero or multiple search matches as facts to investigate. Budget each call to at most 12 repository reads and 40000 characters of combined tool output; then publish compact state and end the call. Limit each individual output to 100 lines or 8000 characters. Do not read large files whole. Document refs carry hashes, not contents; read only a specific needed section on demand, once per unchanged hash. Do not repeat unchanged excerpts or documents recorded in the handoff. Never use network, external accounts, economic runtime, push or merge.
 When the objective, exact repository-relative edit paths, test targets and constraints are clear, publish one bounded product_ticket and cache/astra-relay/request.json, then end the turn. The host validates paths and tests before Step runs. Do not run Step yourself. After Step, inspect its compact receipt and the relevant diff, then publish a checkpoint request if accepted. The host handles Git writes and full pytest.
 For a verified terminal state, end with ASTRA_STATUS: STABLE or ASTRA_STATUS: BLOCKED. Otherwise the host continues automatically; ASTRA_CONTINUE: followed by one compact next action is optional. Before a terminal marker or Step request, write one line ASTRA_STATE_JSON {"facts":[],"hypotheses":[],"inspected":[{"path":"repo/relative.py","summary":"short fact"}],"tests":[],"tickets":[],"remaining":[]}. Set refresh=true on an inspected entry only when you reread a changed file. Keep the state under 4000 characters. The host hashes inspected files and returns changed_since_inspection in the next packet. Do not reread unchanged files. The host starts fresh calls across mini-sessions up to MaxRelayCycles.
 "@
@@ -1075,21 +1130,25 @@ while ($true) {
         $workerExit = $LASTEXITCODE
         $workerReceipt = Get-Content -LiteralPath (Join-Path $repo $resultPath) -Raw | ConvertFrom-Json
         $validatedWorkerSummary = Assert-ValidWorkerReviewReceipt -Receipt $workerReceipt -WorkerExit $workerExit -RequestId $requestId -Repository $repo
+        $validatedWorkerSummary | Add-Member -NotePropertyName execution_status -NotePropertyValue ([string]$workerReceipt.execution_status) -Force
         $lastWorkerSummary = New-CompactWorkerSummary $validatedWorkerSummary
         $workerPaths = @($validatedWorkerSummary.changed_paths)
         $reviewContext = [ordered]@{
             kind = 'step'
+            execution_status = [string]$workerReceipt.execution_status
+            failure = Limit-Text $validatedWorkerSummary.failure 1200
             base_head = [string]$validatedWorkerSummary.base_head
             head = [string]$validatedWorkerSummary.source_commit
             changed_paths = $workerPaths
+            uncommitted_paths = @($validatedWorkerSummary.uncommitted_paths)
             diff_stat = @($validatedWorkerSummary.diff_stat)
-            review_policy = 'Use the compact worker receipt; inspect one changed-file diff at a time. Do not read the raw report or worker log.'
+            review_policy = 'Review the compact result. On failure, revise the ticket, change the oracle, reduce scope, or conclude BLOCKED. Inspect only listed paths and tests.'
         }
         $lastResult = "Step $requestId exited $workerExit; result=$resultPath"
         $astraState = if ($script:lastTurn) { Get-AstraState -LastMessagePath $script:lastTurn.last_message } else { $null }
-        Save-Handoff -Result $lastResult -NextDecision 'Review the compact worker receipt and listed paths; publish worker_commit checkpoint only if acceptable.' -Files $workerPaths -Tests @($validatedWorkerSummary.tests) -State $astraState
+        Save-Handoff -Result $lastResult -NextDecision 'Review the worker result; checkpoint only a successful changed commit, otherwise adapt or conclude BLOCKED.' -Files $workerPaths -Tests @($validatedWorkerSummary.tests) -State $astraState
         $nextReason = 'Step review'
-        $nextPrompt = New-AstraTaskPrompt "Fresh Step review for phase $Phase. Use the compact worker receipt in HOST_CONTEXT_JSON; do not open its raw report, evidence or log. Inspect the actual diff for each listed path. If acceptable, publish checkpoint.json version 2 with kind=worker_commit, base_head, source_commit, message and exact paths, then end the call."
+        $nextPrompt = New-AstraTaskPrompt "Fresh Step review for phase $Phase. Use the compact worker result in HOST_CONTEXT_JSON. If successful with changed paths, inspect the diff and publish a worker_commit checkpoint if acceptable. If it failed or was an accepted noop, decide the next bounded action or conclude BLOCKED/STABLE with reasons."
     } elseif (Test-Path -LiteralPath $validationPath -PathType Leaf) {
         $validationResult = Invoke-HostValidation
         $lastValidationSummary = [ordered]@{
@@ -1120,7 +1179,10 @@ while ($true) {
         $forcedContinuation = ''
         if ($status -eq 'STABLE') {
             $currentHead = (git rev-parse HEAD | Out-String).Trim()
-            if ($script:lastWorkerSummary -and [string]$script:lastWorkerSummary.source_commit -ne $currentHead) {
+            if ($script:lastWorkerSummary -and [string]$script:lastWorkerSummary.execution_status -ne 'success') {
+                $status = ''
+                $forcedContinuation = 'The last Step execution failed. Resolve its cause or conclude BLOCKED.'
+            } elseif ($script:lastWorkerSummary -and [string]$script:lastWorkerSummary.source_commit -ne $currentHead) {
                 $status = ''
                 $forcedContinuation = 'Review the Step diff and publish its checkpoint before STABLE.'
             } elseif (-not $script:lastValidationSummary -or [string]$script:lastValidationSummary.head -ne $currentHead) {
@@ -1170,7 +1232,8 @@ while ($true) {
     foreach ($call in $script:calls) {
         if ($call.usage) { $usedTokens += [long]$call.usage.input_tokens + [long]$call.usage.output_tokens }
     }
-    if ($usedTokens -ge $MaxRunTokens -or ((Get-Date) - $runStarted).TotalMinutes -ge $MaxRunMinutes) {
+    $mandatoryReview = $nextReason -in @('Step review', 'checkpoint review', 'validation review')
+    if (-not $mandatoryReview -and ($usedTokens -ge $MaxRunTokens -or ((Get-Date) - $runStarted).TotalMinutes -ge $MaxRunMinutes)) {
         Save-SessionState -Status 'active'
         Write-Host "Astra run budget reached. Handoff: $handoffPath" -ForegroundColor Yellow
         break

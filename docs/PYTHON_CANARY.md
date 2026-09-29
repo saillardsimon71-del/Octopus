@@ -23,7 +23,7 @@ From the repository root:
 docker build -f docker/dev-sandbox.Dockerfile -t octopus-test-sandbox:py311 .
 ```
 
-The image intentionally contains only Python 3.11 and pytest. Therefore the first canary targets `octopus/capabilities.py`, whose current tests do not require the heavier OCTOPUS runtime dependencies.
+The image installs `requirements-local.txt` so host and sandbox tests use the same declared Python dependencies. Rebuild the image after changing that file or the Dockerfile. The worker still runs tests in an isolated container without network or host credentials.
 
 ## Dry-run
 
