@@ -1704,6 +1704,23 @@ def test_kilo_prompt_allows_broad_reading_but_keeps_write_scope():
     assert "Do not survey the entire repository" not in prompt
 
 
+def test_kilo_retry_prompt_stays_below_windows_command_limit():
+    from octopus import dev_worker
+
+    prompt = dev_worker._build_kilo_prompt(
+        "Implement the selected task. " * 100,
+        [[sys.executable, "-m", "pytest", "-q", "tests/test_tasks_worker.py"]],
+        24,
+        last_test_output="failure details " * 400,
+        attempt=1,
+        allowed_paths=["octopus/tasks.py", "octopus/worker.py", "octopus/__main__.py"],
+    )
+
+    assert len(prompt) <= 6500
+    assert "PREVIOUS_FEEDBACK:" in prompt
+    assert prompt.endswith("failure details")
+
+
 def test_development_task_accepts_justified_noop_when_allowed(tmp_path, monkeypatch):
     from octopus import dev_worker
 

@@ -133,6 +133,7 @@ KILO_COMMAND = "kilo.cmd" if os.name == "nt" else "kilo"
 KILO_TIMEOUT_S = 600
 KILO_POLL_S = 1.0
 KILO_TEST_FEEDBACK_CHARS = 4000
+KILO_PROMPT_CHARS = 6500
 KILO_MAX_PASSES = 3
 # Deterministic repair is intentionally tiny and closed-world. JSON trailing
 # whitespace is semantically inert once the document parses; Markdown is
@@ -344,8 +345,15 @@ def _build_kilo_prompt(
             "meaningfully different correction; do not merely repeat the previous pass."
         )
     if last_test_output:
-        parts.append("PREVIOUS_FEEDBACK: " + " ".join(last_test_output[-KILO_TEST_FEEDBACK_CHARS:].split()))
-    return " ".join(parts)
+        prefix = "PREVIOUS_FEEDBACK: "
+        available = KILO_PROMPT_CHARS - len(" ".join(parts)) - len(prefix) - 1
+        if available > 0:
+            feedback = " ".join(last_test_output[-KILO_TEST_FEEDBACK_CHARS:].split())
+            parts.append(prefix + feedback[-available:])
+    prompt = " ".join(parts)
+    if len(prompt) > KILO_PROMPT_CHARS:
+        raise DevWorkerError("Kilo prompt exceeds the command-line limit; shorten the ticket goal")
+    return prompt
 
 
 def _kilo_environment(config_root: str, config: dict) -> dict[str, str]:
