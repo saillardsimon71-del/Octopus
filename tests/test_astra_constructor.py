@@ -1095,7 +1095,8 @@ def test_host_checkpoint_accepts_rename_with_both_declared_paths(tmp_path: Path)
     ]
 
 
-def test_host_checkpoint_fast_forwards_reviewed_worker_commit(tmp_path: Path):
+@pytest.mark.parametrize("supplied_message", ["worker: bounded change", "different subject", None])
+def test_host_checkpoint_fast_forwards_reviewed_worker_commit(tmp_path: Path, supplied_message: str | None):
     repo = init_repo(tmp_path)
     base = git(repo, "rev-parse", "HEAD")
     git(repo, "switch", "-c", "worker/task")
@@ -1110,9 +1111,13 @@ def test_host_checkpoint_fast_forwards_reviewed_worker_commit(tmp_path: Path):
         kind="worker_commit",
         source_commit=worker_commit,
         base_head=base,
-        message="worker: bounded change",
     )
+    if supplied_message is None:
+        body.pop("message")
+    else:
+        body["message"] = supplied_message
     request.write_text(json.dumps(body), encoding="utf-8")
+    result_path = repo / "cache" / "astra-relay" / "checkpoint-result.json"
 
     result = run(
         POWERSHELL,
@@ -1125,11 +1130,52 @@ def test_host_checkpoint_fast_forwards_reviewed_worker_commit(tmp_path: Path):
         str(repo),
         "-CheckpointPath",
         str(request),
+        "-ResultPath",
+        str(result_path),
         cwd=repo,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert git(repo, "rev-parse", "HEAD") == worker_commit
+    assert git(repo, "status", "--porcelain") == ""
+    receipt = json.loads(result_path.read_text(encoding="utf-8-sig"))
+    assert receipt["message"] == git(repo, "show", "-s", "--format=%s", worker_commit)
+
+
+@pytest.mark.parametrize("invalid", ["source_commit", "base_head", "ancestry", "paths"])
+def test_host_checkpoint_rejects_invalid_worker_commit(tmp_path: Path, invalid: str):
+    repo = init_repo(tmp_path)
+    base = git(repo, "rev-parse", "HEAD")
+    git(repo, "switch", "-c", "worker/task")
+    (repo / "product.txt").write_text("worker result\n", encoding="utf-8")
+    git(repo, "commit", "-am", "worker: bounded change")
+    source = git(repo, "rev-parse", "HEAD")
+    if invalid == "ancestry":
+        (repo / "product.txt").write_text("worker result 2\n", encoding="utf-8")
+        git(repo, "commit", "-am", "worker: second change")
+        source = git(repo, "rev-parse", "HEAD")
+    git(repo, "switch", "prep/astra-local-orchestration")
+
+    request = checkpoint(repo, ["product.txt"], request_id="worker-invalid")
+    body = json.loads(request.read_text(encoding="utf-8"))
+    body.update(kind="worker_commit", source_commit=source, base_head=base)
+    if invalid == "source_commit":
+        body["source_commit"] = "0" * 40
+    elif invalid == "base_head":
+        body["base_head"] = "0" * 40
+    elif invalid == "paths":
+        body["paths"] = ["other.txt"]
+    request.write_text(json.dumps(body), encoding="utf-8")
+
+    result = run(
+        POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+        str(ROOT / "scripts" / "commit_astra_checkpoint.ps1"),
+        "-Repo", str(repo), "-CheckpointPath", str(request), cwd=repo,
+    )
+
+    assert result.returncode != 0
+    assert git(repo, "rev-parse", "HEAD") == base
+    assert request.exists()
     assert git(repo, "status", "--porcelain") == ""
 
 

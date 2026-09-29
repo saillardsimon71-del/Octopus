@@ -55,8 +55,9 @@ $archiveRoot = Join-Path (Split-Path -Parent $CheckpointPath) "requests"
 $archivePath = Join-Path $archiveRoot ("checkpoint-" + $requestId + ".json")
 if (Test-Path -LiteralPath $archivePath) { throw "Checkpoint request_id was already consumed: $requestId" }
 
+$kind = if ($checkpoint.kind) { [string]$checkpoint.kind } else { "working_tree" }
 $message = ([string]$checkpoint.message).Trim()
-if (-not $message -or $message.Length -gt 120 -or $message -match "[`r`n]") {
+if ($kind -ne "worker_commit" -and (-not $message -or $message.Length -gt 120 -or $message -match "[`r`n]")) {
     throw "Astra checkpoint message must be one line and <=120 characters."
 }
 
@@ -89,7 +90,6 @@ foreach ($path in @($checkpoint.paths)) {
 if ($declared.Count -eq 0) { throw "Checkpoint paths cannot be empty." }
 
 $wanted = @($declared | Sort-Object -Unique)
-$kind = if ($checkpoint.kind) { [string]$checkpoint.kind } else { "working_tree" }
 if ($kind -eq "working_tree") {
     $tracked = @((Invoke-Git @("diff", "--name-only", "--relative", "HEAD", "--")) | Where-Object { $_ })
     $untracked = @((Invoke-Git @("ls-files", "--others", "--exclude-standard", "--")) | Where-Object { $_ })
@@ -124,8 +124,10 @@ if ($kind -eq "working_tree") {
     if ($ancestry.Count -ne 2 -or $ancestry[1] -ne $head) {
         throw "Worker commit must be a single-parent direct child of checkpoint base_head."
     }
-    $workerMessage = ((Invoke-Git @("log", "-1", "--format=%s", $sourceCommit)) -join "").Trim()
-    if ($workerMessage -ne $message) { throw "Worker checkpoint message does not match the reviewed commit subject." }
+    $message = ((Invoke-Git @("show", "-s", "--format=%s", $sourceCommit)) -join "").Trim()
+    if (-not $message -or $message.Length -gt 120 -or $message -match "[`r`n]") {
+        throw "Worker commit subject must be one line and <=120 characters."
+    }
 
     $workerPaths = @((Invoke-Git @("diff", "--no-renames", "--name-only", "--relative", $head, $sourceCommit, "--")) | Where-Object { $_ } | Sort-Object -Unique)
     $workerDifference = @(Compare-Object -ReferenceObject $wanted -DifferenceObject $workerPaths)
