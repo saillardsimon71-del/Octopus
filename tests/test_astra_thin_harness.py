@@ -15,7 +15,7 @@ def git(repo, *args):
     return result.stdout.strip()
 
 
-def run_fake_harness(tmp_path, terminal="STABLE", relays=2, tokens=300000, unsafe=False, step_failure=False, large_context=False):
+def run_fake_harness(tmp_path, terminal="STABLE", relays=2, tokens=300000, total_tokens=1000000, unsafe=False, step_failure=False, large_context=False):
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init", "-b", "prep/astra-local-orchestration")
@@ -97,8 +97,13 @@ $prompt=($input|Out-String)
 [IO.File]::WriteAllText((Join-Path $env:FAKE_STATE "prompt-$count.txt"),$prompt)
 $index=[Array]::IndexOf([object[]]$args,'--output-last-message')
 if($index -lt 0){exit 7}
+if($args -contains 'resume'){exit 8}
 $repo=$env:FAKE_REPO
-if($count -eq 1){
+if($env:FAKE_TERMINAL -eq 'CONTINUE_FOREVER' -or ($env:FAKE_TERMINAL -in @('CONTINUE','BLOCKED_EARLY') -and $count -le 2)){
+  $message=if($env:FAKE_TERMINAL -eq 'BLOCKED_EARLY' -and $count -eq 2){'ASTRA_STATUS: BLOCKED'}else{'ASTRA_CONTINUE: next bounded action'}
+}elseif($env:FAKE_TERMINAL -eq 'CONTINUE' -and $count -eq 3){
+  $message='ASTRA_STATUS: BLOCKED'
+}elseif($count -eq 1){
   $missing=@(rg --fixed-strings 'agent.react_step' octopus 2>$null).Count
   $many=@(rg --line-number 'proxy' octopus 2>$null).Count
   $source=(Get-Content 'octopus/transport.py' -TotalCount 10|Out-String).Trim()
@@ -177,7 +182,8 @@ exit 0
     result = subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(launcher),
          "-CodexHome", str(tmp_path / "codex-home"), "-Phase", "G", "-MaxAstraTurns", "2",
-         "-MaxRelayCycles", str(relays), "-MaxRunTokens", str(tokens), "-SkipFetch", "-NewSession"],
+         "-MaxRelayCycles", str(relays), "-MaxRunTokens", str(tokens),
+         "-MaxTotalRunTokens", str(total_tokens), "-SkipFetch", "-NewSession"],
         cwd=repo, env=env, text=True, encoding="utf-8", errors="replace", capture_output=True,
     )
     return repo, state, result
@@ -254,6 +260,7 @@ def test_relay_budget_stops_without_extra_astra_call(tmp_path):
     assert "Relay cycle budget reached" in result.stdout
     session = json.loads((repo / "cache/astra-relay/session.json").read_text(encoding="utf-8"))
     assert session["status"] == "active"
+    assert session["stop_reason"] == "relay_cycle_limit"
 
 
 def test_unsafe_ticket_fails_before_step(tmp_path):
@@ -264,10 +271,45 @@ def test_unsafe_ticket_fails_before_step(tmp_path):
     assert "worker/fake-step-runtime" not in git(repo, "branch", "--list")
 
 
-def test_token_budget_stops_before_next_astra_call(tmp_path):
-    repo, state, result = run_fake_harness(tmp_path, terminal="EXHAUST", relays=2, tokens=5)
+def test_mini_session_budget_continues_with_fresh_calls(tmp_path):
+    repo, state, result = run_fake_harness(tmp_path, terminal="CONTINUE", relays=2, tokens=10)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Astra run budget reached" in result.stdout
     assert (state / "count.txt").read_text(encoding="utf-8") == "3"
     session = json.loads((repo / "cache/astra-relay/session.json").read_text(encoding="utf-8"))
+    assert session["status"] == "blocked"
+    assert session["mini_session_calls"] == 1
+    assert session["total_astra_calls"] == 3
+    assert session["relay_cycles_this_run"] == 1
+    assert session["stop_reason"] == "blocked"
+    assert "Astra calls: 3" in result.stdout
+    assert "mini_session_calls=1" in result.stdout
+    assert "stop_reason=blocked" in result.stdout
+
+
+def test_terminal_status_stops_before_mini_session_rollover(tmp_path):
+    repo, state, result = run_fake_harness(tmp_path, terminal="BLOCKED_EARLY", relays=2)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (state / "count.txt").read_text(encoding="utf-8") == "2"
+    session = json.loads((repo / "cache/astra-relay/session.json").read_text(encoding="utf-8"))
+    assert session["stop_reason"] == "blocked"
+
+
+def test_multiple_mini_sessions_stop_at_relay_limit(tmp_path):
+    repo, state, result = run_fake_harness(tmp_path, terminal="CONTINUE_FOREVER", relays=2)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (state / "count.txt").read_text(encoding="utf-8") == "6"
+    session = json.loads((repo / "cache/astra-relay/session.json").read_text(encoding="utf-8"))
+    assert session["mini_session_calls"] == 2
+    assert session["total_astra_calls"] == 6
+    assert session["relay_cycles"] == 2
+    assert session["stop_reason"] == "relay_cycle_limit"
+
+
+def test_global_token_budget_stops_with_explicit_reason(tmp_path):
+    repo, state, result = run_fake_harness(tmp_path, terminal="CONTINUE", relays=2, tokens=10, total_tokens=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (state / "count.txt").read_text(encoding="utf-8") == "2"
+    session = json.loads((repo / "cache/astra-relay/session.json").read_text(encoding="utf-8"))
     assert session["status"] == "active"
+    assert session["stop_reason"] == "global_token_limit"
+    assert "stop_reason=global_token_limit" in result.stdout

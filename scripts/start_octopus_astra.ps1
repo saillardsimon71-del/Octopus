@@ -9,6 +9,8 @@ param(
     [int]$MaxPreparedContextChars = 30000,
     [int]$MaxRunMinutes = 180,
     [int]$MaxRunTokens = 100000,
+    [int]$MaxTotalRunMinutes = 720,
+    [long]$MaxTotalRunTokens = 1000000,
     [ValidateSet("medium", "high")]
     [string]$Reasoning = "medium",
     [switch]$SkipFetch,
@@ -419,7 +421,7 @@ if ($MaxAstraTurns -lt 1 -or $MaxAstraTurns -gt 2) {
 if ($MaxRelayCycles -lt 0 -or $MaxRelayCycles -gt 20) {
     throw "MaxRelayCycles must be between 0 and 20."
 }
-if ($MaxRunMinutes -lt 1 -or $MaxRunTokens -lt 1) { throw 'Run time and token budgets must be positive.' }
+if ($MaxRunMinutes -lt 1 -or $MaxRunTokens -lt 1 -or $MaxTotalRunMinutes -lt 1 -or $MaxTotalRunTokens -lt 1) { throw 'Run time and token budgets must be positive.' }
 
 $phaseSpec = switch ($Phase) {
     "B" {
@@ -541,6 +543,7 @@ $baselineLogPath = Join-Path $relayRoot "baseline-pytest.log"
 $astraTurns = 0
 $astraTurnsInCycle = 0
 $relayCycles = 0
+$stopReason = 'running'
 $threadId = $null
 $modelInvoked = $false
 $calls = @()
@@ -637,7 +640,11 @@ function Save-SessionState([string]$Status) {
         current_head = (git rev-parse HEAD | Out-String).Trim()
         baseline_fingerprint = $baselineFingerprint
         astra_turns_this_run = $script:astraTurns
+        mini_session_calls = $script:astraTurnsInCycle
+        total_astra_calls = $script:astraTurns
         relay_cycles_this_run = $script:relayCycles
+        relay_cycles = $script:relayCycles
+        stop_reason = $script:stopReason
         updated_at_utc = (Get-Date).ToUniversalTime().ToString("o")
     })
 }
@@ -1206,6 +1213,8 @@ if (-not (Test-Path -LiteralPath $handoffPath -PathType Leaf)) {
 $nextReason = 'phase work'
 $nextPrompt = $initialPrompt
 $runStarted = Get-Date
+$miniSessionStarted = $runStarted
+$miniSessionTokenStart = 0
 while ($true) {
     $pending = @($checkpointPath, $requestPath, $validationPath | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
     if ($pending.Count -gt 1) { throw 'Only one checkpoint, Step relay, or validation request may be pending.' }
@@ -1317,6 +1326,7 @@ while ($true) {
             $astraState = Get-AstraState -LastMessagePath $script:lastTurn.last_message
             Save-Handoff -Result $lastMessage -NextDecision $status -State $astraState
             $terminalStatus = if ($status -eq 'BLOCKED') { 'blocked' } else { 'completed' }
+            $stopReason = if ($terminalStatus -eq 'blocked') { 'blocked' } else { 'stable' }
             Save-SessionState -Status $terminalStatus
             break
         }
@@ -1331,11 +1341,29 @@ while ($true) {
         $nextPrompt = New-AstraTaskPrompt 'Continue the next action in HOST_CONTEXT_JSON. Use the handoff to avoid repeated reads.'
     }
 
-    if ($astraTurnsInCycle -ge $MaxAstraTurns) {
+    $usedTokens = 0
+    foreach ($call in $script:calls) {
+        if ($call.usage) { $usedTokens += [long]$call.usage.input_tokens + [long]$call.usage.output_tokens }
+    }
+    $mandatoryReview = $nextReason -in @('Step review', 'checkpoint review', 'validation review')
+    if (-not $mandatoryReview -and $usedTokens -ge $MaxTotalRunTokens) {
+        $stopReason = 'global_token_limit'
+        Save-SessionState -Status 'active'
+        Write-Host "Global Astra token budget reached. Handoff: $handoffPath" -ForegroundColor Yellow
+        break
+    }
+    if (-not $mandatoryReview -and ((Get-Date) - $runStarted).TotalMinutes -ge $MaxTotalRunMinutes) {
+        $stopReason = 'global_time_limit'
+        Save-SessionState -Status 'active'
+        Write-Host "Global Astra time budget reached. Handoff: $handoffPath" -ForegroundColor Yellow
+        break
+    }
+    if ($astraTurnsInCycle -ge $MaxAstraTurns -or ($usedTokens - $miniSessionTokenStart) -ge $MaxRunTokens -or ((Get-Date) - $miniSessionStarted).TotalMinutes -ge $MaxRunMinutes) {
         if ($nextReason -eq 'Step review') {
             $astraTurnsInCycle = 0
         } else {
             if ($relayCycles -ge $MaxRelayCycles) {
+                $stopReason = 'relay_cycle_limit'
                 Save-SessionState -Status 'active'
                 Write-Host "Relay cycle budget reached. Handoff: $handoffPath" -ForegroundColor Yellow
                 break
@@ -1343,16 +1371,8 @@ while ($true) {
             $relayCycles++
             $astraTurnsInCycle = 0
         }
-    }
-    $usedTokens = 0
-    foreach ($call in $script:calls) {
-        if ($call.usage) { $usedTokens += [long]$call.usage.input_tokens + [long]$call.usage.output_tokens }
-    }
-    $mandatoryReview = $nextReason -in @('Step review', 'checkpoint review', 'validation review')
-    if (-not $mandatoryReview -and ($usedTokens -ge $MaxRunTokens -or ((Get-Date) - $runStarted).TotalMinutes -ge $MaxRunMinutes)) {
-        Save-SessionState -Status 'active'
-        Write-Host "Astra run budget reached. Handoff: $handoffPath" -ForegroundColor Yellow
-        break
+        $miniSessionStarted = Get-Date
+        $miniSessionTokenStart = $usedTokens
     }
     $preparedPrompt = Write-AstraContext -TaskPrompt $nextPrompt
     $turn = Invoke-AstraTurn -Prompt $preparedPrompt -Reason $nextReason
@@ -1363,5 +1383,5 @@ while ($true) {
 }
 
 $usageTotals = Save-UsageSummary
-Write-Host ("Astra calls: {0}; relay cycles: {1}/{2}; run_totals={3}; lifetime_totals={4}" -f $astraTurns, $relayCycles, $MaxRelayCycles, ($usageTotals.run_totals | ConvertTo-Json -Compress), ($usageTotals.lifetime_totals | ConvertTo-Json -Compress))
+Write-Host ("Astra calls: {0}; mini_session_calls={1}; total_astra_calls={0}; relay_cycles={2}/{3}; stop_reason={4}; run_totals={5}; lifetime_totals={6}" -f $astraTurns, $astraTurnsInCycle, $relayCycles, $MaxRelayCycles, $stopReason, ($usageTotals.run_totals | ConvertTo-Json -Compress), ($usageTotals.lifetime_totals | ConvertTo-Json -Compress))
 Write-Host "Handoff: $handoffPath"
