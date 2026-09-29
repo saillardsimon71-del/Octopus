@@ -212,6 +212,12 @@ function Resolve-StepRelayPlan([object]$Request, [string]$RequestId) {
     $testTargets = @(if ($testTargetsProperty) {
         $testTargetsProperty.Value | Where-Object { $null -ne $_ }
     })
+    $postChangeProperty = $ticket.PSObject.Properties['post_change_tests']
+    if ($postChangeProperty -and $postChangeProperty.Value -isnot [array]) {
+        throw 'Product ticket post_change_tests must be an explicit list.'
+    }
+    $postChangeTests = @()
+    if ($postChangeProperty) { $postChangeTests = @($postChangeProperty.Value) }
     $missingDispatchFields = @()
     if (-not $allowedPaths.Count) { $missingDispatchFields += 'allowed_edit_paths (or explicit canonical allowed_paths)' }
     if (-not $testTargets.Count) { $missingDispatchFields += 'test_targets' }
@@ -262,6 +268,7 @@ function Resolve-StepRelayPlan([object]$Request, [string]$RequestId) {
             }
         }
     }
+    $allowedPaths = @($allowedPaths | ForEach-Object { $_.Replace('\', '/').Trim() })
     foreach ($target in $testTargets) {
         if (-not ($target -is [string]) -or -not $target.Trim()) {
             throw 'Product ticket test_targets must contain non-empty strings executable in the Step sandbox.'
@@ -286,6 +293,37 @@ function Resolve-StepRelayPlan([object]$Request, [string]$RequestId) {
             $item = Get-Item -LiteralPath $cursor -Force
             if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
                 throw "Product ticket test target traverses a link: $target"
+            }
+            if ($cursor -eq $repo) { break }
+            $cursor = Split-Path -Parent $cursor
+        }
+    }
+    if ($postChangeTests.Count -gt 20) { throw 'Product ticket exceeds bounded post_change_tests limits.' }
+    foreach ($target in $postChangeTests) {
+        if (-not ($target -is [string]) -or -not $target.Trim()) {
+            throw 'Product ticket post_change_tests must contain non-empty repository-relative paths.'
+        }
+        $path = $target.Replace('\', '/')
+        $parts = @($path.Split('/'))
+        if (-not $path.StartsWith('tests/') -or -not $path.EndsWith('.py') -or
+            $path -match '[*?\[\]:\x00-\x1f]' -or @($parts | Where-Object { $_ -in @('', '.', '..') }).Count -or
+            [System.IO.Path]::IsPathRooted($path)) {
+            throw "Product ticket post_change_tests path is invalid: $target"
+        }
+        $resolved = [System.IO.Path]::GetFullPath((Join-Path $repo $path))
+        if (-not $resolved.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Product ticket post_change_tests path escapes repository: $target"
+        }
+        if (-not (Test-Path -LiteralPath $resolved -PathType Leaf) -and $path -notin $allowedPaths) {
+            throw "Product ticket post_change_tests new file is not in allowed_edit_paths: $target"
+        }
+        $cursor = $resolved
+        while ($cursor.Length -ge $repo.Length) {
+            if (Test-Path -LiteralPath $cursor) {
+                $item = Get-Item -LiteralPath $cursor -Force
+                if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                    throw "Product ticket post_change_tests traverses a link: $target"
+                }
             }
             if ($cursor -eq $repo) { break }
             $cursor = Split-Path -Parent $cursor
@@ -334,6 +372,7 @@ function Resolve-StepRelayPlan([object]$Request, [string]$RequestId) {
         goal = ($goalParts | Where-Object { $_ }) -join [Environment]::NewLine
         allowed_paths = $allowedPaths
         test_targets = $testTargets
+        post_change_tests = $postChangeTests
         max_steps = if ($null -ne $ticket.max_steps) { [int]$ticket.max_steps } else { 20 }
         max_files_changed = if ($null -ne $ticket.max_files_changed) { [int]$ticket.max_files_changed } else { $allowedPaths.Count }
         max_lines_added = if ($null -ne $ticket.max_lines_added) { [int]$ticket.max_lines_added } else { 2500 }
@@ -765,6 +804,10 @@ function New-CompactWorkerSummary([object]$Summary) {
         uncommitted_paths = @($Summary.uncommitted_paths | Select-Object -First 20 | ForEach-Object { Limit-Text $_ 240 })
         diff_stat = @($Summary.diff_stat | Select-Object -First 12 | ForEach-Object { Limit-Text $_ 240 })
         tests = @($Summary.tests | Select-Object -First 12 | ForEach-Object { Limit-Text $_ 240 })
+        baseline_oracle = @($Summary.baseline_oracle | Select-Object -First 20 | ForEach-Object { Limit-Text $_ 240 })
+        baseline_oracle_runs = [int]$Summary.baseline_oracle_runs
+        post_change_tests = @($Summary.post_change_tests | Select-Object -First 20 | ForEach-Object { Limit-Text $_ 240 })
+        post_change_tests_passed = [bool]$Summary.post_change_tests_passed
         summary_truncated = $true
     }
 }
@@ -847,6 +890,10 @@ function Assert-ValidWorkerReviewReceipt(
     }
     if ($executionStatus -eq 'success' -and -not @($summary.tests).Count) {
         throw 'External worker summary requires a non-empty tests summary. Astra review was not started.'
+    }
+    if (@($plan.tickets[0].post_change_tests | Where-Object { $_ }).Count -and $executionStatus -eq 'success' -and
+        (-not [bool]$summary.post_change_tests_passed -or [int]$summary.baseline_oracle_runs -ne 2)) {
+        throw 'External worker success lacks baseline oracle or post_change_tests proof. Astra review was not started.'
     }
 
     $tickets = @($summary.tickets)

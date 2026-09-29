@@ -235,6 +235,7 @@ def test_step_relay_v2_normalizes_product_ticket_and_prefers_it_over_legacy_plan
     work_ticket = validated["tickets"][0]
     assert work_ticket["allowed_paths"] == ticket["allowed_edit_paths"]
     assert work_ticket["test_targets"] == ticket["test_targets"]
+    assert work_ticket["post_change_tests"] == []
     assert work_ticket["acceptance_criteria"] == ticket["acceptance"]
     assert ticket["objective"] in work_ticket["goal"]
     assert ticket["scope"]["implementation"] in work_ticket["goal"]
@@ -247,6 +248,65 @@ def test_step_relay_v2_normalizes_product_ticket_and_prefers_it_over_legacy_plan
             "expected": True,
         }
     ]
+
+
+@pytest.mark.parametrize("post_path, accepted", [
+    ("tests/test_new.py", True),
+    ("tests/test_missing.py", False),
+    ("tests/../test_escape.py", False),
+    ("tests/test_*.py", False),
+    ("C:/tests/test_absolute.py", False),
+])
+def test_step_relay_post_change_test_contract(tmp_path: Path, post_path: str, accepted: bool):
+    repo = init_repo(tmp_path)
+    relay = repo / "cache" / "astra-relay"
+    relay.mkdir(parents=True)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_oracle.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+    git(repo, "add", "tests/test_oracle.py")
+    git(repo, "commit", "-m", "oracle")
+    head = git(repo, "rev-parse", "HEAD")
+    ticket = {
+        "request_id": "post-change-001", "phase": "G", "base_head": head,
+        "objective": "Add a regression test", "acceptance": ["Tests pass"],
+        "allowed_edit_paths": ["octopus/runtime.py", "tests/test_new.py"],
+        "test_targets": ["tests/test_oracle.py"], "post_change_tests": [post_path],
+    }
+    (relay / "product_ticket.json").write_text(json.dumps(ticket), encoding="utf-8")
+    request = {"request_id": ticket["request_id"], "phase": "G", "base_head": head,
+               "product_ticket": "cache/astra-relay/product_ticket.json"}
+    result = gate_step_relay_dispatch(repo, request, tmp_path)
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] is accepted
+    if accepted:
+        plan = json.loads((repo / "cache" / "astra-tickets" / "post-change-001.json").read_text())
+        assert night_shift.validate_plan(plan)["tickets"][0]["post_change_tests"] == [post_path]
+    else:
+        assert payload["worker_calls"] == 0
+
+
+def test_step_relay_rejects_edited_oracle_even_with_post_change_tests(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    relay = repo / "cache" / "astra-relay"
+    relay.mkdir(parents=True)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_oracle.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+    git(repo, "add", "tests/test_oracle.py")
+    git(repo, "commit", "-m", "oracle")
+    head = git(repo, "rev-parse", "HEAD")
+    (relay / "product_ticket.json").write_text(json.dumps({
+        "request_id": "oracle-edit-001", "phase": "G", "base_head": head,
+        "objective": "Edit tests", "acceptance": ["Tests pass"],
+        "allowed_edit_paths": ["tests/test_oracle.py", "tests/test_new.py"],
+        "test_targets": ["tests/test_oracle.py"], "post_change_tests": ["tests/test_new.py"],
+    }), encoding="utf-8")
+    result = gate_step_relay_dispatch(repo, {
+        "request_id": "oracle-edit-001", "phase": "G", "base_head": head,
+        "product_ticket": "cache/astra-relay/product_ticket.json",
+    }, tmp_path)
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] is False
+    assert "cannot edit its Step test oracle" in payload["error"]
 
 
 def test_step_relay_accepts_bounded_core_product_ticket(tmp_path: Path):
@@ -671,6 +731,44 @@ def test_valid_compact_worker_receipt_allows_one_astra_review(tmp_path: Path):
     assert payload["summary"]["source_commit"] == source_commit
 
 
+def test_step_review_requires_post_change_proof_when_declared(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    head = git(repo, "rev-parse", "HEAD")
+    git(repo, "switch", "-c", "worker/post-tests")
+    (repo / "product.txt").write_text("updated\n", encoding="utf-8")
+    git(repo, "commit", "-am", "worker result")
+    commit = git(repo, "rev-parse", "HEAD")
+    git(repo, "switch", "prep/astra-local-orchestration")
+    request_id = "post-proof-001"
+    plan_dir = repo / "cache" / "astra-tickets"
+    plan_dir.mkdir(parents=True)
+    (plan_dir / f"{request_id}.json").write_text(json.dumps({
+        "request_id": request_id, "base_head": head,
+        "tickets": [{"allowed_paths": ["product.txt"],
+                     "test_targets": ["tests/test_oracle.py"],
+                     "post_change_tests": ["tests/test_new.py"]}],
+    }), encoding="utf-8")
+    receipt = {
+        "version": 1, "request_id": request_id, "status": "completed", "exit_code": 0,
+        "worker_summary": {
+            "status": "backlog_complete", "base_head": head, "source_commit": commit,
+            "changed_paths": ["product.txt"], "tests": ["oracle and regression passed"],
+            "baseline_oracle": ["tests/test_oracle.py"], "baseline_oracle_runs": 2,
+            "post_change_tests": ["tests/test_new.py"], "post_change_tests_passed": True,
+            "tickets": [{"status": "done", "commit": commit, "tests_passed": True,
+                         "gate_status": "ACCEPTED", "changed_paths": ["product.txt"]}],
+        },
+    }
+    accepted = gate_worker_review(repo, request_id, receipt, 0, tmp_path)
+    assert json.loads(accepted.stdout)["accepted"] is True
+    receipt["worker_summary"]["post_change_tests_passed"] = False
+    rejected = gate_worker_review(repo, request_id, receipt, 0, tmp_path)
+    payload = json.loads(rejected.stdout)
+    assert payload["accepted"] is False
+    assert "post_change_tests proof" in payload["error"]
+    assert payload["astra_calls"] == 0
+
+
 @pytest.mark.parametrize("execution_status", [
     "baseline_failed", "step_not_started", "step_failed", "tests_failed", "timeout",
 ])
@@ -824,6 +922,9 @@ def test_external_runner_emits_baseline_failure_receipt_and_review_continues(tmp
     assert receipt["execution_status"] == "baseline_failed"
     assert receipt["worker_summary"]["changed_paths"] == []
     assert receipt["worker_summary"]["tests"] == ["tests/test_tasks_worker.py"]
+    assert receipt["worker_summary"]["baseline_oracle"] == ["tests/test_tasks_worker.py"]
+    assert receipt["worker_summary"]["post_change_tests"] == []
+    assert receipt["worker_summary"]["post_change_tests_passed"] is False
     review = gate_worker_review(repo, request_id, receipt, 0, tmp_path)
     assert json.loads(review.stdout)["astra_calls"] == 1
 

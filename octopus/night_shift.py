@@ -9,6 +9,7 @@ Nothing is pushed or merged into main.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -154,6 +155,18 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
         test_targets.append(value)
     if policy == "product_ticket" and set(allowed_paths) & {target.split("::", 1)[0] for target in test_targets}:
         raise NightShiftError(f"ticket #{index}: oracles de test non modifiables")
+    post_raw = raw.get("post_change_tests", [])
+    if not isinstance(post_raw, list) or len(post_raw) > 20:
+        raise NightShiftError(f"ticket #{index}: post_change_tests doit être une liste bornée")
+    post_change_tests = []
+    for value in post_raw:
+        if not isinstance(value, str) or re.search(r"[*?\[\]:\x00-\x1f]", value):
+            raise NightShiftError(f"ticket #{index}: post_change_tests exige des fichiers explicites")
+        path = _normalize_relative_path(value)
+        if not path.startswith("tests/") or not path.endswith(".py"):
+            raise NightShiftError(f"ticket #{index}: post_change_tests sous tests/ en .py requis: {value}")
+        if path not in post_change_tests:
+            post_change_tests.append(path)
 
     if policy == "python_canary":
         required_targets = []
@@ -241,6 +254,7 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
         "goal": goal,
         "allowed_paths": allowed_paths,
         "test_targets": test_targets,
+        "post_change_tests": post_change_tests,
         "max_steps": max_steps,
         "acceptance_criteria": acceptance_criteria,
         "acceptance_contract": acceptance_contract,
@@ -461,6 +475,7 @@ def run(
                     "repository": str(night_worktree),
                     "goal": ticket["goal"],
                     "tests": tests,
+                    "post_change_tests": ticket["post_change_tests"],
                     "max_steps": ticket["max_steps"],
                     "backend": "kilo",
                     "allowed_paths": ticket["allowed_paths"],

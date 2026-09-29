@@ -171,6 +171,8 @@ if ($nightReport) {
             status = Limit-Text $_.status 40
             commit = [string]$_.result.output.commit
             tests_passed = [bool]$_.result.output.tests_passed
+            baseline_oracle_runs = [int]$_.result.output.baseline_oracle_runs
+            post_change_tests_passed = [bool]$_.result.output.post_change_tests_passed
             gate_status = Limit-Text $_.result.output.gate_status 40
             changed_paths = @($_.result.output.changed_paths | Select-Object -First 30)
             error = Limit-Text $_.result.error 1200
@@ -197,6 +199,10 @@ if ($nightReport) {
         uncommitted_paths = @($uncommittedPaths | Select-Object -First 30)
         diff_stat = $diffStat
         tests = $tests
+        baseline_oracle = @($planBody.tickets[0].test_targets | Select-Object -First 20)
+        post_change_tests = @($planBody.tickets[0].post_change_tests | Select-Object -First 20)
+        baseline_oracle_runs = if ($ticketSummaries.Count -eq 1) { $ticketSummaries[0].baseline_oracle_runs } else { 0 }
+        post_change_tests_passed = if ($ticketSummaries.Count -eq 1) { $ticketSummaries[0].post_change_tests_passed } else { $false }
         tickets = $ticketSummaries
         failure = if ($ticketSummaries.Count -eq 1 -and $ticketSummaries[0].status -ne 'done') { $ticketSummaries[0].error } else { $null }
         summary_truncated = $true
@@ -211,6 +217,10 @@ if (-not $receipt.worker_summary) {
         uncommitted_paths = @()
         diff_stat = @()
         tests = @($planBody.tickets[0].test_targets | Select-Object -First 12)
+        baseline_oracle = @($planBody.tickets[0].test_targets | Select-Object -First 20)
+        post_change_tests = @($planBody.tickets[0].post_change_tests | Select-Object -First 20)
+        baseline_oracle_runs = 0
+        post_change_tests_passed = $false
         tickets = @()
         failure = Limit-Text ((Get-Content -LiteralPath $logPath -Tail 12 -ErrorAction SilentlyContinue) -join ' ') 1200
         summary_truncated = $true

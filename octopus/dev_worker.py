@@ -771,6 +771,24 @@ def _pytest_targets(commands: list[list[str]]) -> list[str]:
     return targets
 
 
+def _validate_post_change_tests(raw, repository: Path, allowed_paths: list[str] | None) -> list[str]:
+    if not isinstance(raw, list) or len(raw) > PRODUCT_TICKET_MAX_FILES:
+        raise DevWorkerError("post_change_tests doit être une liste bornée")
+    paths = []
+    for value in raw:
+        if not isinstance(value, str) or not value or re.search(r"[*?\[\]:\x00-\x1f]", value):
+            raise DevWorkerError("post_change_tests exige des fichiers explicites")
+        path = value.replace("\\", "/")
+        parts = path.split("/")
+        if len(parts) < 2 or parts[0] != "tests" or not path.endswith(".py") or any(part in {"", ".", ".."} for part in parts):
+            raise DevWorkerError(f"post_change_tests invalide: {value}")
+        if not (repository / path).is_file() and path not in (allowed_paths or []):
+            raise DevWorkerError(f"post_change_tests absent hors allowed_paths: {value}")
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
 def _validate_octopus_self_modification_policy(
         repository: Path, backend: str, allowed_paths: list[str] | None, tests: list[list[str]],
         test_sandbox: str, test_sandbox_image: str, max_files_changed: int | None,
@@ -1892,6 +1910,7 @@ def development_task(ctx):
     if backend not in {"kilo", "declarative"}:
         raise DevWorkerError("backend attendu: kilo ou declarative")
     allowed_paths = _validate_allowed_paths(ctx.input.get("allowed_paths"))
+    post_change_tests = _validate_post_change_tests(ctx.input.get("post_change_tests", []), repository, allowed_paths)
     acceptance_criteria = _validate_acceptance_criteria(ctx.input.get("acceptance_criteria"))
     noop_allowed = bool(ctx.input.get("noop_allowed", False))
     test_sandbox = _validate_test_sandbox(ctx.input.get("test_sandbox"))
@@ -1954,6 +1973,9 @@ def development_task(ctx):
 
     worktree, branch = _create_worktree(repository, ctx.id)
     _assert_safe_allowed_paths(worktree, allowed_paths)
+    if post_change_tests:
+        _assert_safe_allowed_paths(worktree, post_change_tests)
+    post_commands = [[sys.executable, "-m", "pytest", "-q", path] for path in post_change_tests]
     if strict_repository_preflight:
         _strict_repository_preflight(worktree)
     if backend == "declarative":
@@ -2005,7 +2027,7 @@ def development_task(ctx):
     for attempt in range(KILO_MAX_PASSES):
         repository_context = _repository_context(worktree)
         prompt = _build_kilo_prompt(
-            goal, tests, max_steps, last_test_output, attempt,
+            goal, tests + post_commands, max_steps, last_test_output, attempt,
             allowed_paths=allowed_paths,
             acceptance_criteria=acceptance_criteria,
             noop_allowed=noop_allowed,
@@ -2013,7 +2035,7 @@ def development_task(ctx):
         )
         try:
             kilo_output = _run_kilo(
-                worktree, goal, tests, max_steps, prompt=prompt, allowed_paths=allowed_paths,
+                worktree, goal, tests + post_commands, max_steps, prompt=prompt, allowed_paths=allowed_paths,
             )
             summary = _kilo_output_summary(kilo_output)
             ctx.emit("development.kilo_pass", {
@@ -2079,6 +2101,12 @@ def development_task(ctx):
                     tests_passed = noop_signature == baseline_signature
                     if not tests_passed:
                         test_output += "\nORACLE_SIGNATURE_MISMATCH"
+                if tests_passed and post_commands:
+                    post_output, tests_passed = _run_tests(
+                        worktree, post_commands, sandbox=test_sandbox, sandbox_image=effective_test_image,
+                        expected_image_id=effective_test_image_id,
+                    )
+                    test_output += "\n" + post_output
                 ctx.emit("development.tool", {"action": "test", "ok": tests_passed, "noop": True})
                 if tests_passed:
                     gate_result = None
@@ -2140,6 +2168,8 @@ def development_task(ctx):
                         "baseline_oracle_runs": 2 if baseline_signature is not None else 0,
                         "oracle_tests": len(baseline_signature or ()),
                         "post_oracle_tests": len(noop_signature if baseline_signature is not None else ()),
+                        "post_change_tests": post_change_tests,
+                        "post_change_tests_passed": True,
                         "test_sandbox": test_sandbox,
                         "test_sandbox_image": effective_test_image_id if test_sandbox == "docker" else None,
                         "test_sandbox_image_ref": effective_test_image if test_sandbox == "docker" else None,
@@ -2193,6 +2223,12 @@ def development_task(ctx):
             tests_passed = post_signature == baseline_signature
             if not tests_passed:
                 test_output += "\nORACLE_SIGNATURE_MISMATCH"
+        if tests_passed and post_commands:
+            post_output, tests_passed = _run_tests(
+                worktree, post_commands, sandbox=test_sandbox, sandbox_image=effective_test_image,
+                expected_image_id=effective_test_image_id,
+            )
+            test_output += "\n" + post_output
         ctx.emit("development.tool", {"action": "test", "ok": tests_passed})
         if tests_passed:
             changed_paths = _validate_kilo_result(
@@ -2270,6 +2306,8 @@ def development_task(ctx):
                 "baseline_oracle_runs": 2 if baseline_signature is not None else 0,
                 "oracle_tests": len(baseline_signature or ()),
                 "post_oracle_tests": len(post_signature if baseline_signature is not None else ()),
+                "post_change_tests": post_change_tests,
+                "post_change_tests_passed": True,
                 "self_policy": "product_ticket" if product_ticket else ("python_canary" if octopus_python_canary else "scoped_kilo"),
                 "deterministic_fixes": deterministic_fixes,
             }

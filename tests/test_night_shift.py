@@ -545,8 +545,9 @@ def test_product_ticket_runner_passes_supervised_policy_to_development_task(tmp_
         "policy": "product_ticket",
         "tickets": [{
             "goal": "Redesign the GUI.",
-            "allowed_paths": ["agents/gui/workbench.py", "agents/gui/intelligence.py"],
+            "allowed_paths": ["agents/gui/workbench.py", "agents/gui/intelligence.py", "tests/test_gui_regression.py"],
             "test_targets": ["tests/test_gui.py", "tests/test_gui_intelligence.py"],
+            "post_change_tests": ["tests/test_gui_regression.py"],
             "acceptance_contract": product_contract(),
             "max_steps": 30,
             "max_files_changed": 2,
@@ -608,6 +609,7 @@ def test_product_ticket_runner_passes_supervised_policy_to_development_task(tmp_
     assert result["status"] == "backlog_complete"
     task_input = captured["input"]
     assert task_input["self_modification_policy"] == "product_ticket"
+    assert task_input["post_change_tests"] == ["tests/test_gui_regression.py"]
     assert task_input["acceptance_contract"] == product_contract()
     assert task_input["strict_repository_preflight"] is True
     assert task_input["require_baseline_oracle"] is True

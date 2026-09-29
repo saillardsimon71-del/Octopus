@@ -1433,6 +1433,51 @@ def test_product_ticket_requires_acceptance_contract_before_execution(tmp_path):
     assert "acceptance_contract explicite" in result["error"]
 
 
+@pytest.mark.parametrize("post_green", [True, False])
+def test_post_change_tests_run_only_after_oracle_baseline(tmp_path, monkeypatch, post_green):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_oracle.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+    git(repo, "add", "tests/test_oracle.py")
+    git(repo, "commit", "-qm", "oracle")
+    seen = []
+
+    def fake_tests(worktree, commands, **kwargs):
+        targets = dev_worker._pytest_targets(commands)
+        seen.append(targets)
+        if targets == ["tests/test_oracle.py"]:
+            return "PASSED tests/test_oracle.py::test_ok", True
+        assert targets == ["tests/test_new.py"]
+        return ("PASSED" if post_green else "FAILED") + " tests/test_new.py::test_new", post_green
+
+    def fake_kilo(worktree, goal, commands, max_steps, **kwargs):
+        assert dev_worker._pytest_targets(commands) == ["tests/test_oracle.py", "tests/test_new.py"]
+        (worktree / "calc.py").write_text("def answer():\n    return 2\n", encoding="utf-8")
+        (worktree / "tests" / "test_new.py").write_text("def test_new(): assert True\n", encoding="utf-8")
+        return '{"type":"text","text":"implemented"}\n'
+
+    monkeypatch.setattr(dev_worker, "_run_tests", fake_tests)
+    monkeypatch.setattr(dev_worker, "_run_kilo", fake_kilo)
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo), "goal": "Add regression", "backend": "kilo",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "tests/test_oracle.py"]],
+        "post_change_tests": ["tests/test_new.py"],
+        "allowed_paths": ["calc.py", "tests/test_new.py"],
+        "require_baseline_oracle": True, "allow_declarative_fallback": False,
+    })
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+    assert seen[:2] == [["tests/test_oracle.py"], ["tests/test_oracle.py"]]
+    assert seen[2:4] == [["tests/test_oracle.py"], ["tests/test_new.py"]]
+    assert result["status"] == ("done" if post_green else "failed")
+    if post_green:
+        assert result["output"]["post_change_tests_passed"] is True
+        assert result["output"]["baseline_oracle_runs"] == 2
+    else:
+        assert "tests déterministes en échec" in result["error"]
+
+
 def test_development_task_commits_only_after_acceptance_gate(tmp_path, monkeypatch):
     from octopus import acceptance, dev_worker
 
