@@ -1253,7 +1253,7 @@ def test_call_2_uses_only_compact_review_packet(tmp_path: Path):
 $tokens=$null;$errors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
 if($errors.Count){{throw ($errors|ForEach-Object Message)}}
-foreach($name in @('Write-JsonAtomic','Write-BoundedJsonAtomic','Limit-Text','Get-LocalSha256','ConvertTo-CompactAstraValue','New-CompactAstraPacket','Get-ChangedPaths','Get-CompactDiffStat','Write-AstraContext')){{
+foreach($name in @('Write-JsonAtomic','Write-BoundedJsonAtomic','Read-Handoff','Limit-Text','Get-LocalSha256','ConvertTo-CompactAstraValue','New-CompactAstraPacket','Get-ChangedPaths','Get-CompactDiffStat','Write-AstraContext')){{
   $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
   Invoke-Expression $fn.Extent.Text
 }}
@@ -1314,13 +1314,13 @@ def test_large_context_compacts_and_keeps_critical_state(tmp_path: Path):
         f"""
 $ErrorActionPreference='Stop'
 $ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$null,[ref]$null)
-foreach($name in @('Write-JsonAtomic','Write-BoundedJsonAtomic','Limit-Text','Get-LocalSha256','ConvertTo-CompactAstraValue','New-CompactAstraPacket','Write-AstraContext')){{
+foreach($name in @('Write-JsonAtomic','Write-BoundedJsonAtomic','Read-Handoff','Limit-Text','Get-LocalSha256','ConvertTo-CompactAstraValue','New-CompactAstraPacket','Write-AstraContext')){{
   $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
   Invoke-Expression $fn.Extent.Text
 }}
 $repo='{repo}';$handoffPath='{relay / "handoff.json"}'
 $snapshotPath='{relay / "snapshot.json"}';$fullContextPath='{relay / "context-full.json"}';$contextMetricsPath='{relay / "metrics.json"}'
-$Phase='G';$MaxSnapshotChars=8000;$MaxPreparedContextChars=30000
+$Phase='G';$MaxSnapshotChars=8000;$MaxHandoffChars=20000;$MaxPreparedContextChars=30000
 $phaseSpec=@{{documents=@();mission='phase objective'}};$script:astraTurns=1
 $script:reviewContext=@{{kind='step';base_head=('a'*40);head=('b'*40);diff_stat=@(1..25|ForEach-Object{{'diff '+$_+('d'*300)}})}}
 $script:lastWorkerSummary=@{{execution_status='success';tests=@('target test passed');source_commit=('b'*40)}}
@@ -1367,9 +1367,11 @@ def test_corrupt_handoff_fails_closed(tmp_path: Path, content: str, error: str):
         f"""
 $ErrorActionPreference='Stop'
 $ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$null,[ref]$null)
-$fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Write-AstraContext'}},$true)
-Invoke-Expression $fn.Extent.Text
-$handoffPath='{relay / "handoff.json"}';Write-AstraContext -TaskPrompt 'continue'
+foreach($name in @('Read-Handoff','Write-AstraContext')){{
+  $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
+  Invoke-Expression $fn.Extent.Text
+}}
+$handoffPath='{relay / "handoff.json"}';$MaxHandoffChars=6000;Write-AstraContext -TaskPrompt 'continue'
 """,
         encoding="utf-8",
     )
@@ -1379,7 +1381,7 @@ $handoffPath='{relay / "handoff.json"}';Write-AstraContext -TaskPrompt 'continue
     assert not (relay / "snapshot.json").exists()
 
 
-def test_handoff_persists_massive_context(tmp_path: Path):
+def test_handoff_compacts_massive_context(tmp_path: Path):
     repo = init_repo(tmp_path)
     handoff = repo / "cache" / "astra-relay" / "handoff.json"
     launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
@@ -1389,7 +1391,7 @@ def test_handoff_persists_massive_context(tmp_path: Path):
 $tokens=$null;$errors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
 if($errors.Count){{throw ($errors|ForEach-Object Message)}}
-foreach($name in @('Write-JsonAtomic','Limit-Text','Get-ChangedPaths','Save-Handoff')){{
+foreach($name in @('Write-BoundedJsonAtomic','Read-Handoff','Limit-Text','ConvertTo-CompactAstraValue','Get-ChangedPaths','Save-Handoff')){{
   $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
   Invoke-Expression $fn.Extent.Text
 }}
@@ -1405,9 +1407,78 @@ Save-Handoff -Result ('y'*5000) -NextDecision ('z'*5000) -Decisions $large
 
     assert result.returncode == 0, result.stdout + result.stderr
     saved = json.loads(handoff.read_text(encoding="utf-8"))
-    assert len(saved["last_result"]) == 5000
-    assert len(saved["next_decision"]) == 5000
-    assert len(saved["decisions"]) == 12
+    assert len(handoff.read_text(encoding="utf-8")) <= 6000
+    assert saved["next_decision"].startswith("z")
+    assert saved["last_result"].startswith("y")
+    assert saved["dropped_counts"]["decisions"] > 0
+
+
+def test_oversized_handoff_fails_before_reading(tmp_path: Path):
+    handoff = tmp_path / "handoff.json"
+    with handoff.open("wb") as stream:
+        stream.truncate(1_000_000_000)
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    runner = tmp_path / "oversized.ps1"
+    runner.write_text(
+        f"""
+$ErrorActionPreference='Stop'
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$null,[ref]$null)
+$fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Read-Handoff'}},$true)
+Invoke-Expression $fn.Extent.Text
+Read-Handoff -Path '{handoff}' -MaxChars 6000
+""",
+        encoding="utf-8",
+    )
+    result = run(POWERSHELL, "-NoProfile", "-File", str(runner))
+    assert result.returncode != 0
+    assert "exceeds its 6000 character limit" in result.stderr
+    assert handoff.stat().st_size == 1_000_000_000
+
+
+def test_handoff_utf8_roundtrip_preserves_phase_g_state(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    relay = repo / "cache" / "astra-relay"
+    relay.mkdir(parents=True)
+    handoff = relay / "handoff.json"
+    nested_summary = "Déjà inspecté " + '{"handoff":"nested"}' * 100
+    handoff.write_text(json.dumps({
+        "version": 3, "phase": "G", "next_decision": "Continuer après validation",
+        "facts": ["État vérifié"], "inspected": [{
+            "path": "product.txt", "sha256": "a" * 64, "summary": nested_summary,
+        }],
+        "criteria": [{"id": "B", "status": "demonstrated", "evidence": {
+            "kind": "test", "ref": "tests/test_gateway.py::test_http_413", "head": "b" * 40,
+        }}],
+        "remaining": ["Vérifier F"], "pending_checkpoint_head": "c" * 40,
+    }, ensure_ascii=False), encoding="utf-8")
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    runner = tmp_path / "roundtrip.ps1"
+    runner.write_text(
+        f"""
+$ErrorActionPreference='Stop'
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$null,[ref]$null)
+foreach($name in @('Write-BoundedJsonAtomic','Read-Handoff','ConvertTo-CompactAstraValue','Get-ChangedPaths','Save-Handoff')){{
+  $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
+  Invoke-Expression $fn.Extent.Text
+}}
+$repo='{repo}';$handoffPath='{handoff}';$MaxHandoffChars=6000;$Phase='G'
+$phaseSpec=@{{mission='phase objective'}};$phaseGCriteria=@(@{{id='B'}})
+$script:pendingCheckpointHead='{'c' * 40}'
+1..8|ForEach-Object{{ Save-Handoff -Result 'résumé' -NextDecision 'Continuer après validation' }}
+""",
+        encoding="utf-8-sig",
+    )
+    result = run(POWERSHELL, "-NoProfile", "-File", str(runner), cwd=repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+    saved = json.loads(handoff.read_text(encoding="utf-8"))
+    assert handoff.stat().st_size <= 6000
+    assert saved["facts"] == ["État vérifié"]
+    assert saved["inspected"][0]["sha256"] == "a" * 64
+    assert saved["inspected"][0]["summary"].startswith("Déjà inspecté")
+    assert len(saved["inspected"][0]["summary"]) <= 503
+    assert saved["criteria"][0]["evidence"]["ref"] == "tests/test_gateway.py::test_http_413"
+    assert saved["pending_checkpoint_head"] == "c" * 40
+    assert saved["remaining"] == ["Vérifier F"]
 
 
 def test_codex_stream_keeps_stderr_out_of_json_and_saves_thread_early(tmp_path: Path):

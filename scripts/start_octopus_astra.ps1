@@ -40,15 +40,38 @@ function Write-BoundedJsonAtomic([string]$Path, [object]$Value, [int]$MaxChars, 
     $parent = Split-Path -Parent $Path
     if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
     $tmp = "$Path.tmp-$PID"
+    $backup = "$Path.backup-$PID"
     [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
-    Move-Item -LiteralPath $tmp -Destination $Path -Force
+    try {
+        if ([System.IO.File]::Exists($Path)) { [System.IO.File]::Replace($tmp, $Path, $backup) }
+        else { [System.IO.File]::Move($tmp, $Path) }
+    } finally {
+        if ([System.IO.File]::Exists($tmp)) { [System.IO.File]::Delete($tmp) }
+        if ([System.IO.File]::Exists($backup)) { [System.IO.File]::Delete($backup) }
+    }
     return $json
+}
+
+function Read-Handoff([string]$Path, [int]$MaxChars) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    $bytes = (Get-Item -LiteralPath $Path).Length
+    if ($bytes -gt ([long]$MaxChars * 4)) {
+        throw "Astra handoff exceeds its $MaxChars character limit ($bytes bytes): $Path. Recover compact Phase G state before resuming."
+    }
+    try { $handoff = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw "Astra handoff is malformed JSON: $Path" }
+    if ($handoff -isnot [pscustomobject] -or -not $handoff.PSObject.Properties['next_decision']) { throw 'Astra handoff has an invalid shape.' }
+    if ($handoff.next_decision -isnot [string]) { throw 'Astra handoff has an invalid next decision.' }
+    foreach ($field in @('facts', 'hypotheses', 'inspected', 'tickets', 'remaining', 'tests', 'criteria')) {
+        if ($handoff.PSObject.Properties[$field] -and $handoff.$field -isnot [array]) { throw "Astra handoff has an invalid $field section." }
+    }
+    return $handoff
 }
 
 function ConvertTo-CompactAstraValue([object]$Value, [string]$Key, [int]$MaxItems, [int]$MaxChars, [string]$Section) {
     if ($null -eq $Value) { return $null }
     if ($Value -is [string]) {
-        $limit = if ($Key -in @('next_decision', 'blocked', 'failure')) { [Math]::Max(600, $MaxChars) } elseif ($Key -eq 'review_policy') { [Math]::Max(240, $MaxChars) } elseif ($Key -in @('path', 'plan_path')) { [Math]::Max(300, $MaxChars) } else { $MaxChars }
+        $limit = if ($Key -in @('next_decision', 'blocked', 'failure')) { [Math]::Max(600, $MaxChars) } elseif ($Key -eq 'review_policy') { [Math]::Max(240, $MaxChars) } elseif ($Key -in @('path', 'plan_path')) { [Math]::Max(300, $MaxChars) } elseif ($Key -eq 'sha256') { [Math]::Max(64, $MaxChars) } else { $MaxChars }
         if ($Value.Length -le $limit) { return $Value }
         $script:compactDropped[$Section] = [int]$script:compactDropped[$Section] + 1
         return $Value.Substring(0, $limit) + '...'
@@ -135,7 +158,7 @@ function Read-TurnUsage([string]$JsonLog) {
 
 function Get-AstraContinuation([string]$LastMessagePath) {
     if (-not (Test-Path -LiteralPath $LastMessagePath -PathType Leaf)) { return "" }
-    foreach ($line in Get-Content -LiteralPath $LastMessagePath) {
+    foreach ($line in Get-Content -LiteralPath $LastMessagePath -Encoding UTF8) {
         if ($line -match '^ASTRA_CONTINUE:\s*(\S.*)$') {
             if ($Matches[1].Length -gt 600) { throw 'ASTRA_CONTINUE exceeds its 600 character limit.' }
             return $Matches[1]
@@ -146,7 +169,7 @@ function Get-AstraContinuation([string]$LastMessagePath) {
 
 function Get-AstraStatus([string]$LastMessagePath) {
     if (-not (Test-Path -LiteralPath $LastMessagePath -PathType Leaf)) { return '' }
-    foreach ($line in Get-Content -LiteralPath $LastMessagePath) {
+    foreach ($line in Get-Content -LiteralPath $LastMessagePath -Encoding UTF8) {
         if ($line -match '^ASTRA_STATUS:\s*(STABLE|BLOCKED)\s*$') { return $Matches[1] }
     }
     return ''
@@ -154,7 +177,7 @@ function Get-AstraStatus([string]$LastMessagePath) {
 
 function Get-AstraState([string]$LastMessagePath) {
     if (-not (Test-Path -LiteralPath $LastMessagePath -PathType Leaf)) { return $null }
-    foreach ($line in Get-Content -LiteralPath $LastMessagePath) {
+    foreach ($line in Get-Content -LiteralPath $LastMessagePath -Encoding UTF8) {
         if ($line.StartsWith('ASTRA_STATE_JSON ')) {
             $json = $line.Substring(17)
             if ($json.Length -gt 4000) { throw 'ASTRA_STATE_JSON exceeds its 4000 character limit.' }
@@ -766,9 +789,7 @@ function Save-Handoff(
     [object]$State = $null
 ) {
     $changed = if ($Files.Count) { @($Files | Select-Object -First 30) } else { @(Get-ChangedPaths) }
-    $previous = if (Test-Path -LiteralPath $handoffPath -PathType Leaf) {
-        Get-Content -LiteralPath $handoffPath -Raw | ConvertFrom-Json
-    } else { $null }
+    $previous = Read-Handoff -Path $handoffPath -MaxChars $MaxHandoffChars
     $facts = if ($State) { @($State.facts) } else { @($previous.facts) }
     $hypotheses = if ($State) { @($State.hypotheses) } else { @($previous.hypotheses) }
     $inspectedByPath = [ordered]@{}
@@ -787,7 +808,7 @@ function Save-Handoff(
     $inspected = @($inspectedByPath.Values)
     $remaining = if ($State) { @($State.remaining) } else { @($previous.remaining) }
     $tickets = if ($State) { @($State.tickets) } else { @($previous.tickets) }
-    $stateTests = if ($State) { @($State.tests) } else { @($previous.tests) }
+    $stateTests = @(@($State.tests) + @($previous.tests) | Where-Object { $null -ne $_ -and [string]$_ })
     $criteriaById = [ordered]@{}
     foreach ($item in @($previous.criteria)) {
         if ($item -and [string]$item.id -in @($phaseGCriteria.id)) { $criteriaById[[string]$item.id] = $item }
@@ -824,7 +845,29 @@ function Save-Handoff(
         blocked = if ($Blocked) { $Blocked } elseif ($State -and $State.blocked) { $State.blocked } else { $null }
         next_decision = $NextDecision
     }
-    Write-JsonAtomic -Path $handoffPath -Value $handoff
+    foreach ($pass in @(@(12, 500), @(8, 240), @(5, 160), @(3, 100), @(1, 60))) {
+        $script:compactDropped = @{}
+        $compact = [ordered]@{}
+        foreach ($entry in $handoff.GetEnumerator()) {
+            if ($entry.Key -in @('version', 'objective', 'phase', 'head', 'criteria', 'pending_checkpoint_head', 'blocked')) {
+                $compact[$entry.Key] = $entry.Value
+            } else {
+                $compact[$entry.Key] = ConvertTo-CompactAstraValue -Value $entry.Value -Key $entry.Key -MaxItems $pass[0] -MaxChars $pass[1] -Section $entry.Key
+            }
+        }
+        if ($previous -and $previous.dropped_counts) {
+            foreach ($entry in $previous.dropped_counts.PSObject.Properties) {
+                $script:compactDropped[$entry.Name] = [int]$script:compactDropped[$entry.Name] + [int]$entry.Value
+            }
+        }
+        if ($script:compactDropped.Count) { $compact.dropped_counts = $script:compactDropped }
+        $json = $compact | ConvertTo-Json -Depth 20 -Compress
+        if ($json.Length -le $MaxHandoffChars) {
+            $null = Write-BoundedJsonAtomic -Path $handoffPath -Value $compact -MaxChars $MaxHandoffChars -Label 'Astra handoff'
+            return
+        }
+    }
+    throw "Astra handoff has irreducible critical content above its $MaxHandoffChars character limit; existing handoff was left intact."
 }
 
 function New-CompactReceipt([object]$Receipt) {
@@ -993,13 +1036,8 @@ function Assert-ValidWorkerReviewReceipt(
 }
 
 function Write-AstraContext([string]$TaskPrompt) {
-    $handoffJson = if (Test-Path -LiteralPath $handoffPath -PathType Leaf) { Get-Content -LiteralPath $handoffPath -Raw } else { '{}' }
-    try { $handoff = $handoffJson | ConvertFrom-Json -ErrorAction Stop } catch { throw 'Astra handoff is malformed JSON.' }
-    if ($handoff -isnot [pscustomobject] -or -not $handoff.PSObject.Properties['next_decision']) { throw 'Astra handoff has an invalid shape.' }
-    if ($handoff.next_decision -isnot [string]) { throw 'Astra handoff has an invalid next decision.' }
-    foreach ($field in @('facts', 'hypotheses', 'inspected', 'tickets', 'remaining', 'tests', 'criteria')) {
-        if ($handoff.PSObject.Properties[$field] -and $handoff.$field -isnot [array]) { throw "Astra handoff has an invalid $field section." }
-    }
+    $handoff = Read-Handoff -Path $handoffPath -MaxChars $MaxHandoffChars
+    if (-not $handoff) { throw "Astra handoff is missing: $handoffPath" }
     $branch = (git branch --show-current | Out-String).Trim()
     $currentHead = (git rev-parse HEAD | Out-String).Trim()
     $packet = [ordered]@{
@@ -1247,7 +1285,7 @@ function New-AstraTaskPrompt([string]$Task) {
 $initialPrompt = New-AstraTaskPrompt "Work on the phase $Phase objective in HOST_CONTEXT_JSON. Inspect the repository directly, then delegate bounded implementation to Step and review it."
 
 if (Test-Path -LiteralPath $handoffPath -PathType Leaf) {
-    $oldHandoff = Get-Content -LiteralPath $handoffPath -Raw | ConvertFrom-Json
+    $oldHandoff = Read-Handoff -Path $handoffPath -MaxChars $MaxHandoffChars
     if ($NewSession -or [string]$oldHandoff.phase -ne $Phase) {
         $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
         Move-Item -LiteralPath $handoffPath -Destination (Join-Path $sessionArchiveRoot ("handoff-" + $stamp + "-" + $PID + ".json"))
@@ -1257,7 +1295,7 @@ if (-not (Test-Path -LiteralPath $handoffPath -PathType Leaf)) {
     Save-Handoff -Result 'ready' -NextDecision 'Start bounded phase work.'
 }
 if ($Phase -eq 'G') {
-    $resumeHandoff = Get-Content -LiteralPath $handoffPath -Raw | ConvertFrom-Json
+    $resumeHandoff = Read-Handoff -Path $handoffPath -MaxChars $MaxHandoffChars
     $pendingCheckpointHead = [string]$resumeHandoff.pending_checkpoint_head
     $resumeHead = (git rev-parse HEAD | Out-String).Trim()
     $resumeMissing = @(Get-MissingPhaseGCriteria -Criteria $phaseGCriteria -Proofs @($resumeHandoff.criteria) -Head $resumeHead)
@@ -1363,11 +1401,11 @@ while ($true) {
     } elseif ($modelInvoked) {
         if ((git status --porcelain --untracked-files=all | Out-String).Trim()) { throw 'Astra ended with uncheckpointed changes.' }
         $status = if ($script:lastTurn) { Get-AstraStatus -LastMessagePath $script:lastTurn.last_message } else { '' }
-        $lastMessage = Get-Content -LiteralPath $script:lastTurn.last_message -Raw
+        $lastMessage = Get-Content -LiteralPath $script:lastTurn.last_message -Raw -Encoding UTF8
         $astraState = Get-AstraState -LastMessagePath $script:lastTurn.last_message
         if ($Phase -eq 'G') {
             Save-Handoff -Result $lastMessage -NextDecision 'Evaluate terminal state.' -State $astraState
-            $currentHandoff = Get-Content -LiteralPath $handoffPath -Raw | ConvertFrom-Json
+            $currentHandoff = Read-Handoff -Path $handoffPath -MaxChars $MaxHandoffChars
         }
         $forcedContinuation = ''
         if ($status -eq 'STABLE') {
