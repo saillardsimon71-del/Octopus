@@ -59,12 +59,27 @@ Tables `tasks`, `events`, `human_requests`, `schedules` dans `data/octopus.db` (
 | Humain | `ctx.ask_human(clé, question)` met la tâche en attente ; `python -m octopus answer ID "texte"` la remet en file, le handler est rejoué et retrouve la réponse |
 | Planification | `python -m octopus schedule ...` ; une occurrence encore active n'est pas empilée |
 | Idempotence | `idempotency_key` unique (ex. `publish:<offre>:<sha256>`) |
-| Coûts | chaque tâche tourne dans un run du journal, avec le budget déclaré par son handler |
+    | Coûts | chaque tâche tourne dans un run du journal, avec le budget déclaré par son handler |
+
+Un handler est une fonction `fn(ctx) -> sortie JSON`, enregistrée pour un type de tâche :
+
+```python
+@handler("atelier.prepare_delivery", resource="cpu_heavy", budget_usd=1.0)
+def prepare_delivery(ctx):
+    ...
+```
+
+- Chaque tâche tourne dans un run du journal (budget par tâche, coûts rattachés).
+- `ctx.ask_human(clé, question)` : renvoie la réponse si elle existe, sinon met la tâche en attente ;
+  elle sera relancée depuis le début après la réponse (les handlers doivent être rejouables :
+  `ctx.memo(clé, fonction)` conserve le résultat des étapes coûteuses).
+- `ctx.cancelled()` : annulation demandée (coopérative). `ctx.enqueue(...)` : tâche suivante.
 
 Handlers chargés : `octopus.builtin_handlers` (`octopus.cost_report`), `agents.task_handlers` (`podalux.agent_message`, `podalux.mission`, `orbit.mission`) et `businesses.veille.handlers` (`veille.brief`, voir `businesses/veille/README.md`), surchargeables par `OCTOPUS_HANDLERS`. Une tâche rejouée après une réponse humaine retrouve ses étapes coûteuses via `ctx.memo`. Aucune planification n'est créée d'office. Le moteur vidéo historique a été retiré le 2026-09-25.
 
 ```
 python -m octopus worker                      boucle (Ctrl+C pour arrêter)
+python -m octopus worker --task ID             exécuter une tâche spécifique en une seule tentative
 python -m octopus enqueue octopus octopus.cost_report
 python -m octopus tasks / events / ask / answer 3 "oui" / cancel 12
 python -m octopus schedule octopus octopus.cost_report --every 86400

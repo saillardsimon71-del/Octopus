@@ -139,12 +139,29 @@ def events(since_id: int = 0, task_id: int | None = None, limit: int = 200) -> l
 
 # --- exécution ------------------------------------------------------------------------------
 
-def claim(owner: str, *, lease_s: float = 60, kinds: list[str] | None = None) -> dict | None:
+def claim(owner: str, *, task_id: int | None = None, lease_s: float = 60, kinds: list[str] | None = None) -> dict | None:
     """Prend la tâche prête la plus prioritaire dont la ressource est libre. None si rien à faire."""
     with _tx() as conn:
         now = time.time()
         busy = {r["resource"] for r in conn.execute(
             "SELECT resource FROM tasks WHERE status='running' AND lease_until > ? AND resource IS NOT NULL", (now,))}
+        if task_id is not None:
+            row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None or row["status"] in FINAL or row["status"] != "queued":
+                return None
+            if row["not_before"] and row["not_before"] > now:
+                return None
+            if kinds is not None and row["kind"] not in kinds:
+                return None
+            if row["resource"] and row["resource"] in busy:
+                return None
+            updated = conn.execute("UPDATE tasks SET status='running', lease_owner=?, lease_until=?, attempts=attempts+1, "
+                                   "updated_at=? WHERE id=? AND status='queued'",
+                                   (owner, now + lease_s, now, row["id"])).rowcount
+            if updated == 0:
+                return None
+            _emit(conn, row["business"], row["id"], "task.started", {"owner": owner, "attempt": row["attempts"] + 1})
+            return get_in(conn, row["id"])
         sql = "SELECT * FROM tasks WHERE status='queued' AND not_before <= ?"
         params: list = [now]
         if kinds:
@@ -153,8 +170,11 @@ def claim(owner: str, *, lease_s: float = 60, kinds: list[str] | None = None) ->
         for row in conn.execute(sql + " ORDER BY priority DESC, id", params):
             if row["resource"] and row["resource"] in busy:
                 continue
-            conn.execute("UPDATE tasks SET status='running', lease_owner=?, lease_until=?, attempts=attempts+1, "
-                         "updated_at=? WHERE id=?", (owner, now + lease_s, now, row["id"]))
+            updated = conn.execute("UPDATE tasks SET status='running', lease_owner=?, lease_until=?, attempts=attempts+1, "
+                                   "updated_at=? WHERE id=? AND status='queued'",
+                                   (owner, now + lease_s, now, row["id"])).rowcount
+            if updated == 0:
+                continue
             _emit(conn, row["business"], row["id"], "task.started", {"owner": owner, "attempt": row["attempts"] + 1})
             return get_in(conn, row["id"])
     return None

@@ -126,6 +126,18 @@ def _dump(value) -> str:
 
 def cmd_worker(args) -> int:
     from . import worker
+    if args.task is not None:
+        if args.max_tasks is not None:
+            print("--task et --max-tasks sont incompatibles")
+            return 2
+        worker.load_handlers()
+        try:
+            result = worker.run_one(task_id=args.task)
+        except ValueError as exc:
+            print(f"task invalide : {exc}")
+            return 2
+        print(_dump(result) if result else "aucune tâche prête")
+        return 0
     worker.load_handlers()
     if args.once:
         result = worker.run_one()
@@ -320,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("doctor", help="verification de l'installation")
     p = sub.add_parser("worker", help="execute les taches de la file")
     p.add_argument("--once", action="store_true", help="une seule tache puis sortie")
+    p.add_argument("--task", type=int, default=None, help="executer une tache specifique par ID")
     p.add_argument("--max-tasks", type=int, default=None, help="nombre de taches strictement positif")
     p.add_argument("--poll", type=float, default=2.0, help="intervalle fini strictement positif, en secondes")
     p = sub.add_parser("night-shift", help="canary autonome borné, sans push ni merge vers main")
@@ -387,6 +400,10 @@ def main(argv: list[str] | None = None) -> int:
     strategy_cli.add_parser(sub)
     args = parser.parse_args(argv)
     if args.cmd == "worker":
+        if args.task is not None and args.max_tasks is not None:
+            parser.error("--task et --max-tasks sont incompatibles")
+        if args.task is not None and args.task <= 0:
+            parser.error("worker --task doit etre strictement positif")
         if args.max_tasks is not None and args.max_tasks <= 0:
             parser.error("worker --max-tasks doit etre strictement positif")
         if not math.isfinite(args.poll) or args.poll <= 0:
