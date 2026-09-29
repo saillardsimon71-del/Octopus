@@ -72,6 +72,24 @@ def test_product_ticket_accepts_wide_scoped_surface_and_real_oracles():
     assert ticket["max_lines_deleted"] == 3000
 
 
+def test_product_ticket_accepts_core_code_and_test_helper_with_separate_oracle():
+    from octopus import night_shift
+
+    plan = night_shift.validate_plan({
+        "policy": "product_ticket",
+        "tickets": [{
+            "goal": "Repair the durable task path and its fixture.",
+            "allowed_paths": ["octopus/tasks.py", "octopus/worker.py", "tests/task_fixture.py"],
+            "test_targets": ["tests/test_tasks.py"],
+            "acceptance_contract": product_contract(),
+        }],
+    })
+
+    assert plan["tickets"][0]["allowed_paths"] == [
+        "octopus/tasks.py", "octopus/worker.py", "tests/task_fixture.py",
+    ]
+
+
 @pytest.mark.parametrize("path", [
     "octopus/dev_worker.py",
     "octopus/night_shift.py",
@@ -89,6 +107,14 @@ def test_product_ticket_accepts_wide_scoped_surface_and_real_oracles():
     "agents/publish.py",
     "docker/dev-sandbox.Dockerfile",
     "tests/test_gui.py",
+    "scripts/start_octopus_astra.ps1",
+    "scripts/codex_preflight.ps1",
+    ".codex/config.toml",
+    "octopus/.codex/config.toml",
+    "../octopus/tasks.py",
+    "C:/outside.py",
+    "octopus/*.py",
+    "octopus/task?.py",
     ".env",
 ])
 def test_product_ticket_protects_small_control_kernel(path):
@@ -137,6 +163,21 @@ def test_product_ticket_requires_explicit_test_oracle():
             "tickets": [{
                 "goal": "no weak default oracle",
                 "allowed_paths": ["agents/gui/workbench.py"],
+            }],
+        })
+
+
+def test_product_ticket_rejects_excessive_allowed_paths():
+    from octopus import night_shift
+
+    with pytest.raises(night_shift.NightShiftError, match="allowed_paths dépasse"):
+        night_shift.validate_plan({
+            "policy": "product_ticket",
+            "tickets": [{
+                "goal": "Unbounded task",
+                "allowed_paths": [f"octopus/file_{i}.py" for i in range(21)],
+                "test_targets": ["tests/test_tasks.py"],
+                "acceptance_contract": product_contract(),
             }],
         })
 

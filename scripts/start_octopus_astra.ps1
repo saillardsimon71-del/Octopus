@@ -160,16 +160,26 @@ function Resolve-StepRelayPlan([object]$Request, [string]$RequestId) {
     if ($missingDispatchFields.Count) {
         throw ('Product ticket is not dispatchable to Step: explicit ' + ($missingDispatchFields -join ' and ') + ' required. starting_paths and likely_tests are discovery hints only.')
     }
+    if (-not ([string]$ticket.objective).Trim()) { throw 'Product ticket requires a concrete objective.' }
+    if (-not @($ticket.acceptance | Where-Object { $_ -is [string] -and $_.Trim() }).Count) {
+        throw 'Product ticket requires explicit acceptance criteria.'
+    }
+    if ($allowedPaths.Count -gt 20) { throw 'Product ticket exceeds bounded Step path limits.' }
     foreach ($path in $allowedPaths) {
         if (-not ($path -is [string]) -or -not $path.Trim()) {
             throw 'Product ticket allowed_edit_paths must contain non-empty repository-relative strings.'
         }
         $normalizedPath = $path.Replace('\', '/').Trim()
         $pathParts = @($normalizedPath.Split('/'))
-        if ($normalizedPath.StartsWith('/') -or $pathParts[0].Contains(':') -or @($pathParts | Where-Object { $_ -in @('', '.', '..') }).Count) {
+        if ($normalizedPath.StartsWith('/') -or $normalizedPath -match '[*?\[\]:\x00-\x1f]' -or @($pathParts | Where-Object { $_ -in @('', '.', '..') }).Count) {
             throw "Product ticket contains an invalid allowed_edit_paths entry: $path"
         }
-        if ($pathParts[0] -in @('.git', '.venv', 'cache', 'data', '.codex')) {
+        $lowerParts = @($pathParts | ForEach-Object { $_.ToLowerInvariant() })
+        if (@($lowerParts | Where-Object { $_ -in @('.git', '.venv', 'cache', 'data', '.codex', '.github', '.kilo', '.kilocode', '.aws', '.ssh', '.docker') }).Count -or
+            $lowerParts[0] -in @('scripts', 'docker') -or
+            $normalizedPath.ToLowerInvariant() -in @('octopus/dev_worker.py', 'octopus/night_shift.py', 'octopus/promotion.py', 'octopus/acceptance.py', 'octopus/acceptance_probe.py', 'octopus/compute_finance.py', 'octopus/economy.py', 'octopus/actions.py', 'octopus/browser_actions.py', 'octopus/smtp_executor.py', 'agents/web_guard.py', 'agents/browser.py', 'agents/publish.py', 'docs/acceptance_gates.md', 'docs/evidence_acceptance.md', 'pyproject.toml', 'setup.py', 'setup.cfg', 'tox.ini', 'pytest.ini') -or
+            $lowerParts[-1] -match '^(agents\.md|conftest\.py|\.env(\..*)?|\.git-credentials|\.netrc|\.npmrc|\.pypirc|.*\.(pem|key|p12|pfx|kdbx|tfstate|tfvars)|credentials.*|secrets.*|id_rsa.*|service-account.*)$' -or
+            ($lowerParts.Count -eq 1 -and ($lowerParts[0].StartsWith('requirements') -or $lowerParts[0].StartsWith('codex_')))) {
             throw "Product ticket edit path targets protected repository state: $path"
         }
         $resolved = [System.IO.Path]::GetFullPath((Join-Path $repo $normalizedPath))
@@ -199,6 +209,10 @@ function Resolve-StepRelayPlan([object]$Request, [string]$RequestId) {
             throw 'Product ticket test_targets must contain non-empty strings executable in the Step sandbox.'
         }
         $targetPath = $target.Split('::', 2)[0].Replace('\', '/')
+        if ($targetPath -in $allowedPaths) { throw "Product ticket cannot edit its Step test oracle: $targetPath" }
+        if ($targetPath -match '[*?\[\]:\x00-\x1f]' -or @($targetPath.Split('/') | Where-Object { $_ -in @('', '.', '..') }).Count) {
+            throw "Product ticket test target is not available in the Step sandbox: $target"
+        }
         if (-not $targetPath.StartsWith('tests/') -or -not $targetPath.EndsWith('.py')) {
             throw "Product ticket test target is not compatible with the Step pytest sandbox: $target"
         }

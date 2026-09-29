@@ -233,6 +233,88 @@ def test_step_relay_v2_normalizes_product_ticket_and_prefers_it_over_legacy_plan
     ]
 
 
+def test_step_relay_accepts_bounded_core_product_ticket(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_runtime.py").write_text("def test_runtime(): assert True\n", encoding="utf-8")
+    git(repo, "add", "tests/test_runtime.py")
+    git(repo, "commit", "-m", "oracle")
+    relay = repo / "cache" / "astra-relay"
+    relay.mkdir(parents=True)
+    head = git(repo, "rev-parse", "HEAD")
+    ticket = {
+        "version": 1, "request_id": "core-ticket", "phase": "G", "base_head": head,
+        "objective": "Repair the task worker and related fixture.",
+        "acceptance": ["Runtime oracle passes."],
+        "allowed_edit_paths": ["octopus/tasks.py", "octopus/worker.py", "tests/task_fixture.py"],
+        "test_targets": ["tests/test_runtime.py"],
+    }
+    (relay / "product_ticket.json").write_text(json.dumps(ticket), encoding="utf-8")
+    request = {"request_id": ticket["request_id"], "phase": "G", "base_head": head,
+               "product_ticket": "cache/astra-relay/product_ticket.json"}
+
+    result = resolve_step_relay_plan(repo, request, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    plan = json.loads((repo / "cache" / "astra-tickets" / "core-ticket.json").read_text(encoding="utf-8"))
+    assert night_shift.validate_plan(plan)["tickets"][0]["allowed_paths"] == ticket["allowed_edit_paths"]
+
+
+@pytest.mark.parametrize("path", [
+    "scripts/start_octopus_astra.ps1", ".codex/config.toml", "../outside.py",
+    "C:/outside.py", "octopus/*.py", "octopus/tasks?.py",
+])
+def test_step_relay_rejects_unsafe_edit_scope_before_worker(tmp_path: Path, path: str):
+    repo = init_repo(tmp_path)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_runtime.py").write_text("def test_runtime(): assert True\n", encoding="utf-8")
+    git(repo, "add", "tests/test_runtime.py")
+    git(repo, "commit", "-m", "oracle")
+    relay = repo / "cache" / "astra-relay"
+    relay.mkdir(parents=True)
+    head = git(repo, "rev-parse", "HEAD")
+    ticket = {
+        "version": 1, "request_id": "unsafe-ticket", "phase": "G", "base_head": head,
+        "objective": "Repair the task path.", "allowed_edit_paths": [path],
+        "acceptance": ["Runtime oracle passes."],
+        "test_targets": ["tests/test_runtime.py"],
+    }
+    (relay / "product_ticket.json").write_text(json.dumps(ticket), encoding="utf-8")
+    request = {"request_id": ticket["request_id"], "phase": "G", "base_head": head,
+               "product_ticket": "cache/astra-relay/product_ticket.json"}
+
+    result = gate_step_relay_dispatch(repo, request, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] is False
+    assert payload["worker_calls"] == payload["astra_calls"] == 0
+
+
+def test_step_relay_rejects_excessive_edit_scope_before_worker(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    relay = repo / "cache" / "astra-relay"
+    relay.mkdir(parents=True)
+    head = git(repo, "rev-parse", "HEAD")
+    ticket = {
+        "version": 1, "request_id": "wide-ticket", "phase": "G", "base_head": head,
+        "objective": "Repair a task path.", "acceptance": ["Oracle passes."],
+        "allowed_edit_paths": [f"octopus/file_{i}.py" for i in range(21)],
+        "test_targets": ["tests/test_runtime.py"],
+    }
+    (relay / "product_ticket.json").write_text(json.dumps(ticket), encoding="utf-8")
+    request = {"request_id": ticket["request_id"], "phase": "G", "base_head": head,
+               "product_ticket": "cache/astra-relay/product_ticket.json"}
+
+    result = gate_step_relay_dispatch(repo, request, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["accepted"] is False
+    assert "bounded Step path limits" in payload["error"]
+    assert payload["worker_calls"] == payload["astra_calls"] == 0
+
+
 def test_phase_g_discovery_ticket_fails_closed_before_worker_or_astra(tmp_path: Path):
     repo = init_repo(tmp_path)
     relay = repo / "cache" / "astra-relay"
@@ -289,6 +371,7 @@ def test_step_relay_rejects_test_target_missing_from_step_sandbox(tmp_path: Path
         "objective": "Fix one reproduced runtime blocker.",
         "allowed_edit_paths": ["octopus/runtime.py"],
         "test_targets": ["tests/test_runtime_missing.py::test_startup"],
+        "acceptance": ["Runtime oracle passes."],
     }
     (relay / "product_ticket.json").write_text(json.dumps(ticket), encoding="utf-8")
     request = {

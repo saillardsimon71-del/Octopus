@@ -123,10 +123,10 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
             if path not in PYTHON_CANARY_ALLOWED:
                 raise NightShiftError(f"ticket #{index}: fichier hors allowlist python_canary: {path}")
         elif policy == "product_ticket":
-            if path in dev_worker.OCTOPUS_PRODUCT_PROTECTED_PATHS:
+            if dev_worker._product_ticket_protected_path(path):
                 raise NightShiftError(f"ticket #{index}: noyau product_ticket protégé: {path}")
-            if path.startswith("tests/") or path.endswith("/conftest.py") or path == "conftest.py":
-                raise NightShiftError(f"ticket #{index}: oracles de test non modifiables: {path}")
+            if path.endswith("/conftest.py") or path == "conftest.py":
+                raise NightShiftError(f"ticket #{index}: conftest.py non modifiable: {path}")
             try:
                 dev_worker._validate_allowed_paths([path])
             except dev_worker.DevWorkerError as exc:
@@ -135,6 +135,8 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
             allowed_paths.append(path)
     if policy == "python_canary" and len(allowed_paths) != 1:
         raise NightShiftError(f"ticket #{index}: python_canary exige exactement un fichier source")
+    if policy == "product_ticket" and len(allowed_paths) > dev_worker.PRODUCT_TICKET_MAX_FILES:
+        raise NightShiftError(f"ticket #{index}: allowed_paths dépasse {dev_worker.PRODUCT_TICKET_MAX_FILES} fichiers")
 
     targets_raw = raw.get("test_targets")
     if policy == "product_ticket" and not targets_raw:
@@ -150,6 +152,8 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
         if not target.startswith("tests/") or not target.endswith(".py"):
             raise NightShiftError(f"ticket #{index}: cible pytest refusée: {value}")
         test_targets.append(value)
+    if policy == "product_ticket" and set(allowed_paths) & {target.split("::", 1)[0] for target in test_targets}:
+        raise NightShiftError(f"ticket #{index}: oracles de test non modifiables")
 
     if policy == "python_canary":
         required_targets = []

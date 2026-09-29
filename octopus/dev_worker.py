@@ -158,16 +158,14 @@ OCTOPUS_SELF_PROTECTED_PATHS = frozenset({
     "octopus/AGENTS.md",
     "docs/ACCEPTANCE_GATES.md",
 })
-# Product tickets may change application code, but never the self-development, cost,
-# outbound-action, or web-safety boundaries that supervise those tickets.
+# Product tickets may change application code. Only the constructor, policy,
+# credentials, and known external-effect boundaries remain protected.
 OCTOPUS_PRODUCT_PROTECTED_PATHS = OCTOPUS_SELF_PROTECTED_PATHS | frozenset({
     "octopus/dev_worker.py",
     "octopus/night_shift.py",
     "octopus/promotion.py",
     "octopus/acceptance.py",
     "octopus/acceptance_probe.py",
-    "octopus/worker.py",
-    "octopus/tasks.py",
     "octopus/compute_finance.py",
     "octopus/economy.py",
     "octopus/actions.py",
@@ -188,6 +186,19 @@ OCTOPUS_PRODUCT_PROTECTED_PATHS = OCTOPUS_SELF_PROTECTED_PATHS | frozenset({
 # policy change, not something a product ticket can do itself.
 PRODUCT_TICKET_MAX_FILES = 20
 PRODUCT_TICKET_MAX_LINES = 5000
+
+
+def _product_ticket_protected_path(relative: str) -> bool:
+    path = relative.replace("\\", "/").lower()
+    parts = path.split("/")
+    return (
+        _forbidden_kilo_path(path)
+        or any(part in {".codex", ".github", ".venv", "cache", "data"} for part in parts)
+        or parts[0] in {"scripts", "docker"}
+        or path in {item.lower() for item in OCTOPUS_PRODUCT_PROTECTED_PATHS}
+        or path in {"pyproject.toml", "setup.py", "setup.cfg", "tox.ini", "pytest.ini"}
+        or (len(parts) == 1 and (path.startswith("requirements") or path.startswith("codex_")))
+    )
 _RETRY_DELAY_RE = re.compile(r"try again in ([0-9]+(?:\.[0-9]+)?)\s*(?:s|seconds?)\b", re.IGNORECASE)
 
 _KILO_SENSITIVE_PATTERNS = (
@@ -211,6 +222,13 @@ _KILO_PROTECTED_PATTERNS = (
     "docs/ACCEPTANCE_GATES.md", "docs/EVIDENCE_ACCEPTANCE.md",
     ".github/workflows/**",
     "octopus/acceptance.py", "octopus/acceptance_probe.py",
+    "scripts/**", "docker/**", ".codex/**", "**/.codex/**",
+    ".venv/**", "cache/**", "data/**",
+    "octopus/dev_worker.py", "octopus/night_shift.py", "octopus/promotion.py",
+    "octopus/compute_finance.py", "octopus/economy.py", "octopus/actions.py",
+    "octopus/browser_actions.py", "octopus/smtp_executor.py",
+    "agents/web_guard.py", "agents/browser.py", "agents/publish.py",
+    "pyproject.toml", "setup.py", "setup.cfg", "tox.ini", "pytest.ini", "requirements*",
 )
 
 
@@ -778,24 +796,26 @@ def _validate_octopus_self_modification_policy(
         raise DevWorkerError("chemin de gouvernance protégé: " + ", ".join(protected))
 
     if product_ticket:
-        product_protected = sorted(set(allowed_paths) & OCTOPUS_PRODUCT_PROTECTED_PATHS)
+        product_protected = sorted(path for path in allowed_paths if _product_ticket_protected_path(path))
         if product_protected:
             raise DevWorkerError(
                 "product_ticket refuse une frontière de sécurité: " + ", ".join(product_protected)
             )
-        if any(path.startswith("tests/") or path.endswith("/conftest.py") or path == "conftest.py"
-               for path in allowed_paths):
-            raise DevWorkerError("product_ticket OCTOPUS ne peut pas modifier ses oracles de test")
+        if any(path.endswith("/conftest.py") or path == "conftest.py" for path in allowed_paths):
+            raise DevWorkerError("product_ticket OCTOPUS ne peut pas modifier conftest.py")
         if len(allowed_paths) > PRODUCT_TICKET_MAX_FILES:
             raise DevWorkerError(
                 f"product_ticket OCTOPUS limité à {PRODUCT_TICKET_MAX_FILES} chemins autorisés"
             )
         actual_targets = _pytest_targets(tests)
         if not actual_targets or any(
-            not target.startswith("tests/") or not target.endswith(".py")
+            not target.split("::", 1)[0].startswith("tests/")
+            or not target.split("::", 1)[0].endswith(".py")
             for target in actual_targets
         ):
             raise DevWorkerError("product_ticket OCTOPUS exige uniquement des cibles pytest sous tests/")
+        if set(allowed_paths) & {target.split("::", 1)[0] for target in actual_targets}:
+            raise DevWorkerError("product_ticket OCTOPUS ne peut pas modifier ses oracles de test")
         if test_sandbox != "docker":
             raise DevWorkerError("product_ticket OCTOPUS exige test_sandbox=docker")
         if (
@@ -1479,6 +1499,7 @@ def _forbidden_kilo_path(relative: str) -> bool:
     name = lowered[-1]
     return (
         any(part in {".git", ".kilo", ".kilocode", ".aws", ".ssh", ".docker"} for part in lowered)
+        or any(char in relative for char in "*?[]:\x00\r\n")
         or name == ".env"
         or name.startswith(".env.")
         or name.endswith((".pem", ".key", ".p12", ".pfx", ".kdbx", ".tfstate", ".tfvars"))
@@ -1610,7 +1631,7 @@ def _deterministic_diff_check_fixes(
             continue
         if allowed_paths is not None and relative not in set(allowed_paths):
             continue
-        if _forbidden_kilo_path(relative) or relative in OCTOPUS_PRODUCT_PROTECTED_PATHS:
+        if _product_ticket_protected_path(relative):
             continue
         flagged.setdefault(relative, set()).add(int(match.group("line")))
 

@@ -1048,6 +1048,29 @@ def test_octopus_product_ticket_allows_scoped_non_python_product_files(tmp_path)
     assert dev_worker._validate_octopus_self_modification_policy(**values) is False
 
 
+def test_octopus_product_ticket_accepts_core_code_and_test_helper(tmp_path):
+    from octopus import dev_worker
+
+    values = _self_policy_kwargs(_octopus_self_repo(tmp_path))
+    values.update(
+        allowed_paths=["octopus/tasks.py", "octopus/worker.py", "tests/task_fixture.py"],
+        tests=[[sys.executable, "-m", "pytest", "-q", "tests/test_tasks.py"]],
+        test_sandbox="docker",
+        max_files_changed=3,
+        max_lines_added=1200,
+        max_lines_deleted=1200,
+        strict_repository_preflight=True,
+        require_baseline_oracle=True,
+        python_canary_ast=False,
+        product_ticket=True,
+    )
+
+    assert dev_worker._validate_octopus_self_modification_policy(**values) is False
+    dev_worker._enforce_allowed_paths(["octopus/tasks.py", "tests/task_fixture.py"], values["allowed_paths"])
+    with pytest.raises(dev_worker.DevWorkerError, match="hors périmètre autorisé"):
+        dev_worker._enforce_allowed_paths(["octopus/tasks.py", "octopus/promotion.py"], values["allowed_paths"])
+
+
 @pytest.mark.parametrize("change, message", [
     ({"allowed_paths": ["octopus/dev_worker.py"]}, "frontière de sécurité"),
     ({"allowed_paths": ["octopus/acceptance.py"]}, "frontière de sécurité"),
