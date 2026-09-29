@@ -31,7 +31,7 @@ function Write-JsonAtomic([string]$Path, [object]$Value) {
 }
 
 function Write-BoundedJsonAtomic([string]$Path, [object]$Value, [int]$MaxChars, [string]$Label) {
-    $json = $Value | ConvertTo-Json -Depth 20
+    $json = $Value | ConvertTo-Json -Depth 20 -Compress
     if ($json.Length -gt $MaxChars) {
         throw "$Label exceeds its $MaxChars character limit: $($json.Length)."
     }
@@ -41,6 +41,64 @@ function Write-BoundedJsonAtomic([string]$Path, [object]$Value, [int]$MaxChars, 
     [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
     Move-Item -LiteralPath $tmp -Destination $Path -Force
     return $json
+}
+
+function ConvertTo-CompactAstraValue([object]$Value, [string]$Key, [int]$MaxItems, [int]$MaxChars, [string]$Section) {
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string]) {
+        $limit = if ($Key -in @('next_decision', 'blocked', 'failure')) { [Math]::Max(600, $MaxChars) } elseif ($Key -eq 'review_policy') { [Math]::Max(240, $MaxChars) } elseif ($Key -in @('path', 'plan_path')) { [Math]::Max(300, $MaxChars) } else { $MaxChars }
+        if ($Value.Length -le $limit) { return $Value }
+        $script:compactDropped[$Section] = [int]$script:compactDropped[$Section] + 1
+        return $Value.Substring(0, $limit) + '...'
+    }
+    if ($Value -is [array]) {
+        $unique = [System.Collections.Generic.List[object]]::new()
+        $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        $entries = @($Value)
+        if ($Key -eq 'facts') {
+            $entries = @($entries | Where-Object { [string]$_ -match '(?i)secur|safet|permission|approval|secret|credential|blocker|bloqu' }) + @($entries | Where-Object { [string]$_ -notmatch '(?i)secur|safet|permission|approval|secret|credential|blocker|bloqu' })
+        }
+        foreach ($item in $entries) {
+            $identity = if ($Key -eq 'inspected' -and $item.path) { [string]$item.path } else { $item | ConvertTo-Json -Depth 20 -Compress }
+            if ($seen.Add($identity)) { $unique.Add($item) }
+        }
+        $script:compactDropped[$Section] = [int]$script:compactDropped[$Section] + ($Value.Count - $unique.Count)
+        $limit = if ($Key -in @('document_refs', 'inspected_status')) { [Math]::Max(3, $MaxItems) } else { $MaxItems }
+        if ($unique.Count -gt $limit) { $script:compactDropped[$Section] = [int]$script:compactDropped[$Section] + ($unique.Count - $limit) }
+        $result = @()
+        foreach ($item in @($unique | Select-Object -First $limit)) {
+            $result += ,(ConvertTo-CompactAstraValue -Value $item -Key $Key -MaxItems $MaxItems -MaxChars $MaxChars -Section $Section)
+        }
+        return ,$result
+    }
+    if ($Value -is [System.Collections.IDictionary] -or $Value -is [pscustomobject]) {
+        $result = [ordered]@{}
+        $entries = if ($Value -is [System.Collections.IDictionary]) { @($Value.GetEnumerator() | ForEach-Object { [pscustomobject]@{ Name = $_.Key; Value = $_.Value } }) } else { @($Value.PSObject.Properties) }
+        foreach ($entry in $entries) {
+            $name = [string]$entry.Name
+            $result[$name] = ConvertTo-CompactAstraValue -Value $entry.Value -Key $name -MaxItems $MaxItems -MaxChars $MaxChars -Section $Section
+        }
+        return $result
+    }
+    return $Value
+}
+
+function New-CompactAstraPacket([object]$Packet, [int]$MaxChars) {
+    $original = $Packet | ConvertTo-Json -Depth 20 -Compress
+    if ($original.Length -le $MaxChars) { return [ordered]@{ packet = $Packet; json = $original; compacted = $false; dropped_counts = @{} } }
+    foreach ($pass in @(@(12, 500), @(8, 240), @(5, 160), @(3, 100), @(1, 60))) {
+        $script:compactDropped = @{}
+        $copy = [ordered]@{}
+        foreach ($entry in $Packet.GetEnumerator()) {
+            $copy[$entry.Key] = ConvertTo-CompactAstraValue -Value $entry.Value -Key $entry.Key -MaxItems $pass[0] -MaxChars $pass[1] -Section $entry.Key
+        }
+        $copy.compacted = $true
+        $copy.full_context_path = 'cache/astra-relay/context-full.json'
+        $copy.dropped_counts = $script:compactDropped
+        $json = $copy | ConvertTo-Json -Depth 20 -Compress
+        if ($json.Length -le $MaxChars) { return [ordered]@{ packet = $copy; json = $json; compacted = $true; dropped_counts = $script:compactDropped } }
+    }
+    throw "Astra context has irreducible critical content above its $MaxChars character limit; full copy: cache/astra-relay/context-full.json."
 }
 
 function Limit-Text([object]$Value, [int]$MaxChars = 500) {
@@ -437,6 +495,7 @@ $handoffPath = Join-Path $relayRoot "handoff.json"
 $validationPath = Join-Path $relayRoot "validation.json"
 $usagePath = Join-Path $relayRoot "usage.json"
 $snapshotPath = Join-Path $relayRoot "snapshot.json"
+$fullContextPath = Join-Path $relayRoot "context-full.json"
 $contextMetricsPath = Join-Path $relayRoot "context-metrics.json"
 $baselineStatePath = Join-Path $relayRoot "baseline.json"
 $baselineLogPath = Join-Path $relayRoot "baseline-pytest.log"
@@ -653,33 +712,33 @@ function Save-Handoff(
     $tickets = if ($State) { @($State.tickets) } else { @($previous.tickets) }
     $stateTests = if ($State) { @($State.tests) } else { @($previous.tests) }
     $verifiedInspected = @()
-    foreach ($item in @($inspected | Select-Object -First 12)) {
+    foreach ($item in $inspected) {
         $path = ([string]$item.path).Replace('\', '/')
         if ($path -notmatch '^[A-Za-z0-9_./-]+$' -or $path.StartsWith('/') -or @($path.Split('/') | Where-Object { $_ -in @('', '.', '..') }).Count) { continue }
         $fullPath = [System.IO.Path]::GetFullPath((Join-Path $repo $path))
         if (-not $fullPath.StartsWith($repo + '\', [System.StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { continue }
         $hash = if ($item.refresh -or -not $item.sha256) { Get-LocalSha256 -Path $fullPath } else { [string]$item.sha256 }
-        $verifiedInspected += [ordered]@{ path = $path; sha256 = $hash; summary = Limit-Text $item.summary 180 }
+        $verifiedInspected += [ordered]@{ path = $path; sha256 = $hash; summary = [string]$item.summary }
     }
     $handoff = [ordered]@{
         version = 3
-        objective = Limit-Text $phaseSpec.mission 1200
+        objective = [string]$phaseSpec.mission
         phase = $Phase
         head = (git rev-parse HEAD | Out-String).Trim()
-        facts = @($facts | Select-Object -First 8 | ForEach-Object { Limit-Text $_ 200 })
-        hypotheses = @($hypotheses | Select-Object -First 5 | ForEach-Object { Limit-Text $_ 200 })
+        facts = @($facts)
+        hypotheses = @($hypotheses)
         inspected = $verifiedInspected
-        tickets = @($tickets | Select-Object -First 5 | ForEach-Object { Limit-Text $_ 120 })
-        remaining = @($remaining | Select-Object -First 8 | ForEach-Object { Limit-Text $_ 200 })
-        decisions = @($Decisions | Select-Object -First 12 | ForEach-Object { Limit-Text $_ 500 })
-        files_modified = @($changed | ForEach-Object { Limit-Text $_ 300 })
-        tests = @(@($Tests) + @($stateTests) | Select-Object -First 12 | ForEach-Object { Limit-Text $_ 200 })
-        pending_host_requests = @($PendingHostRequests | Select-Object -First 5 | ForEach-Object { Limit-Text $_ 200 })
-        last_result = if ($State -and $Result -match 'ASTRA_STATE_JSON') { '' } else { Limit-Text $Result 1000 }
-        blocked = if ($Blocked) { Limit-Text $Blocked 800 } else { $null }
-        next_decision = Limit-Text $NextDecision 600
+        tickets = @($tickets)
+        remaining = @($remaining)
+        decisions = @($Decisions)
+        files_modified = @($changed)
+        tests = @(@($Tests) + @($stateTests))
+        pending_host_requests = @($PendingHostRequests)
+        last_result = if ($State -and $Result -match 'ASTRA_STATE_JSON') { '' } else { $Result }
+        blocked = if ($Blocked) { $Blocked } else { $null }
+        next_decision = $NextDecision
     }
-    $null = Write-BoundedJsonAtomic -Path $handoffPath -Value $handoff -MaxChars $MaxHandoffChars -Label "Astra handoff"
+    Write-JsonAtomic -Path $handoffPath -Value $handoff
 }
 
 function New-CompactReceipt([object]$Receipt) {
@@ -841,7 +900,12 @@ function Assert-ValidWorkerReviewReceipt(
 
 function Write-AstraContext([string]$TaskPrompt) {
     $handoffJson = if (Test-Path -LiteralPath $handoffPath -PathType Leaf) { Get-Content -LiteralPath $handoffPath -Raw } else { '{}' }
-    if ($handoffJson.Length -gt $MaxHandoffChars) { throw "Astra handoff exceeds its $MaxHandoffChars character limit." }
+    try { $handoff = $handoffJson | ConvertFrom-Json -ErrorAction Stop } catch { throw 'Astra handoff is malformed JSON.' }
+    if ($handoff -isnot [pscustomobject] -or -not $handoff.PSObject.Properties['next_decision']) { throw 'Astra handoff has an invalid shape.' }
+    if ($handoff.next_decision -isnot [string]) { throw 'Astra handoff has an invalid next decision.' }
+    foreach ($field in @('facts', 'hypotheses', 'inspected', 'tickets', 'remaining', 'tests')) {
+        if ($handoff.PSObject.Properties[$field] -and $handoff.$field -isnot [array]) { throw "Astra handoff has an invalid $field section." }
+    }
     $branch = (git branch --show-current | Out-String).Trim()
     $currentHead = (git rev-parse HEAD | Out-String).Trim()
     $packet = [ordered]@{
@@ -850,7 +914,7 @@ function Write-AstraContext([string]$TaskPrompt) {
         objective = Limit-Text $phaseSpec.mission 1200
         head = $currentHead
         branch = $branch
-        handoff = $handoffJson | ConvertFrom-Json
+        handoff = $handoff
         review = $script:reviewContext
         step_summary = $script:lastWorkerSummary
         validation = $script:lastValidationSummary
@@ -879,7 +943,9 @@ function Write-AstraContext([string]$TaskPrompt) {
             duration_seconds = $baseline.duration_seconds
         }
     }
-    $packetJson = Write-BoundedJsonAtomic -Path $snapshotPath -Value $packet -MaxChars $MaxSnapshotChars -Label 'Astra context packet'
+    Write-JsonAtomic -Path $fullContextPath -Value $packet
+    $compact = New-CompactAstraPacket -Packet $packet -MaxChars $MaxSnapshotChars
+    $packetJson = Write-BoundedJsonAtomic -Path $snapshotPath -Value $compact.packet -MaxChars $MaxSnapshotChars -Label 'Astra context packet'
     $preparedPrompt = "$TaskPrompt`n`nHOST_CONTEXT_JSON`n$packetJson"
     $agentsChars = (Get-Content -LiteralPath (Join-Path $repo 'AGENTS.md') -Raw).Length
     $estimatedInputChars = $preparedPrompt.Length + $agentsChars
@@ -892,6 +958,9 @@ function Write-AstraContext([string]$TaskPrompt) {
         implicit_instruction_chars = $agentsChars
         estimated_input_chars = $estimatedInputChars
         packet_chars = $packetJson.Length
+        context_chars = $packetJson.Length
+        compacted = $compact.compacted
+        dropped_counts = $compact.dropped_counts
         handoff_chars = $handoffJson.Length
         call_kind = if ($script:reviewContext) { 'review' } elseif ($script:astraTurns) { 'continuation' } else { 'initial' }
     })

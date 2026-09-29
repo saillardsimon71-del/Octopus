@@ -15,7 +15,7 @@ def git(repo, *args):
     return result.stdout.strip()
 
 
-def run_fake_harness(tmp_path, terminal="STABLE", relays=2, tokens=300000, unsafe=False, step_failure=False):
+def run_fake_harness(tmp_path, terminal="STABLE", relays=2, tokens=300000, unsafe=False, step_failure=False, large_context=False):
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init", "-b", "prep/astra-local-orchestration")
@@ -75,6 +75,7 @@ $receipt=@{version=1;request_id=$RequestId;plan_path=$Plan;plan_sha256=$hash;sta
   changed_paths=@('octopus/transport.py');diff_stat=@('1 file changed')
   tests=@('1 passed');tickets=@(@{status='done';commit=$source;tests_passed=$true;gate_status='ACCEPTED';changed_paths=@('octopus/transport.py')})
 }}
+if($env:FAKE_LARGE_CONTEXT -eq '1'){$receipt.worker_summary.diff_stat=@(1..16|ForEach-Object{'diff '+$_+('d'*220)})}
 $full=Join-Path $repo $ResultPath
 [IO.File]::WriteAllText($full,($receipt|ConvertTo-Json -Depth 12))
 exit 0
@@ -112,6 +113,13 @@ if($count -eq 1){
   $requestPath=Join-Path $repo 'cache/astra-relay/request.json'
   [IO.File]::WriteAllText($requestPath,($request|ConvertTo-Json -Depth 10))
   $message='ASTRA_STATE_JSON {"facts":["HTTP 413; handler absent; proxy matches two files"],"hypotheses":[],"inspected":[{"path":"octopus/transport.py","summary":"runtime value path"}],"tests":[],"tickets":["step-runtime"],"remaining":["review Step"]}'
+  if($env:FAKE_LARGE_CONTEXT -eq '1'){
+    $facts=@('SAFETY: permissions stay local')+@(1..6|ForEach-Object{'runtime fact '+$_+('f'*220)})
+    $hypotheses=@(1..4|ForEach-Object{'open hypothesis '+$_+('h'*220)})
+    $tests=@('target test passed')+@(1..4|ForEach-Object{'test result '+$_+('t'*150)})
+    $state=@{facts=$facts;hypotheses=$hypotheses;inspected=@(@{path='octopus/transport.py';summary='runtime value path'});tests=$tests;tickets=@('step-runtime');remaining=@('review Step')}
+    $message='ASTRA_STATE_JSON '+($state|ConvertTo-Json -Depth 10 -Compress)
+  }
 }elseif($count -eq 2){
   $marker="HOST_CONTEXT_JSON`n"
   $packet=$prompt.Substring($prompt.LastIndexOf($marker)+$marker.Length)|ConvertFrom-Json
@@ -162,6 +170,7 @@ exit 0
         "FAKE_TERMINAL": terminal,
         "FAKE_UNSAFE": "1" if unsafe else "0",
         "FAKE_STEP_FAILURE": "1" if step_failure else "0",
+        "FAKE_LARGE_CONTEXT": "1" if large_context else "0",
         "PATH": str(fake_bin) + os.pathsep + env["PATH"],
     })
     launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
@@ -220,6 +229,21 @@ def test_baseline_failure_receipt_gets_astra_review(tmp_path):
     assert "oracle baseline failed" in review["failure"]
     session = json.loads((repo / "cache/astra-relay/session.json").read_text(encoding="utf-8"))
     assert session["status"] == "blocked"
+    assert git(repo, "status", "--porcelain") == ""
+
+
+def test_large_handoff_compacts_and_continues_step_review(tmp_path):
+    repo, state, result = run_fake_harness(tmp_path, large_context=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (state / "count.txt").read_text(encoding="utf-8") == "4"
+    second = (state / "prompt-2.txt").read_text(encoding="utf-8")
+    packet = json.loads(second.split("HOST_CONTEXT_JSON\n", 1)[1])
+    assert len(second.split("HOST_CONTEXT_JSON\n", 1)[1].strip()) <= 8000
+    assert packet["compacted"] is True
+    assert "SAFETY: permissions stay local" in packet["handoff"]["facts"]
+    assert "target test passed" in packet["handoff"]["tests"]
+    assert packet["handoff"]["tickets"] == ["step-runtime"]
+    assert packet["review"]["head"] == packet["step_summary"]["source_commit"]
     assert git(repo, "status", "--porcelain") == ""
 
 

@@ -1106,11 +1106,11 @@ def test_call_2_uses_only_compact_review_packet(tmp_path: Path):
 $tokens=$null;$errors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
 if($errors.Count){{throw ($errors|ForEach-Object Message)}}
-foreach($name in @('Write-JsonAtomic','Write-BoundedJsonAtomic','Limit-Text','Get-LocalSha256','Get-ChangedPaths','Get-CompactDiffStat','Write-AstraContext')){{
+foreach($name in @('Write-JsonAtomic','Write-BoundedJsonAtomic','Limit-Text','Get-LocalSha256','ConvertTo-CompactAstraValue','New-CompactAstraPacket','Get-ChangedPaths','Get-CompactDiffStat','Write-AstraContext')){{
   $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
   Invoke-Expression $fn.Extent.Text
 }}
-$repo='{repo}';$snapshotPath='{relay / "snapshot.json"}';$contextMetricsPath='{relay / "metrics.json"}'
+$repo='{repo}';$snapshotPath='{relay / "snapshot.json"}';$fullContextPath='{relay / "context-full.json"}';$contextMetricsPath='{relay / "metrics.json"}'
 $handoffPath='{relay / "handoff.json"}';$checkpointPath='{relay / "checkpoint.json"}';$requestPath='{relay / "request.json"}';$validationPath='{relay / "validation.json"}'
 $Phase='G';$MaxSnapshotChars=8000;$MaxHandoffChars=6000;$MaxPreparedContextChars=30000
 $phaseSpec=@{{documents=@('DO-NOT-READ.md');mission='not needed in review'}};$script:astraTurns=1
@@ -1133,6 +1133,7 @@ $prompt=Write-AstraContext -TaskPrompt 'review only'
     assert payload["snapshot"]["handoff"]["decisions"] == ["delegate bounded change"]
     assert payload["snapshot"]["step_summary"]["tests"] == ["1 passed"]
     assert payload["metrics"]["call_kind"] == "review"
+    assert payload["metrics"]["compacted"] is False
     assert payload["metrics"]["packet_chars"] < 8000
     assert payload["metrics"]["estimated_input_chars"] < 15000
     assert payload["snapshot"]["document_refs"][0]["sha256"] == hashlib.sha256(
@@ -1141,7 +1142,97 @@ $prompt=Write-AstraContext -TaskPrompt 'review only'
     assert "stable document content" not in payload["prompt"]
 
 
-def test_handoff_rejects_massive_context(tmp_path: Path):
+def test_large_context_compacts_and_keeps_critical_state(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    (repo / "AGENTS.md").write_text("rules\n", encoding="utf-8")
+    relay = repo / "cache" / "astra-relay"
+    relay.mkdir(parents=True)
+    inspected = [{"path": "product.txt", "sha256": "a" * 64, "summary": "inspected path " + "x" * 180}] * 16
+    handoff = {
+        "version": 3, "objective": "phase objective", "phase": "G",
+        "facts": ["ordinary fact " + str(i) + " " + "x" * 180 for i in range(25)]
+        + ["SAFETY: do not broaden permissions"],
+        "hypotheses": ["open hypothesis " + str(i) + " " + "h" * 180 for i in range(10)],
+        "inspected": inspected,
+        "tests": ["target test passed"] + ["test " + str(i) + " " + "t" * 180 for i in range(20)],
+        "tickets": ["step-runtime active"],
+        "remaining": ["next action: review economy.cycle"],
+        "blocked": "BLOCKER: worker receipt pending",
+        "next_decision": "Review the active Step ticket and choose the next runtime action.",
+    }
+    (relay / "handoff.json").write_text(json.dumps(handoff), encoding="utf-8")
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    runner = tmp_path / "large-context.ps1"
+    runner.write_text(
+        f"""
+$ErrorActionPreference='Stop'
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$null,[ref]$null)
+foreach($name in @('Write-JsonAtomic','Write-BoundedJsonAtomic','Limit-Text','Get-LocalSha256','ConvertTo-CompactAstraValue','New-CompactAstraPacket','Write-AstraContext')){{
+  $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
+  Invoke-Expression $fn.Extent.Text
+}}
+$repo='{repo}';$handoffPath='{relay / "handoff.json"}'
+$snapshotPath='{relay / "snapshot.json"}';$fullContextPath='{relay / "context-full.json"}';$contextMetricsPath='{relay / "metrics.json"}'
+$Phase='G';$MaxSnapshotChars=8000;$MaxPreparedContextChars=30000
+$phaseSpec=@{{documents=@();mission='phase objective'}};$script:astraTurns=1
+$script:reviewContext=@{{kind='step';base_head=('a'*40);head=('b'*40);diff_stat=@(1..25|ForEach-Object{{'diff '+$_+('d'*300)}})}}
+$script:lastWorkerSummary=@{{execution_status='success';tests=@('target test passed');source_commit=('b'*40)}}
+$script:lastValidationSummary=@{{status='passed';tests='target test passed'}}
+$prompt=Write-AstraContext -TaskPrompt 'continue'
+@{{prompt=$prompt;metrics=(Get-Content $contextMetricsPath -Raw|ConvertFrom-Json)}}|ConvertTo-Json -Depth 20 -Compress
+""",
+        encoding="utf-8",
+    )
+    result = run(POWERSHELL, "-NoProfile", "-File", str(runner), cwd=repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    packet = json.loads(payload["prompt"].split("HOST_CONTEXT_JSON\n", 1)[1])
+    full = json.loads((relay / "context-full.json").read_text(encoding="utf-8"))
+    assert payload["metrics"]["compacted"] is True
+    assert payload["metrics"]["context_chars"] <= 8000
+    assert full["handoff"]["facts"] == handoff["facts"]
+    assert len(full["review"]["diff_stat"]) == 25
+    assert "SAFETY: do not broaden permissions" in packet["handoff"]["facts"]
+    assert "target test passed" in packet["handoff"]["tests"]
+    assert packet["handoff"]["tickets"] == ["step-runtime active"]
+    assert packet["handoff"]["blocked"] == "BLOCKER: worker receipt pending"
+    assert packet["handoff"]["next_decision"] == handoff["next_decision"]
+    assert len(packet["handoff"]["inspected"]) == 1
+    assert packet["handoff"]["inspected"][0]["sha256"] == "a" * 64
+    assert len(packet["review"]["diff_stat"]) < 12
+    assert packet["dropped_counts"]["handoff"] > 0
+
+
+@pytest.mark.parametrize("content,error", [
+    ("{broken", "malformed JSON"),
+    ('{"next_decision":42}', "invalid next decision"),
+    ('{"next_decision":"continue","tests":"passed"}', "invalid tests section"),
+])
+def test_corrupt_handoff_fails_closed(tmp_path: Path, content: str, error: str):
+    repo = init_repo(tmp_path)
+    (repo / "AGENTS.md").write_text("rules\n", encoding="utf-8")
+    relay = repo / "cache" / "astra-relay"
+    relay.mkdir(parents=True)
+    (relay / "handoff.json").write_text(content, encoding="utf-8")
+    launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    runner = tmp_path / "corrupt-context.ps1"
+    runner.write_text(
+        f"""
+$ErrorActionPreference='Stop'
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$null,[ref]$null)
+$fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Write-AstraContext'}},$true)
+Invoke-Expression $fn.Extent.Text
+$handoffPath='{relay / "handoff.json"}';Write-AstraContext -TaskPrompt 'continue'
+""",
+        encoding="utf-8",
+    )
+    result = run(POWERSHELL, "-NoProfile", "-File", str(runner), cwd=repo)
+    assert result.returncode != 0
+    assert error in result.stderr
+    assert not (relay / "snapshot.json").exists()
+
+
+def test_handoff_persists_massive_context(tmp_path: Path):
     repo = init_repo(tmp_path)
     handoff = repo / "cache" / "astra-relay" / "handoff.json"
     launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
@@ -1151,15 +1242,14 @@ def test_handoff_rejects_massive_context(tmp_path: Path):
 $tokens=$null;$errors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile('{launcher}',[ref]$tokens,[ref]$errors)
 if($errors.Count){{throw ($errors|ForEach-Object Message)}}
-foreach($name in @('Write-BoundedJsonAtomic','Limit-Text','Get-ChangedPaths','Save-Handoff')){{
+foreach($name in @('Write-JsonAtomic','Limit-Text','Get-ChangedPaths','Save-Handoff')){{
   $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name}},$true)
   Invoke-Expression $fn.Extent.Text
 }}
 $handoffPath='{handoff}';$MaxHandoffChars=6000;$Phase='F'
 $phaseSpec=@{{mission='bounded mission'}}
 $large=@(1..12|ForEach-Object{{'x'*1000}})
-try {{ Save-Handoff -Result ('y'*5000) -NextDecision ('z'*5000) -Decisions $large; exit 2 }}
-catch {{ if($_.Exception.Message -notmatch 'character limit'){{throw}} }}
+Save-Handoff -Result ('y'*5000) -NextDecision ('z'*5000) -Decisions $large
 """,
         encoding="utf-8",
     )
@@ -1167,7 +1257,10 @@ catch {{ if($_.Exception.Message -notmatch 'character limit'){{throw}} }}
     result = run(POWERSHELL, "-NoProfile", "-File", str(runner), cwd=repo)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert not handoff.exists()
+    saved = json.loads(handoff.read_text(encoding="utf-8"))
+    assert len(saved["last_result"]) == 5000
+    assert len(saved["next_decision"]) == 5000
+    assert len(saved["decisions"]) == 12
 
 
 def test_codex_stream_keeps_stderr_out_of_json_and_saves_thread_early(tmp_path: Path):
