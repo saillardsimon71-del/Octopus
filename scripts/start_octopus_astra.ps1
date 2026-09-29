@@ -65,7 +65,7 @@ function ConvertTo-CompactAstraValue([object]$Value, [string]$Key, [int]$MaxItem
             if ($seen.Add($identity)) { $unique.Add($item) }
         }
         $script:compactDropped[$Section] = [int]$script:compactDropped[$Section] + ($Value.Count - $unique.Count)
-        $limit = if ($Key -in @('document_refs', 'inspected_status')) { [Math]::Max(3, $MaxItems) } else { $MaxItems }
+        $limit = if ($Key -in @('document_refs', 'inspected_status')) { [Math]::Max(3, $MaxItems) } elseif ($Key -in @('criteria', 'required_criteria')) { [Math]::Max(10, $MaxItems) } else { $MaxItems }
         if ($unique.Count -gt $limit) { $script:compactDropped[$Section] = [int]$script:compactDropped[$Section] + ($unique.Count - $limit) }
         $result = @()
         foreach ($item in @($unique | Select-Object -First $limit)) {
@@ -162,6 +162,35 @@ function Get-AstraState([string]$LastMessagePath) {
         }
     }
     return $null
+}
+
+function Get-PhaseGCriteria([string]$MandatePath) {
+    $criteria = @()
+    foreach ($match in @(Select-String -LiteralPath $MandatePath -Pattern '^### ([A-I])\. (.+)$')) {
+        $criteria += [ordered]@{ id = $match.Matches[0].Groups[1].Value; title = $match.Matches[0].Groups[2].Value }
+    }
+    if (($criteria.id -join '') -cne 'ABCDEFGHI' -or
+        -not (Select-String -LiteralPath $MandatePath -Pattern '^## Autonomous runtime entrypoint$' -Quiet)) {
+        throw 'Phase G acceptance headings changed; update the gate before continuing.'
+    }
+    $criteria += [ordered]@{ id = 'entrypoint'; title = 'Autonomous runtime entrypoint' }
+    return $criteria
+}
+
+function Test-PhaseGProof([object]$Proof, [string]$Head) {
+    return ($Proof -and [string]$Proof.status -ceq 'demonstrated' -and $Proof.evidence -and
+        [string]$Proof.evidence.kind -cin @('test', 'inspection', 'receipt', 'range') -and
+        [string]$Proof.evidence.ref -match '^\S.{0,239}$' -and
+        [string]$Proof.evidence.head -ceq $Head)
+}
+
+function Get-MissingPhaseGCriteria([object[]]$Criteria, [object[]]$Proofs, [string]$Head) {
+    $missing = @()
+    foreach ($criterion in $Criteria) {
+        $proof = @($Proofs | Where-Object { [string]$_.id -ceq [string]$criterion.id } | Select-Object -Last 1)
+        if (-not $proof.Count -or -not (Test-PhaseGProof -Proof $proof[0] -Head $Head)) { $missing += [string]$criterion.id }
+    }
+    return $missing
 }
 
 function Resolve-CodexExecutable {
@@ -461,6 +490,7 @@ $phaseSpec = switch ($Phase) {
         }
     }
 }
+$phaseGCriteria = if ($Phase -eq 'G') { @(Get-PhaseGCriteria -MandatePath (Join-Path $repo 'docs/migrations/OPERATIONALIZATION.md')) } else { @() }
 
 $setup = Join-Path $repo "scripts\setup_octopus_codex_home.ps1"
 $preflight = Join-Path $repo "scripts\codex_preflight.ps1"
@@ -553,6 +583,7 @@ $lastValidationSummary = $null
 $lastWorkerSummary = $null
 $reviewContext = $null
 $lastTurn = $null
+$pendingCheckpointHead = $null
 $previousLifetimeTotals = @{}
 if (Test-Path -LiteralPath $usagePath -PathType Leaf) {
     $previousUsage = Get-Content -LiteralPath $usagePath -Raw | ConvertFrom-Json
@@ -757,6 +788,13 @@ function Save-Handoff(
     $remaining = if ($State) { @($State.remaining) } else { @($previous.remaining) }
     $tickets = if ($State) { @($State.tickets) } else { @($previous.tickets) }
     $stateTests = if ($State) { @($State.tests) } else { @($previous.tests) }
+    $criteriaById = [ordered]@{}
+    foreach ($item in @($previous.criteria)) {
+        if ($item -and [string]$item.id -in @($phaseGCriteria.id)) { $criteriaById[[string]$item.id] = $item }
+    }
+    foreach ($item in @($State.criteria)) {
+        if ($item -and [string]$item.id -in @($phaseGCriteria.id)) { $criteriaById[[string]$item.id] = $item }
+    }
     $verifiedInspected = @()
     foreach ($item in $inspected) {
         $path = ([string]$item.path).Replace('\', '/')
@@ -775,13 +813,15 @@ function Save-Handoff(
         hypotheses = @($hypotheses)
         inspected = $verifiedInspected
         tickets = @($tickets)
+        criteria = @($criteriaById.Values)
+        pending_checkpoint_head = $script:pendingCheckpointHead
         remaining = @($remaining)
         decisions = @($Decisions)
         files_modified = @($changed)
         tests = @(@($Tests) + @($stateTests))
         pending_host_requests = @($PendingHostRequests)
         last_result = if ($State -and $Result -match 'ASTRA_STATE_JSON') { '' } else { $Result }
-        blocked = if ($Blocked) { $Blocked } else { $null }
+        blocked = if ($Blocked) { $Blocked } elseif ($State -and $State.blocked) { $State.blocked } else { $null }
         next_decision = $NextDecision
     }
     Write-JsonAtomic -Path $handoffPath -Value $handoff
@@ -957,7 +997,7 @@ function Write-AstraContext([string]$TaskPrompt) {
     try { $handoff = $handoffJson | ConvertFrom-Json -ErrorAction Stop } catch { throw 'Astra handoff is malformed JSON.' }
     if ($handoff -isnot [pscustomobject] -or -not $handoff.PSObject.Properties['next_decision']) { throw 'Astra handoff has an invalid shape.' }
     if ($handoff.next_decision -isnot [string]) { throw 'Astra handoff has an invalid next decision.' }
-    foreach ($field in @('facts', 'hypotheses', 'inspected', 'tickets', 'remaining', 'tests')) {
+    foreach ($field in @('facts', 'hypotheses', 'inspected', 'tickets', 'remaining', 'tests', 'criteria')) {
         if ($handoff.PSObject.Properties[$field] -and $handoff.$field -isnot [array]) { throw "Astra handoff has an invalid $field section." }
     }
     $branch = (git branch --show-current | Out-String).Trim()
@@ -973,6 +1013,7 @@ function Write-AstraContext([string]$TaskPrompt) {
         step_summary = $script:lastWorkerSummary
         validation = $script:lastValidationSummary
     }
+    if ($Phase -eq 'G') { $packet.required_criteria = $phaseGCriteria }
     $packet.document_refs = @($phaseSpec.documents | Where-Object { $_ } | Select-Object -First 3 | ForEach-Object {
         $path = [string]$_
         $full = Join-Path $repo $path
@@ -1192,6 +1233,12 @@ You are the architecture and review owner. Explore this local repository with rg
 When the objective, exact repository-relative edit paths, test targets and constraints are clear, publish one bounded product_ticket and cache/astra-relay/request.json, then end the turn. The host validates paths and tests before Step runs. Do not run Step yourself. After Step, inspect its compact receipt and the relevant diff, then publish a checkpoint request if accepted. The host handles Git writes and full pytest.
 For a verified terminal state, end with ASTRA_STATUS: STABLE or ASTRA_STATUS: BLOCKED. Otherwise the host continues automatically; ASTRA_CONTINUE: followed by one compact next action is optional. Before a terminal marker or Step request, write one line ASTRA_STATE_JSON {"facts":[],"hypotheses":[],"inspected":[{"path":"repo/relative.py","summary":"short fact"}],"tests":[],"tickets":[],"remaining":[]}. Set refresh=true on an inspected entry only when you reread a changed file. Keep the state under 4000 characters. The host hashes inspected files and returns changed_since_inspection in the next packet. Do not reread unchanged files. The host starts fresh calls across mini-sessions up to MaxRelayCycles.
 "@
+if ($Phase -eq 'G') {
+    $contextRules += @"
+
+Phase G required_criteria IDs and titles come from the canonical acceptance headings in docs/migrations/OPERATIONALIZATION.md. For each demonstrated ID, add a compact criteria entry to ASTRA_STATE_JSON: {"id":"F","status":"demonstrated","evidence":{"kind":"test","ref":"tests/test_runtime.py::test_objective_loop","head":"<current full HEAD>"}}. Kinds: test, inspection, receipt, range. Use a specific evidence reference, not a conclusion. Every proof must name the current HEAD; after a checkpoint, refresh stale proofs. Carry prior entries forward through the handoff. STABLE requires every ID and host full pytest on current HEAD. For BLOCKED, add "blocked":{"id":"F","evidence":{"kind":"inspection","ref":"specific observation","head":"<current full HEAD>"},"missing":"exact unavailable resource or capability"} to ASTRA_STATE_JSON. A remaining:[] claim has no terminal authority.
+"@
+}
 
 function New-AstraTaskPrompt([string]$Task) {
     return $Task + [Environment]::NewLine + [Environment]::NewLine + $contextRules
@@ -1209,6 +1256,17 @@ if (Test-Path -LiteralPath $handoffPath -PathType Leaf) {
 if (-not (Test-Path -LiteralPath $handoffPath -PathType Leaf)) {
     Save-Handoff -Result 'ready' -NextDecision 'Start bounded phase work.'
 }
+if ($Phase -eq 'G') {
+    $resumeHandoff = Get-Content -LiteralPath $handoffPath -Raw | ConvertFrom-Json
+    $pendingCheckpointHead = [string]$resumeHandoff.pending_checkpoint_head
+    $resumeHead = (git rev-parse HEAD | Out-String).Trim()
+    $resumeMissing = @(Get-MissingPhaseGCriteria -Criteria $phaseGCriteria -Proofs @($resumeHandoff.criteria) -Head $resumeHead)
+    if ($resumeMissing.Count) {
+        $resumeDecision = 'Phase G missing criteria: ' + ($resumeMissing -join ',')
+        Save-Handoff -Result 'resume' -NextDecision $resumeDecision
+        $initialPrompt = New-AstraTaskPrompt "Continue $resumeDecision. Use the existing handoff and inspect only the next needed evidence."
+    }
+}
 
 $nextReason = 'phase work'
 $nextPrompt = $initialPrompt
@@ -1223,6 +1281,7 @@ while ($true) {
         & powershell -NoProfile -ExecutionPolicy Bypass -File $checkpointRunner -Repo $repo -CheckpointPath $checkpointPath -ResultPath $checkpointResultPath
         if ($LASTEXITCODE -ne 0) { throw "Host checkpoint failed. Request left in place: $checkpointPath" }
         $receipt = Get-Content -LiteralPath $checkpointResultPath -Raw | ConvertFrom-Json
+        if ([string]$script:pendingCheckpointHead -eq [string]$receipt.commit) { $script:pendingCheckpointHead = $null }
         $lastCheckpointSummary = New-CompactReceipt $receipt
         $reviewContext = [ordered]@{
             kind = 'checkpoint'
@@ -1257,6 +1316,9 @@ while ($true) {
         $validatedWorkerSummary = Assert-ValidWorkerReviewReceipt -Receipt $workerReceipt -WorkerExit $workerExit -RequestId $requestId -Repository $repo
         $validatedWorkerSummary | Add-Member -NotePropertyName execution_status -NotePropertyValue ([string]$workerReceipt.execution_status) -Force
         $lastWorkerSummary = New-CompactWorkerSummary $validatedWorkerSummary
+        if ([string]$workerReceipt.execution_status -eq 'success' -and [string]$validatedWorkerSummary.source_commit -ne [string]$validatedWorkerSummary.base_head) {
+            $script:pendingCheckpointHead = [string]$validatedWorkerSummary.source_commit
+        }
         $workerPaths = @($validatedWorkerSummary.changed_paths)
         $reviewContext = [ordered]@{
             kind = 'step'
@@ -1301,19 +1363,30 @@ while ($true) {
     } elseif ($modelInvoked) {
         if ((git status --porcelain --untracked-files=all | Out-String).Trim()) { throw 'Astra ended with uncheckpointed changes.' }
         $status = if ($script:lastTurn) { Get-AstraStatus -LastMessagePath $script:lastTurn.last_message } else { '' }
+        $lastMessage = Get-Content -LiteralPath $script:lastTurn.last_message -Raw
+        $astraState = Get-AstraState -LastMessagePath $script:lastTurn.last_message
+        if ($Phase -eq 'G') {
+            Save-Handoff -Result $lastMessage -NextDecision 'Evaluate terminal state.' -State $astraState
+            $currentHandoff = Get-Content -LiteralPath $handoffPath -Raw | ConvertFrom-Json
+        }
         $forcedContinuation = ''
         if ($status -eq 'STABLE') {
             $currentHead = (git rev-parse HEAD | Out-String).Trim()
+            $missingCriteria = if ($Phase -eq 'G') { @(Get-MissingPhaseGCriteria -Criteria $phaseGCriteria -Proofs @($currentHandoff.criteria) -Head $currentHead) } else { @() }
             if ($script:lastWorkerSummary -and [string]$script:lastWorkerSummary.execution_status -ne 'success') {
                 $status = ''
                 $forcedContinuation = 'The last Step execution failed. Resolve its cause or conclude BLOCKED.'
+            } elseif ($script:pendingCheckpointHead) {
+                $status = ''
+                $forcedContinuation = 'Review the Step diff and publish its checkpoint before STABLE.'
             } elseif ($script:lastWorkerSummary -and [string]$script:lastWorkerSummary.source_commit -ne $currentHead) {
                 $status = ''
                 $forcedContinuation = 'Review the Step diff and publish its checkpoint before STABLE.'
+            } elseif ($missingCriteria.Count -gt 0) {
+                $status = ''
+                $forcedContinuation = 'Phase G missing criteria: ' + ($missingCriteria -join ',')
             } elseif (-not $script:lastValidationSummary -or [string]$script:lastValidationSummary.head -ne $currentHead) {
                 Write-JsonAtomic -Path $validationPath -Value ([ordered]@{ version = 1; kind = 'full_pytest' })
-                $lastMessage = Get-Content -LiteralPath $script:lastTurn.last_message -Raw
-                $astraState = Get-AstraState -LastMessagePath $script:lastTurn.last_message
                 Save-Handoff -Result $lastMessage -NextDecision 'Host full pytest before STABLE.' -State $astraState
                 continue
             } elseif ([string]$script:lastValidationSummary.status -ne 'passed') {
@@ -1321,9 +1394,19 @@ while ($true) {
                 $forcedContinuation = 'Full pytest failed; resolve the reported failures before STABLE.'
             }
         }
+        if ($status -eq 'BLOCKED' -and $Phase -eq 'G') {
+            $blockedProof = $astraState.blocked
+            $currentHead = (git rev-parse HEAD | Out-String).Trim()
+            if (-not $blockedProof -or [string]$blockedProof.id -cnotin @($phaseGCriteria.id) -or
+                [string]$blockedProof.evidence.kind -cnotin @('test', 'inspection', 'receipt', 'range') -or
+                [string]$blockedProof.evidence.ref -notmatch '^\S.{0,239}$' -or
+                [string]$blockedProof.evidence.head -cne $currentHead -or
+                [string]$blockedProof.missing -notmatch '^\S.{0,239}$') {
+                $status = ''
+                $forcedContinuation = 'Phase G BLOCKED requires an exact criterion ID, structured evidence on current HEAD, and the missing resource or capability.'
+            }
+        }
         if ($status) {
-            $lastMessage = Get-Content -LiteralPath $script:lastTurn.last_message -Raw
-            $astraState = Get-AstraState -LastMessagePath $script:lastTurn.last_message
             Save-Handoff -Result $lastMessage -NextDecision $status -State $astraState
             $terminalStatus = if ($status -eq 'BLOCKED') { 'blocked' } else { 'completed' }
             $stopReason = if ($terminalStatus -eq 'blocked') { 'blocked' } else { 'stable' }
@@ -1333,8 +1416,6 @@ while ($true) {
         $continuation = if ($script:lastTurn) { Get-AstraContinuation -LastMessagePath $script:lastTurn.last_message } else { "" }
         if ($forcedContinuation) { $continuation = $forcedContinuation }
         if (-not $continuation) { $continuation = 'Continue the phase objective from the compact handoff.' }
-        $lastMessage = Get-Content -LiteralPath $script:lastTurn.last_message -Raw
-        $astraState = Get-AstraState -LastMessagePath $script:lastTurn.last_message
         Save-Handoff -Result $lastMessage -NextDecision $continuation -State $astraState
         $reviewContext = $null
         $nextReason = 'bounded continuation'

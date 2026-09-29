@@ -15,7 +15,7 @@ def git(repo, *args):
     return result.stdout.strip()
 
 
-def run_fake_harness(tmp_path, terminal="STABLE", relays=2, tokens=300000, total_tokens=1000000, unsafe=False, step_failure=False, large_context=False):
+def run_fake_harness(tmp_path, terminal="STABLE", relays=2, tokens=300000, total_tokens=1000000, unsafe=False, step_failure=False, large_context=False, proofs="full", resume=False):
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init", "-b", "prep/astra-local-orchestration")
@@ -24,7 +24,9 @@ def run_fake_harness(tmp_path, terminal="STABLE", relays=2, tokens=300000, total
     (repo / ".gitignore").write_text("cache/\n__pycache__/\n*.pyc\n", encoding="utf-8")
     (repo / "AGENTS.md").write_text("Local test rules.\n", encoding="utf-8")
     (repo / "docs" / "migrations").mkdir(parents=True)
-    (repo / "docs" / "migrations" / "OPERATIONALIZATION.md").write_text("Runtime symptom: HTTP 413.\n", encoding="utf-8")
+    (repo / "docs" / "migrations" / "OPERATIONALIZATION.md").write_text(
+        (ROOT / "docs" / "migrations" / "OPERATIONALIZATION.md").read_text(encoding="utf-8"), encoding="utf-8"
+    )
     (repo / "octopus").mkdir()
     (repo / "octopus" / "__init__.py").write_text("", encoding="utf-8")
     (repo / "octopus" / "transport.py").write_text("def value():\n    return 1  # proxy path\n", encoding="utf-8")
@@ -84,6 +86,19 @@ exit 0
     )
     git(repo, "add", ".")
     git(repo, "commit", "-m", "fixture")
+    if resume:
+        relay = repo / "cache" / "astra-relay"
+        relay.mkdir(parents=True)
+        head = git(repo, "rev-parse", "HEAD")
+        criteria = [
+            {"id": criterion, "status": "demonstrated", "evidence": {"kind": "test", "ref": "tests/test_runtime.py::test_value", "head": head}}
+            for criterion in list("ABCDEGHI") + ["entrypoint"]
+        ]
+        (relay / "handoff.json").write_text(json.dumps({
+            "version": 3, "phase": "G", "facts": ["prior finding"], "criteria": criteria,
+            "next_decision": "STABLE",
+        }), encoding="utf-8")
+        (relay / "session.json").write_text(json.dumps({"version": 3, "status": "completed", "phase": "G"}), encoding="utf-8")
 
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
@@ -146,17 +161,31 @@ if($env:FAKE_TERMINAL -eq 'CONTINUE_FOREVER' -or ($env:FAKE_TERMINAL -in @('CONT
   $message='ASTRA_STATE_JSON {"facts":["checkpoint requested"],"hypotheses":[],"inspected":[],"tests":[],"tickets":["step-runtime"],"remaining":["full validation"]}'
 }elseif($env:FAKE_TERMINAL -eq 'BLOCKED' -and $count -eq 3){
   $message='ASTRA_STATUS: BLOCKED'
-}elseif(($env:FAKE_TERMINAL -eq 'STABLE' -and $count -eq 3) -or ($env:FAKE_TERMINAL -eq 'AUTO' -and $count -eq 4)){
+}elseif(($env:FAKE_TERMINAL -in @('STABLE','PARTIAL','EMPTY','STALE','VALIDATED_PARTIAL') -and $count -eq 3) -or ($env:FAKE_TERMINAL -eq 'AUTO' -and $count -eq 4)){
   $marker="HOST_CONTEXT_JSON`n"
   $packet=$prompt.Substring($prompt.LastIndexOf($marker)+$marker.Length)|ConvertFrom-Json
   if(-not $packet.inspected_status[0].changed_since_inspection){throw 'changed file was not detected'}
   $source=(Get-Content 'octopus/transport.py' -TotalCount 10|Out-String).Trim()
   [IO.File]::WriteAllText((Join-Path $env:FAKE_STATE 'reread.txt'),$source)
-  $message='ASTRA_STATE_JSON {"facts":["checkpoint applied"],"hypotheses":[],"inspected":[{"path":"octopus/transport.py","summary":"verified new runtime code","refresh":true}],"tests":[],"tickets":["step-runtime"],"remaining":["full validation"]}' + "`nASTRA_STATUS: STABLE"
+  $head=(git rev-parse HEAD).Trim()
+  $ids=@(Select-String -Path 'docs/migrations/OPERATIONALIZATION.md' -Pattern '^### ([A-I])\\.'|ForEach-Object {$_.Matches[0].Groups[1].Value})+@('entrypoint')
+  if($env:FAKE_PROOFS -eq 'partial'){$ids=@($ids|Where-Object {$_ -ne 'F'})}
+  if($env:FAKE_PROOFS -eq 'empty'){$ids=@()}
+  $proofs=@($ids|ForEach-Object {@{id=$_;status='demonstrated';evidence=@{kind='test';ref='tests/test_runtime.py::test_value';head=$(if($env:FAKE_PROOFS -eq 'stale' -and $_ -eq 'F'){(git rev-parse HEAD~1).Trim()}else{$head})}}})
+  $state=@{facts=@('checkpoint applied');hypotheses=@();inspected=@(@{path='octopus/transport.py';summary='verified new runtime code';refresh=$true});tests=@();tickets=@('step-runtime');remaining=@();criteria=$proofs}
+  $message='ASTRA_STATE_JSON '+($state|ConvertTo-Json -Depth 10 -Compress)+"`nASTRA_STATUS: STABLE"
+}elseif($env:FAKE_TERMINAL -eq 'VALIDATED_PARTIAL' -and $count -eq 4){
+  $state=@{criteria=@(@{id='F';status='pending'})}
+  $message='ASTRA_STATE_JSON '+($state|ConvertTo-Json -Depth 10 -Compress)+"`nASTRA_STATUS: STABLE"
 }elseif($env:FAKE_TERMINAL -eq 'EXHAUST'){
   $message='ASTRA_CONTINUE: another local review'
 }else{
-  $message='ASTRA_STATUS: STABLE'
+  $message=if($env:FAKE_TERMINAL -in @('PARTIAL','EMPTY','STALE','VALIDATED_PARTIAL')){'ASTRA_STATUS: BLOCKED'}else{'ASTRA_STATUS: STABLE'}
+}
+if($message -eq 'ASTRA_STATUS: BLOCKED'){
+  $head=(git rev-parse HEAD).Trim()
+  $blocked=@{id='F';evidence=@{kind='inspection';ref='tests/test_runtime.py';head=$head};missing='offline supervisor capability'}
+  $message='ASTRA_STATE_JSON '+(@{blocked=$blocked}|ConvertTo-Json -Depth 10 -Compress)+"`nASTRA_STATUS: BLOCKED"
 }
 [IO.File]::WriteAllText([string]$args[$index+1],$message)
 Write-Output ('{"type":"thread.started","thread_id":"thread-' + $count + '"}')
@@ -176,14 +205,18 @@ exit 0
         "FAKE_UNSAFE": "1" if unsafe else "0",
         "FAKE_STEP_FAILURE": "1" if step_failure else "0",
         "FAKE_LARGE_CONTEXT": "1" if large_context else "0",
+        "FAKE_PROOFS": proofs,
         "PATH": str(fake_bin) + os.pathsep + env["PATH"],
     })
     launcher = ROOT / "scripts" / "start_octopus_astra.ps1"
+    command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(launcher),
+               "-CodexHome", str(tmp_path / "codex-home"), "-Phase", "G", "-MaxAstraTurns", "2",
+               "-MaxRelayCycles", str(relays), "-MaxRunTokens", str(tokens),
+               "-MaxTotalRunTokens", str(total_tokens), "-SkipFetch"]
+    if not resume:
+        command.append("-NewSession")
     result = subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(launcher),
-         "-CodexHome", str(tmp_path / "codex-home"), "-Phase", "G", "-MaxAstraTurns", "2",
-         "-MaxRelayCycles", str(relays), "-MaxRunTokens", str(tokens),
-         "-MaxTotalRunTokens", str(total_tokens), "-SkipFetch", "-NewSession"],
+        command,
         cwd=repo, env=env, text=True, encoding="utf-8", errors="replace", capture_output=True,
     )
     return repo, state, result
@@ -212,6 +245,9 @@ def test_generic_discovery_step_review_and_multi_cycle(tmp_path, terminal, expec
     handoff = json.loads((repo / "cache/astra-relay/handoff.json").read_text(encoding="utf-8"))
     assert handoff["inspected"][0]["sha256"]
     assert handoff["tests"]
+    if terminal == "BLOCKED":
+        assert handoff["blocked"]["id"] == "F"
+        assert handoff["blocked"]["missing"] == "offline supervisor capability"
     session = json.loads((repo / "cache/astra-relay/session.json").read_text(encoding="utf-8"))
     assert session["status"] == expected
     assert session["relay_cycles_this_run"] == relays
@@ -223,6 +259,44 @@ def test_generic_discovery_step_review_and_multi_cycle(tmp_path, terminal, expec
     assert metrics["packet_chars"] < 8000
     assert metrics["estimated_input_chars"] < 30000
     assert git(repo, "status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("proofs,missing", [
+    ("partial", ["F"]),
+    ("empty", list("ABCDEFGHI") + ["entrypoint"]),
+    ("stale", ["F"]),
+])
+def test_phase_g_rejects_stable_without_current_head_proof(tmp_path, proofs, missing):
+    repo, state, result = run_fake_harness(tmp_path, terminal=proofs.upper(), proofs=proofs)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (state / "count.txt").read_text(encoding="utf-8") == "4"
+    packet = json.loads((state / "prompt-4.txt").read_text(encoding="utf-8").split("HOST_CONTEXT_JSON\n", 1)[1])
+    assert packet["handoff"]["next_decision"] == "Phase G missing criteria: " + ",".join(missing)
+    assert sorted(item["id"] for item in packet["required_criteria"]) == sorted(list("ABCDEFGHI") + ["entrypoint"])
+    assert not (repo / "cache/astra-relay/results/validation-latest.json").exists()
+    session = json.loads((repo / "cache/astra-relay/session.json").read_text(encoding="utf-8"))
+    assert session["status"] == "blocked"
+    assert git(repo, "status", "--porcelain") == ""
+
+
+def test_phase_g_rejects_stable_after_passing_full_pytest_if_proof_is_missing(tmp_path):
+    repo, state, result = run_fake_harness(tmp_path, terminal="VALIDATED_PARTIAL", relays=3)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (state / "count.txt").read_text(encoding="utf-8") == "5"
+    validation = json.loads((repo / "cache/astra-relay/results/validation-latest.json").read_text(encoding="utf-8"))
+    assert validation["status"] == "passed"
+    assert validation["head"] == git(repo, "rev-parse", "HEAD")
+    packet = json.loads((state / "prompt-5.txt").read_text(encoding="utf-8").split("HOST_CONTEXT_JSON\n", 1)[1])
+    assert packet["handoff"]["next_decision"] == "Phase G missing criteria: F"
+
+
+def test_phase_g_resume_reuses_handoff_without_new_session(tmp_path):
+    repo, state, result = run_fake_harness(tmp_path, resume=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    packet = json.loads((state / "prompt-1.txt").read_text(encoding="utf-8").split("HOST_CONTEXT_JSON\n", 1)[1])
+    assert packet["handoff"]["next_decision"] == "Phase G missing criteria: F"
+    assert packet["handoff"]["facts"] == ["prior finding"]
+    assert len(packet["handoff"]["criteria"]) == 9
 
 
 def test_baseline_failure_receipt_gets_astra_review(tmp_path):
