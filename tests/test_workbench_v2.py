@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+import hashlib
 import time
 from pathlib import Path
+
+import pytest
 
 from agents.gui import agnes_missions
 from agents import db
@@ -45,6 +48,8 @@ def test_smoke_video_without_objective_requires_file_decode_sha_and_active_evide
     target = tmp_path / "livrable.mp4"
     shutil.copyfile(Path(__file__).parent / "fixtures" / "tiny.mp4", target)
     check = agnes.verify_mp4(target)
+    if check.get("reason") == "real multimedia validation required: ffprobe/ffmpeg not available":
+        pytest.skip("validation MP4 réelle indisponible sans ffprobe ou ffmpeg")
     assert check["verified"]
     evidence_id = strategy.create("evidence", "octopus", "MP4 observé", created_by="worker",
                                   nature="observed", source_type="file", source_ref=str(target),
@@ -60,6 +65,33 @@ def test_smoke_video_without_objective_requires_file_decode_sha_and_active_evide
     assert generation["objective_id"] is None
 
     target.write_bytes(b"corrupt")
+    assert read_snapshot("octopus")["generations"][0]["verified"] is False
+
+
+def test_deliverable_requires_matching_sha_and_active_evidence_without_decoder(tmp_path, monkeypatch):
+    agnes_production.ensure_schema()
+    target = tmp_path / "livrable.mp4"
+    shutil.copyfile(Path(__file__).parent / "fixtures" / "tiny.mp4", target)
+    original = target.read_bytes()
+    sha = hashlib.sha256(original).hexdigest()
+
+    def verify(path):
+        content = Path(path).read_bytes()
+        return {"verified": content == original, "sha256": hashlib.sha256(content).hexdigest(),
+                "bytes": len(content)}
+
+    monkeypatch.setattr(agnes, "verify_mp4", verify)
+    evidence_id = strategy.create("evidence", "octopus", "MP4 observé", created_by="worker",
+                                  nature="observed", source_type="file", source_ref=str(target),
+                                  captured_at=time.time(), observation="Fichier de test")
+    generation_id = agnes_production.create_generation(
+        business="octopus", prompt="test", idempotency_key="test-proof", status="done")
+    agnes_production.update_generation(generation_id, output_path=str(target), sha256="wrong",
+                                       file_size=len(original), evidence_id=evidence_id)
+    assert read_snapshot("octopus")["generations"][0]["verified"] is False
+    agnes_production.update_generation(generation_id, sha256=sha)
+    assert read_snapshot("octopus")["generations"][0]["verified"] is True
+    strategy.transition("evidence", evidence_id, "octopus", "retracted", actor="human")
     assert read_snapshot("octopus")["generations"][0]["verified"] is False
 
 
