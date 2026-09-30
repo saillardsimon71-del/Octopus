@@ -38,6 +38,15 @@ def _load_configured_executors() -> None:
     from . import smtp_executor
     if ("email", "send") not in _EXECUTORS and smtp_executor.configured():
         smtp_executor.register()
+    # Agnes is optional: if service module loads, its executors are registered idempotently.
+    # Explicit register() is still supported but not required for autonomous missions using
+    # an available and authorized channel.
+    try:
+        from . import agnes as _agnes
+        _agnes._ensure_registered()
+    except Exception:
+        # Agnes unavailable or broken should never block other activities
+        pass
 
 
 def executors() -> list[tuple[str, str]]:
@@ -66,6 +75,23 @@ def propose(business: str, channel_id: int, action: str, payload: dict | None = 
                                     (idempotency_key,)).fetchone()
             if existing:
                 return {"action_id": existing["id"], "status": existing["status"], "duplicate": True}
+        # Block blind new generation when an ambiguous submit exists (reconcile first)
+        if action in ("submit",):
+            amb = conn.execute(
+                "SELECT id FROM channel_actions WHERE business=? AND channel_id=? AND action=? AND status='ambiguous' LIMIT 1",
+                (business, channel_id, action),
+            ).fetchone()
+            if amb:
+                # Insert blocked trace for the attempted new key
+                action_id = int(conn.execute(
+                    "INSERT INTO channel_actions (business, channel_id, experiment_id, action, payload, status, requested_by, "
+                    "idempotency_key, created_at, updated_at, reason, decided_by) VALUES (?, ?, ?, ?, ?, 'blocked', ?, ?, ?, ?, ?, ?)",
+                    (business, channel_id, experiment_id, action, json.dumps(payload or {}, ensure_ascii=False),
+                     strategy._text(requested_by, "requested_by"), idempotency_key, now, now,
+                     f"previous action #{amb['id']} is ambiguous; reconcile with service before new generation",
+                     "policy:actions")).lastrowid)
+                return {"action_id": action_id, "status": "blocked",
+                        "reason": f"previous action #{amb['id']} is ambiguous; reconcile with service before new generation"}
         channel = conn.execute("SELECT * FROM economic_channels WHERE id=? AND business=?",
                                (channel_id, business)).fetchone()
         if channel is None:

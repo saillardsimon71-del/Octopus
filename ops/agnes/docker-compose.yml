@@ -1,0 +1,44 @@
+# Agnes Video Generator — Docker Compose local (loopback only)
+# Pin: lcy362/agnes-video-generator@a87162d6df73ffe72186838ca0ae9d461e68589b
+# Usage:
+#   $env:AGNES_API_KEY="your-key"  # or use env_file below
+#   docker compose up -d
+#   curl http://127.0.0.1:8765/api/health
+# Security:
+#   - AGNES_API_KEY injected only into Agnes process via env, never in prompts/logs/Git/args/browser
+#   - HOST=127.0.0.1 enforced, port bind 127.0.0.1:8765 only
+#   - volumes preserve config/tasks/videos between restarts
+
+version: "3.8"
+
+services:
+  agnes-video:
+    build:
+      context: ../../cache/upstreams/agnes-video-generator
+      dockerfile: Dockerfile
+    image: agnes-video:pinned
+    container_name: agnes-video
+    restart: unless-stopped
+    environment:
+      HOST: 127.0.0.1
+      PORT: 8765
+      # AGNES_API_KEY taken from host env; never commit
+      AGNES_API_KEY: ${AGNES_API_KEY}
+      # Optional multi-key rotation (contiguous):
+      # AGNES_API_KEY_2: ${AGNES_API_KEY_2:-}
+      # AGNES_API_KEY_3: ${AGNES_API_KEY_3:-}
+    # If you prefer file outside repo:
+    # env_file:
+    #   - C:\octopus\secrets\agnes.env
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      # Persist tasks, videos, config between restarts (bind mounts)
+      - ../../cache/upstreams/agnes-video-generator/agnes_data/working:/app/.working_dir
+      - ../../cache/upstreams/agnes-video-generator/agnes_data/config:/app/.agnes_config
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8765/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

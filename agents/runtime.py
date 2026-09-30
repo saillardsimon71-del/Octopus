@@ -796,6 +796,144 @@ def _browser_tool(method: str, **fixed):
 # observer -> décider -> agir -> vérifier. Les refs @eN viennent du dernier snapshot.
 _BROWSER_ACT = ("exige un canal actif avec accès act accordé par l'humain pour ce site "
                 "(channel_id optionnel si un seul) ; ")
+def _agnes_probe(args):
+    from octopus import agnes as _agnes
+    base = str(args.get("base_url") or _agnes.DEFAULT_URL)
+    try:
+        result = _agnes.probe(base)
+        return {"ok": True, "service": result["service"], "expected_pin": result["expected_pin"],
+                "base_url": base, "note": "Agnes service reachable on loopback, key is in Agnes process only"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300], "base_url": base,
+                "note": "Agnes indisponible : optionnel, ne bloque pas les autres activités"}
+
+
+def _agnes_submit(args):
+    from octopus import agnes_production as _prod
+    business = _run_business()
+    prompt = str(args.get("prompt") or "").strip()
+    idem = str(args.get("idempotency_key") or "").strip()
+    if not prompt:
+        raise ValueError("prompt required (1..5000 chars)")
+    if not idem:
+        raise ValueError("idempotency_key required for crash-resume and idempotence")
+    base = str(args.get("base_url") or "http://127.0.0.1:8765")
+    # Enforce prompt length here too for tool-level feedback
+    if len(prompt) > 5000:
+        raise ValueError("prompt too long (max 5000)")
+    try:
+        gen = _prod.request_generation(
+            business=business, prompt=prompt, idempotency_key=idem,
+            task_id=_current_task_id(), base_url=base,
+        )
+        return {"generation_id": gen["id"], "agnes_task_id": gen["agnes_task_id"],
+                "status": gen["status"], "source_ref": gen.get("source_ref"),
+                "note": "Agnes task ID preserved immediately; tracking can resume after crash"}
+    except Exception as exc:
+        # Never leak secrets; return sanitized error
+        return {"ok": False, "error": str(exc)[:500],
+                "note": "En cas de résultat incertain, ne pas déclencher aveuglément nouvelle génération; reconcile"}
+
+
+def _current_task_id():
+    try:
+        from octopus import journal
+        run = journal.current_run()
+        if run is None:
+            return None
+        rows = journal.query("SELECT id FROM tasks WHERE run_id=? ORDER BY id DESC LIMIT 1", (run.root_id,))
+        return int(rows[0]["id"]) if rows else None
+    except Exception:
+        return None
+
+
+def _agnes_status(args):
+    from octopus import agnes as _agnes, agnes_production as _prod
+    base = str(args.get("base_url") or _agnes.DEFAULT_URL)
+    gen_id = args.get("generation_id")
+    agnes_task_id = args.get("agnes_task_id")
+    if gen_id is not None:
+        gen = _prod.get_generation(int(gen_id))
+        if not gen:
+            raise ValueError(f"generation #{gen_id} not found")
+        agnes_task_id = gen["agnes_task_id"]
+    if not agnes_task_id:
+        raise ValueError("agnes_task_id or generation_id required")
+    try:
+        st = _agnes.status_full(str(agnes_task_id), base_url=base)
+        # Also get local record if exists
+        local = _prod.get_by_agnes_id(str(agnes_task_id))
+        return {"agnes_task_id": agnes_task_id, "status": st["status"], "task_type": st.get("task_type"),
+                "source_ref": st["source_ref"], "local": {"id": local["id"], "status": local["status"]} if local else None,
+                "note": "Polling with backoff; avoid excessive calls"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:500], "agnes_task_id": agnes_task_id}
+
+
+def _agnes_download(args):
+    from octopus import agnes_production as _prod
+    business = _run_business()
+    gen_id = args.get("generation_id")
+    if gen_id is None:
+        raise ValueError("generation_id required")
+    base = str(args.get("base_url") or "http://127.0.0.1:8765")
+    try:
+        gen = _prod.retrieve_and_verify(int(gen_id), base_url=base, task_id=_current_task_id())
+        return {"generation_id": gen["id"], "agnes_task_id": gen["agnes_task_id"],
+                "path": gen["output_path"], "sha256": gen["sha256"], "bytes": gen["file_size"],
+                "verified": True, "evidence_id": gen.get("evidence_id"),
+                "note": "MP4 verified physically (header, size, SHA-256), not just HTTP completed"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:500], "generation_id": int(gen_id),
+                "note": "Vérification réelle du MP4 échouée: fichier incomplet ou corrompu possible"}
+
+
+def _agnes_stop(args):
+    from octopus import agnes_production as _prod
+    gen_id = args.get("generation_id")
+    if gen_id is None:
+        raise ValueError("generation_id required")
+    base = str(args.get("base_url") or "http://127.0.0.1:8765")
+    try:
+        gen = _prod.stop_generation(int(gen_id), base_url=base)
+        return {"generation_id": gen["id"], "status": gen["status"], "agnes_task_id": gen["agnes_task_id"]}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:500]}
+
+
+def _agnes_list(args):
+    from octopus import agnes_production as _prod
+    business = _run_business()
+    limit = int(args.get("limit", 10))
+    gens = _prod.list_generations(business, limit=limit)
+    return {"business": business, "count": len(gens),
+            "generations": [{k: g[k] for k in ("id", "agnes_task_id", "status", "prompt", "output_path", "sha256", "created_at")} for g in gens]}
+
+
+def _agnes_generate_full(args):
+    """Full cycle: submit, poll, download, verify, persist proofs."""
+    from octopus import agnes_production as _prod
+    business = _run_business()
+    prompt = str(args.get("prompt") or "").strip()
+    idem = str(args.get("idempotency_key") or "").strip()
+    if not prompt or not idem:
+        raise ValueError("prompt and idempotency_key required")
+    base = str(args.get("base_url") or "http://127.0.0.1:8765")
+    poll_timeout = float(args.get("poll_timeout_s", 1800))
+    try:
+        gen = _prod.full_production_cycle(
+            business=business, prompt=prompt, idempotency_key=idem,
+            task_id=_current_task_id(), base_url=base, poll_timeout_s=poll_timeout,
+        )
+        return {"generation_id": gen["id"], "agnes_task_id": gen["agnes_task_id"],
+                "status": gen["status"], "path": gen["output_path"], "sha256": gen["sha256"],
+                "bytes": gen["file_size"], "verified": True, "evidence_id": gen.get("evidence_id"),
+                "note": "Full cycle done: MP4 verified, proofs persisted, mission can continue autonomously"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:500],
+                "note": "Full cycle failed or rate limited; will retry with backoff, no blind new generation"}
+
+
 TOOLS.update({
     "browser_navigate": {"desc": "espace de travail navigateur persistant de la tâche : ouvre une URL et renvoie "
                          "l'arbre de la page avec des refs @eN (cookies/étapes conservés entre appels)",
@@ -827,6 +965,18 @@ TOOLS.update({
     "browser_upload": {"desc": "joint au champ fichier @eN un fichier préparé dans la boîte d'envoi du business ; "
                        + _BROWSER_ACT, "params": {"ref": "str", "filename": "str", "channel_id": "int?"},
                        "fn": _browser_tool("upload")},
+    "agnes_probe": {"desc": "Vérifie que le service Agnes local (http://127.0.0.1:8765) répond ; optionnel, ne bloque pas",
+                    "params": {"base_url": "str?"}, "fn": _agnes_probe},
+    "agnes_submit_video": {"desc": "Demande génération vidéo Agnes (t2v) ; conserve immédiatement ID tâche Agnes pour reprise après crash ; idempotency_key requis",
+                           "params": {"prompt": "str", "idempotency_key": "str", "base_url": "str?"}, "fn": _agnes_submit},
+    "agnes_status": {"desc": "Suit statut génération Agnes sans appels excessifs (backoff) ; génération_id ou agnes_task_id",
+                     "params": {"generation_id": "int?", "agnes_task_id": "str?", "base_url": "str?"}, "fn": _agnes_status},
+    "agnes_download_video": {"desc": "Récupère MP4 Agnes, vérifie réellement (header, taille, SHA-256) ; preuve persistée",
+                             "params": {"generation_id": "int", "base_url": "str?"}, "fn": _agnes_download},
+    "agnes_stop_video": {"desc": "Demande arrêt génération Agnes en cours", "params": {"generation_id": "int", "base_url": "str?"}, "fn": _agnes_stop},
+    "agnes_list_generations": {"desc": "Liste générations vidéo Agnes du business", "params": {"limit": "int?"}, "fn": _agnes_list},
+    "agnes_generate_video_full": {"desc": "Cycle complet Agnes : soumission, suivi progression, récupération MP4, vérification livrable, persistance preuves, continuation autonome",
+                                  "params": {"prompt": "str", "idempotency_key": "str", "base_url": "str?", "poll_timeout_s": "float?"}, "fn": _agnes_generate_full},
 })
 BROWSER_TOOLS = frozenset(name for name in TOOLS if name.startswith("browser_"))
 
