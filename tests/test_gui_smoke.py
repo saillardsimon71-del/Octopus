@@ -20,7 +20,8 @@ from agents import config  # noqa: E402
 from agents.gui.intelligence import EntrepreneurialWorkbench  # noqa: E402
 from agents.gui.workbench_v2 import ADVANCED, PRIMARY, WorkbenchV2  # noqa: E402
 from agents.gui.workbench import PAGE_META  # noqa: E402
-from octopus import strategy  # noqa: E402
+from agents.gui.workspaces import Business  # noqa: E402
+from octopus import economy, strategy  # noqa: E402
 
 
 def _pump(app, seconds: float) -> None:
@@ -51,6 +52,28 @@ def test_v2_primary_navigation_at_requested_window_sizes(isolated):
     finally:
         app.destroy()
     assert errors == []
+
+
+def test_v2_keeps_system_validation_out_of_business_and_mission_choices(isolated, monkeypatch):
+    channel = economy.add_channel("octopus", "agnes_video", "Agnes local", created_by="human",
+                                  locator="http://127.0.0.1:8765", capabilities=["agnes_submit"])
+    economy.update_channel("octopus", channel, actor="human", status="active", access="act")
+    app = WorkbenchV2()
+    try:
+        _pump(app, 1.8)
+        assert "octopus" in app._snapshot["businesses"]
+        app.registry._businesses["podalux"] = Business("podalux", "Podalux")
+        app._sync_business_menu()
+        assert app.business_menu.cget("values") == ["Toutes les activités"]
+        app._show_page("Missions")
+        assert app.mission_business.cget("values") == ["Aucune activité autorisée"]
+        assert app.mission_button.cget("state") == "disabled"
+        monkeypatch.setattr("agents.gui.agnes_missions.create", lambda *_a, **_kw: pytest.fail("mission créée"))
+        app.mission_prompt.insert("1.0", "Test")
+        app.mission_consent.set(True)
+        app._create_mission()
+    finally:
+        app.destroy()
 
 
 def test_workbench_opens_every_page_and_keeps_refreshing(isolated, monkeypatch):

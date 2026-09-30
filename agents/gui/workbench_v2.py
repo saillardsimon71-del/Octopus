@@ -1,6 +1,7 @@
 """OCTOPUS Workbench V2: mission-first desktop interface."""
 from __future__ import annotations
 
+import json
 import os
 import queue
 import threading
@@ -17,6 +18,7 @@ from .workspaces import Business
 
 PRIMARY = ("Vue d'ensemble", "Missions", "Livrables", "Activité", "Paramètres")
 ADVANCED = ("Business", "Agents", "Intelligence", "Navigateur", "Production", "Humain", "Système")
+SYSTEM_BUSINESS = "octopus"
 META = {
     "Vue d'ensemble": ("Vue d'ensemble", "OCTOPUS suit les objectifs autorisés jusqu'aux livrables vérifiés."),
     "Missions": ("Missions", "Créez un objectif et suivez sa preuve jusqu'à la clôture."),
@@ -70,6 +72,7 @@ def _event_detail(event: dict) -> str:
 class WorkbenchV2(EntrepreneurialWorkbench):
     def __init__(self) -> None:
         self._snapshot = None
+        self._visible_business_ids = set()
         self._snapshot_busy = False
         self._snapshot_at = 0.0
         self._snapshot_error = None
@@ -147,11 +150,35 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             self.bind_all(f"<Control-Key-{index}>", lambda _event, name=page: self._show_page(name))
 
     def _on_business_menu(self, label: str) -> None:
-        selected = next((item.id for item in self.registry.all() if item.label() == label), DEFAULT_BUSINESS_ID)
+        selected = next((item.id for item in self._visible_businesses() if item.label() == label), DEFAULT_BUSINESS_ID)
         self.selected_business_id = selected
         self._sync_business_menu()
         self._show_page(self.current_page)
         self._load_snapshot()
+
+    def _visible_businesses(self) -> list[Business]:
+        known = self._visible_business_ids | set((self._snapshot or {}).get("businesses", []))
+        known.discard(SYSTEM_BUSINESS)
+        return [item for item in self.registry.all() if item.id in known]
+
+    def _eligible_businesses(self) -> list[Business]:
+        channels = (self._snapshot or {}).get("channels", [])
+        allowed = {channel["business"] for channel in channels
+                   if channel["business"] != SYSTEM_BUSINESS and channel["kind"] == "agnes_video"
+                   and channel["status"] == "active" and channel["access"] == "act"
+                   and channel["locator"] and "agnes_submit" in json.loads(channel["capabilities"])}
+        return [item for item in self.registry.all() if item.id in allowed]
+
+    def _business_label(self) -> str:
+        if self.selected_business_id == DEFAULT_BUSINESS_ID:
+            return "Toutes les activités"
+        return super()._business_label()
+
+    def _sync_business_menu(self) -> None:
+        self.business_menu.configure(values=["Toutes les activités"] +
+                                     [item.label() for item in self._visible_businesses()])
+        self.business_menu.set(self._business_label())
+        self.context_chip.configure(text=self._business_label())
 
     def _select_business(self, business_id: str) -> None:
         self.selected_business_id = business_id
@@ -242,8 +269,10 @@ class WorkbenchV2(EntrepreneurialWorkbench):
 
     def _overview(self, body) -> None:
         state = self._snapshot
-        objectives = state["objectives"]
-        verified = [g for g in state["generations"] if g["verified"]]
+        objectives = [item for item in state["objectives"] if item["business"] != SYSTEM_BUSINESS]
+        verified = [g for g in state["generations"] if g["verified"] and
+                    g["business"] != SYSTEM_BUSINESS and g["objective_id"]]
+        technical = [g for g in state["generations"] if g["verified"] and g not in verified]
         pending = [r for r in state["requests"] if r["status"] == "pending"]
         active = [o for o in objectives if o["status"] == "active"]
         hero = self._card(body)
@@ -255,8 +284,10 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             headline = f"{len(active)} objectif(s) en cours"
             detail = mission_state(active[0])[1]
         else:
-            headline = "Prêt pour une mission"
-            detail = "Créez un objectif vidéo autorisé pour lancer un travail supervisé."
+            headline = "Aucune mission économique en cours"
+            detail = ("Choisissez une activité réelle et autorisez son canal Agnes avant de créer une mission."
+                      if not self._eligible_businesses() else
+                      "Créez un objectif vidéo autorisé pour lancer un travail supervisé.")
         self._line(hero, headline, size=22, bold=True, padx=20, pady=(19, 3))
         self._line(hero, detail, COLORS["muted"], padx=20, pady=(0, 10))
         ctk.CTkButton(hero, text="Nouvelle mission", command=lambda: self._show_page("Missions"),
@@ -268,7 +299,7 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             stats.grid_columnconfigure(col, weight=1)
         for col, (title, value, detail) in enumerate((
             ("Objectifs actifs", str(len(active)), "Clôture après preuve"),
-            ("MP4 vérifiés", str(len(verified)), "Fichier, décodage et SHA"),
+            ("Livrables MP4 vérifiés", str(len(verified)), "Fichier, décodage et SHA"),
             ("Worker", self._worker_label(), "Agnes : " + state["agnes_health"]))):
             card = self._card(stats)
             card.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 5, 0))
@@ -304,20 +335,26 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             self._line(card, f"{_date(latest['created_at'])} - MP4 vérifié", COLORS["muted"], padx=18)
             self._secondary(card, "Ouvrir le MP4", lambda p=latest["output_path"]: _open_path(p))
         else:
-            self._line(body, "Aucun MP4 vérifié pour ce contexte.", COLORS["muted"], pady=(14, 0))
+            self._line(body, "Aucun livrable économique vérifié pour ce contexte.", COLORS["muted"], pady=(14, 0))
+        if technical:
+            self._line(body, f"{len(technical)} validation(s) technique(s) MP4 dans Livrables.",
+                       COLORS["muted"], pady=(10, 0))
 
     def _missions(self, body) -> None:
         compose = self._card(body, "Nouvelle mission")
         compose.pack(fill="x", pady=(0, 8))
-        businesses = self.registry.all()
+        businesses = self._eligible_businesses()
         values = [b.label() for b in businesses]
         self._line(compose, "Business", COLORS["muted"], padx=18)
-        self.mission_business = ctk.CTkOptionMenu(compose, values=values or ["Aucun business disponible"],
+        self.mission_business = ctk.CTkOptionMenu(compose, values=values or ["Aucune activité autorisée"],
                                                   dynamic_resizing=False,
                                                   command=lambda _value: self._update_create_state())
         self.mission_business.pack(fill="x", padx=18, pady=(2, 9))
+        if not businesses:
+            self._line(compose, "Le canal OCTOPUS sert aux tests du système. Autorisez un canal pour une activité réelle.",
+                       COLORS["warn"], padx=18, pady=(0, 8))
         selected = self.registry.get(self.selected_business_id)
-        if selected:
+        if selected and selected in businesses:
             self.mission_business.set(selected.label())
         self._line(compose, "Type : Vidéo avec Agnes", padx=18, pady=(0, 5))
         self.mission_prompt = ctk.CTkTextbox(compose, height=95, wrap="word", fg_color=COLORS["surface2"],
@@ -332,7 +369,7 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         self._update_create_state()
 
         self._section(body, "Suivi des objectifs")
-        objectives = self._snapshot["objectives"]
+        objectives = [item for item in self._snapshot["objectives"] if item["business"] != SYSTEM_BUSINESS]
         if not objectives:
             self._line(body, "Aucun objectif dans ce contexte. Créez une mission ci-dessus.", COLORS["muted"])
         for objective in objectives:
@@ -402,18 +439,16 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             self.mission_button.configure(state="disabled")
             self.mission_info.configure(text="Mode consultation : création désactivée.", text_color=COLORS["warn"])
             return
-        selected = next((b for b in self.registry.all() if b.label() == self.mission_business.get()), None)
-        allowed = bool(selected and any(c["business"] == selected.id and c["kind"] == "agnes_video" and
-                                        c["status"] == "active" and c["access"] == "act" for c in self._snapshot["channels"]))
-        self.mission_button.configure(state="normal" if allowed else "disabled")
-        self.mission_info.configure(text="Canal Agnes autorisé." if allowed else
+        selected = next((b for b in self._eligible_businesses() if b.label() == self.mission_business.get()), None)
+        self.mission_button.configure(state="normal" if selected else "disabled")
+        self.mission_info.configure(text="Canal Agnes autorisé." if selected else
                                     "Canal Agnes actif avec accès act requis pour ce business.",
-                                    text_color=COLORS["muted"] if allowed else COLORS["warn"])
+                                    text_color=COLORS["muted"] if selected else COLORS["warn"])
 
     def _create_mission(self) -> None:
         if self._readonly or self._creating:
             return
-        selected = next((b for b in self.registry.all() if b.label() == self.mission_business.get()), None)
+        selected = next((b for b in self._eligible_businesses() if b.label() == self.mission_business.get()), None)
         prompt = self.mission_prompt.get("1.0", "end").strip()
         if not selected:
             self._set_status("Choisissez un business concret.", COLORS["bad"])
@@ -443,29 +478,36 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             return
         self._line(body, f"{sum(g['verified'] for g in generations)} MP4 vérifié(s) sur {len(generations)} génération(s)",
                    COLORS["muted"], pady=(0, 12))
-        for item in generations:
-            card = self._card(body)
-            card.pack(fill="x", pady=(0, 8))
-            title = f"Vidéo Agnes #{item['id']}" if item["objective_id"] else f"Test technique #{item['id']}"
-            self._line(card, title, size=15, bold=True, padx=18, pady=(13, 1))
-            self._line(card, f"{item['business']}  |  {_date(item['created_at'])}  |  "
-                       f"{(item['file_size'] or 0) / 1048576:.2f} Mo", COLORS["muted"], padx=18)
-            status = "Vérifié" if item["verified"] else f"Non vérifié : {item['verification_reason']}"
-            self._line(card, status, COLORS["good"] if item["verified"] else COLORS["warn"],
-                       padx=18, pady=(5, 1))
-            self._line(card, f"Objectif #{item['objective_id']}" if item["objective_id"] else
-                       "Aucun objectif parent : génération de test", COLORS["muted"], padx=18)
-            self._line(card, f"Preuve #{item['evidence_id'] or 'absente'}  |  SHA-256 : {item['sha256'] or 'inconnu'}",
-                       COLORS["muted"], padx=18, pady=(3, 1))
-            if item["verified"]:
-                buttons = ctk.CTkFrame(card, fg_color="transparent")
-                buttons.pack(fill="x", padx=18, pady=(5, 12))
-                for label, path in (("Ouvrir le MP4", item["output_path"]),
-                                    ("Ouvrir le dossier", str(Path(item["output_path"]).parent))):
-                    ctk.CTkButton(buttons, text=label, width=150, height=31,
-                                  fg_color=COLORS["surface3"], command=lambda p=path: _open_path(p)).pack(side="left", padx=(0, 8))
-            else:
-                self._line(card, item["status"], COLORS["muted"], padx=18, pady=(0, 12))
+        economic = [item for item in generations if item["business"] != SYSTEM_BUSINESS and item["objective_id"]]
+        technical = [item for item in generations if item not in economic]
+        for section, items in (("Livrables économiques", economic), ("Validations techniques", technical)):
+            if items:
+                self._section(body, section)
+            for item in items:
+                card = self._card(body)
+                card.pack(fill="x", pady=(0, 8))
+                title = (f"Validation technique Agnes #{item['id']}" if section == "Validations techniques"
+                         else f"Vidéo Agnes #{item['id']}")
+                self._line(card, title, size=15, bold=True, padx=18, pady=(13, 1))
+                context = "Système OCTOPUS" if item["business"] == SYSTEM_BUSINESS else item["business"]
+                self._line(card, f"{context}  |  {_date(item['created_at'])}  |  "
+                           f"{(item['file_size'] or 0) / 1048576:.2f} Mo", COLORS["muted"], padx=18)
+                status = "Vérifié" if item["verified"] else f"Non vérifié : {item['verification_reason']}"
+                self._line(card, status, COLORS["good"] if item["verified"] else COLORS["warn"],
+                           padx=18, pady=(5, 1))
+                self._line(card, f"Objectif #{item['objective_id']}" if item["objective_id"] else
+                           "Aucun objectif économique : génération de test", COLORS["muted"], padx=18)
+                self._line(card, f"Preuve #{item['evidence_id'] or 'absente'}  |  SHA-256 : {item['sha256'] or 'inconnu'}",
+                           COLORS["muted"], padx=18, pady=(3, 1))
+                if item["verified"]:
+                    buttons = ctk.CTkFrame(card, fg_color="transparent")
+                    buttons.pack(fill="x", padx=18, pady=(5, 12))
+                    for label, path in (("Ouvrir le MP4", item["output_path"]),
+                                        ("Ouvrir le dossier", str(Path(item["output_path"]).parent))):
+                        ctk.CTkButton(buttons, text=label, width=150, height=31,
+                                      fg_color=COLORS["surface3"], command=lambda p=path: _open_path(p)).pack(side="left", padx=(0, 8))
+                else:
+                    self._line(card, item["status"], COLORS["muted"], padx=18, pady=(0, 12))
 
     def _activity(self, body) -> None:
         events = self._snapshot["events"]
@@ -485,7 +527,8 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             card = self._card(body)
             card.pack(fill="x", pady=(0, 6))
             self._line(card, _event_label(event), size=13, bold=True, padx=16, pady=(9, 0))
-            self._line(card, f"{_date(event['ts'])}  |  {event['business'] or 'global'}" +
+            context = "Système OCTOPUS" if event["business"] == SYSTEM_BUSINESS else event["business"] or "global"
+            self._line(card, f"{_date(event['ts'])}  |  {context}" +
                        (f"  |  tâche #{event['task_id']}" if event["task_id"] else ""),
                        COLORS["muted"], padx=16, pady=(0, 2))
             if _event_detail(event):
@@ -511,7 +554,9 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         if not channels:
             self._line(body, "Aucun canal économique déclaré.", COLORS["muted"], pady=(11, 0))
         for channel in channels:
-            self._line(body, f"{channel['name']} ({channel['kind']}) : {channel['status']}  |  accès {channel['access']}",
+            scope = "Système OCTOPUS - validation technique" if channel["business"] == SYSTEM_BUSINESS else channel["business"]
+            self._line(body, f"{channel['name']} ({channel['kind']}) - {scope} : "
+                       f"{channel['status']}  |  accès {channel['access']}",
                        COLORS["muted"], pady=(8, 0))
         active_allowances = [a for a in state["allowances"] if a["status"] == "active"]
         self._line(body, f"Enveloppes actives : {len(active_allowances)}", COLORS["muted"], pady=(10, 0))
@@ -575,8 +620,10 @@ class WorkbenchV2(EntrepreneurialWorkbench):
                 self._snapshot_busy = False
                 if result[1] == self.selected_business_id:
                     self._snapshot = result[2]
+                    self._visible_business_ids.update(self._snapshot["businesses"])
                     for business_id in self._snapshot["businesses"]:
-                        self.registry._businesses.setdefault(business_id, Business(business_id, business_id.title()))
+                        if business_id != SYSTEM_BUSINESS:
+                            self.registry._businesses.setdefault(business_id, Business(business_id, business_id.title()))
                     self._sync_business_menu()
                     self._snapshot_error = None
                     self._snapshot_at = time.monotonic()
