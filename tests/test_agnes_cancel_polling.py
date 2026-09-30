@@ -108,7 +108,7 @@ def test_cancel_raises_taskcancelled_not_event(monkeypatch):
 def test_handler_uses_check_cancel_and_taskcancelled():
     # Static check: ensure agnes_handlers.py imports TaskCancelled and raises it
     from pathlib import Path
-    src = Path("octopus/agnes_handlers.py").read_text()
+    src = Path("octopus/agnes_handlers.py").read_text(encoding="utf-8")
     assert "from .worker import TaskCancelled" in src or "TaskCancelled" in src
     assert 'raise TaskCancelled("annulation demandée pendant le polling Agnes")' in src
     assert "raise ctx._cancel" not in src, "Must not raise ctx._cancel Event directly"
