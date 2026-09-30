@@ -22,7 +22,7 @@ import tempfile
 
 import pytest
 
-from octopus import actions, agnes, economy, journal, strategy, tasks, supervisor
+from octopus import actions, agnes, economy, journal, strategy, tasks, supervisor, worker
 from octopus import agnes_production
 from octopus.strategy import StrategyError
 
@@ -174,6 +174,14 @@ def test_permissions_require_channel():
     # No channel -> request_generation should fail with human boundary
     with pytest.raises(StrategyError, match="No active human-authorized"):
         agnes_production.request_generation(business=B, prompt="test", idempotency_key="k1")
+
+
+def test_agnes_submission_uses_authorized_channel_url(http):
+    channel()
+    with pytest.raises(StrategyError, match="does not match"):
+        agnes_production.request_generation(business=B, prompt="test", idempotency_key="wrong-url",
+                                            base_url="http://127.0.0.1:9999")
+    assert agnes_production.get_by_idempotency("wrong-url") is None
 
 
 def test_submission_preserves_task_id_immediately(http):
@@ -422,3 +430,103 @@ def test_full_production_cycle_end_to_end(http):
             assert gen["evidence_id"]
         finally:
             os.environ.pop("OCTOPUS_AGNES_VIDEO_DIR", None)
+
+
+def test_supervisor_video_objective_worker_and_replay(http, monkeypatch, tmp_path):
+    channel()
+    fake = FakeAgnes()
+    http.side_effect = fake.handler
+    monkeypatch.setenv("OCTOPUS_AGNES_VIDEO_DIR", str(tmp_path))
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    worker.load_handlers(["octopus.builtin_handlers", "octopus.agnes_handlers"])
+
+    objective_id = supervisor.create_video_objective(B, "A calm sea at sunset")
+    first = supervisor.tick(businesses=[B])
+    task_id = first["objectives"][0]["work_task_id"]
+    assert tasks.get(task_id)["kind"] == "agnes.generate_video"
+    assert supervisor.tick(businesses=[B])["objectives"][0]["work_task_id"] == task_id
+    assert worker.run_one(task_id=task_id, log=lambda _message: None)["status"] == "done"
+    decided = supervisor.tick(businesses=[B])["objectives"][0]
+    assert decided["decision"]["outcome"] == "satisfied"
+    assert strategy.get("objective", objective_id, B)["status"] == "achieved"
+    assert supervisor.tick(businesses=[B])["checked"] == 0
+    assert len([call for call in fake.calls if call[1].endswith("/api/tasks/simple")]) == 1
+    generation = agnes_production.list_generations(B)[0]
+    assert generation["evidence_id"]
+    assert agnes.verify_mp4(Path(generation["output_path"]))["verified"]
+
+
+def test_supervisor_video_failure_and_cancel_never_resubmit(http, monkeypatch):
+    channel()
+    worker.load_handlers(["octopus.builtin_handlers", "octopus.agnes_handlers"])
+    fake = FakeAgnes()
+
+    def failed(req, timeout=15):
+        if "/api/tasks/" in req.full_url and req.method == "GET":
+            response = Mock(status=200)
+            response.read.return_value = json.dumps({"task_id": TASK_ID, "task_type": "simple", "status": "failed",
+                                                      "error": "model error"}).encode()
+            response.__enter__ = Mock(return_value=response)
+            response.__exit__ = Mock(return_value=False)
+            return response
+        return fake.handler(req, timeout)
+
+    http.side_effect = failed
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    failed_id = supervisor.create_video_objective(B, "A failed video")
+    failed_task = supervisor.tick(businesses=[B])["objectives"][0]["work_task_id"]
+    assert worker.run_one(task_id=failed_task, log=lambda _message: None)["status"] == "failed"
+    assert supervisor.tick(businesses=[B])["objectives"][0]["decision"]["outcome"] == "exhausted"
+    assert strategy.get("objective", failed_id, B)["status"] == "paused"
+
+    cancelled_id = supervisor.create_video_objective(B, "A cancelled video")
+    cancelled_task = supervisor.tick(businesses=[B])["objectives"][0]["work_task_id"]
+    tasks.cancel(cancelled_task)
+    supervisor.tick(businesses=[B])
+    assert strategy.get("objective", cancelled_id, B)["status"] == "paused"
+    assert len([call for call in fake.calls if call[1].endswith("/api/tasks/simple")]) == 1
+
+
+def test_supervisor_rejects_prompt_changed_after_human_approval(http):
+    channel()
+    objective_id = supervisor.create_video_objective(B, "Approved prompt")
+    strategy.update("objective", objective_id, B, statement="Changed prompt")
+    with pytest.raises(supervisor.SupervisorError, match="changé"):
+        supervisor.tick(businesses=[B])
+    assert not tasks.list_tasks(business=B)
+
+
+def test_supervisor_worker_respects_revoked_channel(http):
+    channel_id = channel()
+    objective_id = supervisor.create_video_objective(B, "A video with revoked access")
+    task_id = supervisor.tick(businesses=[B])["objectives"][0]["work_task_id"]
+    economy.update_channel(B, channel_id, actor="human", access="observe")
+    worker.load_handlers(["octopus.builtin_handlers", "octopus.agnes_handlers"])
+    result = worker.run_one(task_id=task_id, log=lambda _message: None)
+    assert result["status"] == "failed"
+    assert not any("/api/tasks/simple" in str(call) for call in http.call_args_list)
+    supervisor.tick(businesses=[B])
+    assert strategy.get("objective", objective_id, B)["status"] == "paused"
+
+
+@pytest.mark.parametrize("tamper", ["evidence", "retracted", "file"])
+def test_supervisor_rejects_unproved_video(http, monkeypatch, tmp_path, tamper):
+    channel()
+    fake = FakeAgnes()
+    http.side_effect = fake.handler
+    monkeypatch.setenv("OCTOPUS_AGNES_VIDEO_DIR", str(tmp_path))
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    worker.load_handlers(["octopus.builtin_handlers", "octopus.agnes_handlers"])
+    objective_id = supervisor.create_video_objective(B, "A video requiring proof")
+    task_id = supervisor.tick(businesses=[B])["objectives"][0]["work_task_id"]
+    assert worker.run_one(task_id=task_id, log=lambda _message: None)["status"] == "done"
+    generation = agnes_production.list_generations(B)[0]
+    if tamper == "evidence":
+        with tasks._tx() as conn:
+            conn.execute("UPDATE agnes_video_generations SET evidence_id=NULL WHERE id=?", (generation["id"],))
+    elif tamper == "retracted":
+        strategy.transition("evidence", generation["evidence_id"], B, "retracted", actor="human")
+    else:
+        Path(generation["output_path"]).write_bytes(b"not an mp4")
+    supervisor.tick(businesses=[B])
+    assert strategy.get("objective", objective_id, B)["status"] == "paused"

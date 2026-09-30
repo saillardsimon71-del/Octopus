@@ -14,7 +14,8 @@ from .. import db, procs
 from octopus import strategy as strategy_store
 
 from .strategy import STRATEGIC_ACTIONS, build_objective, get_action, overview_lines, portfolio_lines
-from .workbench import COLORS, DEFAULT_BUSINESS_ID, PAGE_META, PodaluxWorkbench
+from .workbench import COLORS, DEFAULT_BUSINESS_ID, PAGE_META, PodaluxWorkbench, _open_path
+from . import agnes_missions
 
 INTELLIGENCE_META = {
     "title": "Intelligence & stratégie",
@@ -27,6 +28,12 @@ class EntrepreneurialWorkbench(PodaluxWorkbench):
 
     def _build_shell(self) -> None:
         super()._build_shell()
+        agnes_button = ctk.CTkButton(
+            self.sidebar, text="Agnes", anchor="w", height=39, corner_radius=9,
+            fg_color="transparent", hover_color=COLORS["surface3"], text_color=COLORS["muted"],
+            command=lambda: self._show_page("Agnes"))
+        agnes_button.pack(fill="x", padx=12, pady=2)
+        self.nav_buttons["Agnes"] = agnes_button
         button = ctk.CTkButton(
             self.sidebar,
             text="◎  Intelligence",
@@ -46,6 +53,18 @@ class EntrepreneurialWorkbench(PodaluxWorkbench):
         self.bind_all("<Control-Key-9>", lambda _e: self._show_page("Intelligence"))
 
     def _show_page(self, page: str) -> None:
+        if page == "Agnes":
+            self.current_page = page
+            for name, button in self.nav_buttons.items():
+                button.configure(fg_color=COLORS["surface3"] if name == page else "transparent",
+                                 text_color=COLORS["text"] if name == page else COLORS["muted"])
+            self.page_title.configure(text="Missions vidéo Agnes")
+            self.page_subtitle.configure(text="Autorisation humaine, travail durable et preuve MP4")
+            self.context_chip.configure(text=self._business_label())
+            for child in self.page_host.winfo_children():
+                child.destroy()
+            self._page_agnes()
+            return
         if page != "Intelligence":
             return super()._show_page(page)
         self.current_page = page
@@ -60,6 +79,83 @@ class EntrepreneurialWorkbench(PodaluxWorkbench):
         for child in self.page_host.winfo_children():
             child.destroy()
         self._page_intelligence()
+
+    def _page_agnes(self) -> None:
+        root = self.page_host
+        root.grid_columnconfigure(0, weight=1)
+        root.grid_rowconfigure(1, weight=1)
+        controls = self._card(root, "Nouvelle mission Agnes")
+        controls.grid(row=0, column=0, sticky="ew", pady=(0, 9))
+        ctk.CTkLabel(controls, text="Business", text_color=COLORS["muted"]).pack(anchor="w", padx=14)
+        self.agnes_business = ctk.CTkEntry(controls)
+        self.agnes_business.insert(0, self.selected_business_id if self.selected_business_id != DEFAULT_BUSINESS_ID else "octopus")
+        self.agnes_business.pack(fill="x", padx=14, pady=(0, 6))
+        self.agnes_prompt = ctk.CTkEntry(controls, placeholder_text="Décrivez la vidéo à produire")
+        self.agnes_prompt.pack(fill="x", padx=14, pady=6)
+        self.agnes_consent = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(controls, text="J'autorise une génération Agnes pour cet objectif (coût API inconnu)",
+                        variable=self.agnes_consent).pack(anchor="w", padx=14, pady=6)
+        ctk.CTkButton(controls, text="Créer l'objectif et autoriser", command=self._create_agnes).pack(anchor="w", padx=14, pady=(4, 12))
+        ctk.CTkButton(controls, text="Démarrer / arrêter Worker", command=self._toggle_worker,
+                      fg_color=COLORS["surface3"]).pack(anchor="w", padx=14, pady=(0, 12))
+        status = self._card(root, "État, économie, preuves et activité")
+        status.grid(row=1, column=0, sticky="nsew")
+        self.agnes_view = ctk.CTkTextbox(status, wrap="word")
+        self.agnes_view.pack(fill="both", expand=True, padx=14, pady=8)
+        ctk.CTkButton(status, text="Ouvrir le dernier MP4 vérifié", command=self._open_agnes_video).pack(anchor="e", padx=14, pady=(0, 12))
+        self._render_agnes()
+
+    def _create_agnes(self) -> None:
+        try:
+            objective_id = agnes_missions.create(self.agnes_business.get().strip(), self.agnes_prompt.get(),
+                                                  authorized=self.agnes_consent.get())
+        except Exception as exc:
+            self._set_status(str(exc)[:140], COLORS["bad"])
+            return
+        self.agnes_prompt.delete(0, "end")
+        self.agnes_consent.set(False)
+        self._set_status(f"Objectif Agnes #{objective_id} créé", COLORS["good"])
+        self._render_agnes()
+
+    def _render_agnes(self) -> None:
+        if not hasattr(self, "agnes_view") or not self.agnes_view.winfo_exists():
+            return
+        try:
+            state = agnes_missions.snapshot(self.agnes_business.get().strip())
+            lines = [f"Business: {state['business']}",
+                     f"Coût API Agnes: inconnu | Coût tokens calculé: {state['token_cost_usd']['value']} USD",
+                     f"Cash calculé depuis ledger observé: {state['cash']['by_currency']}", "", "Canaux et permissions:"]
+            lines += [f"#{c['id']} {c['kind']} {c['status']} accès={c['access']} capacités={c['capabilities']}"
+                      for c in state["channels"]] or ["Aucun canal"]
+            lines += ["", "Allowances:"] + ([str(a) for a in state["allowances"]] or ["Aucune"])
+            lines += ["", "Objectifs:"] + [f"#{o['id']} {o['status']} {o['summary']}" for o in state["objectives"]]
+            lines += ["", "Tâches:"] + [f"#{t['id']} {t['kind']} {t['status']} {str(t.get('error') or '')[:160]}"
+                                           for t in state["tasks"][:20]]
+            lines += ["", "Livrables:"]
+            for g in state["generations"][:20]:
+                lines.append(f"#{g['id']} {g['status']} vérifié={g['verified']} preuve={g['evidence_id']} "
+                             f"octets={g['file_size']} SHA-256={g['sha256']}\n{g['output_path'] or '(aucun MP4)'}")
+            lines += ["", "Ledger observé:"] + [f"#{e['id']} {e['direction']} {e['amount']} {e['currency']} {e['nature']} {e['category']}"
+                                                  for e in state["ledger"]]
+            lines += ["", "Activité récente:"] + [f"#{e['id']} {e['type']} tâche={e['task_id']}" for e in state["events"][:20]]
+            self._agnes_latest_path = next((g["output_path"] for g in state["generations"]
+                                            if g["verified"]), None)
+        except Exception as exc:
+            lines = [f"Lecture impossible: {type(exc).__name__}: {exc}"]
+            self._agnes_latest_path = None
+        self.agnes_view.configure(state="normal")
+        self.agnes_view.delete("1.0", "end")
+        self.agnes_view.insert("1.0", "\n".join(lines))
+        self.agnes_view.configure(state="disabled")
+
+    def _open_agnes_video(self) -> None:
+        if self._agnes_latest_path:
+            _open_path(self._agnes_latest_path)
+
+    def _refresh(self) -> None:
+        super()._refresh()
+        if self.current_page == "Agnes":
+            self._render_agnes()
 
     def _page_intelligence(self) -> None:
         root = self.page_host

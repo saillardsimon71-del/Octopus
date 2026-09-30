@@ -201,6 +201,30 @@ def test_autonomous_loop_requests_human_boundary_then_resumes_without_repeating_
     assert strategy.get("objective", objective_id, BUSINESS)["status"] == "active"
 
 
+def test_answered_supervisor_tick_reconciles_duplicate_pending_request(handlers):
+    objective_id = _active_objective()
+    work_id = tasks.enqueue(BUSINESS, supervisor.WORK_KIND, {"objective_id": objective_id})
+    strategy.link(BUSINESS, "objective", objective_id, "task", work_id, "executed_by")
+    work = tasks.claim("work-owner", task_id=work_id)
+    tasks.complete(work_id, "work-owner", {"success": False, "measured": False,
+                                            "execution_status": "llm_unavailable",
+                                            "human_boundary": "route LLM gratuite indisponible"})
+    supervisor.tick(businesses=[BUSINESS])
+
+    first_id = tasks.enqueue(BUSINESS, supervisor.TICK_KIND, supervisor.tick_input())
+    tasks.claim("first-owner", task_id=first_id)
+    first_request = tasks.request_human(first_id, "first-owner", supervisor.boundary_key(objective_id), "Autoriser")
+    tasks.answer(first_request, "route gratuite rétablie")
+
+    duplicate_id = tasks.enqueue(BUSINESS, supervisor.TICK_KIND, supervisor.tick_input())
+    tasks.claim("duplicate-owner", task_id=duplicate_id)
+    duplicate_request = tasks.request_human(duplicate_id, "duplicate-owner", supervisor.boundary_key(objective_id),
+                                            "Autoriser")
+    assert worker.run_one(task_id=first_id, **QUIET)["status"] == "done"
+    assert len(supervisor.work_tasks(BUSINESS, objective_id)) == 2
+    assert tasks.pending_human_requests(BUSINESS) == []
+
+
 def test_objective_work_initializes_shared_agent_state_before_a_mission(handlers, monkeypatch):
     """Régression réelle du point d'entrée : la mission exige l'état partagé des agents.
 
