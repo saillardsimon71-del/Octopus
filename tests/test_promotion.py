@@ -130,6 +130,18 @@ def test_build_manifest_accepts_product_ticket_with_human_review():
     assert manifest["auto_merge"] is False
 
 
+def test_build_manifest_accepts_core_code_and_test_helper():
+    report = good_product_report()
+    allowed = ["octopus/tasks.py", "tests/task_fixture.py"]
+    report["tickets"][0]["allowed_paths"] = allowed
+    report["tickets"][0]["result"]["input"]["allowed_paths"] = allowed
+    report["tickets"][0]["result"]["output"]["changed_paths"] = allowed
+
+    manifest = promotion.build_manifest(report)
+
+    assert manifest["changed_paths"] == sorted(allowed)
+
+
 @pytest.mark.parametrize("mutate, message", [
     (lambda r: r["tickets"][0]["result"]["output"].update(self_policy="scoped_kilo"), "self_policy"),
     (lambda r: r["tickets"][0]["result"]["input"].update(self_modification_policy="python_canary"),
@@ -148,7 +160,7 @@ def test_build_manifest_accepts_product_ticket_with_human_review():
     (lambda r: (
         r["tickets"][0].update(allowed_paths=["tests/test_resources.py"]),
         r["tickets"][0]["result"]["output"].update(changed_paths=["tests/test_resources.py"]),
-    ), "modification des tests"),
+    ), "modification des oracles de test"),
     (lambda r: r["tickets"][0]["result"]["input"].update(max_files_changed=21), "max_files_changed"),
     (lambda r: r["tickets"][0]["result"]["input"].update(max_lines_added=5001), "max_lines_added"),
 ])

@@ -2,8 +2,8 @@
 
 Un handler est une fonction `fn(ctx) -> sortie JSON`, enregistrée pour un type de tâche :
 
-    @handler("podalux.video_cycle", resource="cpu_heavy", budget_usd=1.0)
-    def video_cycle(ctx):
+    @handler("atelier.prepare_delivery", resource="cpu_heavy", budget_usd=1.0)
+    def prepare_delivery(ctx):
         ...
 
 - Chaque tâche tourne dans un run du journal (budget par tâche, coûts rattachés).
@@ -39,6 +39,7 @@ class Handler:
 
 
 HANDLERS: dict[str, Handler] = {}
+_KINDS_UNSET = object()
 
 
 def handler(kind: str, *, resource: str | None = None, budget_usd: float | None = None, max_attempts: int = 1,
@@ -155,16 +156,21 @@ def _heartbeat_loop(ctx: TaskContext, stop: threading.Event) -> None:
             continue
 
 
-def run_one(owner: str | None = None, *, lease_s: float = 60, kinds: list[str] | None = None,
+def run_one(owner: str | None = None, *, task_id: int | None = None, lease_s: float = 60,
+            kinds: list[str] | None | object = _KINDS_UNSET,
             log: Callable[[str], None] = print) -> dict | None:
     """Maintenance, puis exécution d'une tâche prête. Renvoie la tâche traitée (état final) ou None."""
+    if task_id is not None:
+        if type(task_id) is bool or not isinstance(task_id, int) or task_id <= 0:
+            raise ValueError("task_id doit etre un entier strictement positif")
     if not math.isfinite(lease_s) or lease_s <= 0:
-        raise ValueError("lease_s doit être une durée finie strictement positive")
-    # Un nom de worker peut être réutilisé : chaque exécution doit avoir son propre bail.
+        raise ValueError("lease_s doit etre une duree finie strictement positive")
     owner = f"{owner or default_owner()}:{uuid.uuid4().hex}"
+    if kinds is _KINDS_UNSET:
+        kinds = None if task_id is not None else (list(HANDLERS) or None)
     tasks.reap()
     tasks.materialize_due(resources={k: h.resource for k, h in HANDLERS.items() if h.resource})
-    task = tasks.claim(owner, lease_s=lease_s, kinds=kinds or list(HANDLERS) or None)
+    task = tasks.claim(owner, task_id=task_id, lease_s=lease_s, kinds=kinds)
     if task is None:
         return None
     spec = HANDLERS.get(task["kind"])
@@ -219,6 +225,10 @@ def _safe(fn):
 def loop(owner: str | None = None, *, poll_s: float = 2.0, lease_s: float = 60, stop: threading.Event | None = None,
          max_tasks: int | None = None, log: Callable[[str], None] = print) -> int:
     """Boucle du worker. S'arrête sur `stop`, après `max_tasks` tâches, ou Ctrl+C."""
+    if max_tasks is not None and (type(max_tasks) is not int or max_tasks <= 0):
+        raise ValueError("max_tasks doit etre un entier strictement positif")
+    if not math.isfinite(poll_s) or poll_s <= 0:
+        raise ValueError("poll_s doit etre une duree finie strictement positive")
     owner = owner or default_owner()
     stop = stop or threading.Event()
     done = 0

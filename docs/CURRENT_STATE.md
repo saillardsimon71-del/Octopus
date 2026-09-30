@@ -1,256 +1,324 @@
-**AVANT CETTE INTERVENTION, OCTOPUS ÉTAIT :**
-un système de contrôle et d'exécution riche, issu de Podalux, avec de vraies protections et
-une boucle stratégique/financière déjà présente, mais des priorités documentaires contradictoires
-et aucune preuve commerciale disponible dans ce checkout.
+# État actuel OCTOPUS - 2026-09-30
 
-**APRÈS CETTE INTERVENTION, OCTOPUS EST :**
-un atelier économique supervisé au chemin explicite : besoin, expérience, travail, livraison,
-encaissement/retour client distincts, coûts/temps, décision. Il n'est **pas** devenu une activité
-rentable prouvée. Le prochain travail est une expérience client, pas une phase d'architecture.
+## Phase G — runtime autonome supervisé
 
-## A. Thèse
+Verdict : **PARTIEL — le critère I (constructeur Astra) n'est pas démontré dans cet environnement.**
+Les critères A (hors tests du constructeur et GUI), B, C, D, E, F, G et H sont démontrés par des
+tests exécutables. Détail, causes racines et limites : `docs/migrations/OPERATIONALIZATION.md`,
+section « Phase G closure - 2026-09-30 ».
 
-Le dépôt n'avait pas besoin d'un nouveau moteur économique, mais d'une exploitation cohérente
-de ses preuves et de son ledger. J'ai retenu le monolithe existant, maintenable sans ajouter
-une couche « core » ni déplacer les modules. Market first n'implique pas de croire aveuglément
-le premier paiement : livraison, acceptation, utilisation et économie doivent rester distinctes.
-L'humain est un opérateur mesuré, pas un échec d'autonomie. Le self-development devient un outil
-latéral déclenché par une observation. La complexité doit payer par un résultat ou une protection
-actuels ; sinon elle est gelée. Le pilote e-commerce est une expérience réfutable, pas un business
-définitif ni une raison de construire un moteur spécialisé.
+Ce qui manquait et a été corrigé, sans nouvelle architecture :
 
-## B. Réalité observée
+- aucun code ne reliait un objectif persistant à un travail durable : la boucle exigeait de relancer
+  `strategy mission` puis `worker --once` à la main. `octopus/supervisor.py` supervise désormais
+  l'état canonique existant (`strategy`, `tasks`, `journal`) et s'exécute comme une tâche durable
+  dans le worker existant ;
+- les runs du journal restaient `running` après la mort de leur processus (reproduit par SIGKILL) :
+  `tasks.reap()` les clos maintenant en `abandoned` avec le bail expiré de leur tâche ;
+- aucun état runtime lisible sans SQLite : `python -m octopus status` assemble objectif, tâche et
+  run courants, dernière progression, raison d'attente humaine, raison d'échec, travail suivant,
+  routage LLM et coût cumulé.
 
-- Main local, `origin/main` et main distant (`git ls-remote`) concordaient sur
-  `d2279f628703cb88ca1bf78fcb591389dcc9f764` ; arbre initial propre.
-- `CURRENT_STATE`/`HANDOFF_WORK` citaient encore `cd8a3b3`, `CODEX_START` une PR GPU Draft #2,
-  tandis que l'historique avait déjà intégré actions HTTP/SMTP, product tickets et acceptance.
-- API GitHub consultée en lecture : aucune PR ouverte, aucun check-run retourné pour ce HEAD.
-  Les workflows existent ; aucune conclusion de CI distante verte n'en a été inventée.
-- L'historique confirme la suppression antérieure de `core/` et `businesses/short_video/`
-  (33 fichiers / 616 lignes selon commit/docs). Ce n'est **pas** une suppression de cette session.
-- Les branches canary/capabilities/cleanup servent à comprendre l'historique, pas à remplacer main.
-- Aucun journal SQLite utilisateur ni pièce commerciale trouvé dans /app. Cela signifie
-  **absence de preuve disponible**, pas preuve qu'aucun client n'existe ailleurs.
-- `strategy` stocke déjà objectifs, hypothèses, expériences, preuves, décisions, liens ;
-  `economy` contient canaux, cash, imports CSV, allowances, verdicts et réinvestissement.
-- Les missions ORBIT relient déjà les tâches à la stratégie et marquent leur rapport `inferred`.
-  Le problème n'était donc pas une égalité générale `task done = argent` dans le code.
-  Il manquait une lecture unifiée des résultats client et du temps humain, et la documentation
-  donnait trop d'autorité aux succès de transport/compute et aux compteurs d'ingénierie.
-
-### Architecture exécutée, pas seulement noms de modules
-
-| Entrée / sous-système | Chemin constaté et décision |
-|---|---|
-| CLI économique | `__main__ → strategy_cli → strategy/economy → journal SQLite` ; sans worker/LLM |
-| Tâches | `worker.load_handlers → businesses.handler_modules`, baux/reprise `tasks`, runs `journal` |
-| Agents | `agents/task_handlers → runtime.run_mission/run_agent`, outils et gateway LLM ; cycle Podalux séparé encore consommé |
-| Actions | `actions.propose → canal/autorisation/coût → browser_form ou SMTP configuré → evidence` |
-| État historique | `agents/db.py` conserve messages/mémoire/verrous Podalux, distinct du journal durable OCTOPUS |
-| Ressources/connecteurs | inventaire TOML, sondes et accès ; des consommateurs runtime réels, pas à supprimer |
-| Capabilities | module typé testé et surface canary ; aucun consommateur runtime direct identifié |
-| GUI | `run_gui → agents.gui`, CustomTkinter conservé ; pas de nouvelle UI |
-| Vidéo/compute | Studio/WanGP, VideoService/renderers, broker/breaker/watchdog ; consommateurs actifs conservés |
-| Développement | entrée explicite/night-shift → dev_worker/Kilo ou déclaratif → clone/sandbox/tests/gate → promotion humaine |
-| Acceptance | contrat hashé, probe Tk important mais dépendant du candidat ; revue réelle toujours nécessaire |
-| CI | workflows présents, dont suite Python complète ; vérification locale réelle détaillée ci-dessous |
-
-**Hypothèse control plane >> economic plane : confirmée pour la priorité et les preuves disponibles,
-pas comme absence de code économique.** La réutilisation était préférable à une nouvelle couche.
-
-## C. Kill map
-
-| Décision | Composants importants |
-|---|---|
-| KEEP | tasks/worker/journal, strategy, economy/ledger, actions, budgets, secrets/sandbox/promotion |
-| SIMPLIFY | chemin CLI, rapport outcomes, documents canoniques et conventions de mesure |
-| FREEZE | extension GUI/vidéo/GPU, nouveaux canaris, capabilities sans consommateur runtime |
-| DEPRECATE | développement chargé par défaut ; autonomie/compteurs techniques comme preuve de progrès |
-| REMOVE | imports média inutiles sur la CLI économique ; roadmap GPU obligatoire avant client ; pourcentages de progression non probants |
-| LATER | automatisation de prospection et généralisation après répétition d'un travail acheté/utilisé |
-
-## D. Golden path
-
-```text
-humain : besoin + limites
-  → strategy : objectif / hypothèse / expérience bornée
-  → travail manuel ou tasks/worker
-  → action autorisée / livraison avec preuve
-  → ledger : encaissement et coûts  +  evidence : client et minutes humaines
-  → economy outcome : faits, provenance, inconnues
-  → décision humaine : continuer / corriger / arrêter
-       └ si obstacle mesuré → development.task → revue → même mission → nouvelle mesure
-```
-
-Protocole unique : [HANDOFF_WORK.md](HANDOFF_WORK.md). Aucune dépendance à quinze sous-systèmes
-pour tenir le premier pilote ; les opérations manuelles restent légitimes et visibles.
-
-## E. Changements : problème → décision → bénéfice → risque résiduel
-
-1. **Faits dispersés** → preuves/ledger/liens existent → fonction `experiment_outcomes` et commande
-   `economy outcome`, intégrées aux vues de résultats → lecture séparée travail/livraison/client/cash,
-   temps par phase et références du ledger → saisie manuelle, coût complet et vérité des sources à revoir.
-2. **Absence interprétée comme résultat** → échéance sans données `refutes`, cash unverified donnant
-   zéro, budget zéro immédiatement consommé → `inconclusive`, valeur inconnue et dépense positive
-   requise pour épuisement → pas de conclusion marché inventée → `supports` reste propre à la métrique.
-3. **Conventions de preuve fragiles** → nombres non finis et addition de constats booléens possibles
-   → validations et dernier constat observé, retrait existant réutilisé → minutes et états explicites
-   → pas de dédoublonnage automatique de toute saisie manuelle ; sources/IDs à vérifier.
-4. **Atelier au centre** → dev_worker dans les handlers par défaut → retiré du défaut, imports vidéo
-   retardés dans la CLI → maintenance explicite, commande économique plus légère → un import explicite
-   conserve l'enregistrement ; pas de désactivation rétroactive d'un processus déjà chargé.
-5. **Faits candidat/contrôleur fusionnés** → probe pouvait écraser tests/Git/empreinte → refus de tout
-   namespace autre que runtime/ui → intégrité des faits contrôleur → probe Tk toujours non indépendant.
-6. **Création de canal plus permissive que mise à jour** → `act` pouvait être demandé à la création
-   par un agent → même contrôle humain que lors d'une mise à jour → politique cohérente → API locale,
-   chaîne `human` n'est pas une authentification ou un durcissement complet de la frontière hôte.
-7. **Documents contradictoires** → vidéo/GPU déclarés passage obligé malgré phase économique ouverte
-   → constitution, vision, gates, backlog et handoffs recadrés ; historiques signalés → une direction
-   maintenable → les runbooks spécialisés conservés ne valent pas validations live.
-8. **Callback GUI tardif** → suite réelle : Doctor écrivait dans un widget détruit après navigation,
-   et Orca avait le même défaut → deux guards `winfo_exists`, sans refonte → le rafraîchissement
-   continue après réponse tardive → tests déterministes reproduits rouges avant correction.
-
-## F. Suppressions
-
-Aucun fichier runtime supprimé. Une inscription `octopus.dev_worker` retirée du chargement par
-défaut ; import groupé de cinq modules média déplacé hors de l'entrée économique ; import argparse
-inutilisé retiré. Les suppressions de lignes les plus importantes sont documentaires, pas une
-prétendue élimination massive de code. Chiffrage final en N.
-
-## G. Ajouts justifiés
-
-- Une projection dans `economy.py`, pas une nouvelle abstraction persistante. Les totaux cash et
-  le statut de tâche existants ne pouvaient répondre à livraison/client/minutes ; les preuves et
-  liens existants le peuvent, avec une agrégation explicite et quelques validations.
-- Conventions de métriques (`delivery`, `customer_acceptance`, `customer_use`, `human_minutes:phase`)
-  et catégories de ledger : pas d'entités prospect/order/payment nouvelles, pas de migration.
-- Tests dans les fichiers existants. Aucun package/dependency produit supplémentaire.
-- Les mémos et rapports générés par l'environnement de travail ne font pas partie du produit :
-  ils ont été retirés avant revue. Les logs/XML de test restent locaux et ignorés par Git.
-
-## H. Ce que j'ai refusé de construire
-
-Moteur e-commerce, scraper générique, Shopify, CRM, campagne, nouveau rôle/agent, Model Lab,
-capability acquisition, MCP discovery, Web Control Plane, refonte GUI, provider GPU, nouvelle DB,
-Bottleneck Knowledge Graph, système de scoring de complexité et oracle visuel universel.
-
-## I. Self-development
-
-Disponible mais latéral. Preuve → lien `motivates` vers la tâche ; expérience → lien `improves`.
-`improves` ne compte pas comme exécution du lot (`executed_by`). Aucun champ obligatoire imposé
-aux anciennes tâches. Le goal documente observation/baseline/périmètre et mesure après retour sur
-la même mission. Tests/gate/promotion humaine inchangés dans leur principe, pas d'auto-merge.
-
-## J. Economic plane — ce qui est réellement utilisable demain
-
-Créer le pilote, tenir prospect/offre/accord sous forme de preuves textuelles, produire manuellement,
-consigner livraison/retour client, encaissements vérifiés, coûts et minutes ; lire un rapport,
-évaluer une métrique et persister une décision. Le rapport n'effectue aucun envoi ni paiement.
-La contribution n'est que le cash classé enregistré, pas une marge complète ni un calcul HT/TTC.
-Pas de clients/prospects/revenus fictifs injectés dans un journal de production.
-
-## K. Trust kernel
-
-Droits d'agir ; dépenses/plafonds ; effets externes ; état durable/propriété d'exécution ; sémantique
-des preuves ; modification/promotion/secrets. Responsabilités dans les modules existants, pas
-nouveau package. Leur fermeture dépend de la DB, de l'hôte, du catalogue gouverné, des imports,
-de l'image et de la CI. Voir [EVIDENCE_ACCEPTANCE.md](EVIDENCE_ACCEPTANCE.md) pour les limites.
-
-## L. Tests et preuves
-
-- Baseline : `PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider tests/test_economy.py
-  tests/test_strategy.py tests/test_actions.py tests/test_acceptance.py tests/test_tasks_worker.py
-  tests/test_dev_worker.py tests/test_businesses.py` → 228 tests passés.
-- Premier diff : mêmes sept suites + `tests/test_economy_act_cli.py`, avec `-o addopts='' -q`
-  → 254 passés, 38.81 s.
-- Revue fonctionnelle indépendante : suite hors `test_gui.py`, un test encore attaché à l'ancien
-  verdict sans mesure ; correction intentionnelle de son attente vers `inconclusive`, documentée.
-- Agent de test : 195 ciblés passés ; 844 non-GUI passés, 4 skips ; suite complète bloquée par
-  dépendance native Tk manquante. Aucun test retiré pour masquer ce problème.
-- Installation environnement des dépendances déjà prévues : CustomTkinter, libtk8.6, ffmpeg, xauth.
-  Première suite entière sous Xvfb : 859 passés, 1 module navigateur ignoré (Playwright absent), 114.04 s.
-- Ajout vérifié du roundtrip CLI multi-processus, preuves/ledger/liens/reprise/rapport sans écriture :
-  `python -m pytest -o addopts='' -q tests/test_economy_act_cli.py tests/test_agent_economy_tools.py
-  tests/test_economy.py` → 37 passés, 8.70 s.
-- Relecture finale : une preuve `computed` sans valeur doit pouvoir conserver l'inconnue pour les
-  métriques réservées ; correction et quatre régressions testées, sans inventer un zéro.
-- Navigateur Chromium/Playwright installés (dépendance déjà déclarée). Première suite sans skip :
-  870 passés, 1 échec GUI intermittent. Reproduction déterministe Doctor/Orca :
-  `xvfb-run -a python -m pytest -o addopts='' -q tests/test_gui_smoke.py -k late_background`
-  → **2 échecs avant correction**, mêmes widgets détruits. Deux guards locaux corrigent les callbacks.
-- Suites suivantes : 873 passés, un avertissement de finalisation Tk sur un thread non-GUI.
-  Une tentative de nettoyage dans le test n'a pas éliminé l'avertissement : retirée, aucun filtre ajouté.
-
-La dernière suite avec navigateur est vérifiée sans exclusion de tests :
+Démarrage durable unique :
 
 ```bash
-xvfb-run -a python -m pytest -o addopts='' -q -rs tests/ --junitxml=/app/test_reports/pytest/pytest_results_final.xml
+python -m octopus runtime        # superviseur + worker ; le tick se réarme seul
+python -m octopus status         # état observable
+python -m octopus ask | answer   # frontières humaines
 ```
 
-Résultat final : **873 passés, 0 échec, 0 ignoré, 1 avertissement Tk**, 115.62 s (XML vérifié).
-Les traces XML/logs sont locales et non versionnées. Après publication de la branche, les workflows
-GitHub `Compute finance safety` et `video-foundation` ont également terminé avec succès.
-Aucun canary commercial, fournisseur LLM/GPU, paiement ou envoi externe réel n'a été exécuté.
+Validation exécutée le 2026-09-30 dans la sandbox Arena (Debian, Python 3.11.2), sans réseau ni
+ressource payante : suite produit **1382 passés, 9 ignorés, 0 échec** en 78 s. Les 80 tests du
+constructeur Astra échouent uniquement parce que `powershell` et `docker` sont absents ; ils ne sont
+pas dans le périmètre de cette session. `tests/test_gui.py` n'est pas collectable faute de
+`tkinter`. Les 9 ignores sont Chromium et tkinter absents, pas des régressions masquées.
 
-## M. Git
+Démonstration réelle du point d'entrée, sans LLM disponible : `runtime` a amorcé le superviseur,
+créé le travail, constaté l'absence de route LLM gratuite, ouvert une demande humaine visible dans
+`ask` et `status`, puis repris après `answer` — sans fallback payant ni effet externe.
+Aucune preuve économique n'est apportée par cette phase.
 
-Baseline canonique de cette intervention : `d2279f628703cb88ca1bf78fcb591389dcc9f764`.
-Le travail a été publié sur `recalibrate/market-first-octopus` et ouvert en Pull Request #59
-vers `main`. Les artefacts de session/environnement générés lors de la sauvegarde ont été retirés
-avant revue. La branche reste séparée de `main` tant que la revue humaine n'est pas terminée.
-La CI GitHub du HEAD revu est verte sur `Compute finance safety` et `video-foundation`.
-La fusion n'est pas une preuve économique : elle ne doit intervenir qu'après revue du diff final.
+## Phase F — readiness finale
 
-## N. Complexité — faits, pas score
+Verdict : **READY pour le dry run économique supervisé au démarrage neutre décrit dans
+`HANDOFF_WORK.md`**. Aucun blocage technique reproduit ne reste ouvert pour ce parcours.
+La suite complète hôte a terminé avec exit=0 en 187 secondes sur
+`587001d07ebc201d8c7d62c5e5a2bd7b6c5f2303`, le 2026-09-27
+(`cache/astra-relay/results/validation-latest.json`, log `cache/astra-relay/validation-pytest.log`).
+Ce résultat valide le code et le canari de ce checkpoint, pas une disponibilité live ou un
+résultat économique. La clôture suivante ne modifie que la documentation.
 
-Périmètre : comparaison à `d2279f6`, hors logs/XML générés et métadonnées `.emergent/`.
+Contaminations reproduites : une mission sans business ni run parent injectait l'identité
+Podalux et une description affirmant des comptes connectés ; `NEXT_STEPS` prescrivait encore
+le pilote CSV. Le défaut de mission est désormais `octopus`, les scopes explicites et parents
+sont conservés, et le handler `podalux.mission` choisit explicitement son scope historique.
+Le protocole distingue maintenant le démarrage neutre de son exemple CSV historique.
 
-| Périmètre | Fichiers | Lignes ajoutées | Lignes supprimées |
-|---|---:|---:|---:|
-| Runtime Python | 8 modifiés | 133 | 24 |
-| Tests Python | 7 modifiés | 269 | 4 |
-| Documentation canonique/historique | 15 modifiés | 840 | 1511 |
-| Exclusion des logs/XML générés | 1 modifié | 2 | 0 |
-| Total des fichiers déjà suivis | 31 modifiés | 1244 | 1539 |
-Fichiers applicatifs ajoutés : **0**. Les artefacts de session/environnement ont été retirés avant revue.
-Le diff final de la PR touche **31 fichiers** avec **1 246 ajouts / 1 539 suppressions** (net **−293 lignes**).
-Concepts actifs retirés/dépréciés : self-development par défaut, infrastructure avant client,
-pourcentages de progression et métrique technique prise seule comme preuve économique.
-Zéro nouvelle table, runtime, agent, service, base ou intégration produit.
+Inspection SQLite en lecture seule : le journal réel contient des objectifs actifs sous
+`octopus` et `cycle_0`, ainsi que des expériences historiques en cours sous `octopus` et
+`accessibility_outreach`. La base legacy contient 33 souvenirs et 37 handoffs. Rien n'a été
+supprimé, déplacé ou activé. Le handler ORBIT ne joint un contexte stratégique que sur
+références explicites ; les handoffs du runtime proviennent des sous-tâches de la mission
+courante. Les déclarations de ressources ne sont pas automatiquement injectées en objectifs.
 
-## O. Limites volontairement conservées
+Canari déterministe : historique stratégique, mémoire, messages et ressources semés dans
+des DB temporaires ; capture des prompts planner, agent et synthèse. Échec observé avant
+correction pour le business omis, puis succès pour business omis, neuf et `octopus`.
+Les cas de scope legacy explicite et hérité restent testés. Ce canari vérifie l'injection
+de contexte, pas les choix d'un modèle live ni une preuve économique.
 
-- Sources déclarées à vérifier, preuve Tk non indépendante, protection de chemins pas égale à
-  fermeture complète des imports ; revue humaine, pas nouvel oracle universel.
-- Coûts/temps incomplets possibles, contribution cash partielle, coût nul à justifier humainement,
-  catégories historiques non reclassées automatiquement, saisie cash/preuves non idempotente.
-- Ancienne DB Podalux et chemins vidéo multiples encore consommés ; supprimer serait plus risqué
-  que les geler. Catalogue de modèles/politique encore couplé et donc gouverné.
-- Le framework d'actions payantes personnalisé libère sur exception une autorisation ; aucune
-  nouvelle utilisation payante avant résolution du cas ambigu. Le pilote n'en a pas besoin.
-- Coûts des appels LLM estimés encore additionnés au budget USD dans l'évaluateur historique :
-  ne pas les présenter comme facturation indépendante ni les doubler avec un coût déjà réglé.
-- Projections répétées par expérience acceptables pour le pilote ; pas de cache/optimisation spéculative.
-- Avertissement `Variable.__del__` de Tk multithread dans la suite complète, non masqué. Les parcours
-  GUI et les régressions Doctor/Orca passent ; aucune affirmation de disparition de cet avertissement.
+Validation exécutée sans réseau ni ressource payante :
+- 320 tests réussis : prompt boundaries, runtime ReAct, business signal evidence,
+  strategy, economy, actions et resources ;
+- 197 tests réussis, 8 ignorés : prompt boundaries avec deux tests de scope supplémentaires,
+  tasks/worker, SEARCH structuré/DDGS/coûts et browser integration (tests browser ignorés).
+Ces groupes se recouvrent ; ne pas additionner leurs nombres comme des tests distincts.
+Diff relu et `git diff --check` sans erreur.
 
-## P. Première expérience
+Revue finale : HEAD conforme au résultat hôte, arbre initial propre, branche constructeur
+distincte de `main` ; aucun merge. Six cas ciblés réexécutés avec succès : canari cold start
+(business omis, neuf et `octopus`), scopes explicite et parent, mission générale de bout en bout.
+Aucun dry run lancé. Clôture documentaire soumise au checkpoint hôte.
+Le parcours proposé reste un business neuf, une mission neutre, SEARCH/BROWSE seulement,
+politique `zero_cost`, citations acquises puis revue humaine. Les anciennes expériences
+restent accessibles à un appel explicite d'economy/status/drive ou de mémoire : ce n'est
+pas un parcours de cold start. Les entrées legacy agent/message restent historiques.
+La disponibilité live du LLM gratuit (429 en E5) n'est pas démontrée par ces tests ; une
+indisponibilité doit arrêter la mission sans fallback payant. Prochaine observation dans le
+dry run supervisé : source réellement acquise et signal qualifié, ou résultat `inconclusive`.
 
-Un lot de 20 références e-commerce françaises, quelques attributs factuels sourcés, prix hypothèse
-~99 € HT, cinq contacts supervisés maximum, sept jours, quatre heures humaines. Une seule offre,
-pas un business définitif. Observer commandes/refus, livraison, paiement, acceptation, usage,
-minutes et coûts. Si aucun accord, pas de pipeline automatique à construire.
+## Résumé
 
-## Q. Next bottleneck rule
+OCTOPUS est un atelier économique supervisé techniquement avancé, mais sans activité commerciale
+prouvée dans le dépôt. Son noyau économique, ses tâches durables, ses garde-fous d'actions, son
+journal et ses budgets existent. Le chantier Hermes + Agnes a supprimé l'ancien moteur vidéo,
+ajouté une frontière Agnes minimale et renforcé le runtime de mission.
 
-Après le pilote : relire les pièces et la décision. Si offre non désirée, arrêter/changer l'offre.
-Si données absentes, mieux mesurer. Si travail acheté/utilisé mais coûteux, choisir **une** phase
-dominante observée ; relier sa preuve à une amélioration bornée, puis comparer avant/après à
-volume et qualité équivalents. Aucun gain ni répétabilité proclamé sans nouvelle observation.
+La mission réelle 75 reste inconclusive. Son blocage proxy a été reproduit hors OCTOPUS:
+la sandbox sans réseau injecte HTTP_PROXY/HTTPS_PROXY/ALL_PROXY vers 127.0.0.1:9.
+La configuration Astra autorise maintenant le réseau; aucune neutralisation des proxies
+n'a été ajoutée à SEARCH. Un probe natif Codex avec profil workspace et réseau activé
+confirme HTTP/HTTPS 200 et absence de ces proxies. L'autorisation reste limitée aux lectures.
 
-## R. Do not build
+La reprise E1/E2 adapte le provider DDGS de Hermes pinné, avec timeout global de 30 secondes,
+annulation humaine et environnement enfant sans secrets provider. SEARCH utilise DDGS avant
+les API sous politique de coût et les RSS historiques. Les moteurs et leur agrégation restent
+dans `ddgs==9.16.0`, pas dans du code Google/Bing propre à OCTOPUS. BROWSE reste distinct.
 
-**LA PROCHAINE CHOSE QU'IL NE FAUT SURTOUT PAS CONSTRUIRE EST :**
-**un moteur générique d'enrichissement e-commerce.**
+Probe réel du 2026-09-27: SEARCH via registry a trouvé la documentation Python avec DDGS;
+BROWSE a acquis `https://docs.python.org/3/tutorial/index.html` en HTTP 200,
+méthode `http:html_main`, 6250 caractères, `usable=true`. Aucun LLM, effet métier ni
+evidence stratégique créé. Google seul via DDGS a renvoyé `No results found`:
+intégration présente, disponibilité effective Google non démontrée par ce probe.
+
+## Réalité Git
+
+- Référence locale `origin/main`: `ae4d98dc9692aa10ba15051381a36809e25377df`.
+- `main` local: `5301a27b8f400041e38eef8b2f0afd73a7b23e6f`.
+- Branche locale du constructeur: `prep/astra-local-orchestration`.
+- Base de la reprise E: `b5032cae97947e9f83347f1564f0a5fab755b6ed`, arbre initial propre.
+- Dernier checkpoint produit avant préparation de la phase E:
+  `2952db4781ec8ad60b6958301a2ab48d388fdcd4`.
+- Branche produit publiée: `feat/hermes-agnes-product`.
+- HEAD produit publié: `57cd3e4b4cce4de5d9d60f9fb755668fe91e1a33`.
+- Pull Request produit: GitHub #106 vers `main`.
+- PR #105 reste séparée et contient l'environnement de construction Astra.
+
+La branche du constructeur contient volontairement à la fois son infrastructure locale et les
+checkpoints produit. Elle sert à construire, pas à fusionner telle quelle dans `main`. Les nouveaux
+changements produit devront rester séparables puis être transférés dans la branche produit relue.
+
+## Architecture active
+
+```text
+Humain: objectif, limites, permissions et revue
+  -> strategy: objectifs, hypothèses, expériences, preuves et décisions
+  -> tasks/worker: travail durable, reprise et attente humaine
+  -> agents/runtime: missions, outils bornés et acquisition
+  -> actions: effets externes autorisés et idempotents
+  -> economy: allowances, demandes de dépense et ledger unique
+  -> journal SQLite: état durable et audit
+  -> economy outcome: livraison, client, cash, coûts, temps et inconnues
+```
+
+Frontières canoniques:
+
+- `strategy`: état épistémique et décisions;
+- `tasks` et `worker`: orchestration durable;
+- `journal`: persistance locale;
+- `economy`: argent, allowances et ledger;
+- `actions`: effets externes contrôlés;
+- `resources`: ressources réellement disponibles;
+- `llm`: sélection, validation, coût et budget LLM;
+- `compute`: allocation de compute;
+- `agents/runtime`: orchestration de mission et utilisation des outils.
+
+Il ne doit exister ni second ledger, ni second journal, ni second planner, ni second gateway LLM.
+
+## État des migrations
+
+### Phase B - ancien moteur vidéo
+
+Terminée dans la branche produit:
+
+- suppression de `octopus/video`, `octopus/media`, Remotion, video_worker et des outils associés;
+- suppression des handlers, commandes et workflows exclusivement vidéo;
+- conservation des primitives économiques, compute et historiques encore consommées;
+- suite Python générale découplée des dépendances vidéo.
+
+### Phase C - Agnes
+
+Implémentée et testée:
+
+- service Agnes externe et pinné, jamais recopié dans OCTOPUS;
+- adapter HTTP loopback dans `octopus.agnes`;
+- probe, statut, soumission simple, arrêt et référence vidéo;
+- soumission et arrêt derrière `actions`, permissions, allowance et idempotence;
+- réponses ambiguës sans retry aveugle;
+- tests HTTP déterministes sans génération réelle.
+
+Non encore validé: démarrage réel du service pinné, génération live, artefact final et coût observé.
+Ce smoke test est réservé à une session séparée avec autorisation humaine.
+
+### Phase D - Hermes et fiabilité des missions
+
+Intégré:
+
+- `ToolRegistry` unique inspiré du pattern Hermes;
+- validation centralisée des paramètres et allowlist avant handler;
+- erreurs bornées et annulation humaine préservée;
+- statuts explicites d'exécution et de synthèse;
+- arrêt propre sur budget, annulation ou indisponibilité LLM;
+- budget LLM cumulé sur les runs imbriqués;
+- qualification de signal exigeant SEARCH, BROWSE et citations acquises;
+- aucune evidence stratégique automatique sans mission complétée et signal sourcé;
+- statuts `source_supported`, `inconclusive` et `not_evaluated`;
+- alias CLI `--llm-budget-usd`.
+
+Le registre et le provider SEARCH DDGS sont adaptés de Hermes. La carte E1/E2 de
+`OCTOPUS_HERMES_REPLACEMENT_MATRIX.md` statue sur les composants P0/P1: permissions,
+acquisition, preuves, scheduler et lifecycle OCTOPUS conservés; SearXNG, MCP et computer-use
+différés sans consommateur supplémentaire. Le modèle de capabilities n'est pas promu en autorité.
+
+## Validation disponible
+
+Sur le diff E de la branche constructeur, le 2026-09-27:
+
+- baseline hôte de `b5032ca` réutilisé, sans réexécution;
+- 191 tests ciblés passent en 43,56 s, dont frontières SEARCH/BROWSE, preuves,
+  coûts, permissions, timeout natif, annulation et secrets du worker;
+- suite complète finale exécutée une fois: **1268 passed en 203,96 s**, code 0;
+  commande `.venv/Scripts/python.exe -m pytest -q --tb=short -o addopts=''`,
+  log `cache/astra-relay/phase-e-final-full.log`;
+- diff relu, `git diff --check` passe; aucune suppression/relaxation de test valide;
+- HTTP/HTTPS et SEARCH DDGS -> BROWSE validés aussi en sandbox native avec un profil
+  workspace réseau activé: même page Python, 6250 caractères, HTTP 200, `usable=true`;
+  aucun LLM ni écriture de données métier.
+
+Les modifications E ont été commitées par l'hôte dans `057fc6e`, puis le routeur E5
+dans `dbf30d2`. Elles ne sont pas fusionnées dans `main`.
+Le changement `.codex/config.toml` appartient au constructeur et doit être exclu du
+transfert produit. La lecture seule réseau est une limite du mandat, pas un filtre HTTP
+implémenté par `network_access=true`. Cette validation ne prouve pas une opportunité client.
+
+Sur la branche produit isolée:
+
+- suite complète locale: 1246 tests passés;
+- sélection migration: 341 tests passés;
+- revue indépendante: aucun défaut Critical, Important ou Minor;
+- CI GitHub OCTOPUS: `targeted-tests`, `contract-and-worker` et
+  `local-browser-and-control-plane` réussis.
+
+Le statut Vercel de la PR échoue parce qu'une intégration de déploiement reste attachée au dépôt
+alors que la surface vidéo/Remotion a été supprimée. `main` n'est pas protégé par ce contrôle. Ce
+statut n'est pas une preuve d'échec du noyau Python, mais l'intégration externe doit être nettoyée.
+
+## Mission réelle 75
+
+La tâche durable est `done`, avec:
+
+- `execution_status=incomplete`;
+- `synthesis_status=validated`;
+- `opportunity_status=inconclusive`;
+- 12 SEARCH, 0 BROWSE;
+- 16 appels LLM, dont 14 réussis et 2 sorties JSON invalides;
+- coût journalisé: 0 USD;
+- aucune evidence stratégique créée.
+
+Les 12 SEARCH ont échoué sur Bing/proxy. Les garde-fous ont correctement refusé de transformer le
+rapport en opportunité prouvée. Ce test valide la persistance et les barrières de preuve, pas la
+capacité actuelle à rechercher une opportunité.
+
+## Freins connus avant la première activité
+
+1. E5 a acquis une demande réelle, mais fermée: aucune piste actuelle retenue. Le prochain
+   test proposé exige une demande ouverte et une revue humaine avant contact; ne pas relancer
+   la mission automatiquement. Voir les citations et inconnues ci-dessous.
+2. Google peut ne pas répondre: conserver les erreurs observables et les autres moteurs;
+   ne pas inventer un résultat ni déclencher un fallback payant.
+3. Faire la revue avant transfert des commits E dans la branche produit.
+4. Le smoke test Agnes réel reste à faire séparément si la première activité utilise la vidéo.
+5. Les prochains commits produit doivent être extraits de la branche constructeur sans y inclure
+   l'infrastructure Astra.
+
+## Vérité économique
+
+### Observation E5 du 2026-09-27 — inconclusive
+
+Une seule mission réelle a été lancée depuis `dbf30d2` via `runtime.run_mission`,
+business `cycle_0`, sous un run journalisé `phase_e5_observation`. Profil `zero_cost`,
+plafond LLM partagé de 0 USD, allowlist `search,browse`, six étapes au maximum par
+sous-agent, cible d'un signal et sélection `business_signal_relevance` avec acquisition
+SEARCH/BROWSE couplée. Le goal demande au plus deux tâches de recherche; cette demande
+est une consigne au planner, dont la limite déterministe reste cinq tâches.
+Aucun contact, achat, publication ou test commercial ultérieur n'est autorisé.
+
+Résultat du run 328: `execution_status=llm_unavailable`, `synthesis_status=degraded`.
+Les routes gratuites ont atteint des limites 429; aucun fallback payant déclenché.
+Le journal contient 7 appels LLM (5 réussis, 2 erreurs), coût enregistré 0 USD.
+Le statut technique `done` des runs ne signifie pas que la mission a réussi.
+Sortie conservée: `cache/astra-relay/phase-e5-mission.json`; diagnostic:
+`cache/astra-relay/phase-e5-mission.log`. Ne pas relancer cette mission automatiquement.
+
+Quatre SEARCH via DDGS sans erreur et quatre BROWSE ont ouvert une seule page distincte:
+[Spreadsheet Product Data Extraction](https://www.fr.freelancer.com/projects/data-cleansing/Spreadsheet-Product-Data-Extraction),
+acquise à `2026-09-27T14:38:51.322535+00:00`, HTTP 200, méthode `http:html_body`,
+27 950 caractères. Les moteurs individuels derrière DDGS ne sont pas attestés dans la sortie.
+Extraits littéraux vérifiés dans cette acquisition:
+
+- « I have multiple spreadsheets that hold product details scattered across different tabs and formats. »
+- « Completion will be accepted when I receive the consolidated file, error-free and ready for immediate upload into our system. »
+- « ₹100-400 INR / heure » et « Fermé ».
+
+Cela soutient l'existence d'une demande publiée de consolidation de données produit,
+avec budget annoncé; cela ne prouve ni paiement ni besoin encore disponible. Cette piste
+est rejetée comme opportunité immédiate parce que l'annonce est fermée. Les autres liens
+SEARCH n'ont pas été ouverts: aucune conclusion sur eux. Identité/accès à un acheteur actuel,
+fichiers, volume, marge, prix acceptable et canal utilisable restent inconnus.
+Aucun signal n'a été qualifié automatiquement; la synthèse et sa revue n'ont pas abouti.
+Conclusion de revue: `inconclusive`, aucune piste retenue.
+
+Obstacle observé et correction E5: le titre utile apparaissait au caractère 7 564,
+après la limite de 6 000 caractères de la vue BROWSE. Le modèle ne voyait que les menus.
+`runtime._tool_result_view` affiche maintenant une fenêtre littérale autour d'un titre
+tardif, avec offset et indicateur de troncature. L'acquisition complète et le gate de
+preuves restent inchangés. Relecture locale de la même acquisition: budget, statut fermé
+et besoin visibles dès la fenêtre commençant au caractère 7 364. Aucun nouvel appel LLM.
+Cette heuristique n'est pas un extracteur universel; sans titre trouvé, le préfixe est conservé.
+
+Validation: 5 nouveaux cas échouaient avant correction; 225 tests ciblés passent en 11,86 s
+(`cache/astra-relay/phase-e5-targeted.log`); diff relu et `git diff --check` réussi.
+La suite complète de 1 268 tests précède cette correction et ne la valide pas.
+La validation complète finale de ce nouvel état reste à exécuter après checkpoint.
+
+Prochain test économique proposé, non exécuté: sur une demande encore ouverte, faire
+valider humainement le destinataire, le canal et une offre de consolidation d'un petit lot
+CSV avec critères d'acceptation et prix explicites. Aucun contact sans autorisation humaine;
+ne pas extrapoler le budget INR de cette annonce fermée au pilote français.
+
+Le dépôt ne contient toujours aucune preuve de paiement commercial, de livraison acceptée ou
+d'utilisation client pour la première activité. Tests verts, commits, agents et missions ne sont
+pas des preuves de marché.
+
+Le golden path opérationnel reste `docs/HANDOFF_WORK.md`. La phase E prépare techniquement ce
+parcours; elle ne remplace pas l'expérience client ni la décision humaine.

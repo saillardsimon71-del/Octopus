@@ -199,12 +199,13 @@ def build_manifest(report: dict) -> dict:
                 raise PromotionError(f"ticket #{index}: oracle final différent de la baseline")
             if task_input.get("allowed_paths") != allowed:
                 raise PromotionError(f"ticket #{index}: allowed_paths worker incohérent")
-            protected = sorted(set(allowed) & dev_worker.OCTOPUS_PRODUCT_PROTECTED_PATHS)
+            if len(allowed) > dev_worker.PRODUCT_TICKET_MAX_FILES:
+                raise PromotionError(f"ticket #{index}: allowed_paths product_ticket excessif")
+            protected = sorted(path for path in allowed if dev_worker._product_ticket_protected_path(path))
             if protected:
                 raise PromotionError(f"ticket #{index}: noyau product_ticket protégé: {protected}")
-            if any(path.startswith("tests/") or path.endswith("/conftest.py") or path == "conftest.py"
-                   for path in allowed):
-                raise PromotionError(f"ticket #{index}: modification des tests interdite")
+            if any(path.endswith("/conftest.py") or path == "conftest.py" for path in allowed):
+                raise PromotionError(f"ticket #{index}: modification de conftest.py interdite")
             commands = task_input.get("tests")
             if not isinstance(commands, list) or not commands:
                 raise PromotionError(f"ticket #{index}: commandes oracle manquantes")
@@ -215,6 +216,8 @@ def build_manifest(report: dict) -> dict:
             ]
             if not targets or any(not target.startswith("tests/") or not target.endswith(".py") for target in targets):
                 raise PromotionError(f"ticket #{index}: oracle product_ticket invalide")
+            if set(allowed) & set(targets):
+                raise PromotionError(f"ticket #{index}: modification des oracles de test interdite")
             max_files = task_input.get("max_files_changed")
             if (isinstance(max_files, bool) or not isinstance(max_files, int)
                     or not 1 <= max_files <= min(dev_worker.PRODUCT_TICKET_MAX_FILES, len(allowed))):
@@ -224,12 +227,11 @@ def build_manifest(report: dict) -> dict:
                 if (isinstance(value, bool) or not isinstance(value, int)
                         or not 1 <= value <= dev_worker.PRODUCT_TICKET_MAX_LINES):
                     raise PromotionError(f"ticket #{index}: {field} product_ticket invalide")
-            protected_changed = sorted(set(paths) & dev_worker.OCTOPUS_PRODUCT_PROTECTED_PATHS)
+            protected_changed = sorted(path for path in paths if dev_worker._product_ticket_protected_path(path))
             if protected_changed:
                 raise PromotionError(f"ticket #{index}: changed_paths touche le noyau protégé: {protected_changed}")
-            if any(path.startswith("tests/") or path.endswith("/conftest.py") or path == "conftest.py"
-                   for path in paths):
-                raise PromotionError(f"ticket #{index}: changed_paths modifie un test")
+            if set(paths) & set(targets):
+                raise PromotionError(f"ticket #{index}: changed_paths modifie un oracle")
 
         night_head = entry.get("night_head")
         if night_head is not None:
@@ -325,13 +327,10 @@ def verify_git(report: dict, manifest: dict) -> dict:
     if manifest["policy"] == "product_ticket":
         from . import acceptance, dev_worker
 
-        protected = sorted(set(actual_paths) & dev_worker.OCTOPUS_PRODUCT_PROTECTED_PATHS)
+        protected = sorted(path for path in actual_paths if dev_worker._product_ticket_protected_path(path))
         if protected:
             raise PromotionError(f"diff product_ticket touche le noyau protégé: {protected}")
-        test_paths = [
-            path for path in actual_paths
-            if path.startswith("tests/") or path.endswith("/conftest.py") or path == "conftest.py"
-        ]
+        test_paths = [path for path in actual_paths if path.endswith("/conftest.py") or path == "conftest.py"]
         if test_paths:
             raise PromotionError(f"diff product_ticket modifie des tests: {test_paths}")
 
@@ -359,12 +358,16 @@ def verify_git(report: dict, manifest: dict) -> dict:
                 outside = sorted(set(commit_paths) - allowed)
                 if outside:
                     raise PromotionError(f"ticket #{index}: commit hors allowed_paths: {outside}")
-                protected_commit = sorted(set(commit_paths) & dev_worker.OCTOPUS_PRODUCT_PROTECTED_PATHS)
+                protected_commit = sorted(path for path in commit_paths if dev_worker._product_ticket_protected_path(path))
                 if protected_commit:
                     raise PromotionError(f"ticket #{index}: commit touche le noyau protégé: {protected_commit}")
-                if any(path.startswith("tests/") or path.endswith("/conftest.py") or path == "conftest.py"
-                       for path in commit_paths):
-                    raise PromotionError(f"ticket #{index}: commit modifie un test")
+                oracle_paths = {
+                    arg.split("::", 1)[0]
+                    for command in task_input.get("tests", []) if isinstance(command, list)
+                    for arg in command[3:] if isinstance(arg, str) and not arg.startswith("-")
+                }
+                if set(commit_paths) & oracle_paths:
+                    raise PromotionError(f"ticket #{index}: commit modifie un oracle")
 
                 numstat = _git(
                     worktree, "diff", "--numstat", f"{commit}^", commit, "--"

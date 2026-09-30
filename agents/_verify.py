@@ -1,4 +1,4 @@
-"""Vérification complète du système Podalux (imports, DB, DeepSeek, outils, agents, navigateur, cycle).
+"""Vérification complète du système Podalux (imports, DB, DeepSeek, outils, agents, navigateur).
 
 Usage : python -m agents._verify
 """
@@ -8,8 +8,7 @@ import sys
 import traceback
 
 from . import config, db, deepseek, tools
-from .agents import SOUT, CONVERT, FORGE, GROWTH, LEDGER, ORBIT
-from . import cycle as cycle_mod
+from .agents import SOUT, CONVERT, GROWTH, LEDGER, ORBIT
 
 PASS = []
 FAIL = []
@@ -91,12 +90,12 @@ def main():
 
     print("=== 4. Agents (structure + appels réels) ===")
     def t_agents_defined():
-        for a in (SOUT, CONVERT, FORGE, GROWTH, LEDGER, ORBIT):
+        for a in (SOUT, CONVERT, GROWTH, LEDGER, ORBIT):
             assert hasattr(a, "run"), a.NAME
-    check("les 6 agents ont run()", t_agents_defined)
+    check("les agents historiques conservés ont run()", t_agents_defined)
 
     def t_sout():
-        r = SOUT.run(cycle_mod.already_produced())
+        r = SOUT.run([])
         assert r.get("offer_id"), "offer_id vide"
     check("SOUT.run (flash réel)", t_sout)
 
@@ -135,13 +134,6 @@ def main():
         finally:
             b.stop()
     check("goto + snapshot + links + screenshot", t_browser)
-
-    print("=== 6. Cycle (câblage) ===")
-    def t_cycle():
-        ap = cycle_mod.already_produced()
-        assert isinstance(ap, list)
-        assert hasattr(cycle_mod, "run_cycle")
-    check("already_produced + run_cycle présents", t_cycle)
 
     print(f"\n=== RÉSULTAT : {len(PASS)} OK / {len(FAIL)} ÉCHECS ===")
     if FAIL:

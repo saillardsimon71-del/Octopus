@@ -6,9 +6,8 @@ import time
 
 import pytest
 
-from agents import cycle, db, deepseek, task_handlers  # noqa: F401  (enregistre les handlers Podalux)
+from agents import db, deepseek, task_handlers  # noqa: F401  (enregistre les handlers Podalux)
 from octopus import builtin_handlers, journal, llm, tasks, worker  # noqa: F401
-from octopus.media import library
 from octopus.pricing import Usage
 
 QUIET = dict(log=lambda s: None)
@@ -23,6 +22,39 @@ def handlers(monkeypatch):
 
 
 # --- file -----------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("options", [
+    {"max_tasks": 0}, {"max_tasks": -1}, {"max_tasks": 1.5}, {"max_tasks": True},
+    {"poll_s": 0}, {"poll_s": -1}, {"poll_s": float("nan")},
+    {"poll_s": float("inf")}, {"poll_s": float("-inf")},
+])
+def test_worker_loop_rejects_invalid_bounds_before_claim(monkeypatch, options):
+    def unexpected_run(*args, **kwargs):
+        pytest.fail("invalid worker bounds must not claim or execute a task")
+
+    monkeypatch.setattr(worker, "run_one", unexpected_run)
+    with pytest.raises(ValueError):
+        worker.loop(**options, **QUIET)
+
+
+@pytest.mark.parametrize("options", [
+    ["--max-tasks", "0"], ["--max-tasks", "-1"],
+    ["--poll", "0"], ["--poll", "-1"], ["--poll", "nan"],
+    ["--poll", "inf"], ["--poll=-inf"],
+])
+@pytest.mark.parametrize("mode", [[], ["--once"]])
+def test_worker_cli_rejects_invalid_bounds_before_loading(monkeypatch, capsys, options, mode):
+    from octopus.__main__ import main
+
+    def unexpected_load(*args, **kwargs):
+        pytest.fail("invalid worker arguments must not load handlers")
+
+    monkeypatch.setattr(worker, "load_handlers", unexpected_load)
+    with pytest.raises(SystemExit) as exc:
+        main(["worker", *mode, *options])
+    assert exc.value.code == 2
+    assert "strictement positif" in capsys.readouterr().err
+
 
 def test_claim_order_priority_and_delay():
     low = tasks.enqueue("b", "k", {"n": 1})
@@ -72,14 +104,29 @@ def test_expired_lease_is_retried_then_failed():
     assert "bail expiré" in tasks.get(task_id)["error"]
 
 
+def _historical_generation(task_id):
+    # Existing journal rows still reconcile after removal of the media runtime.
+    conn = journal.connect()
+    try:
+        row = conn.execute(
+            "INSERT INTO media_generations "
+            "(created_at, updated_at, business, task_id, provider, model_type, prompt, status, phase, progress) "
+            "VALUES (?, ?, 'b', ?, 'wangp', 't2v', 'historical', 'running', 'rendering', 50)",
+            (time.time(), time.time(), task_id),
+        )
+        conn.commit()
+        return row.lastrowid
+    finally:
+        conn.close()
+
+
 def test_expired_lease_reconciles_linked_media_generation():
     task_id = tasks.enqueue("b", "media.video_generate", max_attempts=2)
     tasks.claim("mort", lease_s=-1)
-    generation_id = library.create("b", "wangp", "t2v", "test", {}, task_id=task_id)
-    library.update(generation_id, status="running", phase="rendering", progress=50)
+    generation_id = _historical_generation(task_id)
 
     tasks.reap()
-    retried = library.get(generation_id)
+    retried = dict(journal.query("SELECT * FROM media_generations WHERE id=?", (generation_id,))[0])
     assert retried["status"] == "queued"
     assert retried["phase"] == "retrying"
     assert retried["progress"] == 0
@@ -87,7 +134,7 @@ def test_expired_lease_reconciles_linked_media_generation():
 
     tasks.claim("mort-aussi", lease_s=-1)
     tasks.reap()
-    failed = library.get(generation_id)
+    failed = dict(journal.query("SELECT * FROM media_generations WHERE id=?", (generation_id,))[0])
     assert failed["status"] == "failed"
     assert failed["phase"] == "failed"
     assert "bail expiré" in failed["error"]
@@ -95,13 +142,12 @@ def test_expired_lease_reconciles_linked_media_generation():
 
 def test_reap_repairs_preexisting_terminal_media_mismatch():
     task_id = tasks.enqueue("b", "media.video_generate")
-    generation_id = library.create("b", "wangp", "t2v", "test", {}, task_id=task_id)
-    library.update(generation_id, status="running", phase="rendering", progress=50)
+    generation_id = _historical_generation(task_id)
     assert tasks.cancel(task_id, "arrêt demandé") == "cancelled"
 
     result = tasks.reap()
 
-    repaired = library.get(generation_id)
+    repaired = dict(journal.query("SELECT * FROM media_generations WHERE id=?", (generation_id,))[0])
     assert result["reconciled_media"] == [generation_id]
     assert repaired["status"] == "cancelled"
     assert repaired["phase"] == "cancelled"
@@ -382,6 +428,36 @@ def test_human_in_the_loop_resumes_after_answer(handlers):
     assert statuses == ["waiting_human", "done"]
 
 
+def test_idle_worker_wakes_for_task_and_human_answer_without_repeating_step(handlers):
+    computed = []
+
+    @worker.handler("test.continuous")
+    def continuous(ctx):
+        value = ctx.memo("acquired", lambda: computed.append(ctx.id) or "source")
+        return {"value": value, "answer": ctx.ask_human("review", "Continue?")}
+
+    journal.connect().close()
+    stop = threading.Event()
+    thread = threading.Thread(target=worker.loop, kwargs={"stop": stop, "poll_s": 0.01,
+        "max_tasks": 2, **QUIET}, daemon=True)
+    thread.start()
+    try:
+        task_id = worker.enqueue("b", "test.continuous")
+        deadline = time.monotonic() + 5
+        while tasks.get(task_id)["status"] != "waiting_human" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert tasks.get(task_id)["status"] == "waiting_human"
+        assert computed == [task_id]
+        tasks.answer(tasks.pending_human_requests()[0]["id"], "yes")
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert tasks.get(task_id)["output"] == {"value": "source", "answer": "yes"}
+        assert computed == [task_id]
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+
+
 def test_unanswered_request_expires(handlers):
     @worker.handler("test.wait")
     def wait(ctx):
@@ -422,30 +498,20 @@ def test_schedule_does_not_pile_up(handlers):
 
 # --- handlers Podalux -----------------------------------------------------------------------
 
-def test_podalux_video_cycle_task(handlers, monkeypatch):
-    monkeypatch.setattr(cycle, "run_cycle", lambda offer_id=None, max_iterations=3: {
-        "offer_id": offer_id, "ledger": {"score": 27, "go": True, "blocking": []},
-        "orbit": {"decision": "done"}, "iterations": [{}]})
-    worker.enqueue("podalux", "podalux.video_cycle", {"offer_id": "cash_devis_cgv01"})
-    result = worker.run_one("w", **QUIET)
-    assert result["resource"] == "cpu_heavy" and result["max_attempts"] == 3
-    assert result["output"] == {"offer_id": "cash_devis_cgv01", "score": 27, "go": True, "decision": "done",
-                                "iterations": 1, "blocking": []}
-
-
-def test_podalux_task_cancel_reaches_the_cycle(handlers, monkeypatch):
+def test_podalux_task_cancel_reaches_the_agent(handlers, monkeypatch):
     seen = {}
 
-    def fake_cycle(offer_id=None, max_iterations=3):
+    def fake_agent(*args, **kwargs):
         for _ in range(60):
             if db.stop_requested():
                 seen["stopped"] = True
                 break
             time.sleep(0.1)
-        return {"offer_id": offer_id, "ledger": {}, "orbit": {}, "iterations": []}
+        return {"final": "stopped", "steps": []}
 
-    monkeypatch.setattr(cycle, "run_cycle", fake_cycle)
-    task_id = worker.enqueue("podalux", "podalux.video_cycle", {})
+    from agents import runtime
+    monkeypatch.setattr(runtime, "run_agent", fake_agent)
+    task_id = worker.enqueue("podalux", "podalux.agent_message", {"text": "test"})
     threading.Timer(0.3, lambda: tasks.cancel(task_id)).start()
     assert worker.run_one("w", **QUIET)["status"] == "cancelled" and seen.get("stopped")
 
@@ -456,11 +522,30 @@ def test_podalux_agent_message_task(handlers, monkeypatch):
     assert worker.run_one("w", **QUIET)["output"] == {"role": "ORBIT", "final": "Bonjour !", "steps": 0}
 
 
-def test_cli_roundtrip(handlers, capsys):
+@pytest.mark.parametrize("mode", [["--once"], ["--max-tasks", "1", "--poll", "0.01"]])
+def test_cli_roundtrip(handlers, capsys, mode):
     from octopus.__main__ import main
     assert main(["enqueue", "octopus", "octopus.cost_report"]) == 0
-    assert main(["worker", "--once"]) == 0
+    assert main(["enqueue", "octopus", "octopus.cost_report"]) == 0
+    assert main(["worker", *mode]) == 0
+    assert len(tasks.list_tasks(status="done")) == 1
+    assert len(tasks.list_tasks(status="queued")) == 1
     assert main(["tasks"]) == 0
     out = capsys.readouterr().out
     assert "tâche #1 en file" in out and "done" in out
     assert main(["enqueue", "octopus", "inconnu"]) == 2
+
+
+def test_retired_video_commands_are_rejected(monkeypatch, capsys):
+    from agents import run
+    from octopus.__main__ import main
+
+    with pytest.raises(SystemExit) as error:
+        main(["video"])
+    assert error.value.code == 2
+    for command in ("cycle", "batch"):
+        monkeypatch.setattr("sys.argv", ["agents.run", command])
+        with pytest.raises(SystemExit) as error:
+            run.main()
+        assert error.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err

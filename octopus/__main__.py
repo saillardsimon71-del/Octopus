@@ -5,10 +5,12 @@
   python -m octopus models
   python -m octopus doctor
   python -m octopus worker [--once] [--max-tasks N]
+  python -m octopus runtime [--business octopus] [--tick-every 300] [--once]   # démarrage durable unique
+  python -m octopus status [--business X] [--json]                             # état observable du runtime
   python -m octopus night-shift [--repo .] [--hours 8] [--max-tasks 4] [--dry-run]
   python -m octopus night-stop | night-resume
   python -m octopus promotion --report data/night-shift-reports/<run>.json
-  python -m octopus enqueue podalux podalux.video_cycle --input '{"offer_id": "cash_devis_cgv01"}'
+  python -m octopus enqueue octopus octopus.cost_report
   python -m octopus tasks [--status queued] | cancel ID | ask | answer REQUEST_ID "texte"
   python -m octopus schedule octopus octopus.cost_report --every 86400 [--disable]
   python -m octopus events [--since ID]
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import platform
 import shutil
@@ -125,7 +128,61 @@ def _dump(value) -> str:
 
 def cmd_worker(args) -> int:
     from . import worker
+    if args.task is not None:
+        if args.max_tasks is not None:
+            print("--task et --max-tasks sont incompatibles")
+            return 2
+        worker.load_handlers()
+        try:
+            result = worker.run_one(task_id=args.task)
+        except ValueError as exc:
+            print(f"task invalide : {exc}")
+            return 2
+        print(_dump(result) if result else "aucune tâche prête")
+        return 0
     worker.load_handlers()
+    if args.once:
+        result = worker.run_one()
+        print(_dump(result) if result else "aucune tâche prête")
+        return 0
+    worker.loop(poll_s=args.poll, max_tasks=args.max_tasks)
+    return 0
+
+
+def cmd_status(args) -> int:
+    """État observable du runtime : objectifs, tâches, runs, attentes, échecs, suite, routage, coûts."""
+    from . import status
+    state = status.snapshot(args.business, limit=args.limit)
+    if args.json:
+        print(json.dumps(state, ensure_ascii=False, indent=1, default=str))
+    else:
+        print(status.render(state))
+    return 0
+
+
+def cmd_runtime(args) -> int:
+    """Démarrage durable unique : superviseur autonome + worker, sans chorégraphie manuelle.
+
+    Un seul `python -m octopus runtime` suffit ensuite à la boucle normale :
+    objectif persistant -> mission -> preuve -> évaluation -> tâche suivante.
+    """
+    from . import supervisor, worker
+    worker.load_handlers()
+    if supervisor.TICK_KIND not in worker.HANDLERS or supervisor.WORK_KIND not in worker.HANDLERS:
+        print(f"handlers manquants : {supervisor.TICK_KIND}, {supervisor.WORK_KIND}")
+        return 2
+    for missing in ("tick_every", "poll"):
+        value = getattr(args, missing)
+        if not math.isfinite(value) or value <= 0:
+            print(f"runtime --{missing.replace('_', '-')} doit être fini et strictement positif")
+            return 2
+    if args.max_tasks is not None and args.max_tasks <= 0:
+        print("runtime --max-tasks doit être strictement positif")
+        return 2
+    task_id = supervisor.bootstrap(args.business, tick_every_s=args.tick_every)
+    print(f"[runtime] superviseur amorcé : tâche #{task_id} ({supervisor.TICK_KIND}) ; "
+          f"tick toutes les {args.tick_every:g} s")
+    print("[runtime] état observable : python -m octopus status")
     if args.once:
         result = worker.run_one()
         print(_dump(result) if result else "aucune tâche prête")
@@ -319,8 +376,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("doctor", help="verification de l'installation")
     p = sub.add_parser("worker", help="execute les taches de la file")
     p.add_argument("--once", action="store_true", help="une seule tache puis sortie")
-    p.add_argument("--max-tasks", type=int, default=None)
-    p.add_argument("--poll", type=float, default=2.0)
+    p.add_argument("--task", type=int, default=None, help="executer une tache specifique par ID")
+    p.add_argument("--max-tasks", type=int, default=None, help="nombre de taches strictement positif")
+    p.add_argument("--poll", type=float, default=2.0, help="intervalle fini strictement positif, en secondes")
     p = sub.add_parser("night-shift", help="canary autonome borné, sans push ni merge vers main")
     p.add_argument("--repo", default=".", help="racine Git propre à utiliser comme base")
     p.add_argument("--plan", default=None, help="plan JSON; défaut: octopus/config/night_shift.json")
@@ -328,6 +386,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-tasks", type=int, default=4)
     p.add_argument("--max-failures", type=int, default=2)
     p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("runtime", help="démarrage durable unique : superviseur autonome + worker")
+    p.add_argument("--business", default="octopus", help="business porteur du tick superviseur")
+    p.add_argument("--tick-every", type=float, default=300.0,
+                   help="intervalle du superviseur en secondes (défaut 300)")
+    p.add_argument("--poll", type=float, default=2.0, help="intervalle de scrutation du worker, en secondes")
+    p.add_argument("--max-tasks", type=int, default=None, help="nombre de tâches strictement positif")
+    p.add_argument("--once", action="store_true", help="une seule tâche puis sortie (diagnostic)")
+    p = sub.add_parser("status", help="état observable du runtime (objectifs, tâches, runs, attentes, coûts)")
+    p.add_argument("--business", default=None, help="limiter aux objectifs de ce business")
+    p.add_argument("--limit", type=int, default=8, help="nombre d'éléments par section (défaut 8)")
+    p.add_argument("--json", action="store_true", help="sortie JSON plutôt que texte")
     sub.add_parser("night-stop", help="demande l'arrêt immédiat du night-shift/Kilo actif")
     sub.add_parser("night-resume", help="lève le kill switch night-shift")
     p = sub.add_parser("promotion", help="valide un rapport night-shift avant revue humaine")
@@ -382,17 +451,25 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("businesses", help="tableau de bord par activite")
     p.add_argument("--days", type=int, default=7)
-    from .media import cli as media_cli
-    media_cli.add_parser(sub)
     from . import strategy_cli
     strategy_cli.add_parser(sub)
     args = parser.parse_args(argv)
+    if args.cmd == "worker":
+        if args.task is not None and args.max_tasks is not None:
+            parser.error("--task et --max-tasks sont incompatibles")
+        if args.task is not None and args.task <= 0:
+            parser.error("worker --task doit etre strictement positif")
+        if args.max_tasks is not None and args.max_tasks <= 0:
+            parser.error("worker --max-tasks doit etre strictement positif")
+        if not math.isfinite(args.poll) or args.poll <= 0:
+            parser.error("worker --poll doit etre fini et strictement positif")
     commands = {"report": cmd_report, "bench": cmd_bench, "models": cmd_models, "doctor": cmd_doctor,
-                "worker": cmd_worker, "night-shift": cmd_night_shift, "night-stop": cmd_night_stop,
+                "worker": cmd_worker, "runtime": cmd_runtime, "status": cmd_status,
+                "night-shift": cmd_night_shift, "night-stop": cmd_night_stop,
                 "night-resume": cmd_night_resume, "promotion": cmd_promotion, "enqueue": cmd_enqueue,
                 "tasks": cmd_tasks, "cancel": cmd_cancel,
                 "ask": cmd_ask, "answer": cmd_answer, "schedule": cmd_schedule, "events": cmd_events,
-                "video": media_cli.run, "businesses": cmd_businesses, "strategy": strategy_cli.run,
+                "businesses": cmd_businesses, "strategy": strategy_cli.run,
                 "economy": strategy_cli.run_economy, "resources": cmd_resources}
     return commands[args.cmd](args)
 

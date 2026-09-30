@@ -14,12 +14,107 @@ Ne simule aucune performance live : tout est hors ligne et déterministe.
 """
 from __future__ import annotations
 
+import copy
+import json
+
 import pytest
 
 from agents import deepseek, runtime, search
 from octopus import journal
 
 TODAY = "2026-09-24"
+
+
+@pytest.mark.parametrize("business", [None, "dry_run_fresh", "octopus"])
+@pytest.mark.parametrize("allowed_tools", [None, {"search", "browse"}],
+                         ids=["default-tools", "read-only-web"])
+@pytest.mark.parametrize("business_signal_focus", [False, True],
+                         ids=["general-mission", "economic-signals"])
+def test_neutral_cold_start_does_not_inherit_historical_business(
+        monkeypatch, business, allowed_tools, business_signal_focus):
+    """Capture every actual LLM message with historical SQLite state present."""
+    from agents import db
+    from octopus import resources, strategy
+
+    markers = ["Podalux", "video_canary", "product_csv_enrichment_canary",
+               "multibrand_shop_canary", "artisans_canary", "accessibility_canary",
+               "old_mission_canary", "existing_site_canary"]
+    history = " ".join(markers)
+    for scope in ("podalux", "octopus", "accessibility_outreach"):
+        objective = strategy.create("objective", scope, history, created_by="human", statement=history)
+        strategy.transition("objective", objective, scope, "active", actor="human")
+        strategy.create("hypothesis", scope, history, created_by="human",
+                        parent_id=objective, statement=history)
+    db.remember("ORBIT", "active_objective", history)
+    db.remember("SOUT", "active_hypothesis", history)
+    db.post("ORBIT", history)
+    for name in ("Netlify", "Gmail", "Stripe", "LinkedIn", "YouTube", "browser"):
+        resources.declare(name.lower(), "compte", name, created_by="human", notes=history)
+
+    seen = scripted(monkeypatch, [
+        {"tasks": [{"role": "SOUT", "task": "Identifier un besoin observable"}]},
+        {"final": "Aucune source acquise, résultat inconclusif"},
+        {"rapport": "Inconclusif", "business_signals": []},
+    ])
+    result = runtime.run_mission(
+        "Identifier une opportunité économique testable, sans objectif métier hérité",
+        business=business, allowed_tools=allowed_tools,
+        business_signal_focus=business_signal_focus, business_signal_target=1,
+    )
+    assert len(seen) == 3  # planner, executing agent, synthesis
+    messages = json.dumps(seen, ensure_ascii=False).lower()
+    for marker in markers:
+        assert marker.lower() not in messages
+    assert result["execution_status"] == "completed"
+    assert result["synthesis_status"] == "validated"
+    if business_signal_focus:
+        assert result["business_signals"] == []
+    else:
+        assert "business_signals" not in result
+    assert db.recall("ORBIT", "active_objective") == history
+    assert len(strategy.list_items("hypothesis", "octopus")) == 1
+
+
+@pytest.mark.parametrize("inherited", [False, True])
+def test_mission_preserves_explicit_or_parent_business(monkeypatch, inherited):
+    from contextlib import nullcontext
+
+    scopes = []
+
+    def capture(*args, **kwargs):
+        scopes.append(journal.current_run().business)
+        return {}
+
+    monkeypatch.setattr(runtime, "_run_mission", capture)
+    parent = journal.run("podalux", "mission") if inherited else nullcontext()
+    with parent:
+        runtime.run_mission("Explicit historical work", business=None if inherited else "podalux")
+    assert scopes == ["podalux"]
+
+
+@pytest.mark.parametrize("limit", [1200, 6000])
+def test_browse_view_exposes_heading_after_long_site_menu(limit):
+    title = "Spreadsheet Product Data Extraction"
+    text = "Site navigation\n" * 600 + title + "\nClosed\nINR 100-400/hour\nConsolidate product spreadsheets."
+    result = {"page": {"title": title, "main_text": text, "text_chars": len(text)}}
+    original = copy.deepcopy(result)
+    view = json.loads(runtime._tool_result_view("browse", result, max_chars=limit))
+    assert "Closed" in view["texte"]
+    assert "INR 100-400/hour" in view["texte"]
+    assert len(view["texte"]) <= limit
+    start = view["text_start_char"]
+    assert view["texte"] == text[start:start + limit]
+    assert view["text_truncated"] is True
+    assert result == original  # evidence gate retains the entire acquired page
+
+
+@pytest.mark.parametrize("title", ["", "Absent heading", "Intro"])
+def test_browse_view_keeps_prefix_without_late_heading(title):
+    text = "Intro\n" + "body " * 400
+    view = json.loads(runtime._tool_result_view("browse", {"page": {
+        "title": title, "main_text": text}}, max_chars=1200))
+    assert view["texte"] == text[:1200]
+    assert view["text_start_char"] == 0
 
 
 @pytest.fixture

@@ -702,11 +702,22 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
     considered: list[dict] = []
     last_error: Exception | None = None
     budget_block: str | None = None
+    oversized_providers = {
+        row["provider"] for row in journal.query(
+            "SELECT DISTINCT provider FROM llm_calls WHERE task=? AND business=? AND prompt_sha256=? "
+            "AND status='request_too_large' AND ts>=?",
+            (task, business_name, digest, time.time() - 86400),
+        )
+    }
 
     for candidate_attempt, model_id in enumerate(candidates, start=1):
         model = cat.model(model_id)
         if model is None:
             considered.append({"model": model_id, "eligible": False, "reason": "absent du catalogue"})
+            continue
+        if model["provider"] in oversized_providers:
+            considered.append({"model": model_id, "eligible": False,
+                               "reason": "HTTP 413 déjà constaté pour ce contenu et ce fournisseur"})
             continue
         reason = _ineligibility(cat, profile_name, prof, task, task_def, model_id, model, need)
         if reason:
@@ -750,6 +761,9 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
             except Exception as exc:
                 method_name = structured_method or "none"
                 failure = f"echec [{method_name}] : {type(exc).__name__}: {str(exc)[:160]}"
+                response = getattr(exc, "response", None)
+                too_large = (getattr(exc, "status_code", None) == 413
+                             or getattr(response, "status_code", None) == 413)
                 cooldown_delay = _set_rate_limit_cooldown(model_id, exc)
                 provider_cooldown_delay = _set_provider_cooldown(model["provider"], exc)
                 considered.append({"model": model_id, "eligible": True, "reason": failure})
@@ -759,10 +773,13 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                     justification["rate_limit_cooldown_s"] = cooldown_delay
                 if provider_cooldown_delay is not None:
                     justification["provider_cooldown_s"] = provider_cooldown_delay
-                journal.record_llm_call({**base, "status": "error", "error": failure,
+                journal.record_llm_call({**base, "status": "request_too_large" if too_large else "error", "error": failure,
                                          "duration_ms": int((time.perf_counter() - started) * 1000),
                                          "justification": json.dumps(justification, ensure_ascii=False)})
                 last_error = exc
+                if too_large:
+                    oversized_providers.add(model["provider"])
+                    break
                 if (structured_method is not None and method_index + 1 < len(methods)
                         and _structured_method_error(exc)):
                     continue

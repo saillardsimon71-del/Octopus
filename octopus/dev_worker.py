@@ -133,6 +133,7 @@ KILO_COMMAND = "kilo.cmd" if os.name == "nt" else "kilo"
 KILO_TIMEOUT_S = 600
 KILO_POLL_S = 1.0
 KILO_TEST_FEEDBACK_CHARS = 4000
+KILO_PROMPT_CHARS = 6500
 KILO_MAX_PASSES = 3
 # Deterministic repair is intentionally tiny and closed-world. JSON trailing
 # whitespace is semantically inert once the document parses; Markdown is
@@ -158,16 +159,14 @@ OCTOPUS_SELF_PROTECTED_PATHS = frozenset({
     "octopus/AGENTS.md",
     "docs/ACCEPTANCE_GATES.md",
 })
-# Product tickets may change application code, but never the self-development, cost,
-# outbound-action, or web-safety boundaries that supervise those tickets.
+# Product tickets may change application code. Only the constructor, policy,
+# credentials, and known external-effect boundaries remain protected.
 OCTOPUS_PRODUCT_PROTECTED_PATHS = OCTOPUS_SELF_PROTECTED_PATHS | frozenset({
     "octopus/dev_worker.py",
     "octopus/night_shift.py",
     "octopus/promotion.py",
     "octopus/acceptance.py",
     "octopus/acceptance_probe.py",
-    "octopus/worker.py",
-    "octopus/tasks.py",
     "octopus/compute_finance.py",
     "octopus/economy.py",
     "octopus/actions.py",
@@ -188,6 +187,19 @@ OCTOPUS_PRODUCT_PROTECTED_PATHS = OCTOPUS_SELF_PROTECTED_PATHS | frozenset({
 # policy change, not something a product ticket can do itself.
 PRODUCT_TICKET_MAX_FILES = 20
 PRODUCT_TICKET_MAX_LINES = 5000
+
+
+def _product_ticket_protected_path(relative: str) -> bool:
+    path = relative.replace("\\", "/").lower()
+    parts = path.split("/")
+    return (
+        _forbidden_kilo_path(path)
+        or any(part in {".codex", ".github", ".venv", "cache", "data"} for part in parts)
+        or parts[0] in {"scripts", "docker"}
+        or path in {item.lower() for item in OCTOPUS_PRODUCT_PROTECTED_PATHS}
+        or path in {"pyproject.toml", "setup.py", "setup.cfg", "tox.ini", "pytest.ini"}
+        or (len(parts) == 1 and (path.startswith("requirements") or path.startswith("codex_")))
+    )
 _RETRY_DELAY_RE = re.compile(r"try again in ([0-9]+(?:\.[0-9]+)?)\s*(?:s|seconds?)\b", re.IGNORECASE)
 
 _KILO_SENSITIVE_PATTERNS = (
@@ -211,6 +223,13 @@ _KILO_PROTECTED_PATTERNS = (
     "docs/ACCEPTANCE_GATES.md", "docs/EVIDENCE_ACCEPTANCE.md",
     ".github/workflows/**",
     "octopus/acceptance.py", "octopus/acceptance_probe.py",
+    "scripts/**", "docker/**", ".codex/**", "**/.codex/**",
+    ".venv/**", "cache/**", "data/**",
+    "octopus/dev_worker.py", "octopus/night_shift.py", "octopus/promotion.py",
+    "octopus/compute_finance.py", "octopus/economy.py", "octopus/actions.py",
+    "octopus/browser_actions.py", "octopus/smtp_executor.py",
+    "agents/web_guard.py", "agents/browser.py", "agents/publish.py",
+    "pyproject.toml", "setup.py", "setup.cfg", "tox.ini", "pytest.ini", "requirements*",
 )
 
 
@@ -326,8 +345,15 @@ def _build_kilo_prompt(
             "meaningfully different correction; do not merely repeat the previous pass."
         )
     if last_test_output:
-        parts.append("PREVIOUS_FEEDBACK: " + " ".join(last_test_output[-KILO_TEST_FEEDBACK_CHARS:].split()))
-    return " ".join(parts)
+        prefix = "PREVIOUS_FEEDBACK: "
+        available = KILO_PROMPT_CHARS - len(" ".join(parts)) - len(prefix) - 1
+        if available > 0:
+            feedback = " ".join(last_test_output[-KILO_TEST_FEEDBACK_CHARS:].split())
+            parts.append(prefix + feedback[-available:])
+    prompt = " ".join(parts)
+    if len(prompt) > KILO_PROMPT_CHARS:
+        raise DevWorkerError("Kilo prompt exceeds the command-line limit; shorten the ticket goal")
+    return prompt
 
 
 def _kilo_environment(config_root: str, config: dict) -> dict[str, str]:
@@ -753,6 +779,24 @@ def _pytest_targets(commands: list[list[str]]) -> list[str]:
     return targets
 
 
+def _validate_post_change_tests(raw, repository: Path, allowed_paths: list[str] | None) -> list[str]:
+    if not isinstance(raw, list) or len(raw) > PRODUCT_TICKET_MAX_FILES:
+        raise DevWorkerError("post_change_tests doit être une liste bornée")
+    paths = []
+    for value in raw:
+        if not isinstance(value, str) or not value or re.search(r"[*?\[\]:\x00-\x1f]", value):
+            raise DevWorkerError("post_change_tests exige des fichiers explicites")
+        path = value.replace("\\", "/")
+        parts = path.split("/")
+        if len(parts) < 2 or parts[0] != "tests" or not path.endswith(".py") or any(part in {"", ".", ".."} for part in parts):
+            raise DevWorkerError(f"post_change_tests invalide: {value}")
+        if not (repository / path).is_file() and path not in (allowed_paths or []):
+            raise DevWorkerError(f"post_change_tests absent hors allowed_paths: {value}")
+        if path not in paths:
+            paths.append(path)
+    return paths
+
+
 def _validate_octopus_self_modification_policy(
         repository: Path, backend: str, allowed_paths: list[str] | None, tests: list[list[str]],
         test_sandbox: str, test_sandbox_image: str, max_files_changed: int | None,
@@ -778,24 +822,26 @@ def _validate_octopus_self_modification_policy(
         raise DevWorkerError("chemin de gouvernance protégé: " + ", ".join(protected))
 
     if product_ticket:
-        product_protected = sorted(set(allowed_paths) & OCTOPUS_PRODUCT_PROTECTED_PATHS)
+        product_protected = sorted(path for path in allowed_paths if _product_ticket_protected_path(path))
         if product_protected:
             raise DevWorkerError(
                 "product_ticket refuse une frontière de sécurité: " + ", ".join(product_protected)
             )
-        if any(path.startswith("tests/") or path.endswith("/conftest.py") or path == "conftest.py"
-               for path in allowed_paths):
-            raise DevWorkerError("product_ticket OCTOPUS ne peut pas modifier ses oracles de test")
+        if any(path.endswith("/conftest.py") or path == "conftest.py" for path in allowed_paths):
+            raise DevWorkerError("product_ticket OCTOPUS ne peut pas modifier conftest.py")
         if len(allowed_paths) > PRODUCT_TICKET_MAX_FILES:
             raise DevWorkerError(
                 f"product_ticket OCTOPUS limité à {PRODUCT_TICKET_MAX_FILES} chemins autorisés"
             )
         actual_targets = _pytest_targets(tests)
         if not actual_targets or any(
-            not target.startswith("tests/") or not target.endswith(".py")
+            not target.split("::", 1)[0].startswith("tests/")
+            or not target.split("::", 1)[0].endswith(".py")
             for target in actual_targets
         ):
             raise DevWorkerError("product_ticket OCTOPUS exige uniquement des cibles pytest sous tests/")
+        if set(allowed_paths) & {target.split("::", 1)[0] for target in actual_targets}:
+            raise DevWorkerError("product_ticket OCTOPUS ne peut pas modifier ses oracles de test")
         if test_sandbox != "docker":
             raise DevWorkerError("product_ticket OCTOPUS exige test_sandbox=docker")
         if (
@@ -1127,6 +1173,8 @@ def _docker_test_args(
         "-e", "HOME=/tmp",
         "-e", "USERPROFILE=/tmp",
         "-e", "XDG_CONFIG_HOME=/tmp",
+        "-e", "OCTOPUS_HOME=/tmp/octopus-state",
+        "-e", "PODALUX_ROOT=/tmp/podalux-state",
         "-e", "PYTHONUTF8=1",
         "-e", "PYTHONDONTWRITEBYTECODE=1",
         "-e", "TZ=UTC",
@@ -1479,6 +1527,7 @@ def _forbidden_kilo_path(relative: str) -> bool:
     name = lowered[-1]
     return (
         any(part in {".git", ".kilo", ".kilocode", ".aws", ".ssh", ".docker"} for part in lowered)
+        or any(char in relative for char in "*?[]:\x00\r\n")
         or name == ".env"
         or name.startswith(".env.")
         or name.endswith((".pem", ".key", ".p12", ".pfx", ".kdbx", ".tfstate", ".tfvars"))
@@ -1610,7 +1659,7 @@ def _deterministic_diff_check_fixes(
             continue
         if allowed_paths is not None and relative not in set(allowed_paths):
             continue
-        if _forbidden_kilo_path(relative) or relative in OCTOPUS_PRODUCT_PROTECTED_PATHS:
+        if _product_ticket_protected_path(relative):
             continue
         flagged.setdefault(relative, set()).add(int(match.group("line")))
 
@@ -1869,6 +1918,7 @@ def development_task(ctx):
     if backend not in {"kilo", "declarative"}:
         raise DevWorkerError("backend attendu: kilo ou declarative")
     allowed_paths = _validate_allowed_paths(ctx.input.get("allowed_paths"))
+    post_change_tests = _validate_post_change_tests(ctx.input.get("post_change_tests", []), repository, allowed_paths)
     acceptance_criteria = _validate_acceptance_criteria(ctx.input.get("acceptance_criteria"))
     noop_allowed = bool(ctx.input.get("noop_allowed", False))
     test_sandbox = _validate_test_sandbox(ctx.input.get("test_sandbox"))
@@ -1931,6 +1981,9 @@ def development_task(ctx):
 
     worktree, branch = _create_worktree(repository, ctx.id)
     _assert_safe_allowed_paths(worktree, allowed_paths)
+    if post_change_tests:
+        _assert_safe_allowed_paths(worktree, post_change_tests)
+    post_commands = [[sys.executable, "-m", "pytest", "-q", path] for path in post_change_tests]
     if strict_repository_preflight:
         _strict_repository_preflight(worktree)
     if backend == "declarative":
@@ -1982,7 +2035,7 @@ def development_task(ctx):
     for attempt in range(KILO_MAX_PASSES):
         repository_context = _repository_context(worktree)
         prompt = _build_kilo_prompt(
-            goal, tests, max_steps, last_test_output, attempt,
+            goal, tests + post_commands, max_steps, last_test_output, attempt,
             allowed_paths=allowed_paths,
             acceptance_criteria=acceptance_criteria,
             noop_allowed=noop_allowed,
@@ -1990,7 +2043,7 @@ def development_task(ctx):
         )
         try:
             kilo_output = _run_kilo(
-                worktree, goal, tests, max_steps, prompt=prompt, allowed_paths=allowed_paths,
+                worktree, goal, tests + post_commands, max_steps, prompt=prompt, allowed_paths=allowed_paths,
             )
             summary = _kilo_output_summary(kilo_output)
             ctx.emit("development.kilo_pass", {
@@ -2056,6 +2109,12 @@ def development_task(ctx):
                     tests_passed = noop_signature == baseline_signature
                     if not tests_passed:
                         test_output += "\nORACLE_SIGNATURE_MISMATCH"
+                if tests_passed and post_commands:
+                    post_output, tests_passed = _run_tests(
+                        worktree, post_commands, sandbox=test_sandbox, sandbox_image=effective_test_image,
+                        expected_image_id=effective_test_image_id,
+                    )
+                    test_output += "\n" + post_output
                 ctx.emit("development.tool", {"action": "test", "ok": tests_passed, "noop": True})
                 if tests_passed:
                     gate_result = None
@@ -2117,6 +2176,8 @@ def development_task(ctx):
                         "baseline_oracle_runs": 2 if baseline_signature is not None else 0,
                         "oracle_tests": len(baseline_signature or ()),
                         "post_oracle_tests": len(noop_signature if baseline_signature is not None else ()),
+                        "post_change_tests": post_change_tests,
+                        "post_change_tests_passed": True,
                         "test_sandbox": test_sandbox,
                         "test_sandbox_image": effective_test_image_id if test_sandbox == "docker" else None,
                         "test_sandbox_image_ref": effective_test_image if test_sandbox == "docker" else None,
@@ -2170,6 +2231,12 @@ def development_task(ctx):
             tests_passed = post_signature == baseline_signature
             if not tests_passed:
                 test_output += "\nORACLE_SIGNATURE_MISMATCH"
+        if tests_passed and post_commands:
+            post_output, tests_passed = _run_tests(
+                worktree, post_commands, sandbox=test_sandbox, sandbox_image=effective_test_image,
+                expected_image_id=effective_test_image_id,
+            )
+            test_output += "\n" + post_output
         ctx.emit("development.tool", {"action": "test", "ok": tests_passed})
         if tests_passed:
             changed_paths = _validate_kilo_result(
@@ -2247,6 +2314,8 @@ def development_task(ctx):
                 "baseline_oracle_runs": 2 if baseline_signature is not None else 0,
                 "oracle_tests": len(baseline_signature or ()),
                 "post_oracle_tests": len(post_signature if baseline_signature is not None else ()),
+                "post_change_tests": post_change_tests,
+                "post_change_tests_passed": True,
                 "self_policy": "product_ticket" if product_ticket else ("python_canary" if octopus_python_canary else "scoped_kilo"),
                 "deterministic_fixes": deterministic_fixes,
             }

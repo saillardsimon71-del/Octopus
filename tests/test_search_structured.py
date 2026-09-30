@@ -648,7 +648,7 @@ def test_lockstep_browses_a_native_url(monkeypatch):
     monkeypatch.setitem(runtime.TOOLS["browse"], "fn",
                         lambda args: seen.append(args["url"]) or {"texte": "preuve " + "x" * 200})
     from agents import deepseek
-    actions = iter([{"tool": "search", "args": {"query": "mission déménagement"}}])
+    actions = iter([{"tool": "search", "args": {"query": "mission déménagement"}}, {"final": "ok"}])
     monkeypatch.setattr(deepseek, "call_json", lambda *a, **k: next(actions))
 
     result = runtime.run_agent("SOUT", "chercher", max_steps=3, allowed_tools={"search", "browse"},
@@ -656,6 +656,7 @@ def test_lockstep_browses_a_native_url(monkeypatch):
 
     assert seen == ["https://example.org/offre/(42)"]
     assert result["steps"][1]["lockstep_forced"] is True
+    assert result["execution_status"] == "completed"
 
 
 def test_search_failure_does_not_produce_urls(monkeypatch):
@@ -853,3 +854,53 @@ def test_structured_search_results_are_seen_by_record_observation(monkeypatch):
         runtime._search({"query": "mission déménagement"})
         assert runtime._seen_this_session("https://example.org/offre/(42)") is True
         assert runtime._seen_this_session("https://invente.example.org/jamais") is False
+
+
+def test_business_search_uses_hermes_ddgs_before_bing(keyless):
+    keyless.setattr(search, "_ddgs_available", lambda: True, raising=False)
+    keyless.setattr(search, "_ddgs_items", lambda q, n: [item(provider="ddgs")], raising=False)
+    keyless.setattr(search, "_bing_web_items", blow_up("Bing"))
+    with runtime.search_purpose(search.SEARCH_PURPOSE_BUSINESS):
+        refusal, result = runtime.TOOLS.dispatch("search", {"query": "offre"}, {"search"})
+    assert refusal is None
+    assert result["items"][0]["provider"] == "ddgs"
+    assert result["errors"] == []
+
+
+def test_ddgs_failure_falls_back_without_hiding_error(keyless):
+    keyless.setattr(search, "_ddgs_available", lambda: True, raising=False)
+    keyless.setattr(search, "_ddgs_items", blow_up("DDGS unavailable"), raising=False)
+    keyless.setattr(search, "_bing_web_items", lambda q, n: [item()])
+    result = search.search_envelope("offre", purpose=search.SEARCH_PURPOSE_BUSINESS)
+    assert result["items"][0]["provider"] == "bing_web"
+    assert "DDGS unavailable" in result["errors"][0]
+
+
+def test_ddgs_cancellation_never_falls_back(keyless):
+    from agents import cancel
+
+    def stop(*args):
+        raise cancel.Cancelled("stop")
+
+    keyless.setattr(search, "_ddgs_available", lambda: True, raising=False)
+    keyless.setattr(search, "_ddgs_items", stop, raising=False)
+    keyless.setattr(search, "_bing_web_items", blow_up("Bing"))
+    with pytest.raises(cancel.Cancelled):
+        search.search_envelope("offre", purpose=search.SEARCH_PURPOSE_BUSINESS)
+
+
+def test_ddgs_has_same_site_filter_and_mission_permission(keyless):
+    calls = []
+    keyless.setattr(search, "_ddgs_available", lambda: True, raising=False)
+
+    def hits(q, n):
+        calls.append(q)
+        return [item("https://example.org/ok", provider="ddgs"),
+                item("https://elsewhere.org/no", provider="ddgs")]
+
+    keyless.setattr(search, "_ddgs_items", hits, raising=False)
+    refusal, result = runtime.TOOLS.dispatch("search", {"query": "offre"}, {"browse"})
+    assert refusal and result is None and calls == []
+    result = search.search_envelope("offre", site="example.org", purpose=search.SEARCH_PURPOSE_BUSINESS)
+    assert calls == ["offre site:example.org"]
+    assert [i["url"] for i in result["items"]] == ["https://example.org/ok"]

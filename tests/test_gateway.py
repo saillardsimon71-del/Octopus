@@ -175,6 +175,32 @@ def test_structured_cascade_has_bounded_call_count(transport, providers_up, monk
     ]
 
 
+def test_http_413_skips_same_provider_for_same_prompt_across_calls(transport, providers_up, monkeypatch):
+    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
+    prove("agent.plan", "kilo/auto-free")
+
+    class TooLarge(Exception):
+        status_code = 413
+
+    def handler(provider, request):
+        if provider["base_url"].endswith("/v1") and request["model"] in (
+            "groq/openai/gpt-oss-120b", "auto/best-free"
+        ):
+            return TooLarge("Request too large")
+        return ('{"plan": []}', Usage(prompt_tokens=50, completion_tokens=10))
+
+    transport.handler = handler
+    assert llm.complete("agent.plan", MSG, profile="zero_cost").text == '{"plan": []}'
+    llm._rate_limit_cooldowns.clear()
+    llm._provider_cooldowns.clear()
+    assert llm.complete("agent.plan", MSG, profile="zero_cost").text == '{"plan": []}'
+
+    assert transport.models.count("groq/openai/gpt-oss-120b") == 1
+    assert "auto/best-free" not in transport.models
+    assert len([row for row in calls() if row["status"] == "request_too_large"]) == 1
+
+
 def test_normal_zero_cost_routes_to_proven_local_model(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
     monkeypatch.setattr(deepseek, "_client", lambda: pytest.fail("le mode normal ne doit pas appeler DeepSeek directement"))
@@ -637,3 +663,45 @@ def test_budget_block_without_alternative_raises_budget_exceeded(transport, prov
         with pytest.raises(llm.BudgetExceeded, match="gemini/3.5-flash : preuve insuffisante"):
             llm.complete("podalux.write_job", MSG, profile="quality_first", json_mode=True)
     assert transport.calls == []
+
+
+
+def test_zero_ceiling_allows_proven_free_calls_but_blocks_paid(transport, providers_up):
+    prove("podalux.write_job", "ollama/qwen3.5-4b")
+    transport.reply('{"ok": true}')
+    with journal.run("atelier", "task", budget_usd=0):
+        out = llm.complete("podalux.write_job", MSG, profile="zero_cost", json_mode=True)
+        assert out.cost_usd == 0
+        free_calls = len(transport.calls)
+        with pytest.raises(llm.BudgetExceeded):
+            llm.complete("podalux.write_job", MSG, profile="legacy", json_mode=True,
+                         pin_model="deepseek/flash")
+        assert len(transport.calls) == free_calls
+    assert all(row["cost_usd"] == 0 for row in calls())
+
+
+
+def test_explicit_paid_profile_shares_two_dollar_ceiling_without_external_allowance(
+        transport, providers_up, monkeypatch):
+    from agents import runtime
+    from octopus import pricing
+    # Deterministic simulated costs, no provider shortcut in production.
+    monkeypatch.setattr(pricing, "estimate_max_cost", lambda price, *a: 0.7 if price else 0)
+    def reply(provider, request):
+        if request["model"] != "deepseek-flash":
+            return RuntimeError("free route unavailable")
+        return llm.TransportResult(
+            '{"final":"analysis"}', Usage(prompt_tokens=10, completion_tokens=10),
+            request["model"], provider_cost_usd=0.7)
+    transport.handler = reply
+    with journal.run("atelier", "task:orbit.mission", budget_usd=2, profile="flash_fallback") as parent:
+        for role in ("SOUT", "CONVERT"):
+            result = runtime.run_agent(role, "analyze", allowed_tools=set())
+            assert result["execution_status"] == "completed", result
+        result = runtime.run_agent("LEDGER", "analyze", allowed_tools=set())
+        assert result["execution_status"] == "llm_unavailable"
+        assert "BudgetExceeded" in result["execution_error"]
+        assert journal.subtree_cost(parent.id) == pytest.approx(1.4)
+    assert transport.models.count("deepseek-flash") == 2
+    assert not journal.query("SELECT id FROM spend_allowances")
+    assert not journal.query("SELECT id FROM spend_requests")

@@ -160,9 +160,11 @@ Les tests doivent utiliser fakes/mocks et ne jamais engager de dépenses réelle
 
 ## 7. Compatibilité
 
-Ne pas supprimer brutalement les wrappers historiques comme `agents/deepseek.py` ou les adapters vidéo.
+Ne pas supprimer brutalement les wrappers historiques comme `agents/deepseek.py`.
 
-Les migrer progressivement derrière les contrats modernes, avec tests de non-régression.
+Exception explicitement autorisée pour la fenêtre 2026-09-25 : le moteur/adapters vidéo legacy identifiés par `docs/migrations/VIDEO_ENGINE_REMOVAL.md` doivent être retirés plutôt que conservés derrière un nouveau wrapper. Préserver les primitives génériques réellement partagées et les preuves historiques nécessaires; ne pas conserver du runtime vidéo mort « pour compatibilité ».
+
+Pour les autres compatibilités, migrer progressivement derrière les contrats modernes avec tests de non-régression.
 
 ## 8. Changements d'architecture
 
