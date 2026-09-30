@@ -26,6 +26,7 @@ Un objectif n'est jamais déclaré atteint sans mesure : l'absence de critère m
 from __future__ import annotations
 
 import re
+import hashlib
 import time
 
 from . import journal, strategy, tasks
@@ -202,8 +203,8 @@ def goal_text(objective: dict) -> str:
     if b_channels or a_channels:
         parts.append("Travail borné : hors de ces sites/ressources autorisés, acquisition et qualification seulement. "
                      "Aucun achat, paiement ni dépense sans autorisation humaine explicite. "
-                     "Les générations vidéo Agnes sont gratuites mais limitées en quantité/durée ; "
-                     "tout coût réel exige autorisation humaine.")
+                     "Le coût API Agnes reste inconnu tant qu'il n'est pas observé ; "
+                     "chaque génération exige une autorisation humaine explicite.")
     else:
         parts.append("Travail borné : acquisition et qualification seulement. Aucun contact, publication, "
                      "achat ni dépense sans autorisation humaine explicite.")
@@ -224,9 +225,52 @@ def agnes_channels(business: str) -> list[dict]:
     """Canaux sur lesquels l'humain a accordé l'accès `act` pour Agnes vidéo."""
     if not business:
         return []
-    rows = journal.query("SELECT id, name, locator, capabilities FROM economic_channels WHERE business=? "
-                         "AND status='active' AND access='act' ORDER BY id", (business,))
-    return [dict(r) for r in rows if "agnes_submit" in str(r["capabilities"] or "")]
+    from . import economy
+    return [c for c in economy.channels(business, status="active", capability="agnes_submit")
+            if c["kind"] == "agnes_video" and c["access"] == "act" and c.get("locator")]
+
+
+def create_video_objective(business: str, prompt: str) -> int:
+    """Record a human-authorized Agnes mission; the worker still checks channel access."""
+    from . import agnes, economy
+
+    prompt = str(prompt or "").strip()
+    if not 1 <= len(prompt) <= agnes.MAX_PROMPT_LENGTH:
+        raise SupervisorError(f"Le prompt doit contenir 1 à {agnes.MAX_PROMPT_LENGTH} caractères")
+    channels = [c for c in economy.channels(business, status="active", capability="agnes_submit")
+                if c["kind"] == "agnes_video" and c["access"] == "act" and c.get("locator")]
+    if not channels:
+        raise SupervisorError("Un canal Agnes actif avec accès act accordé par un humain est requis")
+    agnes._base_url(channels[0]["locator"])
+    objective_id = strategy.create("objective", business, f"Vidéo Agnes : {prompt[:80]}",
+                                   created_by="human", statement=prompt,
+                                   success_criteria="kept_video_files>=1")
+    decision_id = strategy.create("decision", business, f"Autorisation vidéo objectif #{objective_id}",
+                                  created_by="human", decision="agnes_generate_video",
+                                  rationale="Génération Agnes autorisée par l'humain pour cet objectif",
+                                  resulting_action="prompt_sha256:" + hashlib.sha256(prompt.encode("utf-8")).hexdigest())
+    strategy.transition("decision", decision_id, business, "approved", actor="human")
+    strategy.link(business, "decision", decision_id, "objective", objective_id, "authorizes")
+    strategy.transition("objective", objective_id, business, "active", actor="human")
+    return objective_id
+
+
+def _video_authorization(business: str, objective_id: int) -> dict | None:
+    rows = journal.query(
+        "SELECT d.id, d.resulting_action FROM strategy_decisions d JOIN strategy_links l "
+        "ON l.from_type='decision' AND l.from_id=d.id "
+        "WHERE l.business=? AND l.to_type='objective' AND l.to_id=? AND l.relation='authorizes' "
+        "AND d.business=? AND d.status='approved' AND d.decision='agnes_generate_video' "
+        "AND d.created_by='human' AND d.decided_by='human' LIMIT 1",
+        (business, objective_id, business))
+    return dict(rows[0]) if rows else None
+
+
+def video_authorized(business: str, objective_id: int) -> bool:
+    decision = _video_authorization(business, objective_id)
+    objective = strategy.get("objective", objective_id, business)
+    return bool(decision and objective and decision["resulting_action"] ==
+                "prompt_sha256:" + hashlib.sha256(objective["statement"].encode("utf-8")).hexdigest())
 
 
 def _describe_agnes_channels(channels: list[dict]) -> str:
@@ -253,6 +297,22 @@ def plan_work(business: str, objective: dict, *, criterion: dict | None = None, 
               allowed_tools: list[str] | None = None, parent_id: int | None = None) -> int:
     """Met en file le travail durable d'un objectif. Idempotent par (objectif, tentative)."""
     objective_id = int(objective["id"])
+    if _video_authorization(business, objective_id) and not video_authorized(business, objective_id):
+        raise SupervisorError("Le prompt vidéo a changé depuis l'autorisation humaine")
+    if video_authorized(business, objective_id):
+        if objective.get("status") != "active" or criterion_for(objective) != {"metric": "kept_video_files", "gte": 1}:
+            raise SupervisorError("Objectif vidéo autorisé invalide ou inactif")
+        channels = agnes_channels(business)
+        if not channels:
+            raise SupervisorError("Canal Agnes actif avec accès act et capacité agnes_submit requis")
+        task_id = tasks.enqueue(business, "agnes.generate_video",
+                                {"prompt": objective["statement"], "objective_id": objective_id,
+                                 "idempotency_key": f"agnes.objective#{objective_id}",
+                                 "base_url": channels[0]["locator"]},
+                                parent_id=parent_id, max_attempts=1,
+                                idempotency_key=f"agnes.objective#{objective_id}")
+        strategy.link(business, "objective", objective_id, "task", task_id, "executed_by")
+        return task_id
     attempt = len(work_tasks(business, objective_id)) + 1
     payload = {
         "objective_id": objective_id,
@@ -363,56 +423,33 @@ def video_result(business: str, task_id: int | None, criterion: dict) -> dict:
     - verified_video_count: nombre de générations Agnes vérifiées (MP4 + SHA-256) pour la tâche ou business
     """
     target = int(criterion["gte"])
-    try:
-        from .agnes_production import list_generations
-        from .agnes import verify_mp4
-        from pathlib import Path
-    except Exception:
-        return {"metric": criterion["metric"], "observed": 0, "target": target, "success": False,
-                "scope": "agnes_video_generations", "note": "module Agnes indisponible"}
+    from pathlib import Path
+    from . import agnes_production
+    from .agnes import verify_mp4
 
-    if criterion["metric"] == "kept_video_files":
-        # For a specific task, check its generations; otherwise check business
-        if task_id is not None:
-            rows = journal.query(
-                "SELECT * FROM agnes_video_generations WHERE business=? AND task_id=? AND status='done' ORDER BY id",
-                (business, task_id),
-            )
-        else:
-            rows = journal.query(
-                "SELECT * FROM agnes_video_generations WHERE business=? AND status='done' ORDER BY id DESC LIMIT 20",
-                (business,),
-            )
-        kept = []
-        for r in rows:
-            path = r["output_path"]
-            if not path:
-                continue
-            p = Path(path)
-            ver = verify_mp4(p)
-            if ver.get("verified") and ver.get("sha256") == r["sha256"]:
-                kept.append({"file": str(p), "sha256": ver["sha256"], "bytes": ver["bytes"]})
-        return {"metric": "kept_video_files", "observed": len(kept), "target": target,
-                "success": len(kept) >= target, "files": kept,
-                "scope": "agnes_video_generations+disque",
-                "note": "vidéo MP4 présente, header ftyp, SHA-256 identique"}
-
-    # verified_video_count
+    agnes_production.ensure_schema()
+    sql = ("SELECT g.*, e.id AS proof_id FROM agnes_video_generations g "
+           "LEFT JOIN strategy_evidence e ON e.id=g.evidence_id AND e.business=g.business "
+           "AND e.status='active' AND e.nature='observed' AND e.source_type='file' "
+           "AND e.source_ref=g.output_path "
+           "WHERE g.business=? AND g.status='done'")
+    params: tuple = (business,)
     if task_id is not None:
-        rows = journal.query(
-            "SELECT COUNT(*) AS n FROM agnes_video_generations WHERE business=? AND task_id=? AND status='done' AND sha256 IS NOT NULL",
-            (business, task_id),
-        )
-    else:
-        rows = journal.query(
-            "SELECT COUNT(*) AS n FROM agnes_video_generations WHERE business=? AND status='done' AND sha256 IS NOT NULL",
-            (business,),
-        )
-    count = rows[0]["n"] if rows else 0
-    return {"metric": "verified_video_count", "observed": int(count), "target": target,
-            "success": int(count) >= target,
-            "scope": "agnes_video_generations",
-            "note": "générations vidéo Agnes vérifiées physiquement (MP4 + SHA-256), pas seulement HTTP completed"}
+        sql += " AND g.task_id=?"
+        params += (task_id,)
+    rows = journal.query(sql + " ORDER BY g.id DESC LIMIT 50", params)
+    kept = []
+    for row in rows:
+        if not row["output_path"] or not row["sha256"] or not row["proof_id"]:
+            continue
+        ver = verify_mp4(Path(row["output_path"]))
+        if ver.get("verified") and ver.get("sha256") == row["sha256"]:
+            kept.append({"file": row["output_path"], "sha256": ver["sha256"],
+                         "bytes": ver["bytes"], "evidence_id": row["proof_id"]})
+    return {"metric": criterion["metric"], "observed": len(kept), "target": target,
+            "success": len(kept) >= target, "files": kept,
+            "scope": "agnes_video_generations+strategy_evidence+disque",
+            "note": "preuve observée persistée, vidéo décodable et SHA-256 identique"}
 
 
 def measure(business: str, task_id: int | None, criterion: dict, results: list) -> dict:
@@ -502,9 +539,21 @@ def decide(business: str, objective: dict, work: dict, *, max_attempts: int = DE
            max_steps: int = DEFAULT_MAX_STEPS) -> dict:
     """Décision déterministe à partir du résultat persisté. Renvoie la décision et son effet."""
     output = work.get("output") or {}
+    if work.get("kind") == "agnes.generate_video":
+        criterion = criterion_for(objective)
+        measured = video_result(business, int(work["id"]), criterion)
+        output = {"success": work["status"] == "done" and measured["success"],
+                  "measured": True, "observed": measured["observed"],
+                  "criterion": criterion, "objective_result": measured,
+                  "execution_status": work["status"]}
+        if not output["success"]:
+            output["human_boundary"] = (f"Génération Agnes #{work['id']} {work['status']} sans MP4 "
+                                        "vérifié et preuve persistée ; intervention humaine requise")
     attempts = len(work_tasks(business, int(objective["id"])))
     if output.get("success") is True:
         outcome = "satisfied"
+    elif work.get("kind") == "agnes.generate_video":
+        outcome = "exhausted"
     elif output.get("human_boundary"):
         outcome = "human_boundary"
     elif attempts >= max(1, int(max_attempts)):
@@ -538,6 +587,8 @@ def _reason(outcome: str, output: dict, attempts: int, max_attempts: int) -> str
     if outcome == "human_boundary":
         return str(output.get("human_boundary"))
     if outcome == "exhausted":
+        if output.get("human_boundary"):
+            return str(output["human_boundary"])
         return (f"{attempts}/{max_attempts} tentatives sans mesure concluante "
                 f"(exécution : {output.get('execution_status')}) ; réactivation humaine requise")
     return f"aucune mesure concluante (exécution : {output.get('execution_status')}) ; nouvelle tentative"
@@ -661,14 +712,17 @@ def tick(*, ctx=None, businesses: list[str] | None = None, max_attempts: int = D
     if ctx is not None:
         report["next_tick"] = _rearm(ctx, tick_every_s)
     for entry in report["human_boundaries"]:
-        if pending_boundary(entry["business"], entry["objective_id"]):
+        key = boundary_key(entry["objective_id"])
+        answer = tasks.answer_for(ctx.id, key) if ctx is not None else None
+        if answer is None and pending_boundary(entry["business"], entry["objective_id"]):
             entry["action"] = "waiting_human"
             continue
         if ctx is None:
             continue
-        answer = ctx.ask_human(boundary_key(entry["objective_id"]), entry["human_question"],
-                               context={"objective_id": entry["objective_id"],
-                                        "work_task_id": entry["work_task_id"]})
+        if answer is None:
+            answer = ctx.ask_human(key, entry["human_question"],
+                                   context={"objective_id": entry["objective_id"],
+                                            "work_task_id": entry["work_task_id"]})
         _after_human_answer(entry, answer, parent_id=parent_id, retry_delay_s=retry_delay_s, max_steps=max_steps)
         break  # une seule frontière humaine traitée par passe : la suivante le sera au tick suivant
     return report
@@ -702,5 +756,8 @@ def _after_human_answer(entry: dict, answer: str, *, parent_id: int | None, retr
         return
     entry["work_task_id"] = plan_work(business, objective, criterion=parse_criterion(objective.get("success_criteria")),
                                       delay_s=0.0, parent_id=parent_id, max_steps=max_steps)
+    for request in tasks.pending_human_requests(business):
+        if request["key"] == boundary_key(objective_id):
+            tasks.answer(request["id"], answer)
     entry["action"] = "work_created_after_human_answer"
     entry["human_answer"] = str(answer)[:500]

@@ -251,6 +251,8 @@ def request_generation(*, business: str, prompt: str, idempotency_key: str,
     source_ref = None
 
     if channel is not None:
+        if agnes._base_url(base_url) != agnes._base_url(channel.get("locator") or ""):
+            raise StrategyError("Agnes URL does not match the active human-authorized channel")
         # Use actions.propose path (durable, with evidence, handles crash)
         from . import actions
         # For free_quota, spend not required, but we still support optional allowance
@@ -297,20 +299,9 @@ def request_generation(*, business: str, prompt: str, idempotency_key: str,
                     agnes_task_id = m.group(1)
                     source_ref = ref
     else:
-        # No channel — try direct submission if service is available but still require human auth for prod
-        # For autonomous mission, this path should be blocked and request human resource
-        # We probe service first to give clear error
-        try:
-            agnes.probe(base_url)
-        except Exception as exc:
-            raise StrategyError(
-                f"No active human-authorized Agnes channel for {business}: Agnes unavailable or invalid response ({exc}); "
-                "human must grant act access"
-            ) from None
-        # No channel means human has not authorized act access — request resource
         raise StrategyError(
             f"No active human-authorized Agnes channel (kind=agnes_video, capability=agnes_submit) for {business}; "
-            "human must grant act access. Use: python -m octopus resources request agnes_video create 'Authorize Agnes'"
+            "human must grant act access"
         )
 
     if not agnes_task_id:

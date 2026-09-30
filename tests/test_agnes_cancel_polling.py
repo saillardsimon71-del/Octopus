@@ -12,7 +12,7 @@ B = "atelier_cancel"
 def http(monkeypatch):
     opener = Mock()
     monkeypatch.setattr(agnes, "build_opener", Mock(return_value=opener))
-    monkeypatch.setattr(agnes_production, "_find_channel", lambda *a, **k: {"id": 1, "kind": "agnes_video", "access": "act", "capabilities": ["agnes_submit", "agnes_stop"]})
+    monkeypatch.setattr(agnes_production, "_find_channel", lambda *a, **k: {"id": 1, "kind": "agnes_video", "access": "act", "locator": agnes.DEFAULT_URL, "capabilities": ["agnes_submit", "agnes_stop"]})
     from octopus import actions
     monkeypatch.setattr(actions, "_EXECUTORS", {})
     monkeypatch.setattr(actions, "_load_configured_executors", lambda: None)
@@ -41,7 +41,7 @@ def test_cancel_raises_taskcancelled_not_event(monkeypatch):
                               capabilities=["agnes_submit", "agnes_stop"])
     economy.update_channel(B, cid, actor="human", status="active", access="act")
     # Mock _find_channel to return this channel
-    monkeypatch.setattr(agnes_production, "_find_channel", lambda *a, **k: {"id": cid, "kind": "agnes_video", "access": "act", "capabilities": ["agnes_submit", "agnes_stop"]})
+    monkeypatch.setattr(agnes_production, "_find_channel", lambda *a, **k: {"id": cid, "kind": "agnes_video", "access": "act", "locator": agnes.DEFAULT_URL, "capabilities": ["agnes_submit", "agnes_stop"]})
 
     # Create generation
     gen = agnes_production.request_generation(business=B, prompt="test cancel", idempotency_key="cancel-1")

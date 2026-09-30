@@ -44,7 +44,7 @@ def test_workbench_opens_every_page_and_keeps_refreshing(isolated, monkeypatch):
     original = app._refresh
     monkeypatch.setattr(app, "_refresh", lambda: (ticks.append(1), original()))
     try:
-        for page in (*PAGE_META, "Intelligence", "Missions", "Cockpit"):
+        for page in (*PAGE_META, "Intelligence", "Agnes", "Missions", "Cockpit"):
             app._show_page(page)
             _pump(app, 0.3)
         before = len(ticks)

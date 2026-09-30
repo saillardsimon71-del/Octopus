@@ -13,7 +13,7 @@ def http(monkeypatch):
     opener = Mock()
     monkeypatch.setattr(agnes, "build_opener", Mock(return_value=opener))
     # Mock _find_channel to return authorized channel without needing economy lookup
-    monkeypatch.setattr(agnes_production, "_find_channel", lambda *a, **k: {"id": 1, "kind": "agnes_video", "access": "act", "capabilities": ["agnes_submit", "agnes_stop"]})
+    monkeypatch.setattr(agnes_production, "_find_channel", lambda *a, **k: {"id": 1, "kind": "agnes_video", "access": "act", "locator": agnes.DEFAULT_URL, "capabilities": ["agnes_submit", "agnes_stop"]})
     from octopus import actions
     monkeypatch.setattr(actions, "_EXECUTORS", {})
     monkeypatch.setattr(actions, "_load_configured_executors", lambda: None)
