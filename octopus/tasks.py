@@ -384,18 +384,26 @@ def reap(now: float | None = None) -> dict:
 
 
 def schedule(business: str, kind: str, interval_s: float, input: dict | None = None, *,
-             start_in_s: float = 0, enabled: bool = True, budget_usd: float | None = None) -> int:
+             start_in_s: float = 0, enabled: bool = True, budget_usd: float | None = None,
+             if_absent: bool = False) -> int:
     if interval_s < 60:
         raise TaskError("intervalle minimal : 60 s")
     now = time.time()
     with _tx() as conn:
-        conn.execute(
-            "INSERT INTO schedules (business, kind, input, interval_s, next_run, enabled, budget_usd) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(business, kind) DO UPDATE SET input=excluded.input, "
-            "interval_s=excluded.interval_s, next_run=excluded.next_run, enabled=excluded.enabled, "
-            "budget_usd=excluded.budget_usd",
-            (business, kind, json.dumps(input or {}, ensure_ascii=False), interval_s, now + start_in_s,
-             int(enabled), budget_usd))
+        if if_absent:
+            conn.execute(
+                "INSERT INTO schedules (business, kind, input, interval_s, next_run, enabled, budget_usd) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(business, kind) DO NOTHING",
+                (business, kind, json.dumps(input or {}, ensure_ascii=False), interval_s, now + start_in_s,
+                 int(enabled), budget_usd))
+        else:
+            conn.execute(
+                "INSERT INTO schedules (business, kind, input, interval_s, next_run, enabled, budget_usd) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(business, kind) DO UPDATE SET input=excluded.input, "
+                "interval_s=excluded.interval_s, next_run=excluded.next_run, enabled=excluded.enabled, "
+                "budget_usd=excluded.budget_usd",
+                (business, kind, json.dumps(input or {}, ensure_ascii=False), interval_s, now + start_in_s,
+                 int(enabled), budget_usd))
         return int(conn.execute("SELECT id FROM schedules WHERE business=? AND kind=?", (business, kind)).fetchone()[0])
 
 
