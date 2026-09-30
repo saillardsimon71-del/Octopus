@@ -39,8 +39,9 @@ class Business:
 class WorkspaceRegistry:
     """Charge et persiste les contextes business sans dépendre d'un nouveau service."""
 
-    def __init__(self, path: Path = STORE_PATH) -> None:
+    def __init__(self, path: Path = STORE_PATH, *, readonly: bool = False) -> None:
         self.path = Path(path)
+        self.readonly = readonly
         self._businesses: dict[str, Business] = {}
         self.reload()
 
@@ -48,7 +49,7 @@ class WorkspaceRegistry:
         self._businesses = self._load_file()
         if not self._businesses:
             self._businesses = self._derive_from_jobs()
-            if self._businesses:
+            if self._businesses and not self.readonly:
                 self._save_file()
             return
         # Activites declarees au moteur mais absentes d'un fichier existant : visibles, sans reecrire le fichier.
@@ -75,7 +76,8 @@ class WorkspaceRegistry:
     def set_current(self, business_id: str) -> None:
         if business_id != DEFAULT_BUSINESS_ID and business_id not in self._businesses:
             raise KeyError(business_id)
-        db.set_state(STATE_KEY, business_id)
+        if not self.readonly:
+            db.set_state(STATE_KEY, business_id)
 
     def offers_for(self, business_id: str | None) -> list[str]:
         if not business_id or business_id == DEFAULT_BUSINESS_ID:
@@ -148,6 +150,8 @@ class WorkspaceRegistry:
         return result
 
     def _save_file(self) -> None:
+        if self.readonly:
+            raise PermissionError("Mode consultation : modification du registre désactivée")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"version": 1, "businesses": [asdict(b) for b in self.all()]}
         fd, tmp_name = tempfile.mkstemp(prefix="workspaces-", suffix=".json", dir=str(self.path.parent))

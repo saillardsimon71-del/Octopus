@@ -58,9 +58,10 @@ class PodaluxWorkbench(ctk.CTk):
         self.minsize(1180, 760)
         self.configure(fg_color=COLORS["bg"])
 
-        db.init_db()  # premier lancement : la table state doit exister avant de lire le business actif
-        self.registry = WorkspaceRegistry()
-        selected = db.get_state("active_business") or DEFAULT_BUSINESS_ID
+        if os.environ.get("OCTOPUS_WORKBENCH_READONLY") != "1":
+            db.init_db()  # premier lancement : la table state doit exister avant de lire le business actif
+        self.registry = WorkspaceRegistry(readonly=os.environ.get("OCTOPUS_WORKBENCH_READONLY") == "1")
+        selected = (db.get_state("active_business") if config.DB_PATH.is_file() else None) or DEFAULT_BUSINESS_ID
         self.selected_business_id = selected if selected == DEFAULT_BUSINESS_ID or self.registry.get(selected) else DEFAULT_BUSINESS_ID
         self.proc: subprocess.Popen | None = None
         self.worker_proc: subprocess.Popen | None = None
@@ -404,7 +405,7 @@ class PodaluxWorkbench(ctk.CTk):
         for text, command in (("▶ Ouvrir", self._open_video),):
             ctk.CTkButton(row, text=text, command=command, fg_color=COLORS["surface3"], hover_color=COLORS["surface3"]).pack(side="left", fill="x", expand=True, padx=3)
         ctk.CTkButton(controls, text="Publication dry-run", fg_color="#28623f", hover_color="#32774d", command=self._publish).pack(fill="x", padx=14, pady=(0, 14))
-        ctk.CTkLabel(controls, text="Historique des livrables\nGénération vidéo indisponible", text_color=COLORS["muted"], justify="left", anchor="w").pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkLabel(controls, text="Production Podalux historique. Les vidéos Agnes sont dans Livrables.", text_color=COLORS["muted"], justify="left", anchor="w").pack(fill="x", padx=14, pady=(0, 12))
 
         summary = self._card(root, "Run & QC")
         summary.grid(row=1, column=0, sticky="nsew", padx=(0, 7))
