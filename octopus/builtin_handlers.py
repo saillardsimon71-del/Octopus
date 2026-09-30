@@ -86,3 +86,35 @@ def resources_acquire(ctx):
     ctx.emit("resources.acquired", {"key": key, "need": need, "state": state["state"], "answer": answer[:200]})
     return {"key": key, "need": need, "state": state["state"], "access": state["access"],
             "detail": state["last_check_detail"], "answer": answer[:200]}
+
+
+@handler("supervisor.tick", max_attempts=3, retry_delay_s=60)
+def supervisor_tick(ctx):
+    """Une passe du superviseur autonome : objectifs actifs -> travail -> évaluation -> décision.
+
+    Le tick se réarme lui-même : après `python -m octopus runtime`, aucune commande manuelle n'est
+    nécessaire entre objectif, mission, évaluation et tâche suivante. Les frontières humaines
+    (ressource ou autorisation manquante) passent par `ctx.ask_human` et suspendent la tâche.
+    """
+    from . import supervisor
+    report = supervisor.tick(ctx=ctx)
+    ctx.emit("supervisor.tick", {"checked": report["checked"],
+                                 "actions": {e["objective_id"]: e["action"] for e in report["objectives"]},
+                                 "human_boundaries": [e["objective_id"] for e in report["human_boundaries"]],
+                                 "next_tick_task_id": report["next_tick"]})
+    return report
+
+
+@handler("supervisor.objective_work", resource="llm", max_attempts=2, retry_delay_s=120)
+def supervisor_objective_work(ctx):
+    """Travail durable d'un objectif persistant, exécuté par le runtime de mission existant.
+
+    La mission est mémoïsée (`ctx.memo`) : une réponse humaine, une nouvelle tentative ou un
+    redémarrage ne rejouent pas le travail déjà fait ni ses appels.
+    """
+    from . import supervisor
+    result = supervisor.execute_objective_work(ctx)
+    ctx.emit("supervisor.work.done", {k: result[k] for k in
+                                      ("objective_id", "execution_status", "synthesis_status", "observed",
+                                       "success", "measured", "human_boundary")})
+    return result

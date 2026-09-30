@@ -2,7 +2,19 @@
 
 État canonique: `docs/CURRENT_STATE.md`. Vision: `docs/VISION.md`.
 Protocole économique: `docs/HANDOFF_WORK.md`.
-Chantier constructeur actuel: `docs/migrations/FINAL_READINESS_ANTI_CONTAMINATION.md`.
+Contrat et clôture de la phase G: `docs/migrations/OPERATIONALIZATION.md`.
+
+## P0 - Phase G : ce qui reste
+
+1. La boucle autonome est démontrée hors ligne avec de fausses missions. La prochaine observation
+   utile est un run réel autorisé par l'opérateur, avec une route LLM gratuite effectivement
+   disponible, pour constater une acquisition et un signal qualifié — ou un résultat `inconclusive`.
+2. Le critère I (constructeur Astra) reste non démontré : `powershell` et `docker` sont nécessaires.
+   Ne pas l'annoncer comme acquis.
+3. La reprise après expiration d'une demande humaine exige de relancer `python -m octopus runtime`.
+   Ne pas ajouter de réarmement automatique avant d'avoir observé un cas réel où c'est un frein.
+4. Un objectif sans critère mesurable (`usable_browse_count>=N`) finit suspendu. Si le pilote a
+   besoin d'autres métriques mesurables sans LLM, les ajouter une par une, sur obstacle observé.
 
 ## P0 - Préparation technique avant la première activité
 

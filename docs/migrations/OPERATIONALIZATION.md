@@ -373,3 +373,83 @@ The objective is not “the tests currently pass”.
 The objective is:
 
 OCTOPUS can be started once, continue useful bounded work from persistent objectives, survive normal waiting and failure conditions, preserve its state, request humans only at genuine boundaries, and continue afterwards without the operator manually driving its internal loop.
+
+## Phase G closure - 2026-09-30
+
+Périmètre de cette clôture : le runtime produit OCTOPUS uniquement. Le constructeur Astra est hors
+périmètre de cette session et n'a pas été modifié ; le critère I est donc rapporté non démontré ici.
+
+### Causes racines constatées
+
+1. Aucun code ne transformait un objectif persistant en travail. `strategy` stockait les objectifs
+   actifs et `tasks` savait les exécuter, mais rien ne reliait les deux : aucune commande `enqueue`
+   ni `schedule` n'était atteignable depuis `strategy_objectives`. La boucle exigeait qu'un humain
+   relance `strategy mission` puis `worker --once` (critère F, obligatoire, non implémenté).
+2. Les runs du journal n'étaient jamais clos quand leur processus mourait. Reproduit avec un vrai
+   SIGKILL : `tasks.reap()` reprenait ou échouait la tâche grâce au bail, mais laissait
+   `runs.status='running'` et `finished_at IS NULL` indéfiniment. L'état observable contredisait la
+   réalité (critère C).
+3. Aucun état runtime n'était lisible sans interroger SQLite. La CLI exposait `tasks`, `events`,
+   `ask` et `businesses`, mais rien qui assemble objectif, tâche/run courant, raison d'attente,
+   raison d'échec, travail suivant, routage LLM et coût (critère H).
+4. Blocage découvert en exécutant le point d'entrée réel : `supervisor.objective_work` échouait en
+   `OperationalError: no such table: state` sur un `OCTOPUS_HOME` neuf, car le runtime de mission
+   exige l'état partagé des agents initialisé. Corrigé en passant par le pont existant des handlers
+   de mission (`agents.task_handlers._run`).
+   `tests/test_autonomous_loop.py::test_objective_work_initializes_shared_agent_state_before_a_mission`
+   échoue sans le correctif (`no such table: state`) et passe avec.
+
+### Corrections apportées (sans refonte)
+
+- `octopus/supervisor.py` (nouveau) : supervision déterministe de l'état canonique existant.
+  Objectif actif -> tâche `supervisor.objective_work` -> résultat mesuré -> décision persistée
+  (`satisfied`, `retry`, `human_boundary`, `exhausted`). Aucun second journal, ordonnanceur ni
+  planificateur : `strategy` pour l'état épistémique, `tasks` pour la file durable et les demandes
+  humaines, `journal` pour les runs et les coûts.
+- `octopus/builtin_handlers.py` : handlers `supervisor.tick` et `supervisor.objective_work`, donc
+  exécutés par le worker existant avec ses baux, son heartbeat, son budget et sa reprise.
+- `octopus/tasks.py` : `reap()` clos désormais les runs orphelins (`status='abandoned'`,
+  événement `run.abandoned`) en même temps que le bail expiré de leur tâche. Idempotent.
+- `octopus/status.py` (nouveau) + `python -m octopus status [--business X] [--json]`.
+- `python -m octopus runtime` : amorçage du superviseur puis boucle du worker existant.
+
+### Une seule commande de démarrage autonome
+
+```bash
+python -m octopus runtime
+```
+
+Elle charge les handlers, garantit qu'un tick superviseur est en file (idempotent) et démarre la
+boucle durable. Ensuite aucune commande n'est nécessaire entre objectif, mission, preuve,
+évaluation et tâche suivante : le tick se réarme lui-même. `--once` sert au diagnostic.
+L'état se lit avec `python -m octopus status`, les frontières humaines avec `python -m octopus ask`
+et `python -m octopus answer`.
+
+### Critères A-I sur cette clôture
+
+| Critère | État | Preuve |
+| --- | --- | --- |
+| A Dépôt | PARTIEL | Suite produit 1382 passés, 9 ignorés, 0 échec. Les 80 tests du constructeur Astra échouent faute de `powershell`/`docker` dans cet environnement ; `tests/test_gui.py` n'est pas collectable faute de `tkinter`. Aucune régression masquée par un test ignoré : les 9 ignores sont Chromium et tkinter absents. |
+| B Routage LLM | DEMONTRE | `tests/test_gateway.py::test_http_413_skips_same_provider_for_same_prompt_across_calls`, `tests/test_provider_cooldown.py` (429 au niveau modèle, reprise après cooldown, erreur de structure ou d'auth sans cooldown fournisseur), coût nul sur appel échoué. |
+| C Exécution bornée | DEMONTRE | `tests/test_bounded_execution.py` (borne de timeout réellement appliquée au client, sonde bornée), `tests/test_runtime_react.py` (durée murale opposable), `tests/test_autonomous_loop.py::test_killed_worker_leaves_no_running_task_or_run_behind` (plus de run `running` orphelin), baux et annulation dans `tests/test_tasks_worker.py`. |
+| D Frontière humaine | DEMONTRE | `tests/test_tasks_worker.py::test_idle_worker_wakes_for_task_and_human_answer_without_repeating_step` et `tests/test_autonomous_loop.py::test_autonomous_loop_requests_human_boundary_then_resumes_without_repeating_work`. |
+| E Durabilité worker | DEMONTRE | `tests/test_autonomous_loop.py::test_single_worker_start_claims_objective_work_while_idle` : un seul démarrage, repos sain, tâche exécutée automatiquement, retour au repos. |
+| F Boucle autonome | DEMONTRE | `tests/test_autonomous_loop.py` : objectif atteint, nouvelle tâche créée si non concluant, suspension après épuisement, frontière humaine, aucune commande entre les transitions, fausses missions hors ligne. |
+| G Redémarrage | DEMONTRE | `tests/test_autonomous_loop.py::test_runtime_restart_recovers_pending_work_without_repeating_completed_steps` et `tests/test_tasks_worker.py::test_memo_preserves_falsey_results_across_restart`. |
+| H Observabilité | DEMONTRE | `tests/test_runtime_status.py` : chaque fait exigé est présent dans `octopus.status` et rendu par la CLI. |
+| I Constructeur | NON DEMONTRE | Astra hors périmètre de cette session ; `powershell` et `docker` absents de cet environnement. |
+
+### Limites résiduelles non critiques
+
+- La durée murale d'une mission reste coopérative : un appel fournisseur déjà en vol garde son
+  propre timeout de transport.
+- Si une demande humaine expire sans réponse, la tâche de tick échoue et la chaîne du superviseur
+  s'arrête ; `python -m octopus runtime` la réamorce. Aucun réarmement automatique n'a été ajouté
+  pour ne pas rejouer indéfiniment une erreur déterministe.
+- Chaque tick laisse une tâche durable dans le journal : au pas par défaut de 300 s, environ
+  288 lignes par jour. C'est le coût d'un superviseur durable et auditable.
+- Un objectif sans critère mesurable (`usable_browse_count>=N`) n'est jamais déclaré atteint :
+  il finit suspendu après épuisement du budget de tentatives. C'est voulu.
+- La disponibilité réelle d'un fournisseur LLM gratuit n'est pas prouvée par ces tests. Dans cette
+  sandbox le runtime réel s'arrête correctement sur une frontière humaine, sans fallback payant.
+- Aucune preuve économique : la boucle prouve l'exécution supervisée, pas un résultat commercial.

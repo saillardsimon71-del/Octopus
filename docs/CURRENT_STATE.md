@@ -1,4 +1,42 @@
-# État actuel OCTOPUS - 2026-09-27
+# État actuel OCTOPUS - 2026-09-30
+
+## Phase G — runtime autonome supervisé
+
+Verdict : **PARTIEL — le critère I (constructeur Astra) n'est pas démontré dans cet environnement.**
+Les critères A (hors tests du constructeur et GUI), B, C, D, E, F, G et H sont démontrés par des
+tests exécutables. Détail, causes racines et limites : `docs/migrations/OPERATIONALIZATION.md`,
+section « Phase G closure - 2026-09-30 ».
+
+Ce qui manquait et a été corrigé, sans nouvelle architecture :
+
+- aucun code ne reliait un objectif persistant à un travail durable : la boucle exigeait de relancer
+  `strategy mission` puis `worker --once` à la main. `octopus/supervisor.py` supervise désormais
+  l'état canonique existant (`strategy`, `tasks`, `journal`) et s'exécute comme une tâche durable
+  dans le worker existant ;
+- les runs du journal restaient `running` après la mort de leur processus (reproduit par SIGKILL) :
+  `tasks.reap()` les clos maintenant en `abandoned` avec le bail expiré de leur tâche ;
+- aucun état runtime lisible sans SQLite : `python -m octopus status` assemble objectif, tâche et
+  run courants, dernière progression, raison d'attente humaine, raison d'échec, travail suivant,
+  routage LLM et coût cumulé.
+
+Démarrage durable unique :
+
+```bash
+python -m octopus runtime        # superviseur + worker ; le tick se réarme seul
+python -m octopus status         # état observable
+python -m octopus ask | answer   # frontières humaines
+```
+
+Validation exécutée le 2026-09-30 dans la sandbox Arena (Debian, Python 3.11.2), sans réseau ni
+ressource payante : suite produit **1382 passés, 9 ignorés, 0 échec** en 78 s. Les 80 tests du
+constructeur Astra échouent uniquement parce que `powershell` et `docker` sont absents ; ils ne sont
+pas dans le périmètre de cette session. `tests/test_gui.py` n'est pas collectable faute de
+`tkinter`. Les 9 ignores sont Chromium et tkinter absents, pas des régressions masquées.
+
+Démonstration réelle du point d'entrée, sans LLM disponible : `runtime` a amorcé le superviseur,
+créé le travail, constaté l'absence de route LLM gratuite, ouvert une demande humaine visible dans
+`ask` et `status`, puis repris après `answer` — sans fallback payant ni effet externe.
+Aucune preuve économique n'est apportée par cette phase.
 
 ## Phase F — readiness finale
 
