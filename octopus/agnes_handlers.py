@@ -18,7 +18,7 @@ from pathlib import Path
 
 from . import agnes, agnes_production, strategy
 from .strategy import StrategyError
-from .worker import handler
+from .worker import TaskCancelled, handler
 
 
 def _business_from_ctx(ctx) -> str:
@@ -98,7 +98,8 @@ def generate_video(ctx):
                     agnes_production.stop_generation(gen_id, base_url=base_url)
                 except Exception:
                     pass
-                raise ctx._cancel  # will be caught as TaskCancelled
+                # Use real TaskCancelled exception, not the internal Event
+                raise TaskCancelled("annulation demandée pendant le polling Agnes")
             attempts += 1
             try:
                 cur = agnes.status(agnes_task_id, base_url=base_url)

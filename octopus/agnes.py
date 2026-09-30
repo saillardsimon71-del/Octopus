@@ -7,7 +7,7 @@ proof of delivery, artifact integrity, customer acceptance or actual spend.
 Enhanced in finalisation phase to support full production lifecycle:
 - free_quota cost class (upstream is free, but quotas still apply)
 - rate-limit handling (429)
-- MP4 download with integrity verification (SHA-256)
+- MP4 download with integrity verification (SHA-256) + real multimedia validation
 - polling without excessive calls
 - crash-resume via persisted task ID
 """
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import time
 from pathlib import Path
@@ -30,17 +29,16 @@ from .strategy import StrategyError
 UPSTREAM_PIN = "a87162d6df73ffe72186838ca0ae9d461e68589b"
 DEFAULT_URL = "http://127.0.0.1:8765"
 _MAX_RESPONSE = 1_048_576
-_MAX_VIDEO_BYTES = 200 * 1024 * 1024  # 200 MB max for a single clip
-_MIN_VIDEO_BYTES = 1024  # at least 1KB to be plausible
+_MAX_VIDEO_BYTES = 200 * 1024 * 1024
+_MIN_VIDEO_BYTES = 1024
 _MP4_MAGIC = {b"ftyp", b"moov", b"mdat", b"free", b"skip", b"wide"}
 
-# Economic policy: upstream is free, but we keep limits.
 MAX_PROMPT_LENGTH = 5000
-MAX_DURATION_S = 20  # upstream per-clip max
-MAX_DAILY_GENERATIONS = 30  # per business, even if free
+MAX_DURATION_S = 20
+MAX_DAILY_GENERATIONS = 30
 POLL_INITIAL_S = 3.0
 POLL_MAX_S = 30.0
-POLL_TIMEOUT_S = 1800.0  # matches AGNES_VIDEO_POLL_TIMEOUT
+POLL_TIMEOUT_S = 1800.0
 
 
 class AgnesRateLimited(StrategyError):
@@ -113,18 +111,16 @@ def _request(base: str, path: str, *, form: dict | None = None) -> dict:
 
 
 def _request_bytes(base: str, path: str, *, timeout: float = 60.0) -> bytes:
-    """GET raw bytes (for video download) with same safety properties."""
     request = Request(_base_url(base) + path, method="GET",
                       headers={"Accept": "video/mp4, */*"})
     try:
         with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=timeout) as response:
             if response.status != 200:
                 raise StrategyError(f"Agnes HTTP {response.status}")
-            # Stream with limit
             chunks = []
             total = 0
             while True:
-                chunk = response.read(1 << 20)  # 1 MB
+                chunk = response.read(1 << 20)
                 if not chunk:
                     break
                 total += len(chunk)
@@ -169,12 +165,10 @@ def status(task_id: str, *, base_url: str = DEFAULT_URL) -> dict:
 
 
 def status_full(task_id: str, *, base_url: str = DEFAULT_URL) -> dict:
-    """Return full task payload (for production manager), sanitized."""
     task_id = _task_id(task_id)
     result = _request(base_url, f"/api/tasks/{task_id}")
     if result.get("task_id") != task_id:
         raise StrategyError("Unexpected Agnes task response")
-    # Only expose safe fields, never secrets or arbitrary paths.
     safe = {
         "task_id": task_id,
         "task_type": result.get("task_type"),
@@ -188,7 +182,6 @@ def status_full(task_id: str, *, base_url: str = DEFAULT_URL) -> dict:
 
 
 def video_reference(task_id: str, *, base_url: str = DEFAULT_URL) -> dict:
-    """Return a service-reported final artifact reference, never download arbitrary URLs."""
     if status(task_id, base_url=base_url)["status"] != "completed":
         raise StrategyError("Agnes task is not completed")
     return {"task_id": task_id, "source_ref": _base_url(base_url) + f"/api/video/{task_id}",
@@ -204,28 +197,26 @@ def compute_sha256(path: Path) -> str:
 
 
 def _has_ffprobe() -> str | None:
-    """Return ffprobe executable path if available, else None."""
     import shutil
-    # System ffprobe
     exe = shutil.which("ffprobe")
     if exe:
         return exe
-    # imageio-ffmpeg provides ffmpeg, sometimes ffprobe via same package
     try:
         import imageio_ffmpeg
-        # imageio-ffmpeg 0.4+ has get_ffprobe_exe
         try:
-            fp = imageio_ffmpeg.get_ffprobe_exe()
+            fp = imageio_ffmpeg.get_ffprobe_exe()  # type: ignore[attr-defined]
             if fp and Path(fp).is_file():
                 return fp
         except AttributeError:
             pass
-        # Fallback: try ffmpeg exe and replace ffmpeg -> ffprobe if exists
         try:
             ff = imageio_ffmpeg.get_ffmpeg_exe()
             cand = Path(ff).with_name("ffprobe" + Path(ff).suffix)
             if cand.is_file():
                 return str(cand)
+            cand2 = Path(ff).parent / "ffprobe"
+            if cand2.is_file():
+                return str(cand2)
         except Exception:
             pass
     except Exception:
@@ -233,12 +224,25 @@ def _has_ffprobe() -> str | None:
     return None
 
 
+def _has_ffmpeg() -> str | None:
+    import shutil
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+        ff = imageio_ffmpeg.get_ffmpeg_exe()
+        if ff and Path(ff).is_file():
+            return ff
+    except Exception:
+        pass
+    return None
+
+
 def _probe_video_stream(path: Path, ffprobe_exe: str) -> dict:
-    """Use ffprobe to verify decodable video stream. Returns {verified: bool, reason: str, meta: dict}."""
     import subprocess
     import json as _json
     try:
-        # ffprobe -v error -select_streams v:0 -show_entries stream=codec_type,codec_name,width,height,duration,avg_frame_rate -of json
         cmd = [
             ffprobe_exe,
             "-v", "error",
@@ -259,8 +263,6 @@ def _probe_video_stream(path: Path, ffprobe_exe: str) -> dict:
         s0 = streams[0]
         if s0.get("codec_type") != "video":
             return {"verified": False, "reason": f"ffprobe: first stream not video ({s0.get('codec_type')})"}
-        # Basic sanity: width/height >0 if present
-        # Some files may not have width yet, but codec_name should exist
         if not s0.get("codec_name"):
             return {"verified": False, "reason": "ffprobe: video stream without codec"}
         return {"verified": True, "reason": f"ffprobe verified video stream {s0.get('codec_name')} {s0.get('width')}x{s0.get('height')}", "meta": s0}
@@ -270,17 +272,36 @@ def _probe_video_stream(path: Path, ffprobe_exe: str) -> dict:
         return {"verified": False, "reason": f"ffprobe error: {type(exc).__name__}: {exc}"}
 
 
-def verify_mp4(path: Path) -> dict:
-    """Verify that path is a real MP4 with decodable video, not just ftyp + arbitrary data.
+def _probe_with_ffmpeg(path: Path, ffmpeg_exe: str) -> dict:
+    import subprocess
+    try:
+        cmd = [
+            ffmpeg_exe,
+            "-v", "error",
+            "-i", str(path),
+            "-f", "null",
+            "-",
+        ]
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", errors="ignore")[:500]
+            return {"verified": False, "reason": f"ffmpeg decode failed: {err or 'not decodable'}"}
+        return {"verified": True, "reason": "ffmpeg decode verified (real multimedia validation)"}
+    except subprocess.TimeoutExpired:
+        return {"verified": False, "reason": "ffmpeg timeout"}
+    except Exception as exc:
+        return {"verified": False, "reason": f"ffmpeg error: {type(exc).__name__}: {exc}"}
 
-    Checks:
+
+def verify_mp4(path: Path) -> dict:
+    """Verify that path is a real MP4 with decodable video.
+
+    Real multimedia validation is mandatory for verified=True:
     - file exists, size bounds
-    - ftyp box at start (offset 4)
-    - moov box present (required for valid MP4)
-    - mdat or at least plausible media data
-    - video codec indicator (avc1, hev1, mp4v, av01, vp09, vide, etc.)
-    - not zero-filled / truncated
-    - if ffprobe available, actually probe video stream for decodability
+    - ftyp box at start, moov present, video track indicator
+    - not zero-filled
+    - then actual decode via ffprobe or ffmpeg (imageio-ffmpeg fallback)
+    - no video is marked verified solely because ftyp/moov and codec string are present
 
     Returns dict with verified bool, sha256, bytes, reason.
     """
@@ -296,7 +317,6 @@ def verify_mp4(path: Path) -> dict:
     if size > _MAX_VIDEO_BYTES:
         return {"verified": False, "reason": f"too large: {size} bytes"}
 
-    # Read header and scan boxes
     try:
         with open(p, "rb") as f:
             header = f.read(64)
@@ -304,138 +324,88 @@ def verify_mp4(path: Path) -> dict:
                 return {"verified": False, "reason": "header too short"}
             if header == b"\x00" * len(header):
                 return {"verified": False, "reason": "file appears zero-filled / corrupt"}
-            # ftyp must be at offset 4 for standard MP4
             if header[4:8] != b"ftyp":
-                # Allow other starting boxes but require ftyp somewhere in first 64 bytes for this project
                 if b"ftyp" not in header:
                     return {"verified": False, "reason": "not an MP4 (missing ftyp)"}
-            # Quick zero-fill check beyond header: read 1KB after header, ensure not all zeros
             f.seek(32)
             sample = f.read(1024)
             if sample and sample == b"\x00" * len(sample):
                 return {"verified": False, "reason": "file appears zero-filled after header / corrupt"}
 
-            # Box parsing: scan for ftyp, moov, mdat, and video indicators
-            # We'll scan first 10 MB for boxes to avoid reading huge file fully
-            f.seek(0)
-            found_ftyp = False
-            found_moov = False
-            found_mdat = False
-            found_video_tag = False
-            video_tags = [b"avc1", b"avc3", b"hev1", b"hvc1", b"mp4v", b"av01", b"vp09", b"vide", b"mp4a"]  # mp4a for audio but indicates media
-            # For video we require at least vide or avc1/hevc etc
-            required_video_tags = [b"avc1", b"avc3", b"hev1", b"hvc1", b"mp4v", b"av01", b"vp09", b"vide"]
-
-            offset = 0
-            # Limit scan to first 10 MB or file size
             scan_limit = min(size, 10 * 1024 * 1024)
-            # Read chunk for scanning tags as fallback
             f.seek(0)
             scan_data = f.read(scan_limit)
 
-            # Box iteration using scan_data for speed
+            if b"ftyp" not in scan_data[:64]:
+                return {"verified": False, "reason": "not an MP4 (missing ftyp box)"}
+            if b"moov" not in scan_data:
+                return {"verified": False, "reason": "MP4 missing moov box (only ftyp + arbitrary)"}
+            required_video_tags = [b"avc1", b"avc3", b"hev1", b"hvc1", b"mp4v", b"av01", b"vp09", b"vide"]
+            if not any(tag in scan_data for tag in required_video_tags):
+                return {"verified": False, "reason": "MP4 missing video track indicator (no avc1/hev1/mp4v/vide)"}
+
             idx = 0
+            valid_boxes = 0
             while idx + 8 <= len(scan_data):
-                # size: 4 bytes BE
                 box_size = int.from_bytes(scan_data[idx:idx+4], "big")
-                box_type = scan_data[idx+4:idx+8]
-                if box_type == b"ftyp":
-                    found_ftyp = True
-                if box_type == b"moov":
-                    found_moov = True
-                if box_type == b"mdat":
-                    found_mdat = True
-                # Validate box_size
                 if box_size == 0:
-                    # box extends to end of file
                     break
                 if box_size == 1:
-                    # 64-bit size
                     if idx + 16 > len(scan_data):
                         break
                     box_size = int.from_bytes(scan_data[idx+8:idx+16], "big")
-                    if box_size < 16:
-                        break
-                if box_size < 8:
-                    # Invalid, try to resync by searching next ftyp/moov/mdat?
-                    # For robustness, break and rely on tag search
+                if box_size < 8 or box_size > len(scan_data):
                     break
+                valid_boxes += 1
                 idx += box_size
-                if idx >= scan_limit:
+                if idx >= scan_limit or valid_boxes > 100:
                     break
-
-            # Tag search in scan_data
-            for tag in required_video_tags:
-                if tag in scan_data:
-                    found_video_tag = True
-                    break
-
-            # Also check for ftyp presence via box iteration or tag search
-            if not found_ftyp:
-                # ftyp must have been at start, but double-check
-                if b"ftyp" not in scan_data[:64]:
-                    return {"verified": False, "reason": "not an MP4 (missing ftyp box)"}
-
-            if not found_moov:
-                return {"verified": False, "reason": "MP4 missing moov box (not a valid video file, only ftyp + arbitrary data)"}
-
-            if not found_video_tag:
-                return {"verified": False, "reason": "MP4 missing video track indicator (no avc1/hev1/mp4v/vide)"}
-
-            # If we have ftyp+moov but no mdat and file is tiny (< 5KB), likely still invalid
-            if not found_mdat and size < 5000:
-                return {"verified": False, "reason": "MP4 missing mdat and too small to be valid"}
+            if valid_boxes < 2:
+                return {"verified": False, "reason": "MP4 box structure invalid (too few boxes)"}
 
     except OSError as exc:
         return {"verified": False, "reason": f"read failed: {type(exc).__name__}"}
 
-    # Try ffprobe for real decodability if available
     ffprobe_exe = _has_ffprobe()
     if ffprobe_exe:
         probe_res = _probe_video_stream(p, ffprobe_exe)
         if not probe_res.get("verified"):
-            # ffprobe is authoritative when present: if it says no video, reject
             return {"verified": False, "reason": probe_res.get("reason", "ffprobe verification failed")}
-        # ffprobe verified, include its reason but still compute sha
         try:
             sha = compute_sha256(p)
         except OSError:
             return {"verified": False, "reason": "sha256 failed"}
         return {"verified": True, "sha256": sha, "bytes": size, "reason": probe_res.get("reason", "ffprobe verified")}
 
-    # Fallback heuristic (ffprobe not available): ftyp+moov+video_tag+size plausible is considered verified
-    try:
-        sha = compute_sha256(p)
-    except OSError:
-        return {"verified": False, "reason": "sha256 failed"}
-    return {"verified": True, "sha256": sha, "bytes": size, "reason": "mp4 structure verified (ftyp+moov+video track, ffprobe not available)"}
+    ffmpeg_exe = _has_ffmpeg()
+    if ffmpeg_exe:
+        probe_res = _probe_with_ffmpeg(p, ffmpeg_exe)
+        if not probe_res.get("verified"):
+            return {"verified": False, "reason": probe_res.get("reason", "ffmpeg verification failed")}
+        try:
+            sha = compute_sha256(p)
+        except OSError:
+            return {"verified": False, "reason": "sha256 failed"}
+        return {"verified": True, "sha256": sha, "bytes": size, "reason": probe_res.get("reason", "ffmpeg verified")}
+
+    return {"verified": False, "reason": "real multimedia validation required: ffprobe/ffmpeg not available"}
 
 
 def download_video(task_id: str, dest_path: Path, *, base_url: str = DEFAULT_URL, timeout: float = 60.0) -> dict:
-    """Download final_video.mp4 for task_id into dest_path, verify integrity.
-
-    Returns dict with path, sha256, bytes, verified.
-    Raises StrategyError if not completed or download fails.
-    """
     task_id = _task_id(task_id)
-    # Ensure task is completed before download
     cur = status(task_id, base_url=base_url)
     if cur["status"] != "completed":
         raise StrategyError(f"Agnes task not completed (status={cur['status']})")
     dest = Path(dest_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # Download bytes with limit
     data = _request_bytes(base_url, f"/api/video/{task_id}", timeout=timeout)
-    # Write atomically
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     try:
         tmp.write_bytes(data)
-        # Verify written file
         ver = verify_mp4(tmp)
         if not ver.get("verified"):
             tmp.unlink(missing_ok=True)
             raise StrategyError(f"Downloaded MP4 verification failed: {ver.get('reason')}")
-        # Atomic move
         tmp.replace(dest)
     finally:
         if tmp.exists():
@@ -449,11 +419,6 @@ def download_video(task_id: str, dest_path: Path, *, base_url: str = DEFAULT_URL
 
 def poll_until_done(task_id: str, *, base_url: str = DEFAULT_URL, timeout_s: float = POLL_TIMEOUT_S,
                     initial_interval_s: float = POLL_INITIAL_S, max_interval_s: float = POLL_MAX_S) -> dict:
-    """Poll task status with exponential backoff, without excessive calls.
-
-    Returns final status dict. Raises on timeout or failure.
-    Handles 429 with extra backoff.
-    """
     task_id = _task_id(task_id)
     deadline = time.time() + float(timeout_s)
     interval = float(initial_interval_s)
@@ -468,16 +433,13 @@ def poll_until_done(task_id: str, *, base_url: str = DEFAULT_URL, timeout_s: flo
                 return {"task_id": task_id, "status": last_status, "attempts": attempts,
                         "source_ref": cur["source_ref"]}
         except AgnesRateLimited:
-            # Extra backoff for rate limit
             interval = min(max_interval_s, interval * 1.5 + 5.0)
             time.sleep(interval)
             continue
         except AgnesUnavailable:
-            # Transient unavailable — backoff and retry
             interval = min(max_interval_s, interval * 1.2)
             time.sleep(interval)
             continue
-        # Normal backoff
         if last_status in (None, "pending", "queued", "running"):
             time.sleep(interval)
             interval = min(max_interval_s, interval * 1.25)
@@ -527,28 +489,17 @@ def _stop(channel: dict, payload: dict) -> dict:
 
 
 def _ensure_registered():
-    # Idempotent registration, safe to call multiple times.
     try:
         actions.register_executor("agnes_video", "submit", _submit, cost_class="free_quota", requires_idempotency=True)
         actions.register_executor("agnes_video", "stop", _stop, cost_class="local", requires_idempotency=True)
     except ValueError:
-        # Already registered with same key — ignore, or if cost_class mismatch, overwrite with correct policy
-        # The underlying _EXECUTORS dict is overwritten by register_executor, so we can just set.
         from .actions import _EXECUTORS
         _EXECUTORS[("agnes_video", "submit")] = (_submit, "free_quota", True)
         _EXECUTORS[("agnes_video", "stop")] = (_stop, "local", True)
 
 
 def register() -> None:
-    """Opt-in only. Submission is free_quota (upstream free) with human-authorized channel.
-
-    Even though free, we keep quantity limits, duration caps, quota handling and cost observation.
-    Real spend (if any) still requires human allowance.
-    """
     _ensure_registered()
 
 
-# Auto-register on import for autonomous missions, but still require channel act access and capability.
-# This ensures that an available and authorized Agnes resource can be used without explicit register()
-# in mission code, while keeping it optional (probe failure does not block).
 _ensure_registered()

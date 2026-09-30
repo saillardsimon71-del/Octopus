@@ -65,10 +65,25 @@ if ($Docker) {
         docker rm -f agnes-video 2>$null | Out-Null
 
         # Securely inject key via env-file, not via -e KEY=VALUE literal in command args
+        # Must be UTF-8 without BOM on PowerShell 5.1 (BOM breaks --env-file parsing)
+        # and restricted ACL + guaranteed deletion (no key leak)
         $tmpEnv = Join-Path $env:TEMP ("agnes-env-" + [guid]::NewGuid().ToString() + ".env")
-        # Write with restricted ACL (current user only) - best effort
-        Set-Content -Path $tmpEnv -Value "AGNES_API_KEY=$key" -Encoding utf8
         try {
+            # Write UTF-8 without BOM (PS 5.1 compatible)
+            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+            [System.IO.File]::WriteAllText($tmpEnv, "AGNES_API_KEY=$key`n", $utf8NoBom)
+            # Restrict ACL to current user only (best effort, do not fail if ACL unavailable)
+            try {
+                $acl = Get-Acl -LiteralPath $tmpEnv
+                $acl.SetAccessRuleProtection($true, $false)
+                $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+                if (-not $currentUser) { $currentUser = "$env:USERDOMAIN\$env:USERNAME" }
+                $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($currentUser, "FullControl", "Allow")
+                $acl.SetAccessRule($rule)
+                Set-Acl -LiteralPath $tmpEnv -AclObject $acl
+            } catch {
+                try { icacls $tmpEnv /inheritance:r /grant:r "$env:USERNAME:(F)" 2>$null | Out-Null } catch {}
+            }
             # Inside container, listen on 0.0.0.0 (container interface), host port bound to 127.0.0.1 only
             docker run -d --name agnes-video `
               -p 127.0.0.1:8765:8765 `
@@ -80,8 +95,11 @@ if ($Docker) {
               agnes-video:pinned
             if ($LASTEXITCODE -ne 0) { throw "docker run failed" }
         } finally {
-            # Remove temp env file containing key
-            Remove-Item -LiteralPath $tmpEnv -Force -ErrorAction SilentlyContinue
+            # Guaranteed deletion of temp env file containing key (even on crash)
+            try { Remove-Item -LiteralPath $tmpEnv -Force -ErrorAction SilentlyContinue } catch {}
+            if (Test-Path -LiteralPath $tmpEnv) {
+                try { [System.IO.File]::Delete($tmpEnv) } catch {}
+            }
         }
         Write-Host "[OK] Container agnes-video started: host http://127.0.0.1:8765 -> container 0.0.0.0:8765" -ForegroundColor Green
         Write-Host "[OK] Network: container listens 0.0.0.0, published only on 127.0.0.1 (loopback)" -ForegroundColor Green

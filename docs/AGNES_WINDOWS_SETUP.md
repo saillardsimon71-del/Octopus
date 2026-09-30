@@ -157,28 +157,59 @@ powershell -ExecutionPolicy Bypass -File scripts/agnes_run.ps1
 docker build -t agnes-video:7.0.1-pinned -t agnes-video:pinned .
 
 # Lancement: container écoute 0.0.0.0:8765 (interface conteneur), host publie seulement 127.0.0.1:8765
-# Méthode sécurisée: env-file temporaire, pas de valeur littérale dans les args Docker
-$envContent = "AGNES_API_KEY=$env:AGNES_API_KEY"
-Set-Content -Path $env:TEMP\agnes.env -Value $envContent -Encoding utf8
-docker run -d --name agnes-video `
-  -p 127.0.0.1:8765:8765 `
-  -e HOST=0.0.0.0 -e PORT=8765 `
-  --env-file $env:TEMP\agnes.env `
-  -v ${PWD}/agnes_data/working:/app/.working_dir `
-  -v ${PWD}/agnes_data/config:/app/.agnes_config `
-  --restart unless-stopped `
-  agnes-video:pinned
-Remove-Item $env:TEMP\agnes.env -Force
+# Méthode sécurisée: env-file temporaire UTF-8 sans BOM, ACL restreint, suppression garantie
+# Ne jamais utiliser -e AGNES_API_KEY=valeur littérale (visible dans process list)
+# Ne jamais utiliser docker inspect --format '{{json .Config.Env}}' (divulgue la clé)
 
-# Alternative simple (passe la variable d'env hôte sans valeur littérale dans la ligne):
-# docker run -d --name agnes-video -p 127.0.0.1:8765:8765 -e HOST=0.0.0.0 -e PORT=8765 -e AGNES_API_KEY --restart unless-stopped agnes-video:pinned
+$tmpEnv = Join-Path $env:TEMP ("agnes-env-" + [guid]::NewGuid().ToString() + ".env")
+try {
+    # UTF-8 sans BOM obligatoire sur PowerShell 5.1 (BOM casse --env-file)
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($tmpEnv, "AGNES_API_KEY=$env:AGNES_API_KEY`n", $utf8NoBom)
+    # ACL restreint: utilisateur courant seul (best effort)
+    try {
+        $acl = Get-Acl -LiteralPath $tmpEnv
+        $acl.SetAccessRuleProtection($true, $false)
+        $cu = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($cu, "FullControl", "Allow")
+        $acl.SetAccessRule($rule)
+        Set-Acl -LiteralPath $tmpEnv -AclObject $acl
+    } catch {}
+    docker run -d --name agnes-video `
+      -p 127.0.0.1:8765:8765 `
+      -e HOST=0.0.0.0 -e PORT=8765 `
+      --env-file $tmpEnv `
+      -v ${PWD}/agnes_data/working:/app/.working_dir `
+      -v ${PWD}/agnes_data/config:/app/.agnes_config `
+      --restart unless-stopped `
+      agnes-video:pinned
+} finally {
+    # Suppression garantie
+    Remove-Item -LiteralPath $tmpEnv -Force -ErrorAction SilentlyContinue
+    if (Test-Path $tmpEnv) { [System.IO.File]::Delete($tmpEnv) }
+}
+
+# Alternative compose sécurisée (env_file, pas de ${AGNES_API_KEY} dans environment):
+# Créer C:\octopus\secrets\agnes.env (UTF-8 sans BOM, ACL restreint) avec AGNES_API_KEY=xxx
+# Puis:
+# $env:AGNES_ENV_FILE="C:\octopus\secrets\agnes.env"
+# docker compose -f ops/agnes/docker-compose.yml up -d
 ```
 
-Ou via compose (fichier fourni `ops/agnes/docker-compose.yml` — HOST=0.0.0.0 dedans, publish 127.0.0.1:8765:8765, healthcheck Python):
+Ou via compose (fichier fourni `ops/agnes/docker-compose.yml` — HOST=0.0.0.0 dedans, publish 127.0.0.1:8765:8765, healthcheck Python, env_file sécurisé):
 
 ```powershell
+# Préparer fichier env sécurisé hors repo, UTF-8 sans BOM, ACL restreint
+$secureDir = "C:\octopus\secrets"
+New-Item -ItemType Directory -Force -Path $secureDir | Out-Null
+$secureFile = Join-Path $secureDir "agnes.env"
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+[System.IO.File]::WriteAllText($secureFile, "AGNES_API_KEY=ta_cle_ici`n", $utf8NoBom)
+# ACL restreint
+icacls $secureFile /inheritance:r /grant:r "$env:USERNAME:(F)"
+
 cd ops/agnes
-$env:AGNES_API_KEY="ta_cle"   # ou via fichier env sécurisé C:\octopus\secrets\agnes.env
+$env:AGNES_ENV_FILE=$secureFile
 docker compose up -d
 ```
 
@@ -189,10 +220,13 @@ curl http://127.0.0.1:8765/api/health
 # {"ok": true, "service": "agnes-video-generator", "status": "healthy"}
 
 # Vérifier que le conteneur écoute bien 0.0.0.0 à l'intérieur et que le host n'écoute que sur 127.0.0.1
-docker inspect agnes-video --format '{{json .Config.Env}}'
+# ATTENTION: ne jamais utiliser `docker inspect --format '{{json .Config.Env}}'` car cela divulgue AGNES_API_KEY
+# Utiliser uniquement des commandes sûres:
 docker port agnes-video
 netstat -ano | findstr 8765
 # doit afficher 127.0.0.1:8765, pas 0.0.0.0:8765 sur l'hôte
+# Vérifier logs sans clé:
+docker logs agnes-video --tail 100
 ```
 
 **Persistance Docker**:
@@ -351,9 +385,9 @@ Ne considère jamais gratuit = illimité.
 ## 10. Sécurité et réseau checklist
 
 - [ ] Natif: `HOST=127.0.0.1` (loopback only)
-- [ ] Docker: container `HOST=0.0.0.0` (interface conteneur), publish `127.0.0.1:8765:8765` (seulement loopback sur Windows) — vérifié via `docker inspect` et `netstat`
+- [ ] Docker: container `HOST=0.0.0.0` (interface conteneur), publish `127.0.0.1:8765:8765` (seulement loopback sur Windows) — vérifié via `docker port` et `netstat`, jamais `docker inspect --format '{{json .Config.Env}}'` (divulgue clé)
 - [ ] Healthcheck Compose utilise `python -c urllib.request` (pas curl, image upstream Python)
-- [ ] `AGNES_API_KEY` uniquement dans env du processus Agnes, jamais dans Git, prompts, logs, args CLI visibles, navigateur; Docker via `--env-file` temporaire, pas `-e KEY=literal`
+- [ ] `AGNES_API_KEY` uniquement dans env du processus Agnes, jamais dans Git, prompts, logs, args CLI visibles, navigateur; Docker via `--env-file` temporaire UTF-8 sans BOM (PowerShell 5.1: `UTF8Encoding $false`), ACL restreint utilisateur courant seul, suppression garantie (finally + double-check), pas `-e KEY=literal`
 - [ ] `cache/upstreams/agnes-video-generator/.working_dir` et `.agnes_config` préservés
 - [ ] Aucun log ne contient la clé (vérifie `docker logs`, `server.log`)
 - [ ] Canal `agnes_video` actif + `act` accordé par humain
