@@ -41,10 +41,19 @@ DEFAULT_RETRY_DELAY_S = 900.0
 DEFAULT_MAX_STEPS = 6
 DEFAULT_MAX_DURATION_S = 900.0
 
-# Seule métrique réellement mesurable sans LLM dans une mission existante
-# (`agents.task_handlers._mission_objective_result`).
-SUPPORTED_METRICS = ("usable_browse_count",)
+# Métriques réellement mesurables sans LLM : acquisitions publiques utilisables d'une mission
+# (`agents.task_handlers._mission_objective_result`) et actions navigateur dont l'effet a été
+# constaté sur le site (registre `channel_actions`, `octopus.browser_workspace`) et fichiers
+# téléchargés toujours présents et intacts dans l'espace de la tâche (`browser_workspace.kept_files`).
+SUPPORTED_METRICS = ("usable_browse_count", "verified_browser_actions", "kept_browser_files")
+BROWSER_METRICS = ("verified_browser_actions", "kept_browser_files")
+METRIC_HELP = {
+    "verified_browser_actions": "actions à effet dont le résultat a été constaté sur la page réelle",
+    "kept_browser_files": "fichiers téléchargés avec browser_download et présents, intacts, dans l'espace de la tâche",
+}
 _CRITERION_RE = re.compile(r"^\s*([a-z_]+)\s*>=\s*(\d+)\s*$", re.IGNORECASE)
+# Critères cumulatifs : « a>=1 ; b>=1 », « a>=1 et b>=1 », « a>=1 and b>=1 », « a>=1 && b>=1 ».
+_CRITERIA_SPLIT_RE = re.compile(r"\s*(?:;|&&|\bet\b|\band\b)\s*", re.IGNORECASE)
 
 # Pannes qui exigent une ressource ou une autorisation que le superviseur ne crée jamais lui-même.
 HUMAN_BOUNDARY_STATUSES = {
@@ -107,21 +116,34 @@ def boundary_key(objective_id: int) -> str:
 
 # --- critère mesurable ----------------------------------------------------------------------------
 
+def criterion_parts(criterion: dict | None) -> list[dict]:
+    """Critère simple `{"metric", "gte"}` ou cumulatif `{"all": [...]}` -> liste de critères simples."""
+    if not criterion:
+        return []
+    return list(criterion["all"]) if "all" in criterion else [criterion]
+
+
 def parse_criterion(text) -> dict | None:
-    """`success_criteria` lisible -> critère mesurable. Rien d'inventé : None si non mesurable."""
-    match = _CRITERION_RE.match(str(text or ""))
-    if not match:
+    """`success_criteria` lisible -> critère mesurable. Rien d'inventé : None si non mesurable.
+
+    Plusieurs critères cumulatifs sont tous exigés ; un seul critère illisible rend l'ensemble
+    non mesurable (jamais un sous-ensemble plus facile à satisfaire)."""
+    pieces = [p for p in _CRITERIA_SPLIT_RE.split(str(text or "").strip()) if p.strip()]
+    parts = []
+    for piece in pieces:
+        match = _CRITERION_RE.match(piece)
+        if not match:
+            return None
+        metric, target = match.group(1).lower(), int(match.group(2))
+        if metric not in SUPPORTED_METRICS or target <= 0:
+            return None
+        parts.append({"metric": metric, "gte": target})
+    if not parts:
         return None
-    metric, target = match.group(1).lower(), int(match.group(2))
-    if metric not in SUPPORTED_METRICS or target <= 0:
-        return None
-    return {"metric": metric, "gte": target}
+    return parts[0] if len(parts) == 1 else {"all": parts}
 
 
-def criterion_for(objective: dict, default: dict | None = None) -> dict | None:
-    criterion = parse_criterion(objective.get("success_criteria")) or default
-    if criterion in (None, {}):
-        return None
+def _checked_part(criterion) -> dict:
     if not isinstance(criterion, dict):
         raise SupervisorError("success_criterion doit être un objet")
     metric = str(criterion.get("metric") or "")
@@ -137,15 +159,56 @@ def criterion_for(objective: dict, default: dict | None = None) -> dict | None:
     return {"metric": metric, "gte": target}
 
 
+def criterion_for(objective: dict, default: dict | None = None) -> dict | None:
+    criterion = parse_criterion(objective.get("success_criteria")) or default
+    if criterion in (None, {}):
+        return None
+    if not isinstance(criterion, dict):
+        raise SupervisorError("success_criterion doit être un objet")
+    if "all" in criterion:
+        parts = criterion["all"]
+        if not isinstance(parts, list) or not parts:
+            raise SupervisorError("success_criterion.all doit être une liste non vide")
+        return {"all": [_checked_part(p) for p in parts]}
+    return _checked_part(criterion)
+
+
+def describe_criterion(criterion: dict | None) -> str:
+    return " ET ".join(f"{p['metric']}>={p['gte']}" for p in criterion_parts(criterion))
+
+
 def goal_text(objective: dict) -> str:
     parts = [f"Objectif persistant #{objective['id']} : {objective['statement']}"]
     if objective.get("success_criteria"):
         parts.append(f"Critères de succès déclarés : {objective['success_criteria']}")
+        measured = criterion_parts(parse_criterion(objective["success_criteria"]))
+        helps = [f"{p['metric']} = {METRIC_HELP[p['metric']]}" for p in measured if p["metric"] in METRIC_HELP]
+        if helps:
+            parts.append("Mesure (sur le registre et le disque, pas sur ta réponse) : " + " ; ".join(helps)
+                         + (". Tous les critères sont exigés." if len(measured) > 1 else "."))
     if objective.get("timeframe"):
         parts.append(f"Horizon : {objective['timeframe']}")
-    parts.append("Travail borné : acquisition et qualification seulement. Aucun contact, publication, "
-                 "achat ni dépense sans autorisation humaine explicite.")
+    channels = browser_channels(objective.get("business") or "")
+    if channels:
+        parts.append("Sites où l'humain a autorisé l'action dans le navigateur (outils browser_*) : "
+                     + " ; ".join(f"canal #{c['id']} {c['name']} ({c['locator']})" for c in channels)
+                     + ". Chaque action à effet y est tracée et vérifiée ; ailleurs, lecture seule.")
+        parts.append("Travail borné : hors de ces sites autorisés, acquisition et qualification seulement. "
+                     "Aucun achat, paiement ni dépense sans autorisation humaine explicite.")
+    else:
+        parts.append("Travail borné : acquisition et qualification seulement. Aucun contact, publication, "
+                     "achat ni dépense sans autorisation humaine explicite.")
     return "\n".join(parts)
+
+
+def browser_channels(business: str) -> list[dict]:
+    """Canaux sur lesquels l'humain a accordé l'accès `act` pour l'espace navigateur."""
+    if not business:
+        return []
+    from .browser_workspace import CAPABILITY
+    rows = journal.query("SELECT id, name, locator, capabilities FROM economic_channels WHERE business=? "
+                         "AND status='active' AND access='act' ORDER BY id", (business,))
+    return [dict(r) for r in rows if CAPABILITY in str(r["capabilities"] or "")]
 
 
 # --- création de travail --------------------------------------------------------------------------
@@ -176,7 +239,7 @@ def plan_work(business: str, objective: dict, *, criterion: dict | None = None, 
 
 def bootstrap(business: str = DEFAULT_BUSINESS, *, tick_every_s: float = DEFAULT_TICK_EVERY_S,
               max_attempts: int = DEFAULT_MAX_ATTEMPTS, retry_delay_s: float = DEFAULT_RETRY_DELAY_S,
-              now: float | None = None) -> int | None:
+              now: float | None = None, max_steps: int | None = None) -> int | None:
     """Démarrage durable : garantit qu'un tick du superviseur est en file, sans le dupliquer.
 
     C'est la seule action de démarrage nécessaire : le tick se réarme lui-même ensuite.
@@ -192,14 +255,18 @@ def bootstrap(business: str = DEFAULT_BUSINESS, *, tick_every_s: float = DEFAULT
     if open_tick is not None:
         return int(open_tick["id"])
     return tasks.enqueue(business, TICK_KIND, tick_input(tick_every_s=tick_every_s, max_attempts=max_attempts,
-                                                         retry_delay_s=retry_delay_s),
+                                                         retry_delay_s=retry_delay_s, max_steps=max_steps),
                          idempotency_key=f"supervisor.bootstrap#{business}#{int((now or time.time()) // 60)}")
 
 
 def tick_input(*, tick_every_s: float = DEFAULT_TICK_EVERY_S, max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-               retry_delay_s: float = DEFAULT_RETRY_DELAY_S) -> dict:
-    return {"tick_every_s": float(tick_every_s), "max_attempts": int(max_attempts),
-            "retry_delay_s": float(retry_delay_s)}
+               retry_delay_s: float = DEFAULT_RETRY_DELAY_S, max_steps: int | None = None) -> dict:
+    payload = {"tick_every_s": float(tick_every_s), "max_attempts": int(max_attempts),
+               "retry_delay_s": float(retry_delay_s)}
+    if max_steps is not None:
+        # Les parcours web multi-étapes demandent plus d'actions qu'une acquisition documentaire.
+        payload["max_steps"] = int(max_steps)
+    return payload
 
 
 # --- exécution du travail -------------------------------------------------------------------------
@@ -216,7 +283,7 @@ def execute_objective_work(ctx) -> dict:
         raise SupervisorError(f"objectif #{objective_id} introuvable pour le business {ctx.business!r}")
     criterion = criterion_for(objective, ctx.input.get("success_criterion"))
     result = ctx.memo("mission", lambda: _run_mission(ctx, objective, criterion))
-    return work_output(ctx.business, objective, criterion, result)
+    return work_output(ctx.business, objective, criterion, result, task_id=ctx.id)
 
 
 def _run_mission(ctx, objective: dict, criterion: dict | None) -> dict:
@@ -238,12 +305,57 @@ def _run_mission(ctx, objective: dict, criterion: dict | None) -> dict:
     ))
 
 
-def work_output(business: str, objective: dict, criterion: dict | None, result: dict) -> dict:
+def browser_result(business: str, task_id: int | None, criterion: dict) -> dict:
+    """Mesure sur le registre et le disque, pour CETTE tâche uniquement."""
+    target = int(criterion["gte"])
+    if criterion["metric"] == "kept_browser_files":
+        from .browser_workspace import kept_files
+        kept = kept_files(business, task_id) if task_id is not None else []
+        return {"metric": "kept_browser_files", "observed": len(kept), "target": target,
+                "success": len(kept) >= target, "files": [{k: f[k] for k in ("file", "sha256", "bytes")} for f in kept],
+                "scope": "task_steps+disque", "note": "fichier présent dans l'espace de la tâche, sha256 identique"}
+    from .browser_workspace import task_actions
+    rows = task_actions(business, task_id) if task_id is not None else []
+    verified = [r for r in rows if r["status"] == "verified"]
+    return {"metric": "verified_browser_actions", "observed": len(verified), "target": target,
+            "success": len(verified) >= target, "verified_action_ids": [r["id"] for r in verified],
+            "scope": "channel_actions", "note": "effet constaté sur la page réelle (texte absent avant, présent après)"}
+
+
+def measure(business: str, task_id: int | None, criterion: dict, results: list) -> dict:
+    """Critère simple : sa mesure. Critère cumulatif : succès seulement si CHAQUE partie est
+    satisfaite ; `observed` compte alors les parties satisfaites (cible = nombre de parties)."""
+    from agents import task_handlers
+
+    def one(part: dict) -> dict:
+        if part["metric"] in BROWSER_METRICS:
+            return browser_result(business, task_id, part)
+        return task_handlers._mission_objective_result(results, part)
+
+    if "all" not in criterion:
+        return one(criterion)
+    parts = [one(p) for p in criterion["all"]]
+    satisfied = sum(1 for p in parts if p.get("success"))
+    return {"metric": "all", "observed": satisfied, "target": len(parts), "success": satisfied == len(parts),
+            "parts": parts, "note": "tous les critères sont exigés"}
+
+
+def work_output(business: str, objective: dict, criterion: dict | None, result: dict, *,
+                task_id: int | None = None) -> dict:
     """Résultat mesurable d'un travail : ce qui est constaté, jamais ce qui est espéré."""
     from agents import task_handlers
+
+    from .browser_workspace import task_actions
     results = result.get("results") or []
-    objective_result = task_handlers._mission_objective_result(results, criterion) if criterion else None
+    objective_result = measure(business, task_id, criterion, results) if criterion else None
     execution_status = str(result.get("execution_status") or "unknown")
+    ambiguous = [r["id"] for r in task_actions(business, task_id) if r["status"] in ("ambiguous", "proposed")] \
+        if task_id is not None else []
+    boundary = HUMAN_BOUNDARY_STATUSES.get(execution_status)
+    if ambiguous and not (objective_result or {}).get("success"):
+        # Effet externe inconnu : seul l'humain peut dire s'il a eu lieu ; aucune relance aveugle.
+        boundary = (f"action(s) navigateur au résultat inconnu {', '.join(f'#{i}' for i in ambiguous)} : vérifier "
+                    f"sur le site puis `python -m octopus browser resolve {business} <id> executed|not_executed`")
     return {
         "objective_id": int(objective["id"]),
         "business": business,
@@ -255,7 +367,8 @@ def work_output(business: str, objective: dict, criterion: dict | None, result: 
         "success": None if objective_result is None else bool(objective_result["success"]),
         "citations": task_handlers._usable_browse_urls(results),
         "business_signals": len(result.get("business_signals") or []),
-        "human_boundary": HUMAN_BOUNDARY_STATUSES.get(execution_status),
+        "human_boundary": boundary,
+        "browser_ambiguous_actions": ambiguous,
         "measured": objective_result is not None,
     }
 
@@ -263,7 +376,8 @@ def work_output(business: str, objective: dict, criterion: dict | None, result: 
 # --- évaluation et décision -----------------------------------------------------------------------
 
 def decide(business: str, objective: dict, work: dict, *, max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-           retry_delay_s: float = DEFAULT_RETRY_DELAY_S, parent_id: int | None = None) -> dict:
+           retry_delay_s: float = DEFAULT_RETRY_DELAY_S, parent_id: int | None = None,
+           max_steps: int = DEFAULT_MAX_STEPS) -> dict:
     """Décision déterministe à partir du résultat persisté. Renvoie la décision et son effet."""
     output = work.get("output") or {}
     attempts = len(work_tasks(business, int(objective["id"])))
@@ -288,15 +402,17 @@ def decide(business: str, objective: dict, work: dict, *, max_attempts: int = DE
     }
     # `_persist` renseigne `next_work_task_id` quand la décision crée la tâche suivante.
     decision["next_work_task_id"] = None
-    _persist(business, objective, work, decision, retry_delay_s=retry_delay_s, parent_id=parent_id)
+    _persist(business, objective, work, decision, retry_delay_s=retry_delay_s, parent_id=parent_id,
+             max_steps=max_steps)
     return decision
 
 
 def _reason(outcome: str, output: dict, attempts: int, max_attempts: int) -> str:
     if outcome == "satisfied":
-        criterion = output.get("criterion") or {}
-        return (f"critère mesuré {criterion.get('metric')} : {output.get('observed')} >= "
-                f"{criterion.get('gte')} (tâche de travail)")
+        result = output.get("objective_result") or {}
+        parts = result.get("parts") or [result]
+        return "critère mesuré " + " ET ".join(f"{p.get('metric')} : {p.get('observed')} >= {p.get('target')}"
+                                               for p in parts) + " (tâche de travail)"
     if outcome == "human_boundary":
         return str(output.get("human_boundary"))
     if outcome == "exhausted":
@@ -306,7 +422,7 @@ def _reason(outcome: str, output: dict, attempts: int, max_attempts: int) -> str
 
 
 def _persist(business: str, objective: dict, work: dict, decision: dict, *, retry_delay_s: float,
-             parent_id: int | None) -> None:
+             parent_id: int | None, max_steps: int = DEFAULT_MAX_STEPS) -> None:
     """Écrit la décision, la preuve calculée et l'effet (tâche suivante ou transition d'objectif)."""
     objective_id, work_id, outcome = decision["objective_id"], decision["work_task_id"], decision["outcome"]
     resulting_action = {
@@ -341,7 +457,7 @@ def _persist(business: str, objective: dict, work: dict, decision: dict, *, retr
                             note=f"{decision['attempts']} tentatives sans mesure")
     elif outcome == "retry":
         next_id = plan_work(business, objective, criterion=decision["criterion"], delay_s=retry_delay_s,
-                            parent_id=parent_id)
+                            parent_id=parent_id, max_steps=max_steps)
         decision["next_work_task_id"] = next_id
 
 
@@ -361,7 +477,7 @@ def boundary_question(objective: dict, reason: str | None) -> str:
 
 
 def supervise_objective(business: str, objective: dict, *, max_attempts: int, retry_delay_s: float,
-                        parent_id: int | None = None) -> dict:
+                        parent_id: int | None = None, max_steps: int = DEFAULT_MAX_STEPS) -> dict:
     """Une passe de supervision pour un objectif : lecture d'état, puis création, évaluation ou attente."""
     objective_id = int(objective["id"])
     rows = work_tasks(business, objective_id)
@@ -375,14 +491,14 @@ def supervise_objective(business: str, objective: dict, *, max_attempts: int, re
     done = [row for row in rows if row["status"] not in tasks.ACTIVE]
     if not done:
         entry.update(action="work_created",
-                     work_task_id=plan_work(business, objective, parent_id=parent_id))
+                     work_task_id=plan_work(business, objective, parent_id=parent_id, max_steps=max_steps))
         return entry
     work = done[-1]
     entry["work_task_id"] = int(work["id"])
     if not evaluated(business, objective_id, int(work["id"])):
         entry.update(action="evaluated",
                      decision=decide(business, objective, work, max_attempts=max_attempts,
-                                     retry_delay_s=retry_delay_s, parent_id=parent_id))
+                                     retry_delay_s=retry_delay_s, parent_id=parent_id, max_steps=max_steps))
     elif awaiting_human(business, objective_id, int(work["id"])):
         # Frontière humaine décidée avant un redémarrage : elle reste ouverte jusqu'à réponse.
         outcome, rationale = _last_supervision(business, objective_id)
@@ -408,13 +524,14 @@ def tick(*, ctx=None, businesses: list[str] | None = None, max_attempts: int = D
         tick_every_s = float((ctx.input or {}).get("tick_every_s", tick_every_s))
         max_attempts = int((ctx.input or {}).get("max_attempts", max_attempts))
         retry_delay_s = float((ctx.input or {}).get("retry_delay_s", retry_delay_s))
+    max_steps = int((ctx.input or {}).get("max_steps", DEFAULT_MAX_STEPS)) if ctx is not None else DEFAULT_MAX_STEPS
     parent_id = ctx.id if ctx is not None else None
     report: dict = {"objectives": [], "human_boundaries": [], "next_tick": None, "checked": 0}
     for business in list(businesses) if businesses else businesses_with_active_objectives():
         for objective in active_objectives(business)[:limit]:
             report["checked"] += 1
             entry = supervise_objective(business, objective, max_attempts=max_attempts,
-                                        retry_delay_s=retry_delay_s, parent_id=parent_id)
+                                        retry_delay_s=retry_delay_s, parent_id=parent_id, max_steps=max_steps)
             if entry.get("human_question"):
                 report["human_boundaries"].append(entry)
             report["objectives"].append(entry)
@@ -430,7 +547,7 @@ def tick(*, ctx=None, businesses: list[str] | None = None, max_attempts: int = D
         answer = ctx.ask_human(boundary_key(entry["objective_id"]), entry["human_question"],
                                context={"objective_id": entry["objective_id"],
                                         "work_task_id": entry["work_task_id"]})
-        _after_human_answer(entry, answer, parent_id=parent_id, retry_delay_s=retry_delay_s)
+        _after_human_answer(entry, answer, parent_id=parent_id, retry_delay_s=retry_delay_s, max_steps=max_steps)
         break  # une seule frontière humaine traitée par passe : la suivante le sera au tick suivant
     return report
 
@@ -448,7 +565,8 @@ def _rearm(ctx, tick_every_s: float) -> int | None:
                          parent_id=ctx.id)
 
 
-def _after_human_answer(entry: dict, answer: str, *, parent_id: int | None, retry_delay_s: float) -> None:
+def _after_human_answer(entry: dict, answer: str, *, parent_id: int | None, retry_delay_s: float,
+                        max_steps: int = DEFAULT_MAX_STEPS) -> None:
     """La réponse humaine est l'autorisation : elle est enregistrée puis le travail reprend."""
     business, objective_id = entry["business"], entry["objective_id"]
     decision_id = strategy.create(
@@ -461,6 +579,6 @@ def _after_human_answer(entry: dict, answer: str, *, parent_id: int | None, retr
         entry["action"] = "human_answered_objective_closed"
         return
     entry["work_task_id"] = plan_work(business, objective, criterion=parse_criterion(objective.get("success_criteria")),
-                                      delay_s=0.0, parent_id=parent_id)
+                                      delay_s=0.0, parent_id=parent_id, max_steps=max_steps)
     entry["action"] = "work_created_after_human_answer"
     entry["human_answer"] = str(answer)[:500]

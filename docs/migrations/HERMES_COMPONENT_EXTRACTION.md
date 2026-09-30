@@ -85,7 +85,27 @@ est tardif, annonce son offset/troncature et ne modifie jamais le texte source. 
 ciblés passent; la relecture de la même acquisition rend besoin, budget et fermeture visibles.
 Il reste impossible d'en déduire un client disponible ou un paiement. Voir `CURRENT_STATE`.
 
+### P0 — Browser (réalisé le 2026-09-30)
+
+Upstream inspecté : `tools/browser_tool.py`, `browser_tool_session.py`, `browser_tool_snapshot.py`,
+`browser_tool_install.py`, `browser_tool_lifecycle.py`, `agent/redact.py`, `pm/lock.json`. Le navigateur de Hermes est le CLI natif
+`agent-browser` (Apache-2.0, 0.26.0, sha256 figé, binaires Linux/macOS/Windows) piloté par une couche
+Python. Cette couche dépend du runtime Hermes (config, PM, bot desktop, cloud, secret scope) : elle
+n'est pas importée ; ses mécanismes sont adaptés dans `agents/agent_browser.py` (attribution MIT).
+
+Cible livrée : `octopus/browser_workspace.py` (permissions par canal `act`, registre
+`channel_actions` écrit avant l'effet, vérification sur la page, reprise `proposed -> ambiguous`,
+point de reprise `task_step`), `web_guard.GuardProxy` (tout le trafic Chromium, y compris loopback),
+outils `browser_*` du registre, métrique superviseur `verified_browser_actions`, CLI
+`python -m octopus browser doctor|actions|resolve`, installateur explicite
+`scripts/install_agent_browser.py`. `octopus/browser_agent.py` (maison, sans appelant) est supprimé.
+
+Décision: INTÉGRÉ (backend réutilisé, couche de commande adaptée, politiques OCTOPUS).
+
 ### P0 — Computer Use
+
+Révision 2026-09-30 : `defer` (voir la matrice, section 3) ; le web est couvert par le backend
+navigateur ci-dessus.
 
 Upstream:
 - `tools/computer_use_tool.py`

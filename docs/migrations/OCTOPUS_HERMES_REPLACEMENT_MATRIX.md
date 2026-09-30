@@ -11,7 +11,7 @@ But: identifier les remplacements qui réduisent réellement la dette. Un compos
 |---|---|---|
 | Registry d'outils | intégré et testé | conserver, vérifier son raccordement aux policies |
 | Capability / permissions | modèles OCTOPUS existants, raccordement registry incomplet | intégrer seulement la frontière d'exécution nécessaire |
-| Computer use | absent | intégrer uniquement si un parcours actuel le requiert |
+| Computer use | absent ; web couvert par l'espace navigateur (backend agent-browser Hermes) | `defer` confirmé le 2026-09-30 : aucun parcours desktop requis |
 | MCP générique | absent | créer une frontière minimale seulement avec un premier consommateur |
 | Evidence / vérification | preuves économiques et gate de sources présentes | vérifier portée, fraîcheur et lien action/résultat sans seconde base |
 | Retry / cooldown | présent pour LLM, dispersé ailleurs | extraire seulement si SEARCH/BROWSE/computer le justifient |
@@ -41,6 +41,7 @@ Hermes vérifié à `59004a62356f3a4697ab0fe8ad5086d2b405e2a6` dans
 | Annulation et timeout natif SEARCH | appels HTTP bornés mais pas de worker DDGS | `_run_ddgs_search_bounded`, `_terminate_and_reap` | `integrate`: enfant jetable, arrêt humain OCTOPUS propagé, secrets exclus de son environnement |
 | Erreurs, retry et cooldown | erreurs par provider, cooldown LLM et retry worker existants | `agent/error_classifier.py`, `retry_utils.py`, `fallback_cooldown.py` | `keep_octopus`: upstream orienté failover LLM; aucun retry de soumission ni nouvelle taxonomie nécessaire pour ce GET/search borné |
 | Computer-use | BROWSE HTTP/Playwright | `tools/computer_use/permissions.py`, backend cua MCP | `defer`: aucun obstacle desktop démontré; ne pas confondre disponibilité du driver et permission OCTOPUS |
+| Navigateur comme espace de travail (formulaires, comptes, fichiers, parcours multi-étapes) | `octopus/browser_agent.py` maison (Playwright, sans appelant) | `tools/browser_tool*.py` + CLI `agent-browser` 0.26.0 (`pm/lock.json`) | `integrate` (2026-09-30) : backend repris tel quel, couche de commande adaptée dans `agents/agent_browser.py`, politiques OCTOPUS dans `octopus/browser_workspace.py`, outils `browser_*` du registre ; `browser_agent.py` supprimé. Voir `docs/BROWSER_AGENT.md` |
 | Qualification et fraîcheur | `PublicPageRecord.fetched_at`, gate de citations, journal strategy | `agent/verification_evidence.py` (ledger de vérification de code) | `keep_octopus`: autre domaine et seconde DB; acquisition != preuve économique |
 | Scheduler | queue durable et watchdog existants | `agent/periodic_scheduler.py` | `keep_octopus`: aucun blocage actuel justifiant un scheduler supplémentaire |
 | Lifecycle | worker/tasks, scopes d'annulation | `agent/subagent_lifecycle.py` | `keep_octopus`: contrats dépendants de la délégation Hermes, pas nécessaires au worker SEARCH jetable |
@@ -105,6 +106,14 @@ Critère:
 - toute action side-effect passe par la policy OCTOPUS.
 
 ## 3. Computer use
+
+Révision 2026-09-30 (code pinné relu : `tools/computer_use/cua_backend*.py`, `permissions.py`) :
+`cua-driver` est un serveur MCP stdio externe (macOS, Windows, Linux ; API privées SkyLight sur
+macOS, overlay à désactiver sous X11/WSL2), installé par `hermes computer-use install`. Il pilote le
+bureau, pas le web. Les parcours web réels passent par l'espace navigateur (backend agent-browser
+de Hermes). Décision : `defer` ; concepts repris dans l'espace navigateur : ref périmée refusée et
+verdict structuré de l'effet. L'intention historique ci-dessous reste valable le jour où un parcours
+desktop est démontré.
 
 OCTOPUS actuel:
 - Playwright/browser orienté web;
