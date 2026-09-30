@@ -358,6 +358,36 @@ def cmd_resources(args) -> int:
     return 0
 
 
+def cmd_browser(args) -> int:
+    """Espace de travail navigateur (backend Hermes agent-browser) : diagnostic et tranche humaine."""
+    from . import browser_workspace
+    if args.browser_cmd == "doctor":
+        from agents import agent_browser
+        info = agent_browser.availability()
+        print(json.dumps(info, ensure_ascii=False, indent=1))
+        if not info["ready"]:
+            print("installer : python scripts/install_agent_browser.py ; python -m playwright install chromium")
+            return 2
+        if args.smoke:
+            result = browser_workspace.smoke()
+            print(json.dumps(result, ensure_ascii=False, indent=1))
+            return 0 if result.get("ok") else 1
+        return 0
+    if args.browser_cmd == "actions":
+        rows = browser_workspace.list_actions(args.business, status=args.status, task_id=args.task)
+        for r in rows:
+            print(f"#{r['id']:<5} {r['status']:9} {r['action']:14} tâche {r.get('task_id')} {r.get('page') or ''} "
+                  f"{r.get('target') or ''} {r.get('reason') or ''}"[:200])
+        if not rows:
+            print("aucune action navigateur")
+        return 0
+    if args.browser_cmd == "resolve":
+        result = browser_workspace.resolve(args.business, args.action_id, executed=args.outcome == "executed")
+        print(f"action #{result['action_id']} : {result['status']}")
+        return 0
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     _safe_console()
     parser = argparse.ArgumentParser(prog="octopus", description="OCTOPUS : expériences économiques supervisées, travail et preuves")
@@ -451,6 +481,18 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("businesses", help="tableau de bord par activite")
     p.add_argument("--days", type=int, default=7)
+    p = sub.add_parser("browser", help="espace de travail navigateur (backend Hermes agent-browser)")
+    bsub = p.add_subparsers(dest="browser_cmd", required=True)
+    x = bsub.add_parser("doctor", help="backend installé ? (--smoke : ouvre une vraie page locale)")
+    x.add_argument("--smoke", action="store_true")
+    x = bsub.add_parser("actions", help="actions navigateur à effet et leur état")
+    x.add_argument("business")
+    x.add_argument("--status", default=None)
+    x.add_argument("--task", type=int, default=None)
+    x = bsub.add_parser("resolve", help="l'humain tranche une action ambiguë (après vérification sur le site)")
+    x.add_argument("business")
+    x.add_argument("action_id", type=int)
+    x.add_argument("outcome", choices=["executed", "not_executed"])
     from . import strategy_cli
     strategy_cli.add_parser(sub)
     args = parser.parse_args(argv)
@@ -470,7 +512,8 @@ def main(argv: list[str] | None = None) -> int:
                 "tasks": cmd_tasks, "cancel": cmd_cancel,
                 "ask": cmd_ask, "answer": cmd_answer, "schedule": cmd_schedule, "events": cmd_events,
                 "businesses": cmd_businesses, "strategy": strategy_cli.run,
-                "economy": strategy_cli.run_economy, "resources": cmd_resources}
+                "economy": strategy_cli.run_economy, "resources": cmd_resources,
+                "browser": cmd_browser}
     return commands[args.cmd](args)
 
 

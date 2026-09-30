@@ -18,7 +18,7 @@ from datetime import date
 from contextlib import contextmanager
 from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
-from octopus import journal, llm
+from octopus import browser_workspace, journal, llm
 
 from . import cancel, config, db, deepseek, web_guard
 from .tool_registry import ToolRegistry
@@ -352,6 +352,12 @@ def _browse_result_meta(value) -> dict | None:
 
 def _tool_result_view(tool: str, result, max_chars: int | None = None) -> str:
     """Vue courte destinée au prompt ; l'objet structuré source reste intact à côté."""
+    if tool.startswith("browser_") and isinstance(result, dict):
+        limit = 6000 if max_chars is None else max(200, int(max_chars))
+        head = {k: v for k, v in result.items() if k != "snapshot"}
+        text = json.dumps(head, ensure_ascii=False, default=str)[:2000]
+        snapshot = str(result.get("snapshot") or "")
+        return text + (f"\nPAGE (refs @eN) :\n{snapshot[:limit]}" if snapshot else "")
     if tool == "browse" and isinstance(result, dict):
         page = result.get("page") if isinstance(result.get("page"), dict) else result
         text = str(page.get("main_text") or result.get("texte") or "")
@@ -439,28 +445,10 @@ def _mission_prompt_results(results: list[dict]) -> list[dict]:
 
 def _browser_request_allowed(url: str, state, *, account_context: bool,
                              anonymous_account_domains=()) -> bool:
-    """Isole les sous-requêtes publiques des vrais comptes connectés.
-
-    Un navigateur public est éphémère et sans cookies : une pub/embed vers un domaine classé
-    ACCOUNT ne doit ni être chargée dans ce contexte ni marquer toute la mission account_read.
-    Le navigateur connecté conserve, lui, le garde-fou historique qui taint immédiatement la session.
-    `anonymous_account_domains` couvre le cas où le document principal demandé est un domaine
-    de compte dont l'absence de session a été prouvée (aucun cookie persisté pour l'origine) :
-    la navigation y est anonyme par construction, jamais un taint. Dès qu'une vraie lecture de
-    compte a eu lieu, le garde anti-fuite historique reprend sans exception.
-    """
-    if account_context:
-        return web_guard.allowed(url, state)
-    try:
-        kind = web_guard.check(url, state)
-    except web_guard.BrowseRefused:
-        return False
-    if kind == web_guard.PUBLIC:
-        return True
-    if state.account_read or not anonymous_account_domains:
-        return False
-    host = (urlsplit(url).hostname or "").lower().rstrip(".")
-    return any(host == d or host.endswith("." + d) for d in anonymous_account_domains)
+    """Alias historique : la règle vit dans `web_guard.request_allowed` (partagée avec le
+    proxy de garde de l'espace de travail navigateur)."""
+    return web_guard.request_allowed(url, state, account_context=account_context,
+                                     anonymous_account_domains=anonymous_account_domains)
 
 
 def _account_read_succeeded(browser_instance, final_url: str) -> bool:
@@ -795,6 +783,52 @@ TOOLS = ToolRegistry({
     "request_resource": {"desc": "demande a l'humain de creer, connecter ou autoriser une ressource manquante (login, oauth, 2fa, kyc, signature, validation bancaire) ; l'operation reprend seule apres la reponse", "params": {"key": "str", "need": "str", "question": "str", "label": "str?", "kind": "str?"}, "fn": _request_resource},
     "request_spend": {"desc": "demande l'autorisation de dépenser (ne paie rien) ; refusée hors enveloppe accordée", "params": {"amount": "float", "currency": "str", "purpose": "str", "experiment_id": "int?"}, "fn": _request_spend},
 })
+
+
+def _browser_tool(method: str, **fixed):
+    def fn(args: dict):
+        from octopus import browser_workspace
+        return browser_workspace.call(method, **{**fixed, **{k: v for k, v in args.items() if v is not None}})
+    return fn
+
+
+# Espace de travail navigateur (backend Hermes agent-browser + Chromium, politiques OCTOPUS) :
+# observer -> décider -> agir -> vérifier. Les refs @eN viennent du dernier snapshot.
+_BROWSER_ACT = ("exige un canal actif avec accès act accordé par l'humain pour ce site "
+                "(channel_id optionnel si un seul) ; ")
+TOOLS.update({
+    "browser_navigate": {"desc": "espace de travail navigateur persistant de la tâche : ouvre une URL et renvoie "
+                         "l'arbre de la page avec des refs @eN (cookies/étapes conservés entre appels)",
+                         "params": {"url": "str"}, "fn": _browser_tool("navigate")},
+    "browser_snapshot": {"desc": "observe la page courante (refs @eN à jour) ; full=true pour l'arbre complet",
+                         "params": {"full": "bool?"}, "fn": _browser_tool("snapshot")},
+    "browser_click": {"desc": "clique l'élément @eN. Un lien simple = navigation libre ; un bouton/validation "
+                      "= action à effet : " + _BROWSER_ACT + "expect = court texte qui n'apparaîtra qu'après "
+                      "l'effet (vérification réelle, reprise sans double envoi)",
+                      "params": {"ref": "str", "expect": "str?", "channel_id": "int?"}, "fn": _browser_tool("click")},
+    "browser_type": {"desc": "remplit le champ @eN (efface puis saisit) ; " + _BROWSER_ACT +
+                     "jamais de mot de passe, secret ni moyen de paiement",
+                     "params": {"ref": "str", "text": "str", "channel_id": "int?"}, "fn": _browser_tool("type")},
+    "browser_select": {"desc": "choisit une option (libellé ou valeur) dans la liste @eN ; " + _BROWSER_ACT,
+                       "params": {"ref": "str", "value": "str", "channel_id": "int?"}, "fn": _browser_tool("select")},
+    "browser_check": {"desc": "coche la case @eN ; " + _BROWSER_ACT,
+                      "params": {"ref": "str", "channel_id": "int?"}, "fn": _browser_tool("check")},
+    "browser_press": {"desc": "appuie sur une touche (Tab, Escape, flèches : libres ; Enter et autres = action "
+                      "à effet : " + _BROWSER_ACT + "expect comme browser_click)",
+                      "params": {"key": "str", "expect": "str?", "channel_id": "int?"}, "fn": _browser_tool("press")},
+    "browser_scroll": {"desc": "fait défiler la page (up/down/left/right) puis l'observe",
+                       "params": {"direction": "str?"}, "fn": _browser_tool("scroll")},
+    "browser_back": {"desc": "revient à la page précédente", "params": {}, "fn": _browser_tool("back")},
+    "browser_verify": {"desc": "constate sur la page réelle qu'un texte est visible ; avec une action à effet non "
+                       "vérifiée ou ambiguë (action_id), la marque vérifiée si ce texte n'était pas là avant elle",
+                       "params": {"text": "str", "action_id": "int?"}, "fn": _browser_tool("verify")},
+    "browser_download": {"desc": "télécharge le fichier du lien @eN dans l'espace de la tâche (filename sans chemin)",
+                         "params": {"ref": "str", "filename": "str"}, "fn": _browser_tool("download")},
+    "browser_upload": {"desc": "joint au champ fichier @eN un fichier préparé dans la boîte d'envoi du business ; "
+                       + _BROWSER_ACT, "params": {"ref": "str", "filename": "str", "channel_id": "int?"},
+                       "fn": _browser_tool("upload")},
+})
+BROWSER_TOOLS = frozenset(name for name in TOOLS if name.startswith("browser_"))
 
 
 # Compatibility names reference the single registry, not parallel implementations.
@@ -1250,7 +1284,7 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
                      else deepseek.config.CYCLE_BUDGET_USD):
         token = _ROLE.set(role)
         try:
-            with cancel.scope(), web_guard.session(), _search_cache():
+            with cancel.scope(), web_guard.session(), browser_workspace.mission_scope(), _search_cache():
                 return _run_agent(
                     role, goal, max_steps, conversational, allowed_tools,
                     search_browse_lockstep=search_browse_lockstep,
@@ -1423,7 +1457,8 @@ def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None
                      budget_usd=None if journal.current_run() and journal.current_run().budgets
                      else deepseek.config.CYCLE_BUDGET_USD,
                      profile=profile):
-        with cancel.scope(max_duration_s=max_duration_s), web_guard.session(), _search_cache():
+        with cancel.scope(max_duration_s=max_duration_s), web_guard.session(), \
+                browser_workspace.mission_scope(), _search_cache():
             return _run_mission(
                 goal, max_steps_per_agent, allowed_tools,
                 search_browse_lockstep=search_browse_lockstep,
@@ -1438,7 +1473,8 @@ MAX_PLAN_TASKS = 5
 # Artefacts suffisamment petits pour circuler entre sous-agents sans recopier toute leur trace.
 # Le but est la continuité de travail : une URL/source déjà trouvée doit rester exploitable même
 # si l'agent amont termine sur son budget d'étapes avant d'avoir produit un final détaillé.
-_HANDOFF_TOOLS = {"search", "browse", "record_observation", "economy_status", "resources_status"}
+_HANDOFF_TOOLS = {"search", "browse", "record_observation", "economy_status", "resources_status",
+                  "browser_navigate", "browser_snapshot", "browser_verify", "browser_download"}
 
 
 def _handoff_payload(result: dict) -> dict:
