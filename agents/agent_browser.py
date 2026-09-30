@@ -72,6 +72,14 @@ _GUARD_ARGS = ("--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_
                "--no-pings", "--metrics-recording-only")
 
 
+# Page de démarrage. Sans URL, Chrome for Testing ouvre `chrome://new-tab-page` ; agent-browser
+# ignore cet onglet interne et crée le sien, mais la page Nouvel onglet reste ouverte et contacte
+# Google d'elle-même (`www.google.com/async/newtab_ogb`, `newtab_promos`, `ddljson`, puis la barre
+# OneGoogle : `www.gstatic.com`, `ogads-pa.clients6.google.com`). Un argument non-option est une
+# URL à ouvrir À LA PLACE de cette page ; agent-browser reprend alors cet onglet `about:blank`.
+STARTUP_URL = "about:blank"
+
+
 class BackendUnavailable(RuntimeError):
     """Le binaire agent-browser ou Chromium est absent : rien n'est installé implicitement."""
 
@@ -282,7 +290,7 @@ class Session:
 
     def _global_args(self) -> list[str]:
         launch = [*_GUARD_ARGS, f"--proxy-server={self.proxy_url}", "--proxy-bypass-list=<-loopback>",
-                  *self.extra_args]
+                  *self.extra_args, STARTUP_URL]
         if not launch_args_ok(launch):
             raise ValueError("argument Chromium contenant une virgule ou un retour à la ligne : agent-browser "
                              "le découperait (OCTOPUS_BROWSER_ARGS attend des arguments séparés par des virgules)")

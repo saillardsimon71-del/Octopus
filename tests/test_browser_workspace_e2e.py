@@ -305,3 +305,29 @@ def test_real_browser_egress_is_filtered_by_the_guard_proxy(lab):
         assert again.get("refused")
     finally:
         space.close()
+
+
+def test_local_page_cannot_reach_public_domains_in_the_hermetic_lab(lab):
+    """Une page du laboratoire tente explicitement de joindre des domaines publics (image, fetch,
+    sendBeacon) : laboratoire déclaré = hermétique, tout est refusé avant connexion."""
+    site = lab(0)
+    space = browser_workspace.Workspace(browser_workspace.Scope("sortie", BUSINESS, None), web_guard.BrowseState())
+    seen: list[str] = []
+    try:
+        view = space.navigate(site.origin + "/sortie")
+        assert view["ok"] and "Partenaires" in view["snapshot"]
+        seen += view.get("blocked_requests") or []
+
+        def refused_all() -> bool:
+            seen.extend(space._proxy.blocked)
+            space._proxy.blocked.clear()
+            text = " ".join(seen)
+            return all(h in text for h in ("www.google.com", "www.gstatic.com", "example.com"))
+        assert wait_until(refused_all, timeout=10), seen
+        unexpected = [u for u in space._proxy.allowed_urls if not u.startswith(site.origin + "/")]
+        assert not unexpected, json.dumps({"allowed_unexpected": unexpected, "blocked": seen,
+                                           "browser_internal_refused": space._proxy.browser_internal}, indent=1)
+        refused = browser_workspace.call_on(space, "navigate", url="https://www.google.com/")
+        assert refused.get("refused") and "hermétique" in refused["reason"]
+    finally:
+        space.close()

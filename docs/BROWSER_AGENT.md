@@ -118,6 +118,17 @@ donc jamais clos par un envoi vérifié seul.
   service du navigateur (`web_guard.browser_service`, liste `GuardProxy.browser_internal`). Pas de
   `--disable-features` : agent-browser découpe `--args` aux virgules et Chrome ne garde que la
   dernière occurrence de ce drapeau.
+- Page Nouvel onglet : sans URL de départ, Chrome ouvre `chrome://new-tab-page` ; agent-browser
+  ignore les cibles `chrome://` et crée son propre onglet `about:blank`, si bien que la page
+  Nouvel onglet reste ouverte en arrière-plan. Elle charge la barre OneGoogle et le doodle
+  (`www.google.com/async/newtab_ogb`, `…/async/ddljson`, images `www.gstatic.com`, API
+  `ogads-pa.clients6.google.com`) : ce sont les requêtes inattendues constatées sous Windows.
+  Correctif à la source : Chrome démarre sur `about:blank` (`agent_browser.STARTUP_URL`, dernier
+  argument de lancement), aucune page Nouvel onglet n'existe.
+- `www.google.com` et `www.gstatic.com` restent des domaines légitimes en mission normale (garde
+  habituel, taint des comptes compris). `ogads-pa.clients6.google.com` n'est pas classé service du
+  navigateur : c'est l'API OneGoogle (`AsyncDataService/GetAsyncData`) appelée aussi par Gmail,
+  Docs, Gemini ou support.google.com, pas un point de service exclusif de Chromium.
 
 ## Installation et validation (Windows, Linux, macOS)
 
@@ -131,10 +142,15 @@ python -m pytest -q tests/test_agent_browser_backend.py tests/test_browser_works
 `OCTOPUS_AGENT_BROWSER`, `OCTOPUS_CHROMIUM` et `OCTOPUS_BROWSER_ARGS` (arguments Chromium séparés par
 des virgules) permettent un emplacement ou un environnement particulier. `OCTOPUS_BROWSER_LAB_ORIGINS`
 déclare des applications locales explicitement autorisées (tests, outils internes) : sans elle, tout
-hôte local ou privé est refusé, y compris au niveau du proxy.
+hôte local ou privé est refusé, y compris au niveau du proxy. Quand elle est définie, le laboratoire
+est hermétique : le proxy n'autorise que ces origines et refuse avant connexion toute autre requête,
+qu'elle vienne de la page, d'une sous-ressource, d'un script ou de Chrome lui-même ; `navigate`
+refuse toute autre URL. La page de test `/sortie` tente une image, un `fetch` et un `sendBeacon`
+vers des domaines publics : tout doit être refusé.
 
 `tests/test_browser_workspace_e2e.py` (Chromium réel) : cycle superviseur complet sur une
 application locale dont l'ordre des étapes, des champs et des liens varie ; worker tué dans un
-processus séparé pendant l'envoi puis reprise sans second envoi ; refus sans canal ; filtrage réseau.
+processus séparé pendant l'envoi puis reprise sans second envoi ; refus sans canal ; filtrage réseau ;
+laboratoire hermétique (sortie publique explicite refusée).
 Le modèle y est remplacé par un décideur d'observation déterministe (aucun appel LLM ni réseau) ;
 aucun compte réel, aucune publication, aucun paiement.

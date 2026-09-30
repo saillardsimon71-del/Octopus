@@ -101,7 +101,10 @@ def current_scope() -> Scope:
 
 
 def lab_origins() -> set[str]:
-    """Applications locales explicitement déclarées par l'opérateur (tests, outils internes)."""
+    """Applications locales explicitement déclarées par l'opérateur (tests, outils internes).
+
+    Déclarées, elles rendent l'espace HERMÉTIQUE : seules ces origines sont joignables (navigation
+    et toute requête passant par le proxy) ; tout le reste est refusé avant connexion."""
     raw = __import__("os").environ.get(LAB_ORIGINS_ENV, "")
     return {_origin(item) for item in raw.split(",") if item.strip() and _origin(item)}
 
@@ -188,8 +191,10 @@ class Workspace:
         return bool(self.lab) and _origin(url) in self.lab
 
     def _guard(self, url: str) -> bool:
-        if self._is_lab(url):
-            return not self.state.account_read
+        if self.lab:
+            # Laboratoire hermétique : seules les origines déclarées sortent, quel que soit
+            # l'émetteur (page, sous-ressource, script, ou Chrome lui-même).
+            return self._is_lab(url) and not self.state.account_read
         return web_guard.request_allowed(url, self.state, account_context=self.account_mode,
                                          anonymous_account_domains=tuple(self.anonymous_domains))
 
@@ -522,6 +527,9 @@ class Workspace:
         url = str(url or "").strip()
         if agent_browser.contains_secret(url):
             raise Refused("URL contenant un secret refusée (anti-exfiltration)")
+        if self.lab and not self._is_lab(url):
+            raise Refused(f"laboratoire hermétique ({LAB_ORIGINS_ENV}) : seules les origines déclarées sont "
+                          "joignables, aucune autre sortie")
         self._start()
         if self._is_lab(url):
             if self.state.account_read:
