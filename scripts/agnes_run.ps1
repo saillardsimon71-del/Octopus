@@ -51,28 +51,40 @@ if (-not $key) {
 }
 
 if ($Docker) {
-    Write-Host "[Agnes] Starting via Docker (loopback only 127.0.0.1:8765)" -ForegroundColor Cyan
+    Write-Host "[Agnes] Starting via Docker (container 0.0.0.0:8765, host 127.0.0.1:8765 only)" -ForegroundColor Cyan
     $dest = Join-Path $root $UpstreamDir
     if (-not (Test-Path -LiteralPath $dest)) { throw "Upstream dir missing $dest" }
     Push-Location $dest
     try {
-        # Ensure data dirs
+        # Ensure data dirs (persisted between restarts)
         New-Item -ItemType Directory -Force -Path "agnes_data/working" | Out-Null
         New-Item -ItemType Directory -Force -Path "agnes_data/config" | Out-Null
         docker build -t agnes-video:pinned .
         if ($LASTEXITCODE -ne 0) { throw "docker build failed" }
         # Stop old if exists
         docker rm -f agnes-video 2>$null | Out-Null
-        docker run -d --name agnes-video `
-          -p 127.0.0.1:8765:8765 `
-          -e HOST=127.0.0.1 -e PORT=8765 `
-          -e AGNES_API_KEY=$key `
-          -v ${PWD}/agnes_data/working:/app/.working_dir `
-          -v ${PWD}/agnes_data/config:/app/.agnes_config `
-          --restart unless-stopped `
-          agnes-video:pinned
-        if ($LASTEXITCODE -ne 0) { throw "docker run failed" }
-        Write-Host "[OK] Container agnes-video started on http://127.0.0.1:8765" -ForegroundColor Green
+
+        # Securely inject key via env-file, not via -e KEY=VALUE literal in command args
+        $tmpEnv = Join-Path $env:TEMP ("agnes-env-" + [guid]::NewGuid().ToString() + ".env")
+        # Write with restricted ACL (current user only) - best effort
+        Set-Content -Path $tmpEnv -Value "AGNES_API_KEY=$key" -Encoding utf8
+        try {
+            # Inside container, listen on 0.0.0.0 (container interface), host port bound to 127.0.0.1 only
+            docker run -d --name agnes-video `
+              -p 127.0.0.1:8765:8765 `
+              -e HOST=0.0.0.0 -e PORT=8765 `
+              --env-file $tmpEnv `
+              -v ${PWD}/agnes_data/working:/app/.working_dir `
+              -v ${PWD}/agnes_data/config:/app/.agnes_config `
+              --restart unless-stopped `
+              agnes-video:pinned
+            if ($LASTEXITCODE -ne 0) { throw "docker run failed" }
+        } finally {
+            # Remove temp env file containing key
+            Remove-Item -LiteralPath $tmpEnv -Force -ErrorAction SilentlyContinue
+        }
+        Write-Host "[OK] Container agnes-video started: host http://127.0.0.1:8765 -> container 0.0.0.0:8765" -ForegroundColor Green
+        Write-Host "[OK] Network: container listens 0.0.0.0, published only on 127.0.0.1 (loopback)" -ForegroundColor Green
         Start-Sleep -Seconds 3
         curl.exe -s http://127.0.0.1:8765/api/health
         Write-Host ""

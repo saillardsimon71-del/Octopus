@@ -103,16 +103,24 @@ def _check_daily_limit(business: str) -> None:
         raise StrategyError(f"Agnes daily limit reached ({_DAILY_LIMIT} per 24h for {business})")
 
 
-def _find_channel(business: str) -> dict | None:
-    """Find active human-authorized Agnes channel with submit capability."""
+def _find_channel(business: str, *, capability: str = "agnes_submit") -> dict | None:
+    """Find active human-authorized Agnes channel with given capability."""
     from . import economy
     try:
-        chans = economy.channels(business, status="active", capability="agnes_submit")
+        chans = economy.channels(business, status="active", capability=capability)
     except Exception:
         return None
     for ch in chans:
         if ch.get("kind") == "agnes_video" and ch.get("access") == "act":
-            return ch
+            # Ensure capability list contains requested one (channels() already filters, but double-check)
+            caps = ch.get("capabilities", [])
+            if isinstance(caps, str):
+                try:
+                    caps = json.loads(caps)
+                except Exception:
+                    caps = []
+            if capability in (caps or []):
+                return ch
     return None
 
 
@@ -261,6 +269,10 @@ def request_generation(*, business: str, prompt: str, idempotency_key: str,
                 "reconcile before retry"
             )
         if result["status"] == "failed":
+            reason = (result.get("reason") or "").lower()
+            if "rate limited" in reason or "429" in reason or "rate_limited" in reason:
+                # Explicit rate limit: allow controlled resume with backoff, no extra generation, not ambiguous
+                raise agnes.AgnesRateLimited(f"Agnes submission rate limited (429): {result.get('reason')}")
             raise StrategyError(f"Agnes submission failed: {result.get('reason')}")
         # Executed — extract task_id from result evidence
         # The action result is stored in channel_actions.result
@@ -362,7 +374,7 @@ def track_generation(gen_id: int, *, base_url: str = agnes.DEFAULT_URL,
 
 
 def stop_generation(gen_id: int, *, base_url: str = agnes.DEFAULT_URL) -> dict:
-    """Request stop of a running Agnes task."""
+    """Request stop of a running Agnes task. Must go through actions.propose with human-authorized channel."""
     ensure_schema()
     gen = get_generation(gen_id)
     if not gen:
@@ -371,19 +383,13 @@ def stop_generation(gen_id: int, *, base_url: str = agnes.DEFAULT_URL) -> dict:
     if not agnes_task_id:
         raise StrategyError("No Agnes task ID to stop")
 
-    # Find channel for stop capability
-    channel = _find_channel(gen["business"])
+    # Find channel for stop capability — no direct HTTP bypass
+    channel = _find_channel(gen["business"], capability="agnes_stop")
     if channel is None:
-        # Try direct stop via HTTP if channel not available? Require stop capability
-        # For safety, we try direct _request if service available, but still log
-        try:
-            result = agnes._request(base_url, f"/api/tasks/{agnes_task_id}/stop", form={})
-            if result.get("ok") is True:
-                update_generation(gen_id, status="stopped", phase="stopped")
-                return get_generation(gen_id)
-        except Exception as exc:
-            raise StrategyError(f"Stop failed: {exc}") from None
-        raise StrategyError("No authorized channel with agnes_stop capability")
+        raise StrategyError(
+            f"No active human-authorized Agnes channel (kind=agnes_video, capability=agnes_stop) for {gen['business']}; "
+            "human must grant act access with agnes_stop capability"
+        )
 
     from . import actions
     idem_key = f"agnes-stop-{agnes_task_id}"

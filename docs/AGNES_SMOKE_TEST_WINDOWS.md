@@ -6,7 +6,7 @@
 
 - Pin récupéré: `cache/upstreams/agnes-video-generator` @ `a87162d6df73ffe72186838ca0ae9d461e68589b`
 - Service Agnes lancé sur `http://127.0.0.1:8765` (voir `docs/AGNES_WINDOWS_SETUP.md`)
-- `AGNES_API_KEY` configurée via méthode sécurisée (env var, fichier hors repo, jamais dans prompts/logs/Git)
+- `AGNES_API_KEY` configurée via méthode sécurisée (env var, fichier hors repo, jamais dans prompts/logs/Git/args/navigateur)
 - Canal économique actif avec `act`
 
 ```powershell
@@ -19,7 +19,8 @@ curl http://127.0.0.1:8765/api/health
 # {"ok": true, "service": "agnes-video-generator", ...}
 
 # Vérifier ressource OCTOPUS
-python -m octopus resources check agnes_video --json
+python -m octopus resources check agnes_video
+python -m octopus status --business octopus
 ```
 
 ## Déclaration ressource (si pas déjà fait)
@@ -41,6 +42,7 @@ python -m octopus resources check agnes_video
 ## Canal économique + autorisation humaine
 
 ```powershell
+# Créer canal via Python (economy)
 python -c "
 from octopus import economy
 cid = economy.add_channel('octopus', 'agnes_video', 'Local Agnes', created_by='human',
@@ -48,22 +50,25 @@ cid = economy.add_channel('octopus', 'agnes_video', 'Local Agnes', created_by='h
                           capabilities=['agnes_submit','agnes_stop'])
 print(f'channel #{cid}')
 "
-# Puis activer via CLI ou GUI:
-python -m octopus strategy --help
-# ou
+# Activer: via economy CLI
+python -m octopus economy access octopus 1 --status active --access act
+# ou via Python:
 python -c "
 from octopus import economy
-# remplacer 1 par l'id réel
 economy.update_channel('octopus', 1, actor='human', status='active', access='act')
+print('channel active act')
 "
+# Lister:
+python -m octopus economy status octopus
 ```
 
 ## Smoke test réel — une seule génération courte, idempotente
 
 ```powershell
 # 1. Enqueue via OCTOPUS (idempotency_key garantit reprise sans double génération)
+# PowerShell: single quotes autour du JSON, double quotes à l'intérieur (pas d'échappement backslash)
 $env:OCTOPUS_HOME=$PWD
-python -m octopus enqueue octopus agnes.generate_video --input '{\"prompt\": \"Une mer calme au coucher du soleil, plan large, 5 secondes\", \"idempotency_key\": \"smoke-2026-09-30\"}'
+python -m octopus enqueue octopus agnes.generate_video --input '{"prompt": "Une mer calme au coucher du soleil, plan large, 5 secondes", "idempotency_key": "smoke-2026-09-30"}'
 
 # 2. Lancer worker (une fois)
 python -m octopus worker --once
@@ -78,7 +83,7 @@ g = gens[0]
 print(agnes.verify_mp4(Path(g['output_path'])))
 "
 
-# 4. Via mission autonome (superviseur) — cycle complet
+# 4. Via mission autonome — runtime démarre superviseur + worker (cycle complet)
 python -c "
 from octopus import strategy
 oid = strategy.create('objective', 'octopus', 'Vidéo test Agnes', created_by='human',
@@ -88,8 +93,9 @@ strategy.transition('objective', oid, 'octopus', 'active', actor='human')
 print(f'objective #{oid} active')
 "
 python -m octopus runtime --once --business octopus
-# ou via supervisor:
-python -m octopus supervisor --once --business octopus
+# Vérifier état observable (pas de commande supervisor séparée):
+python -m octopus status --business octopus
+python -m octopus status --business octopus --json
 ```
 
 ## Vérification finale attendue
