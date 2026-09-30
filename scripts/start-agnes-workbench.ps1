@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$DataRoot,
-    [Parameter(Mandatory = $true)][string]$Python
+    [Parameter(Mandatory = $true)][string]$Python,
+    [switch]$ReadOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,6 +12,7 @@ $pythonPath = (Resolve-Path -LiteralPath $Python).Path
 $env:OCTOPUS_HOME = $dataPath
 $env:OCTOPUS_DB = Join-Path $dataPath 'data\octopus.db'
 $env:PODALUX_ROOT = $repoRoot
+if ($ReadOnly) { $env:OCTOPUS_WORKBENCH_READONLY = '1' } else { Remove-Item Env:OCTOPUS_WORKBENCH_READONLY -ErrorAction SilentlyContinue }
 
 Push-Location $repoRoot
 try {

@@ -18,6 +18,7 @@ if sys.platform != "win32" and not os.environ.get("DISPLAY"):
 
 from agents import config  # noqa: E402
 from agents.gui.intelligence import EntrepreneurialWorkbench  # noqa: E402
+from agents.gui.workbench_v2 import ADVANCED, PRIMARY, WorkbenchV2  # noqa: E402
 from agents.gui.workbench import PAGE_META  # noqa: E402
 from octopus import strategy  # noqa: E402
 
@@ -27,6 +28,29 @@ def _pump(app, seconds: float) -> None:
     while time.time() < end:
         app.update()
         time.sleep(0.02)
+
+
+def test_v2_primary_navigation_at_requested_window_sizes(isolated):
+    errors = []
+    app = WorkbenchV2()
+    app.report_callback_exception = lambda exc, val, tb: errors.append(f"{exc.__name__}: {val}")
+    try:
+        for width, height in ((1280, 720), (1488, 960)):
+            app.geometry(f"{width}x{height}")
+            for page in PRIMARY:
+                app._show_page(page)
+                _pump(app, 0.12)
+                assert app.page_title.cget("text") == page
+                assert app.page_host.winfo_width() > 850
+        for page in ADVANCED:
+            app._show_page(page)
+            _pump(app, 0.12)
+        app._show_page("Vue d'ensemble")
+        _pump(app, 1.6)
+        assert app._snapshot is not None
+    finally:
+        app.destroy()
+    assert errors == []
 
 
 def test_workbench_opens_every_page_and_keeps_refreshing(isolated, monkeypatch):

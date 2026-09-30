@@ -5,8 +5,9 @@ vers `agents.gui.app.main` continuent donc d'ouvrir le même centre de travail.
 """
 from __future__ import annotations
 
-from .intelligence import EntrepreneurialWorkbench, main
+from .workbench_v2 import WorkbenchV2, main
 
-PodaluxWorkbench = EntrepreneurialWorkbench
+EntrepreneurialWorkbench = WorkbenchV2
+PodaluxWorkbench = WorkbenchV2
 
 __all__ = ["EntrepreneurialWorkbench", "PodaluxWorkbench", "main"]

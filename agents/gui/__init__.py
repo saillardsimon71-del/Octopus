@@ -9,8 +9,8 @@ __all__ = ["EntrepreneurialWorkbench", "PodaluxWorkbench", "main"]
 
 def __getattr__(name: str):
     if name in __all__:
-        from . import intelligence
+        from . import app
         if name == "PodaluxWorkbench":
-            return intelligence.EntrepreneurialWorkbench
-        return getattr(intelligence, name)
+            return app.PodaluxWorkbench
+        return getattr(app, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

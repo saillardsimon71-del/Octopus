@@ -588,12 +588,20 @@ def _migrate_v9(conn: sqlite3.Connection) -> None:
 
 def connect() -> sqlite3.Connection:
     path = paths.journal_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=10)
+    readonly = os.environ.get("OCTOPUS_WORKBENCH_READONLY") == "1"
+    if not readonly:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    conn = (sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
+            if readonly else sqlite3.connect(str(path), timeout=10))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("PRAGMA foreign_keys=ON")
+    if readonly:
+        conn.execute("PRAGMA query_only=ON")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if readonly and version < SCHEMA_VERSION:
+        conn.close()
+        raise RuntimeError("Journal trop ancien pour la consultation ; ouvrir une copie migrée")
     if version < SCHEMA_VERSION:
         conn.execute("PRAGMA journal_mode=WAL")
         for target, script in _MIGRATIONS:
