@@ -44,12 +44,17 @@ DEFAULT_MAX_DURATION_S = 900.0
 # Métriques réellement mesurables sans LLM : acquisitions publiques utilisables d'une mission
 # (`agents.task_handlers._mission_objective_result`) et actions navigateur dont l'effet a été
 # constaté sur le site (registre `channel_actions`, `octopus.browser_workspace`) et fichiers
-# téléchargés toujours présents et intacts dans l'espace de la tâche (`browser_workspace.kept_files`).
-SUPPORTED_METRICS = ("usable_browse_count", "verified_browser_actions", "kept_browser_files")
+# téléchargés toujours présents et intacts dans l'espace de la tâche (`browser_workspace.kept_files`),
+# et vidéos Agnes vérifiées physiquement (MP4 présent, header ftyp, SHA-256).
+SUPPORTED_METRICS = ("usable_browse_count", "verified_browser_actions", "kept_browser_files",
+                     "kept_video_files", "verified_video_count")
 BROWSER_METRICS = ("verified_browser_actions", "kept_browser_files")
+VIDEO_METRICS = ("kept_video_files", "verified_video_count")
 METRIC_HELP = {
     "verified_browser_actions": "actions à effet dont le résultat a été constaté sur la page réelle",
     "kept_browser_files": "fichiers téléchargés avec browser_download et présents, intacts, dans l'espace de la tâche",
+    "kept_video_files": "vidéos Agnes téléchargées et vérifiées (MP4 présent, SHA-256 intact) dans l'espace de la tâche",
+    "verified_video_count": "nombre de générations vidéo Agnes vérifiées physiquement (MP4 + SHA-256)",
 }
 _CRITERION_RE = re.compile(r"^\s*([a-z_]+)\s*>=\s*(\d+)\s*$", re.IGNORECASE)
 # Critères cumulatifs : « a>=1 ; b>=1 », « a>=1 et b>=1 », « a>=1 and b>=1 », « a>=1 && b>=1 ».
@@ -188,13 +193,17 @@ def goal_text(objective: dict) -> str:
                          + (". Tous les critères sont exigés." if len(measured) > 1 else "."))
     if objective.get("timeframe"):
         parts.append(f"Horizon : {objective['timeframe']}")
-    channels = browser_channels(objective.get("business") or "")
-    if channels:
-        parts.append("Sites où l'humain a autorisé l'action dans le navigateur (outils browser_*) : "
-                     + " ; ".join(f"canal #{c['id']} {c['name']} ({c['locator']})" for c in channels)
-                     + ". Chaque action à effet y est tracée et vérifiée ; ailleurs, lecture seule.")
-        parts.append("Travail borné : hors de ces sites autorisés, acquisition et qualification seulement. "
-                     "Aucun achat, paiement ni dépense sans autorisation humaine explicite.")
+    b_channels = browser_channels(objective.get("business") or "")
+    a_channels = agnes_channels(objective.get("business") or "")
+    if b_channels:
+        parts.append(_describe_browser_channels(b_channels))
+    if a_channels:
+        parts.append(_describe_agnes_channels(a_channels))
+    if b_channels or a_channels:
+        parts.append("Travail borné : hors de ces sites/ressources autorisés, acquisition et qualification seulement. "
+                     "Aucun achat, paiement ni dépense sans autorisation humaine explicite. "
+                     "Les générations vidéo Agnes sont gratuites mais limitées en quantité/durée ; "
+                     "tout coût réel exige autorisation humaine.")
     else:
         parts.append("Travail borné : acquisition et qualification seulement. Aucun contact, publication, "
                      "achat ni dépense sans autorisation humaine explicite.")
@@ -209,6 +218,31 @@ def browser_channels(business: str) -> list[dict]:
     rows = journal.query("SELECT id, name, locator, capabilities FROM economic_channels WHERE business=? "
                          "AND status='active' AND access='act' ORDER BY id", (business,))
     return [dict(r) for r in rows if CAPABILITY in str(r["capabilities"] or "")]
+
+
+def agnes_channels(business: str) -> list[dict]:
+    """Canaux sur lesquels l'humain a accordé l'accès `act` pour Agnes vidéo."""
+    if not business:
+        return []
+    rows = journal.query("SELECT id, name, locator, capabilities FROM economic_channels WHERE business=? "
+                         "AND status='active' AND access='act' ORDER BY id", (business,))
+    return [dict(r) for r in rows if "agnes_submit" in str(r["capabilities"] or "")]
+
+
+def _describe_agnes_channels(channels: list[dict]) -> str:
+    if not channels:
+        return ""
+    return "Ressource vidéo où l'humain a autorisé la génération (outils agnes_* ou agnes.generate_video) : " + \
+           " ; ".join(f"canal #{c['id']} {c['name']} ({c['locator']})" for c in channels) + \
+           ". Chaque génération est tracée, limitée en quantité/durée, et le MP4 est vérifié physiquement."
+
+
+def _describe_browser_channels(channels: list[dict]) -> str:
+    if not channels:
+        return ""
+    return "Sites où l'humain a autorisé l'action dans le navigateur (outils browser_*) : " + \
+           " ; ".join(f"canal #{c['id']} {c['name']} ({c['locator']})" for c in channels) + \
+           ". Chaque action à effet y est tracée et vérifiée ; ailleurs, lecture seule."
 
 
 # --- création de travail --------------------------------------------------------------------------
@@ -322,6 +356,65 @@ def browser_result(business: str, task_id: int | None, criterion: dict) -> dict:
             "scope": "channel_actions", "note": "effet constaté sur la page réelle (texte absent avant, présent après)"}
 
 
+def video_result(business: str, task_id: int | None, criterion: dict) -> dict:
+    """Mesure sur le registre Agnes et le disque, pour CETTE tâche ou ce business.
+
+    - kept_video_files: vidéos Agnes vérifiées physiquement et présentes dans l'espace tâche
+    - verified_video_count: nombre de générations Agnes vérifiées (MP4 + SHA-256) pour la tâche ou business
+    """
+    target = int(criterion["gte"])
+    try:
+        from .agnes_production import list_generations
+        from .agnes import verify_mp4
+        from pathlib import Path
+    except Exception:
+        return {"metric": criterion["metric"], "observed": 0, "target": target, "success": False,
+                "scope": "agnes_video_generations", "note": "module Agnes indisponible"}
+
+    if criterion["metric"] == "kept_video_files":
+        # For a specific task, check its generations; otherwise check business
+        if task_id is not None:
+            rows = journal.query(
+                "SELECT * FROM agnes_video_generations WHERE business=? AND task_id=? AND status='done' ORDER BY id",
+                (business, task_id),
+            )
+        else:
+            rows = journal.query(
+                "SELECT * FROM agnes_video_generations WHERE business=? AND status='done' ORDER BY id DESC LIMIT 20",
+                (business,),
+            )
+        kept = []
+        for r in rows:
+            path = r["output_path"]
+            if not path:
+                continue
+            p = Path(path)
+            ver = verify_mp4(p)
+            if ver.get("verified") and ver.get("sha256") == r["sha256"]:
+                kept.append({"file": str(p), "sha256": ver["sha256"], "bytes": ver["bytes"]})
+        return {"metric": "kept_video_files", "observed": len(kept), "target": target,
+                "success": len(kept) >= target, "files": kept,
+                "scope": "agnes_video_generations+disque",
+                "note": "vidéo MP4 présente, header ftyp, SHA-256 identique"}
+
+    # verified_video_count
+    if task_id is not None:
+        rows = journal.query(
+            "SELECT COUNT(*) AS n FROM agnes_video_generations WHERE business=? AND task_id=? AND status='done' AND sha256 IS NOT NULL",
+            (business, task_id),
+        )
+    else:
+        rows = journal.query(
+            "SELECT COUNT(*) AS n FROM agnes_video_generations WHERE business=? AND status='done' AND sha256 IS NOT NULL",
+            (business,),
+        )
+    count = rows[0]["n"] if rows else 0
+    return {"metric": "verified_video_count", "observed": int(count), "target": target,
+            "success": int(count) >= target,
+            "scope": "agnes_video_generations",
+            "note": "générations vidéo Agnes vérifiées physiquement (MP4 + SHA-256), pas seulement HTTP completed"}
+
+
 def measure(business: str, task_id: int | None, criterion: dict, results: list) -> dict:
     """Critère simple : sa mesure. Critère cumulatif : succès seulement si CHAQUE partie est
     satisfaite ; `observed` compte alors les parties satisfaites (cible = nombre de parties)."""
@@ -330,6 +423,8 @@ def measure(business: str, task_id: int | None, criterion: dict, results: list) 
     def one(part: dict) -> dict:
         if part["metric"] in BROWSER_METRICS:
             return browser_result(business, task_id, part)
+        if part["metric"] in VIDEO_METRICS:
+            return video_result(business, task_id, part)
         return task_handlers._mission_objective_result(results, part)
 
     if "all" not in criterion:
@@ -349,13 +444,39 @@ def work_output(business: str, objective: dict, criterion: dict | None, result: 
     results = result.get("results") or []
     objective_result = measure(business, task_id, criterion, results) if criterion else None
     execution_status = str(result.get("execution_status") or "unknown")
-    ambiguous = [r["id"] for r in task_actions(business, task_id) if r["status"] in ("ambiguous", "proposed")] \
+    ambiguous_browser = [r["id"] for r in task_actions(business, task_id) if r["status"] in ("ambiguous", "proposed")] \
         if task_id is not None else []
+    # Agnes ambiguous actions (channel_actions with kind agnes_video)
+    ambiguous_agnes = []
+    if task_id is not None:
+        try:
+            rows = journal.query(
+                "SELECT id FROM channel_actions WHERE business=? AND kind='agnes_video' AND status IN ('ambiguous','proposed') "
+                "AND idempotency_key LIKE ?",
+                (business, f"%{task_id}%"),
+            )
+            ambiguous_agnes = [r["id"] for r in rows]
+            # Also check agnes_video_generations that are ambiguous due to submission
+            if not ambiguous_agnes:
+                rows2 = journal.query(
+                    "SELECT id FROM channel_actions WHERE business=? AND kind='agnes_video' AND status='ambiguous' ORDER BY id DESC LIMIT 5",
+                    (business,),
+                )
+                ambiguous_agnes = [r["id"] for r in rows2]
+        except Exception:
+            ambiguous_agnes = []
+
     boundary = HUMAN_BOUNDARY_STATUSES.get(execution_status)
-    if ambiguous and not (objective_result or {}).get("success"):
-        # Effet externe inconnu : seul l'humain peut dire s'il a eu lieu ; aucune relance aveugle.
-        boundary = (f"action(s) navigateur au résultat inconnu {', '.join(f'#{i}' for i in ambiguous)} : vérifier "
+    if ambiguous_browser and not (objective_result or {}).get("success"):
+        boundary = (f"action(s) navigateur au résultat inconnu {', '.join(f'#{i}' for i in ambiguous_browser)} : vérifier "
                     f"sur le site puis `python -m octopus browser resolve {business} <id> executed|not_executed`")
+    if ambiguous_agnes and not (objective_result or {}).get("success"):
+        # Do not blindly retry Agnes generation if outcome uncertain
+        ag_msg = (f"action(s) Agnes au résultat incertain {', '.join(f'#{i}' for i in ambiguous_agnes)} : "
+                  f"reconcile avec le service Agnes existant (GET /api/tasks) ou solliciter l'humain, "
+                  f"aucune nouvelle génération ne doit être déclenchée aveuglément")
+        boundary = f"{boundary} ; {ag_msg}" if boundary else ag_msg
+
     return {
         "objective_id": int(objective["id"]),
         "business": business,
@@ -368,7 +489,8 @@ def work_output(business: str, objective: dict, criterion: dict | None, result: 
         "citations": task_handlers._usable_browse_urls(results),
         "business_signals": len(result.get("business_signals") or []),
         "human_boundary": boundary,
-        "browser_ambiguous_actions": ambiguous,
+        "browser_ambiguous_actions": ambiguous_browser,
+        "agnes_ambiguous_actions": ambiguous_agnes,
         "measured": objective_result is not None,
     }
 

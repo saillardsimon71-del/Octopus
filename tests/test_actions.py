@@ -13,6 +13,8 @@ B = "atelier_test"
 @pytest.fixture(autouse=True)
 def no_executors(monkeypatch):
     monkeypatch.setattr(actions, "_EXECUTORS", {})
+    # Prevent auto-loading of optional executors (agnes) during this unit test
+    monkeypatch.setattr(actions, "_load_configured_executors", lambda: None)
 
 
 def _channel():

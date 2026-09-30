@@ -38,6 +38,15 @@ def _load_configured_executors() -> None:
     from . import smtp_executor
     if ("email", "send") not in _EXECUTORS and smtp_executor.configured():
         smtp_executor.register()
+    # Agnes is optional: if service module loads, its executors are registered idempotently.
+    # Explicit register() is still supported but not required for autonomous missions using
+    # an available and authorized channel.
+    try:
+        from . import agnes as _agnes
+        _agnes._ensure_registered()
+    except Exception:
+        # Agnes unavailable or broken should never block other activities
+        pass
 
 
 def executors() -> list[tuple[str, str]]:
@@ -60,12 +69,77 @@ def propose(business: str, channel_id: int, action: str, payload: dict | None = 
     action = strategy._text(action, "action").lower()
     _load_configured_executors()
     now = time.time()
+    # Bounded retry config for Agnes 429 — preserve history, limit to Agnes executor
+    _MAX_AGNES_429_RETRIES = 5
+
     with tasks._tx() as conn:
         if idempotency_key:
-            existing = conn.execute("SELECT id, status FROM channel_actions WHERE idempotency_key=?",
+            existing = conn.execute("SELECT id, status, reason FROM channel_actions WHERE idempotency_key=?",
                                     (idempotency_key,)).fetchone()
             if existing:
-                return {"action_id": existing["id"], "status": existing["status"], "duplicate": True}
+                if existing["status"] == "failed":
+                    reason_lc = (existing["reason"] or "").lower()
+                    is_rate_limited = "rate limited" in reason_lc or "429" in reason_lc or "rate_limited" in reason_lc
+                    if is_rate_limited:
+                        # Fetch channel kind to limit special handling to Agnes executor only
+                        ch_row = conn.execute("SELECT kind FROM economic_channels WHERE id=? AND business=?",
+                                              (channel_id, business)).fetchone()
+                        ch_kind = (ch_row["kind"] if ch_row else "").lower() if ch_row else ""
+                        if ch_kind == "agnes_video":
+                            # Count previous failed attempts for this logical key (including renamed history)
+                            like_pattern = f"{idempotency_key}#failed-attempt-%"
+                            cnt_row = conn.execute(
+                                "SELECT COUNT(*) AS n FROM channel_actions WHERE business=? AND (idempotency_key=? OR idempotency_key LIKE ?) AND status='failed'",
+                                (business, idempotency_key, like_pattern)
+                            ).fetchone()
+                            attempts = int(cnt_row["n"]) if cnt_row else 0
+                            # Also count history rows that were renamed (they match LIKE)
+                            # attempts already includes current existing row (since it matches idempotency_key=?)
+                            # If attempts >= max, block retry, preserve history
+                            if attempts >= _MAX_AGNES_429_RETRIES:
+                                # Keep existing failed row, return blocked with exhausted reason
+                                return {"action_id": existing["id"], "status": "blocked",
+                                        "reason": f"rate limited retry exhausted after {attempts} attempts (bounded backoff)", "duplicate": False}
+                            # Preserve history: rename old failed row to keep it, then allow new insert
+                            # Use timestamp + attempts to make renamed key unique
+                            renamed_key = f"{idempotency_key}#failed-attempt-{attempts}-{int(now)}"
+                            # Ensure uniqueness in case of collision
+                            suffix = 0
+                            while True:
+                                try:
+                                    conn.execute("UPDATE channel_actions SET idempotency_key=? WHERE id=?",
+                                                 (renamed_key if suffix == 0 else f"{renamed_key}-{suffix}", existing["id"]))
+                                    break
+                                except Exception:
+                                    suffix += 1
+                                    if suffix > 10:
+                                        # Fallback: keep original and allow retry by updating status to blocked? But preserve history
+                                        break
+                            # Do not return duplicate; fall through to insert new action with original key (retry)
+                        else:
+                            # For non-Agnes channels, keep original policy: return duplicate (do not delete)
+                            return {"action_id": existing["id"], "status": existing["status"], "duplicate": True}
+                    else:
+                        return {"action_id": existing["id"], "status": existing["status"], "duplicate": True}
+                else:
+                    return {"action_id": existing["id"], "status": existing["status"], "duplicate": True}
+        # Block blind new generation when an ambiguous submit exists (reconcile first)
+        if action in ("submit",):
+            amb = conn.execute(
+                "SELECT id FROM channel_actions WHERE business=? AND channel_id=? AND action=? AND status='ambiguous' LIMIT 1",
+                (business, channel_id, action),
+            ).fetchone()
+            if amb:
+                # Insert blocked trace for the attempted new key
+                action_id = int(conn.execute(
+                    "INSERT INTO channel_actions (business, channel_id, experiment_id, action, payload, status, requested_by, "
+                    "idempotency_key, created_at, updated_at, reason, decided_by) VALUES (?, ?, ?, ?, ?, 'blocked', ?, ?, ?, ?, ?, ?)",
+                    (business, channel_id, experiment_id, action, json.dumps(payload or {}, ensure_ascii=False),
+                     strategy._text(requested_by, "requested_by"), idempotency_key, now, now,
+                     f"previous action #{amb['id']} is ambiguous; reconcile with service before new generation",
+                     "policy:actions")).lastrowid)
+                return {"action_id": action_id, "status": "blocked",
+                        "reason": f"previous action #{amb['id']} is ambiguous; reconcile with service before new generation"}
         channel = conn.execute("SELECT * FROM economic_channels WHERE id=? AND business=?",
                                (channel_id, business)).fetchone()
         if channel is None:
