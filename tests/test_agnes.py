@@ -289,26 +289,76 @@ def test_stop_timeout_is_ambiguous_and_permission_is_required(http):
 def test_rate_limit_429_is_not_ambiguous_but_retryable(http):
     cid = channel()
     http.side_effect = HTTPError("http://127.0.0.1:8765/api/tasks/simple", 429, "Too Many Requests", {}, io.BytesIO(b""))
-    # For submit, 429 should raise AgnesRateLimited which is StrategyError, not AmbiguousAction
-    # But actions.propose catches AmbiguousAction separately; RateLimited is StrategyError -> failed
-    # However we want 429 to be treated as retryable, not ambiguous. In agnes._request it raises AgnesRateLimited.
-    # actions.propose will catch it as failed (since not AmbiguousAction) and cancel spend if any.
-    # For free_quota, no spend, so it becomes failed with reason containing rate limit but not secret.
     result = submit(cid)
     assert result["status"] == "failed"
     assert "429" in result["reason"] or "rate" in result["reason"].lower()
+    # 429 must not be ambiguous
+    assert result["status"] != "ambiguous"
+    # Same idempotency_key must allow controlled retry with backoff, without extra generation and not confused with ambiguous
+    # Our fix deletes previous failed rate-limited action, so second call should attempt HTTP again (call_count 2)
+    http.side_effect = HTTPError("http://127.0.0.1:8765/api/tasks/simple", 429, "Too Many Requests", {}, io.BytesIO(b""))
+    result2 = submit(cid)  # same key mission-1-video
+    assert result2["status"] == "failed"
+    assert http.call_count == 2, "429 retry with same idempotency_key must re-attempt HTTP, not return duplicate failed"
+    # No generation should have been created in agnes_video_generations for failed 429
+    from octopus import agnes_production
+    assert agnes_production.get_by_idempotency("mission-1-video") is None
+
+    # After 429, a successful retry should work and create generation
+    reply(http, {"ok": True, "task_id": TASK})
+    result3 = submit(cid)
+    assert result3["status"] == "executed"
+    assert http.call_count == 3
+
+
+def test_rate_limit_429_in_production_raises_retryable(monkeypatch):
+    """Verify agnes_production.request_generation raises AgnesRateLimited for 429, allowing backoff."""
+    from unittest.mock import Mock
+    opener = Mock()
+    monkeypatch.setattr(agnes, "build_opener", Mock(return_value=opener))
+    monkeypatch.setattr(actions, "_EXECUTORS", {})
+    monkeypatch.setattr(actions, "_load_configured_executors", lambda: None)
+    opener.open.side_effect = HTTPError("http://127.0.0.1:8765/api/tasks/simple", 429, "Too Many Requests", {}, io.BytesIO(b""))
+    agnes.register()
+    # Need channel
+    cid = channel()
+    from octopus import agnes_production
+    with pytest.raises(agnes.AgnesRateLimited, match="rate limited|429"):
+        agnes_production.request_generation(business=B, prompt="test", idempotency_key="rate-1")
+    # Ensure no generation created
+    assert agnes_production.get_by_idempotency("rate-1") is None
+    # Ensure not ambiguous: no ambiguous action with that key
+    rows = journal.query("SELECT * FROM channel_actions WHERE idempotency_key='rate-1' AND status='ambiguous'")
+    assert not rows
+
+
+def _make_valid_mp4_bytes(size=4096):
+    """Minimal MP4 that passes new verify_mp4: ftyp+moov with vide/avc1+mdat."""
+    ftyp = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42mp41"
+    # moov box with video indicators
+    moov_payload = b"\x00" * 20 + b"vide" + b"\x00" * 10 + b"avc1" + b"\x00" * 18
+    moov_size = 8 + len(moov_payload)
+    moov = moov_size.to_bytes(4, "big") + b"moov" + moov_payload
+    remaining = size - len(ftyp) - len(moov) - 8
+    if remaining < 0:
+        remaining = 1024
+    mdat = (8 + remaining).to_bytes(4, "big") + b"mdat" + b"\x01" * remaining
+    return ftyp + moov + mdat
 
 
 def test_verify_mp4_valid_and_corrupt():
-    # Create a minimal plausible MP4: ftyp header
     with tempfile.TemporaryDirectory() as tmp:
         valid = Path(tmp) / "valid.mp4"
-        # Minimal MP4: size 24, 'ftyp' box
-        # 4 bytes size, 4 bytes ftyp, then 16 bytes dummy
-        valid.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42mp41" + b"\x00" * 1024)
+        valid.write_bytes(_make_valid_mp4_bytes(4096))
         ver = agnes.verify_mp4(valid)
-        assert ver["verified"] is True
+        assert ver["verified"] is True, f"should be valid: {ver}"
         assert "sha256" in ver
+
+        # ftyp only + arbitrary data should be rejected (P0 MP4)
+        ftyp_only = Path(tmp) / "ftyp_only.mp4"
+        ftyp_only.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42mp41" + b"\x00" * 2048)
+        ver_ftyp = agnes.verify_mp4(ftyp_only)
+        assert ver_ftyp["verified"] is False, "ftyp + arbitrary should not be accepted"
 
         corrupt = Path(tmp) / "corrupt.mp4"
         corrupt.write_bytes(b"\x00" * 100)
@@ -320,9 +370,19 @@ def test_verify_mp4_valid_and_corrupt():
         ver3 = agnes.verify_mp4(small)
         assert ver3["verified"] is False
 
+        # moov without video tag should be rejected
+        no_video = Path(tmp) / "no_video.mp4"
+        ftyp = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42mp41"
+        moov_payload = b"\x00" * 50
+        moov = (8 + len(moov_payload)).to_bytes(4, "big") + b"moov" + moov_payload
+        mdat = (8 + 1024).to_bytes(4, "big") + b"mdat" + b"\x01" * 1024
+        no_video.write_bytes(ftyp + moov + mdat)
+        ver4 = agnes.verify_mp4(no_video)
+        assert ver4["verified"] is False
+
 
 def test_download_video_verifies_integrity(http):
-    # Mock status completed then video bytes
+    # Mock status completed then video bytes (valid MP4 with moov+avc1)
     def side_effect(request, timeout=15):
         url = request.full_url
         if url.endswith(f"/api/tasks/{TASK}"):
@@ -334,9 +394,8 @@ def test_download_video_verifies_integrity(http):
             return resp
         elif url.endswith(f"/api/video/{TASK}"):
             resp = Mock(status=200)
-            # valid mp4 bytes
-            data = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42mp41" + b"\x00" * 2048
-            resp.read.side_effect = [data[:1024], data[1024:], b""]
+            data = _make_valid_mp4_bytes(4096)
+            resp.read.side_effect = [data[:1024], data[1024:], data[2048:], b""]
             resp.__enter__ = Mock(return_value=resp)
             resp.__exit__ = Mock(return_value=False)
             return resp

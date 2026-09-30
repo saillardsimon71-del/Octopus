@@ -60,8 +60,15 @@ def channel():
 
 
 def make_mp4_bytes(size=4096):
-    header = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42mp41"
-    return header + b"\x01" * (size - len(header))
+    """Minimal valid MP4 that passes strengthened verify_mp4."""
+    ftyp = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42mp41"
+    moov_payload = b"\x00" * 20 + b"vide" + b"\x00" * 10 + b"avc1" + b"\x00" * 18
+    moov = (8 + len(moov_payload)).to_bytes(4, "big") + b"moov" + moov_payload
+    remaining = size - len(ftyp) - len(moov) - 8
+    if remaining < 0:
+        remaining = 1024
+    mdat = (8 + remaining).to_bytes(4, "big") + b"mdat" + b"\x01" * remaining
+    return ftyp + moov + mdat
 
 
 class FakeAgnes:

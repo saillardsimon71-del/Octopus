@@ -71,10 +71,20 @@ def propose(business: str, channel_id: int, action: str, payload: dict | None = 
     now = time.time()
     with tasks._tx() as conn:
         if idempotency_key:
-            existing = conn.execute("SELECT id, status FROM channel_actions WHERE idempotency_key=?",
+            existing = conn.execute("SELECT id, status, reason FROM channel_actions WHERE idempotency_key=?",
                                     (idempotency_key,)).fetchone()
             if existing:
-                return {"action_id": existing["id"], "status": existing["status"], "duplicate": True}
+                # Rate-limited failure should allow controlled retry with backoff, not be treated as final duplicate
+                # and must not create extra generation nor be confused with ambiguous
+                if existing["status"] == "failed":
+                    reason = (existing["reason"] or "").lower()
+                    if "rate limited" in reason or "429" in reason or "rate_limited" in reason:
+                        # Delete previous rate-limited failed action to allow retry with same key (backoff handled by caller)
+                        conn.execute("DELETE FROM channel_actions WHERE id=?", (existing["id"],))
+                    else:
+                        return {"action_id": existing["id"], "status": existing["status"], "duplicate": True}
+                else:
+                    return {"action_id": existing["id"], "status": existing["status"], "duplicate": True}
         # Block blind new generation when an ambiguous submit exists (reconcile first)
         if action in ("submit",):
             amb = conn.execute(

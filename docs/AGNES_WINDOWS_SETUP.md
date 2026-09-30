@@ -156,22 +156,29 @@ powershell -ExecutionPolicy Bypass -File scripts/agnes_run.ps1
 # Depuis cache/upstreams/agnes-video-generator
 docker build -t agnes-video:7.0.1-pinned -t agnes-video:pinned .
 
-# Lancement loopback only, avec persistance
+# Lancement: container écoute 0.0.0.0:8765 (interface conteneur), host publie seulement 127.0.0.1:8765
+# Méthode sécurisée: env-file temporaire, pas de valeur littérale dans les args Docker
+$envContent = "AGNES_API_KEY=$env:AGNES_API_KEY"
+Set-Content -Path $env:TEMP\agnes.env -Value $envContent -Encoding utf8
 docker run -d --name agnes-video `
   -p 127.0.0.1:8765:8765 `
-  -e HOST=127.0.0.1 -e PORT=8765 `
-  -e AGNES_API_KEY=$env:AGNES_API_KEY `
+  -e HOST=0.0.0.0 -e PORT=8765 `
+  --env-file $env:TEMP\agnes.env `
   -v ${PWD}/agnes_data/working:/app/.working_dir `
   -v ${PWD}/agnes_data/config:/app/.agnes_config `
   --restart unless-stopped `
   agnes-video:pinned
+Remove-Item $env:TEMP\agnes.env -Force
+
+# Alternative simple (passe la variable d'env hôte sans valeur littérale dans la ligne):
+# docker run -d --name agnes-video -p 127.0.0.1:8765:8765 -e HOST=0.0.0.0 -e PORT=8765 -e AGNES_API_KEY --restart unless-stopped agnes-video:pinned
 ```
 
-Ou via compose (fichier fourni `ops/agnes/docker-compose.yml`):
+Ou via compose (fichier fourni `ops/agnes/docker-compose.yml` — HOST=0.0.0.0 dedans, publish 127.0.0.1:8765:8765, healthcheck Python):
 
 ```powershell
 cd ops/agnes
-$env:AGNES_API_KEY="ta_cle"   # ou via fichier env sécurisé
+$env:AGNES_API_KEY="ta_cle"   # ou via fichier env sécurisé C:\octopus\secrets\agnes.env
 docker compose up -d
 ```
 
@@ -180,6 +187,12 @@ Vérification:
 ```powershell
 curl http://127.0.0.1:8765/api/health
 # {"ok": true, "service": "agnes-video-generator", "status": "healthy"}
+
+# Vérifier que le conteneur écoute bien 0.0.0.0 à l'intérieur et que le host n'écoute que sur 127.0.0.1
+docker inspect agnes-video --format '{{json .Config.Env}}'
+docker port agnes-video
+netstat -ano | findstr 8765
+# doit afficher 127.0.0.1:8765, pas 0.0.0.0:8765 sur l'hôte
 ```
 
 **Persistance Docker**:
@@ -199,7 +212,8 @@ powershell -ExecutionPolicy Bypass -File scripts/agnes_stop.ps1
 
 # Health
 curl http://127.0.0.1:8765/api/health
-python -m octopus resources check agnes_video --json  # si ressource déclarée
+python -m octopus resources check agnes_video
+python -m octopus status --business octopus --json
 ```
 
 ### Docker
@@ -284,8 +298,9 @@ Quand tu es prêt sur ta machine Windows, avec clé configurée et service Agnes
 curl http://127.0.0.1:8765/api/health
 
 # 2. Smoke test réel (une seule génération courte, idempotente)
+# PowerShell: single quotes autour du JSON, double quotes à l'intérieur, pas d'échappement backslash
 $env:OCTOPUS_HOME=$PWD
-python -m octopus enqueue octopus agnes.generate_video --input '{\"prompt\": \"Une mer calme au coucher du soleil, plan large, 5 secondes\", \"idempotency_key\": \"smoke-2026-09-30\"}'
+python -m octopus enqueue octopus agnes.generate_video --input '{"prompt": "Une mer calme au coucher du soleil, plan large, 5 secondes", "idempotency_key": "smoke-2026-09-30"}'
 
 # 3. Lancer worker
 python -m octopus worker --once
@@ -300,7 +315,7 @@ from pathlib import Path
 print(agnes.verify_mp4(Path(gens[0]['output_path'])))
 "
 
-# 5. Via mission autonome (superviseur)
+# 5. Via mission autonome (runtime démarre superviseur + worker)
 python -c "
 from octopus import strategy
 oid = strategy.create('objective', 'octopus', 'Vidéo test Agnes', created_by='human',
@@ -310,6 +325,8 @@ strategy.transition('objective', oid, 'octopus', 'active', actor='human')
 print(f'objective #{oid} active')
 "
 python -m octopus runtime --once --business octopus
+# Vérifier état observable:
+python -m octopus status --business octopus
 ```
 
 **Vérification finale attendue**:
@@ -331,12 +348,13 @@ python -m octopus runtime --once --business octopus
 
 Ne considère jamais gratuit = illimité.
 
-## 10. Sécurité checklist
+## 10. Sécurité et réseau checklist
 
-- [ ] `HOST=127.0.0.1` (jamais 0.0.0.0 en prod locale)
-- [ ] Port bind `127.0.0.1:8765:8765` en Docker
-- [ ] `AGNES_API_KEY` uniquement dans env du processus Agnes, jamais dans Git, prompts, logs, args, navigateur
+- [ ] Natif: `HOST=127.0.0.1` (loopback only)
+- [ ] Docker: container `HOST=0.0.0.0` (interface conteneur), publish `127.0.0.1:8765:8765` (seulement loopback sur Windows) — vérifié via `docker inspect` et `netstat`
+- [ ] Healthcheck Compose utilise `python -c urllib.request` (pas curl, image upstream Python)
+- [ ] `AGNES_API_KEY` uniquement dans env du processus Agnes, jamais dans Git, prompts, logs, args CLI visibles, navigateur; Docker via `--env-file` temporaire, pas `-e KEY=literal`
 - [ ] `cache/upstreams/agnes-video-generator/.working_dir` et `.agnes_config` préservés
 - [ ] Aucun log ne contient la clé (vérifie `docker logs`, `server.log`)
 - [ ] Canal `agnes_video` actif + `act` accordé par humain
-- [ ] Tests avec faux service passent sans appel externe
+- [ ] Tests avec faux service passent sans appel externe: `python -m pytest tests/test_agnes.py tests/test_agnes_production.py -v`

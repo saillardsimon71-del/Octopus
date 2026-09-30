@@ -83,13 +83,9 @@ def generate_video(ctx):
     gen = ctx.memo(f"agnes_submit:{idem}", do_submit)
     gen_id = gen["id"] if isinstance(gen, dict) else int(gen)
 
-    # Track with backoff — this is also memoized in steps to survive crashes?
-    # We poll live, but we save progress in DB; on crash, next attempt will resume via idempotency.
-
-    # For long polling, we need to respect cancellation
+    # Track with backoff — poll live, persist progress in DB, survive crash via idempotency
     def do_track():
         # This may take minutes; check cancel periodically via heartbeat already in worker
-        # We implement polling loop that checks ctx.cancelled()
         agnes_task_id = agnes_production.get_generation(gen_id)["agnes_task_id"]
         deadline = time.time() + poll_timeout
         interval = agnes.POLL_INITIAL_S
@@ -97,7 +93,7 @@ def generate_video(ctx):
         last_status = None
         while time.time() < deadline:
             if ctx.cancelled():
-                # Request stop if cancelled
+                # Request stop if cancelled (must go through channel permission)
                 try:
                     agnes_production.stop_generation(gen_id, base_url=base_url)
                 except Exception:
@@ -107,13 +103,32 @@ def generate_video(ctx):
             try:
                 cur = agnes.status(agnes_task_id, base_url=base_url)
                 last_status = cur["status"]
-                if last_status in ("completed", "failed"):
+                if last_status == "completed":
+                    agnes_production.update_generation(
+                        gen_id, status="completed", phase="completed",
+                        progress=100, attempts=attempts, source_ref=cur.get("source_ref")
+                    )
                     return agnes_production.get_generation(gen_id)
-                # Update DB progress
-                agnes_production.update_generation(gen_id, status=last_status, phase=last_status,
-                                                   progress=min(95, attempts * 5), attempts=attempts)
+                if last_status == "failed":
+                    # Fetch full status for error detail if available
+                    try:
+                        full = agnes.status_full(agnes_task_id, base_url=base_url)
+                        err = full.get("error") or "Agnes reported failed"
+                    except Exception:
+                        err = "Agnes reported failed"
+                    agnes_production.update_generation(
+                        gen_id, status="failed", phase="failed",
+                        error=str(err)[:500], attempts=attempts
+                    )
+                    return agnes_production.get_generation(gen_id)
+                # Still in progress
+                agnes_production.update_generation(
+                    gen_id, status=last_status, phase=last_status,
+                    progress=min(95, attempts * 5), attempts=attempts
+                )
             except agnes.AgnesRateLimited:
                 interval = min(agnes.POLL_MAX_S, interval * 1.5 + 5)
+                agnes_production.update_generation(gen_id, phase="rate_limited", attempts=attempts)
                 time.sleep(interval)
                 continue
             except agnes.AgnesUnavailable:
@@ -121,9 +136,9 @@ def generate_video(ctx):
                 time.sleep(interval)
                 continue
             except StrategyError as exc:
-                # If status says failed, mark failed
+                # If status parsing says failed, mark failed explicitly
                 if "failed" in str(exc).lower():
-                    agnes_production.update_generation(gen_id, status="failed", error=str(exc)[:500])
+                    agnes_production.update_generation(gen_id, status="failed", error=str(exc)[:500], attempts=attempts)
                     raise
                 time.sleep(interval)
                 interval = min(agnes.POLL_MAX_S, interval * 1.25)
@@ -132,23 +147,23 @@ def generate_video(ctx):
             interval = min(agnes.POLL_MAX_S, interval * 1.25)
         raise StrategyError(f"Agnes polling timeout, last_status={last_status}")
 
-    # Only poll if not already done
+    # Only poll if not already done/completed/failed/stopped
     current = agnes_production.get_generation(gen_id)
-    if current["status"] not in ("done", "completed"):
-        # Use memo for tracking? No, tracking should be live, not memoized, because status changes
-        # But we can use a non-memoized call; crash will resume via DB
+    if current["status"] not in ("done", "completed", "failed", "stopped"):
         try:
             tracked = do_track()
-            # Now tracked should be completed or failed
+            # tracked is now either completed or failed with DB already updated
             if tracked["status"] == "failed":
                 raise StrategyError(f"Agnes generation failed: {tracked.get('error')}")
-            # Update to completed if needed
-            if tracked["status"] != "done":
-                agnes_production.update_generation(gen_id, status="completed", phase="completed", progress=100)
+            # If completed, keep as completed (retrieve step will move to done after verification)
+            if tracked["status"] == "completed":
+                pass  # leave as completed, do not yet mark done
+            else:
+                # Unexpected status, treat as not completed
+                raise StrategyError(f"Agnes generation not completed, last_status={tracked.get('status')}")
         except Exception as exc:
             # If rate limited, we want retry, not final failure
             if isinstance(exc, agnes.AgnesRateLimited):
-                # Mark for retry
                 raise ValueError(f"rate limited, retry: {exc}") from exc
             raise
     else:

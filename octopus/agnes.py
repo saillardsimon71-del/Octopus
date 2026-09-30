@@ -203,14 +203,86 @@ def compute_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _has_ffprobe() -> str | None:
+    """Return ffprobe executable path if available, else None."""
+    import shutil
+    # System ffprobe
+    exe = shutil.which("ffprobe")
+    if exe:
+        return exe
+    # imageio-ffmpeg provides ffmpeg, sometimes ffprobe via same package
+    try:
+        import imageio_ffmpeg
+        # imageio-ffmpeg 0.4+ has get_ffprobe_exe
+        try:
+            fp = imageio_ffmpeg.get_ffprobe_exe()
+            if fp and Path(fp).is_file():
+                return fp
+        except AttributeError:
+            pass
+        # Fallback: try ffmpeg exe and replace ffmpeg -> ffprobe if exists
+        try:
+            ff = imageio_ffmpeg.get_ffmpeg_exe()
+            cand = Path(ff).with_name("ffprobe" + Path(ff).suffix)
+            if cand.is_file():
+                return str(cand)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return None
+
+
+def _probe_video_stream(path: Path, ffprobe_exe: str) -> dict:
+    """Use ffprobe to verify decodable video stream. Returns {verified: bool, reason: str, meta: dict}."""
+    import subprocess
+    import json as _json
+    try:
+        # ffprobe -v error -select_streams v:0 -show_entries stream=codec_type,codec_name,width,height,duration,avg_frame_rate -of json
+        cmd = [
+            ffprobe_exe,
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=codec_type,codec_name,width,height,duration,avg_frame_rate",
+            "-show_entries", "format=duration,size",
+            "-of", "json",
+            str(path),
+        ]
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", errors="ignore")[:500]
+            return {"verified": False, "reason": f"ffprobe failed: {err or 'no video stream'}"}
+        data = _json.loads(proc.stdout.decode("utf-8", errors="ignore") or "{}")
+        streams = data.get("streams") or []
+        if not streams:
+            return {"verified": False, "reason": "ffprobe: no video stream found"}
+        s0 = streams[0]
+        if s0.get("codec_type") != "video":
+            return {"verified": False, "reason": f"ffprobe: first stream not video ({s0.get('codec_type')})"}
+        # Basic sanity: width/height >0 if present
+        # Some files may not have width yet, but codec_name should exist
+        if not s0.get("codec_name"):
+            return {"verified": False, "reason": "ffprobe: video stream without codec"}
+        return {"verified": True, "reason": f"ffprobe verified video stream {s0.get('codec_name')} {s0.get('width')}x{s0.get('height')}", "meta": s0}
+    except subprocess.TimeoutExpired:
+        return {"verified": False, "reason": "ffprobe timeout"}
+    except Exception as exc:
+        return {"verified": False, "reason": f"ffprobe error: {type(exc).__name__}: {exc}"}
+
+
 def verify_mp4(path: Path) -> dict:
-    """Verify that path is a plausible MP4, not just HTTP 200.
+    """Verify that path is a real MP4 with decodable video, not just ftyp + arbitrary data.
 
     Checks:
     - file exists, size bounds
-    - header contains ftyp or moov within first bytes
-    - not truncated (size matches at least header)
-    Returns dict with verified bool and reason.
+    - ftyp box at start (offset 4)
+    - moov box present (required for valid MP4)
+    - mdat or at least plausible media data
+    - video codec indicator (avc1, hev1, mp4v, av01, vp09, vide, etc.)
+    - not zero-filled / truncated
+    - if ffprobe available, actually probe video stream for decodability
+
+    Returns dict with verified bool, sha256, bytes, reason.
     """
     p = Path(path)
     if not p.is_file():
@@ -223,29 +295,120 @@ def verify_mp4(path: Path) -> dict:
         return {"verified": False, "reason": f"too small: {size} bytes"}
     if size > _MAX_VIDEO_BYTES:
         return {"verified": False, "reason": f"too large: {size} bytes"}
+
+    # Read header and scan boxes
     try:
         with open(p, "rb") as f:
-            header = f.read(32)
-            # MP4 should have ftyp at offset 4
+            header = f.read(64)
             if len(header) < 12:
                 return {"verified": False, "reason": "header too short"}
-            # Check for ftyp box
-            if header[4:8] != b"ftyp":
-                # Some files may start with other boxes, scan first 32 bytes for known magic
-                found = any(m in header for m in _MP4_MAGIC)
-                if not found:
-                    return {"verified": False, "reason": "not an MP4 (missing ftyp)"}
-            # Additional check: file should not be all zeros
             if header == b"\x00" * len(header):
                 return {"verified": False, "reason": "file appears zero-filled / corrupt"}
+            # ftyp must be at offset 4 for standard MP4
+            if header[4:8] != b"ftyp":
+                # Allow other starting boxes but require ftyp somewhere in first 64 bytes for this project
+                if b"ftyp" not in header:
+                    return {"verified": False, "reason": "not an MP4 (missing ftyp)"}
+            # Quick zero-fill check beyond header: read 1KB after header, ensure not all zeros
+            f.seek(32)
+            sample = f.read(1024)
+            if sample and sample == b"\x00" * len(sample):
+                return {"verified": False, "reason": "file appears zero-filled after header / corrupt"}
+
+            # Box parsing: scan for ftyp, moov, mdat, and video indicators
+            # We'll scan first 10 MB for boxes to avoid reading huge file fully
+            f.seek(0)
+            found_ftyp = False
+            found_moov = False
+            found_mdat = False
+            found_video_tag = False
+            video_tags = [b"avc1", b"avc3", b"hev1", b"hvc1", b"mp4v", b"av01", b"vp09", b"vide", b"mp4a"]  # mp4a for audio but indicates media
+            # For video we require at least vide or avc1/hevc etc
+            required_video_tags = [b"avc1", b"avc3", b"hev1", b"hvc1", b"mp4v", b"av01", b"vp09", b"vide"]
+
+            offset = 0
+            # Limit scan to first 10 MB or file size
+            scan_limit = min(size, 10 * 1024 * 1024)
+            # Read chunk for scanning tags as fallback
+            f.seek(0)
+            scan_data = f.read(scan_limit)
+
+            # Box iteration using scan_data for speed
+            idx = 0
+            while idx + 8 <= len(scan_data):
+                # size: 4 bytes BE
+                box_size = int.from_bytes(scan_data[idx:idx+4], "big")
+                box_type = scan_data[idx+4:idx+8]
+                if box_type == b"ftyp":
+                    found_ftyp = True
+                if box_type == b"moov":
+                    found_moov = True
+                if box_type == b"mdat":
+                    found_mdat = True
+                # Validate box_size
+                if box_size == 0:
+                    # box extends to end of file
+                    break
+                if box_size == 1:
+                    # 64-bit size
+                    if idx + 16 > len(scan_data):
+                        break
+                    box_size = int.from_bytes(scan_data[idx+8:idx+16], "big")
+                    if box_size < 16:
+                        break
+                if box_size < 8:
+                    # Invalid, try to resync by searching next ftyp/moov/mdat?
+                    # For robustness, break and rely on tag search
+                    break
+                idx += box_size
+                if idx >= scan_limit:
+                    break
+
+            # Tag search in scan_data
+            for tag in required_video_tags:
+                if tag in scan_data:
+                    found_video_tag = True
+                    break
+
+            # Also check for ftyp presence via box iteration or tag search
+            if not found_ftyp:
+                # ftyp must have been at start, but double-check
+                if b"ftyp" not in scan_data[:64]:
+                    return {"verified": False, "reason": "not an MP4 (missing ftyp box)"}
+
+            if not found_moov:
+                return {"verified": False, "reason": "MP4 missing moov box (not a valid video file, only ftyp + arbitrary data)"}
+
+            if not found_video_tag:
+                return {"verified": False, "reason": "MP4 missing video track indicator (no avc1/hev1/mp4v/vide)"}
+
+            # If we have ftyp+moov but no mdat and file is tiny (< 5KB), likely still invalid
+            if not found_mdat and size < 5000:
+                return {"verified": False, "reason": "MP4 missing mdat and too small to be valid"}
+
     except OSError as exc:
         return {"verified": False, "reason": f"read failed: {type(exc).__name__}"}
-    # Compute hash for proof
+
+    # Try ffprobe for real decodability if available
+    ffprobe_exe = _has_ffprobe()
+    if ffprobe_exe:
+        probe_res = _probe_video_stream(p, ffprobe_exe)
+        if not probe_res.get("verified"):
+            # ffprobe is authoritative when present: if it says no video, reject
+            return {"verified": False, "reason": probe_res.get("reason", "ffprobe verification failed")}
+        # ffprobe verified, include its reason but still compute sha
+        try:
+            sha = compute_sha256(p)
+        except OSError:
+            return {"verified": False, "reason": "sha256 failed"}
+        return {"verified": True, "sha256": sha, "bytes": size, "reason": probe_res.get("reason", "ffprobe verified")}
+
+    # Fallback heuristic (ffprobe not available): ftyp+moov+video_tag+size plausible is considered verified
     try:
         sha = compute_sha256(p)
     except OSError:
         return {"verified": False, "reason": "sha256 failed"}
-    return {"verified": True, "sha256": sha, "bytes": size, "reason": "mp4 header present, size plausible"}
+    return {"verified": True, "sha256": sha, "bytes": size, "reason": "mp4 structure verified (ftyp+moov+video track, ffprobe not available)"}
 
 
 def download_video(task_id: str, dest_path: Path, *, base_url: str = DEFAULT_URL, timeout: float = 60.0) -> dict:
