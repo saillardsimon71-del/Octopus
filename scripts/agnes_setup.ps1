@@ -47,7 +47,7 @@ $envFile = Join-Path $dest ".env"
 if (-not (Test-Path -LiteralPath $envFile)) {
     Write-Host "[Agnes] Creating .env template with HOST=127.0.0.1 (no key)" -ForegroundColor Cyan
     @"
-# Agnes local config — loopback only, key injected via env var, never committed
+# Agnes local config - loopback only, key injected via env var, never committed
 HOST=127.0.0.1
 PORT=8765
 # AGNES_API_KEY is injected at runtime from secure env var, not stored here
@@ -58,7 +58,7 @@ PORT=8765
     # Enforce HOST=127.0.0.1 if file exists
     $content = Get-Content -LiteralPath $envFile -Raw
     if ($content -notmatch "HOST=127.0.0.1") {
-        Write-Host "[WARN] .env does not enforce HOST=127.0.0.1 — fixing" -ForegroundColor Yellow
+        Write-Host "[WARN] .env does not enforce HOST=127.0.0.1 - fixing" -ForegroundColor Yellow
         $content = $content -replace "HOST=.*", "HOST=127.0.0.1"
         if ($content -notmatch "HOST=") { $content = "HOST=127.0.0.1`nPORT=8765`n" + $content }
         Set-Content -Path $envFile -Value $content -Encoding utf8

@@ -24,11 +24,11 @@ if (-not $conns) {
     exit 0
 }
 foreach ($c in $conns) {
-    $pid = $c.OwningProcess
-    $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+    $processId = $c.OwningProcess
+    $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue
     if ($proc) {
-        Write-Host "Stopping PID $pid ($($proc.ProcessName))" -ForegroundColor Yellow
-        Stop-Process -Id $pid -Force
+        Write-Host "Stopping PID $processId ($($proc.ProcessName))" -ForegroundColor Yellow
+        Stop-Process -Id $processId -Force
     }
 }
 Write-Host "[OK] Stopped. Working dirs .working_dir and .agnes_config preserved." -ForegroundColor Green
