@@ -1275,6 +1275,7 @@ if ($Phase -eq 'G') {
     $contextRules += @"
 
 Phase G required_criteria IDs and titles come from the canonical acceptance headings in docs/migrations/OPERATIONALIZATION.md. For each demonstrated ID, add a compact criteria entry to ASTRA_STATE_JSON: {"id":"F","status":"demonstrated","evidence":{"kind":"test","ref":"tests/test_runtime.py::test_objective_loop","head":"<current full HEAD>"}}. Kinds: test, inspection, receipt, range. Use a specific evidence reference, not a conclusion. Every proof must name the current HEAD; after a checkpoint, refresh stale proofs. Carry prior entries forward through the handoff. STABLE requires every ID and host full pytest on current HEAD. For BLOCKED, add "blocked":{"id":"F","evidence":{"kind":"inspection","ref":"specific observation","head":"<current full HEAD>"},"missing":"exact unavailable resource or capability"} to ASTRA_STATE_JSON. A remaining:[] claim has no terminal authority.
+Passing full pytest proves only the test suite on its HEAD. If criterion proofs remain missing, inspect the next bounded, previously unread relevant source or test section and continue the phase; do not reread the passing pytest log. Missing proof, unread local code, or a review instruction is work remaining, not BLOCKED. Use BLOCKED only for a concrete unavailable resource or capability that prevents further bounded local work. Its evidence must identify an independent observation, not the handoff or your own statement of remaining work.
 "@
 }
 
@@ -1391,13 +1392,29 @@ while ($true) {
             head = [string]$validationResult.head
             status = [string]$validationResult.status
             failing_tests = @($validationResult.failing_tests)
-            review_policy = 'A passing compact receipt is sufficient. On failure inspect only named tests and bounded source excerpts.'
+            review_policy = if ($Phase -eq 'G') {
+                'A passing compact receipt proves full pytest only. Continue bounded evidence work for missing criteria without rereading the passing log. On failure inspect only named tests and bounded source excerpts.'
+            } else {
+                'A passing compact receipt is sufficient. On failure inspect only named tests and bounded source excerpts.'
+            }
         }
         $lastResult = "Full pytest exited $($validationResult.exit_code); result=cache/astra-relay/results/validation-latest.json"
         $astraState = if ($script:lastTurn) { Get-AstraState -LastMessagePath $script:lastTurn.last_message } else { $null }
-        Save-Handoff -Result $lastResult -NextDecision 'Conclude on pass; on failure resolve only the named failing tests.' -Tests @("full pytest: $($validationResult.status), exit $($validationResult.exit_code), $($validationResult.duration_seconds)s") -State $astraState
+        $validationDecision = if ($Phase -eq 'G') {
+            'On pass, continue missing Phase G criterion proofs; conclude STABLE only when all are demonstrated on the current HEAD. On failure resolve only the named failing tests.'
+        } else {
+            'Conclude on pass; on failure resolve only the named failing tests.'
+        }
+        Save-Handoff -Result $lastResult -NextDecision $validationDecision -Tests @("full pytest: $($validationResult.status), exit $($validationResult.exit_code), $($validationResult.duration_seconds)s") -State $astraState
         $nextReason = 'validation review'
-        $nextPrompt = New-AstraTaskPrompt 'Fresh validation review. The bounded host receipt is in the inline snapshot. If it passed, conclude without reading any log or documentation. If it failed, inspect only the named failing tests and the smallest relevant source excerpt.'
+        if ($Phase -eq 'G') {
+            $validationHandoff = Read-Handoff -Path $handoffPath -MaxChars $MaxHandoffChars
+            $missingAfterValidation = @(Get-MissingPhaseGCriteria -Criteria $phaseGCriteria -Proofs @($validationHandoff.criteria) -Head ([string]$validationResult.head))
+            $missingLabel = if ($missingAfterValidation.Count) { $missingAfterValidation -join ', ' } else { 'none' }
+            $nextPrompt = New-AstraTaskPrompt ("Fresh Phase G validation review. The bounded host receipt is in the inline snapshot. If it passed, do not reread its log. Missing current-HEAD criteria: $missingLabel. Continue one bounded evidence or ticket action for missing criteria; conclude STABLE only if none remain. If validation failed, inspect only the named failing tests and the smallest relevant source excerpt.")
+        } else {
+            $nextPrompt = New-AstraTaskPrompt 'Fresh validation review. The bounded host receipt is in the inline snapshot. If it passed, conclude without reading any log or documentation. If it failed, inspect only the named failing tests and the smallest relevant source excerpt.'
+        }
     } elseif ($modelInvoked) {
         if ((git status --porcelain --untracked-files=all | Out-String).Trim()) { throw 'Astra ended with uncheckpointed changes.' }
         $status = if ($script:lastTurn) { Get-AstraStatus -LastMessagePath $script:lastTurn.last_message } else { '' }
@@ -1438,10 +1455,11 @@ while ($true) {
             if (-not $blockedProof -or [string]$blockedProof.id -cnotin @($phaseGCriteria.id) -or
                 [string]$blockedProof.evidence.kind -cnotin @('test', 'inspection', 'receipt', 'range') -or
                 [string]$blockedProof.evidence.ref -notmatch '^\S.{0,239}$' -or
+                [string]$blockedProof.evidence.ref -match '^(HOST_CONTEXT_JSON|ASTRA_STATE_JSON|handoff\.)' -or
                 [string]$blockedProof.evidence.head -cne $currentHead -or
                 [string]$blockedProof.missing -notmatch '^\S.{0,239}$') {
                 $status = ''
-                $forcedContinuation = 'Phase G BLOCKED requires an exact criterion ID, structured evidence on current HEAD, and the missing resource or capability.'
+                $forcedContinuation = 'Phase G BLOCKED requires an exact criterion ID, independent evidence on current HEAD, and a concrete unavailable resource or capability. Missing proof or unread local code requires bounded continuation.'
             }
         }
         if ($status) {
