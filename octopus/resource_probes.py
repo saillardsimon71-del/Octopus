@@ -89,12 +89,35 @@ def host_probe(resource: dict) -> ProbeResult:
     return ProbeResult(True, detail, source_ref=f"host:{socket.gethostname()}")
 
 
+def agnes_probe(resource: dict) -> ProbeResult:
+    """Probe Agnes local service on loopback 127.0.0.1:8765.
+
+    Checks /api/health with same safety as octopus.agnes.probe (no proxy, no redirect).
+    Returns ok=True if service reports agnes-video-generator.
+    """
+    url = str(resource.get("probe_args", {}).get("url") or resource.get("locator") or "http://127.0.0.1:8765").strip()
+    # Reuse agnes.probe logic but via direct http_probe-like handling to avoid circular import
+    try:
+        from . import agnes as _agnes
+        result = _agnes.probe(url)
+        return ProbeResult(True, f"Agnes {result.get('service')} ok (pin {result.get('expected_pin')[:8]}...)",
+                           source_ref=url, capabilities=["video_generation", "agnes_submit", "agnes_stop"])
+    except Exception as exc:
+        # Distinguish unavailable vs misconfigured
+        msg = str(exc)[:200]
+        if "rate limited" in msg.lower() or "429" in msg:
+            return ProbeResult(True, f"Agnes rate limited but reachable: {msg}", source_ref=url,
+                               capabilities=["video_generation"], degraded=True)
+        return ProbeResult(False, f"Agnes unavailable: {msg}", source_ref=url)
+
+
 PROBES: dict[str, Callable[[dict], ProbeResult]] = {
     "env": env_probe,
     "http": http_probe,
     "dns": dns_probe,
     "command": command_probe,
     "host": host_probe,
+    "agnes": agnes_probe,
 }
 
 

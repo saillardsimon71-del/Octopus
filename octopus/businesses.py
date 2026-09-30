@@ -18,7 +18,7 @@ from . import journal, paths
 
 # L'atelier de développement reste disponible par import explicite/night-shift,
 # pas dans un worker ordinaire. Le moteur vidéo historique a été retiré.
-ENGINE_HANDLERS = ("octopus.builtin_handlers", "agents.task_handlers")
+ENGINE_HANDLERS = ("octopus.builtin_handlers", "octopus.agnes_handlers", "agents.task_handlers")
 _cache: dict[str, tuple[tuple, dict]] = {}
 _problems: dict[str, list[str]] = {}
 
