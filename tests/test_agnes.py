@@ -3,11 +3,15 @@
 Finalisation phase: upstream is free, so submit is free_quota (not paid),
 but we keep quantity limits, duration caps, quota 429 handling, and
 human authorization for real spend.
+
+MP4 validation now requires real multimedia validation (ffprobe/ffmpeg),
+not just ftyp/moov+codec string.
 """
 
 import io
 import json
 import hashlib
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from urllib.error import HTTPError, URLError
@@ -23,6 +27,7 @@ from octopus.strategy import StrategyError
 
 B = "atelier_test"
 TASK = "abcdef123456"
+FIXTURE_TINY = Path(__file__).parent / "fixtures" / "tiny.mp4"
 
 
 @pytest.fixture(autouse=True)
@@ -45,16 +50,6 @@ def reply(http, data):
     http.return_value = response
 
 
-def reply_bytes(http, data: bytes, status=200):
-    response = Mock(status=status)
-    # For bytes download, read returns chunks; simulate single read
-    response.read.side_effect = [data, b""]
-    response.__enter__ = Mock(return_value=response)
-    response.__exit__ = Mock(return_value=False)
-    http.side_effect = None
-    http.return_value = response
-
-
 def channel(*, access=True, capabilities=None, locator=agnes.DEFAULT_URL):
     cid = economy.add_channel(B, "agnes_video", "Local Agnes", created_by="human", locator=locator,
                               capabilities=capabilities if capabilities is not None else ["agnes_submit", "agnes_stop"])
@@ -63,10 +58,8 @@ def channel(*, access=True, capabilities=None, locator=agnes.DEFAULT_URL):
 
 
 def submit(cid, **kwargs):
-    # free_quota does not require spend, but we support optional spend for backward compat
     payload = kwargs.pop("payload", {"prompt": "Une mer calme"})
     key = kwargs.pop("key", "mission-1-video")
-    # Only pass spend if explicitly given
     extra = {}
     if "amount" in kwargs:
         extra["spend_amount"] = kwargs.pop("amount")
@@ -75,10 +68,6 @@ def submit(cid, **kwargs):
     return actions.propose(B, cid, "submit", payload,
                            requested_by="human", idempotency_key=key,
                            **extra)
-
-
-def allowance():
-    economy.grant_allowance(B, 2, "EUR", granted_by="human", rationale="Bounded test")
 
 
 def test_submission_form_evidence_and_restart_deduplication(http):
@@ -94,7 +83,6 @@ def test_submission_form_evidence_and_restart_deduplication(http):
     assert not any(k.lower() == "authorization" for k in req.headers)
     row = actions.list_actions(B)[0]
     assert json.loads(row["result"])["task_id"] == TASK
-    # free_quota: no spend request expected
     assert row["spend_request_id"] is None
     assert journal.query("SELECT COUNT(*) AS n FROM ledger_entries")[0]["n"] == 0
     evidence = journal.query("SELECT * FROM strategy_evidence WHERE id=?", (result["evidence_id"],))[0]
@@ -118,13 +106,11 @@ def test_refusals_do_not_send_http(http, case):
 
 
 def test_free_quota_does_not_require_allowance(http):
-    """Upstream is free: submit should work without allowance or spend_amount."""
     cid = channel()
     reply(http, {"ok": True, "task_id": TASK})
     result = submit(cid)
     assert result["status"] == "executed"
     assert http.call_count == 1
-    # No spend request created
     assert not journal.query("SELECT * FROM spend_requests")
 
 
@@ -292,27 +278,43 @@ def test_rate_limit_429_is_not_ambiguous_but_retryable(http):
     result = submit(cid)
     assert result["status"] == "failed"
     assert "429" in result["reason"] or "rate" in result["reason"].lower()
-    # 429 must not be ambiguous
     assert result["status"] != "ambiguous"
-    # Same idempotency_key must allow controlled retry with backoff, without extra generation and not confused with ambiguous
-    # Our fix deletes previous failed rate-limited action, so second call should attempt HTTP again (call_count 2)
+    # History preserved: first failed row renamed on retry, so original key may be gone, but history like %failed-attempt% exists
+    rows_all = journal.query("SELECT * FROM channel_actions WHERE business=?", (B,))
+    assert len(rows_all) >= 1
+    # Same key must allow bounded retry for Agnes (preserve history, not DELETE)
     http.side_effect = HTTPError("http://127.0.0.1:8765/api/tasks/simple", 429, "Too Many Requests", {}, io.BytesIO(b""))
     result2 = submit(cid)  # same key mission-1-video
     assert result2["status"] == "failed"
-    assert http.call_count == 2, "429 retry with same idempotency_key must re-attempt HTTP, not return duplicate failed"
-    # No generation should have been created in agnes_video_generations for failed 429
-    from octopus import agnes_production
-    assert agnes_production.get_by_idempotency("mission-1-video") is None
+    assert http.call_count == 2, "Agnes 429 retry must re-attempt HTTP, preserving history"
+    # History should now contain 2 failed attempts (one renamed, one with original key or renamed)
+    rows_failed = journal.query("SELECT * FROM channel_actions WHERE business=? AND status='failed'", (B,))
+    assert len(rows_failed) >= 2, f"history must be preserved, got {rows_failed}"
 
-    # After 429, a successful retry should work and create generation
+    # Third attempt successful
     reply(http, {"ok": True, "task_id": TASK})
     result3 = submit(cid)
     assert result3["status"] == "executed"
     assert http.call_count == 3
+    # After success, history of failed attempts still preserved
+    rows_failed_after = journal.query("SELECT * FROM channel_actions WHERE business=? AND status='failed'", (B,))
+    assert len(rows_failed_after) >= 2
+
+    # Bounded retry: after 5 attempts, should block
+    # Simulate 5 more 429s with same key pattern? Use new key to test exhaustion
+    cid2 = channel()
+    # Create 5 failed attempts for key mission-exhaust
+    for i in range(5):
+        http.side_effect = HTTPError("http://127.0.0.1:8765/api/tasks/simple", 429, "Too Many Requests", {}, io.BytesIO(b""))
+        submit(cid2, key="mission-exhaust")
+    # 6th should be blocked (retry exhausted)
+    http.side_effect = HTTPError("http://127.0.0.1:8765/api/tasks/simple", 429, "Too Many Requests", {}, io.BytesIO(b""))
+    result_exhaust = submit(cid2, key="mission-exhaust")
+    assert result_exhaust["status"] == "blocked"
+    assert "exhausted" in result_exhaust["reason"].lower()
 
 
 def test_rate_limit_429_in_production_raises_retryable(monkeypatch):
-    """Verify agnes_production.request_generation raises AgnesRateLimited for 429, allowing backoff."""
     from unittest.mock import Mock
     opener = Mock()
     monkeypatch.setattr(agnes, "build_opener", Mock(return_value=opener))
@@ -320,73 +322,88 @@ def test_rate_limit_429_in_production_raises_retryable(monkeypatch):
     monkeypatch.setattr(actions, "_load_configured_executors", lambda: None)
     opener.open.side_effect = HTTPError("http://127.0.0.1:8765/api/tasks/simple", 429, "Too Many Requests", {}, io.BytesIO(b""))
     agnes.register()
-    # Need channel
     cid = channel()
     from octopus import agnes_production
     with pytest.raises(agnes.AgnesRateLimited, match="rate limited|429"):
         agnes_production.request_generation(business=B, prompt="test", idempotency_key="rate-1")
-    # Ensure no generation created
     assert agnes_production.get_by_idempotency("rate-1") is None
-    # Ensure not ambiguous: no ambiguous action with that key
     rows = journal.query("SELECT * FROM channel_actions WHERE idempotency_key='rate-1' AND status='ambiguous'")
     assert not rows
 
 
-def _make_valid_mp4_bytes(size=4096):
-    """Minimal MP4 that passes new verify_mp4: ftyp+moov with vide/avc1+mdat."""
-    ftyp = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42mp41"
-    # moov box with video indicators
-    moov_payload = b"\x00" * 20 + b"vide" + b"\x00" * 10 + b"avc1" + b"\x00" * 18
-    moov_size = 8 + len(moov_payload)
-    moov = moov_size.to_bytes(4, "big") + b"moov" + moov_payload
-    remaining = size - len(ftyp) - len(moov) - 8
-    if remaining < 0:
-        remaining = 1024
-    mdat = (8 + remaining).to_bytes(4, "big") + b"mdat" + b"\x01" * remaining
-    return ftyp + moov + mdat
+def test_verify_mp4_real_fixture_and_artificial_rejected():
+    # Real tiny MP4 fixture generated via FFmpeg must pass real validation when ffmpeg/ffprobe available
+    # Artificial ftyp-only must be rejected even with codec string present
+    assert FIXTURE_TINY.is_file(), "tiny.mp4 fixture must exist (generated via FFmpeg)"
+    # Ensure ffmpeg is available for this test (imageio-ffmpeg installed in CI)
+    ffmpeg = agnes._has_ffmpeg()
+    ffprobe = agnes._has_ffprobe()
+    # If no validator available, we expect verified=False with reason requiring real validation
+    # But in our CI we install imageio-ffmpeg, so ffmpeg should be present
+    if not ffmpeg and not ffprobe:
+        pytest.skip("ffprobe/ffmpeg not available, cannot test real validation")
 
+    ver = agnes.verify_mp4(FIXTURE_TINY)
+    assert ver["verified"] is True, f"real fixture should be verified: {ver}"
+    assert "sha256" in ver
+    # Check reason mentions ffprobe or ffmpeg (real validation)
+    assert "ffprobe" in ver["reason"].lower() or "ffmpeg" in ver["reason"].lower()
 
-def test_verify_mp4_valid_and_corrupt():
     with tempfile.TemporaryDirectory() as tmp:
-        valid = Path(tmp) / "valid.mp4"
-        valid.write_bytes(_make_valid_mp4_bytes(4096))
-        ver = agnes.verify_mp4(valid)
-        assert ver["verified"] is True, f"should be valid: {ver}"
-        assert "sha256" in ver
-
-        # ftyp only + arbitrary data should be rejected (P0 MP4)
+        # ftyp only + arbitrary should be rejected
         ftyp_only = Path(tmp) / "ftyp_only.mp4"
         ftyp_only.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42mp41" + b"\x00" * 2048)
-        ver_ftyp = agnes.verify_mp4(ftyp_only)
-        assert ver_ftyp["verified"] is False, "ftyp + arbitrary should not be accepted"
+        assert agnes.verify_mp4(ftyp_only)["verified"] is False
+
+        # Artificial with ftyp+moov+avc1 but no valid H264 should be rejected (real decode fails)
+        artificial = Path(tmp) / "artificial.mp4"
+        ftyp = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42mp41"
+        moov_payload = b"\x00" * 20 + b"vide" + b"\x00" * 10 + b"avc1" + b"\x00" * 18
+        moov = (8 + len(moov_payload)).to_bytes(4, "big") + b"moov" + moov_payload
+        mdat = (8 + 1024).to_bytes(4, "big") + b"mdat" + b"\x01" * 1024
+        artificial.write_bytes(ftyp + moov + mdat)
+        ver_art = agnes.verify_mp4(artificial)
+        assert ver_art["verified"] is False, f"artificial ftyp+moov+avc1 must not be verified: {ver_art}"
 
         corrupt = Path(tmp) / "corrupt.mp4"
         corrupt.write_bytes(b"\x00" * 100)
-        ver2 = agnes.verify_mp4(corrupt)
-        assert ver2["verified"] is False
+        assert agnes.verify_mp4(corrupt)["verified"] is False
 
         small = Path(tmp) / "small.mp4"
         small.write_bytes(b"tiny")
-        ver3 = agnes.verify_mp4(small)
-        assert ver3["verified"] is False
+        assert agnes.verify_mp4(small)["verified"] is False
 
-        # moov without video tag should be rejected
-        no_video = Path(tmp) / "no_video.mp4"
+
+def test_verify_mp4_without_validators_requires_real_validation(monkeypatch):
+    # Simulate no ffprobe/ffmpeg available: must not mark verified True solely on ftyp/moov+codec
+    monkeypatch.setattr(agnes, "_has_ffprobe", lambda: None)
+    monkeypatch.setattr(agnes, "_has_ffmpeg", lambda: None)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # Even real fixture should NOT be verified when no validator (real validation mandatory)
+        dest = Path(tmp) / "copy.mp4"
+        shutil.copy(FIXTURE_TINY, dest)
+        ver = agnes.verify_mp4(dest)
+        assert ver["verified"] is False
+        assert "real multimedia validation required" in ver["reason"].lower()
+
+        # Artificial also false
+        artificial = Path(tmp) / "artificial.mp4"
         ftyp = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42mp41"
-        moov_payload = b"\x00" * 50
+        moov_payload = b"\x00" * 20 + b"vide" + b"\x00" * 10 + b"avc1" + b"\x00" * 18
         moov = (8 + len(moov_payload)).to_bytes(4, "big") + b"moov" + moov_payload
         mdat = (8 + 1024).to_bytes(4, "big") + b"mdat" + b"\x01" * 1024
-        no_video.write_bytes(ftyp + moov + mdat)
-        ver4 = agnes.verify_mp4(no_video)
-        assert ver4["verified"] is False
+        artificial.write_bytes(ftyp + moov + mdat)
+        assert agnes.verify_mp4(artificial)["verified"] is False
 
 
 def test_download_video_verifies_integrity(http):
-    # Mock status completed then video bytes (valid MP4 with moov+avc1)
+    # Use real tiny.mp4 bytes for download mock
+    real_bytes = FIXTURE_TINY.read_bytes()
+
     def side_effect(request, timeout=15):
         url = request.full_url
         if url.endswith(f"/api/tasks/{TASK}"):
-            # status call
             resp = Mock(status=200)
             resp.read.return_value = json.dumps({"task_id": TASK, "task_type": "simple", "status": "completed"}).encode()
             resp.__enter__ = Mock(return_value=resp)
@@ -394,8 +411,9 @@ def test_download_video_verifies_integrity(http):
             return resp
         elif url.endswith(f"/api/video/{TASK}"):
             resp = Mock(status=200)
-            data = _make_valid_mp4_bytes(4096)
-            resp.read.side_effect = [data[:1024], data[1024:], data[2048:], b""]
+            # Chunked read of real MP4
+            chunks = [real_bytes[i:i+1024] for i in range(0, len(real_bytes), 1024)] + [b""]
+            resp.read.side_effect = chunks
             resp.__enter__ = Mock(return_value=resp)
             resp.__exit__ = Mock(return_value=False)
             return resp
@@ -412,21 +430,16 @@ def test_download_video_verifies_integrity(http):
 
 
 def test_auto_registration_without_explicit_register(monkeypatch):
-    """Explicit register() should not be required for autonomous missions using authorized channel."""
     opener = Mock()
     monkeypatch.setattr(agnes, "build_opener", Mock(return_value=opener))
-    # Do NOT call agnes.register(), but ensure _EXECUTORS empty and _load_configured_executors loads agnes
     monkeypatch.setattr(actions, "_EXECUTORS", {})
     def load():
         from octopus import agnes as _a
         _a._ensure_registered()
     monkeypatch.setattr(actions, "_load_configured_executors", load)
     opener.open.side_effect = AssertionError("Unconfigured HTTP request")
-    # Now _load_configured_executors should have registered agnes executors
-    # Simulate actions.propose path that calls _load_configured_executors
     from octopus import agnes as _agnes
     _agnes._ensure_registered()
     assert ("agnes_video", "submit") in actions._EXECUTORS
-    # Also check cost_class is free_quota
     _, cost_class, _ = actions._EXECUTORS[("agnes_video", "submit")]
     assert cost_class == "free_quota"

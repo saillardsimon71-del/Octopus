@@ -69,18 +69,56 @@ def propose(business: str, channel_id: int, action: str, payload: dict | None = 
     action = strategy._text(action, "action").lower()
     _load_configured_executors()
     now = time.time()
+    # Bounded retry config for Agnes 429 — preserve history, limit to Agnes executor
+    _MAX_AGNES_429_RETRIES = 5
+
     with tasks._tx() as conn:
         if idempotency_key:
             existing = conn.execute("SELECT id, status, reason FROM channel_actions WHERE idempotency_key=?",
                                     (idempotency_key,)).fetchone()
             if existing:
-                # Rate-limited failure should allow controlled retry with backoff, not be treated as final duplicate
-                # and must not create extra generation nor be confused with ambiguous
                 if existing["status"] == "failed":
-                    reason = (existing["reason"] or "").lower()
-                    if "rate limited" in reason or "429" in reason or "rate_limited" in reason:
-                        # Delete previous rate-limited failed action to allow retry with same key (backoff handled by caller)
-                        conn.execute("DELETE FROM channel_actions WHERE id=?", (existing["id"],))
+                    reason_lc = (existing["reason"] or "").lower()
+                    is_rate_limited = "rate limited" in reason_lc or "429" in reason_lc or "rate_limited" in reason_lc
+                    if is_rate_limited:
+                        # Fetch channel kind to limit special handling to Agnes executor only
+                        ch_row = conn.execute("SELECT kind FROM economic_channels WHERE id=? AND business=?",
+                                              (channel_id, business)).fetchone()
+                        ch_kind = (ch_row["kind"] if ch_row else "").lower() if ch_row else ""
+                        if ch_kind == "agnes_video":
+                            # Count previous failed attempts for this logical key (including renamed history)
+                            like_pattern = f"{idempotency_key}#failed-attempt-%"
+                            cnt_row = conn.execute(
+                                "SELECT COUNT(*) AS n FROM channel_actions WHERE business=? AND (idempotency_key=? OR idempotency_key LIKE ?) AND status='failed'",
+                                (business, idempotency_key, like_pattern)
+                            ).fetchone()
+                            attempts = int(cnt_row["n"]) if cnt_row else 0
+                            # Also count history rows that were renamed (they match LIKE)
+                            # attempts already includes current existing row (since it matches idempotency_key=?)
+                            # If attempts >= max, block retry, preserve history
+                            if attempts >= _MAX_AGNES_429_RETRIES:
+                                # Keep existing failed row, return blocked with exhausted reason
+                                return {"action_id": existing["id"], "status": "blocked",
+                                        "reason": f"rate limited retry exhausted after {attempts} attempts (bounded backoff)", "duplicate": False}
+                            # Preserve history: rename old failed row to keep it, then allow new insert
+                            # Use timestamp + attempts to make renamed key unique
+                            renamed_key = f"{idempotency_key}#failed-attempt-{attempts}-{int(now)}"
+                            # Ensure uniqueness in case of collision
+                            suffix = 0
+                            while True:
+                                try:
+                                    conn.execute("UPDATE channel_actions SET idempotency_key=? WHERE id=?",
+                                                 (renamed_key if suffix == 0 else f"{renamed_key}-{suffix}", existing["id"]))
+                                    break
+                                except Exception:
+                                    suffix += 1
+                                    if suffix > 10:
+                                        # Fallback: keep original and allow retry by updating status to blocked? But preserve history
+                                        break
+                            # Do not return duplicate; fall through to insert new action with original key (retry)
+                        else:
+                            # For non-Agnes channels, keep original policy: return duplicate (do not delete)
+                            return {"action_id": existing["id"], "status": existing["status"], "duplicate": True}
                     else:
                         return {"action_id": existing["id"], "status": existing["status"], "duplicate": True}
                 else:

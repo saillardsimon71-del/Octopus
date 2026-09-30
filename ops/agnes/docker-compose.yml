@@ -1,14 +1,18 @@
 # Agnes Video Generator — Docker Compose local (loopback only)
 # Pin: lcy362/agnes-video-generator@a87162d6df73ffe72186838ca0ae9d461e68589b
 # Usage:
-#   $env:AGNES_API_KEY="your-key"  # or use env_file below
-#   docker compose up -d
+#   # Secure: create env file outside repo, UTF-8 without BOM, restricted ACL
+#   # Example: C:\octopus\secrets\agnes.env containing AGNES_API_KEY=xxx
+#   # Then: $env:AGNES_ENV_FILE="C:\octopus\secrets\agnes.env"; docker compose up -d
 #   curl http://127.0.0.1:8765/api/health
 # Security:
-#   - AGNES_API_KEY injected only into Agnes process via env, never in prompts/logs/Git/args/browser
+#   - AGNES_API_KEY injected only via env_file (not via environment ${VAR} literal that appears in docker inspect)
+#   - Never use `docker inspect --format '{{json .Config.Env}}'` as it divulges AGNES_API_KEY
 #   - Inside container: HOST=0.0.0.0 (container interface)
 #   - Host publish: 127.0.0.1:8765:8765 (only loopback on Windows)
 #   - volumes preserve config/tasks/videos between restarts
+#   - env_file must be UTF-8 without BOM (PowerShell 5.1: use [IO.File]::WriteAllText with UTF8Encoding $false)
+#   - env_file ACL restricted to current user, deletion guaranteed after use
 
 version: "3.8"
 
@@ -23,22 +27,19 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 8765
-      # AGNES_API_KEY taken from host env via ${VAR} or env_file; never commit literal
-      AGNES_API_KEY: ${AGNES_API_KEY}
-      # Optional multi-key rotation (contiguous):
-      # AGNES_API_KEY_2: ${AGNES_API_KEY_2:-}
-      # AGNES_API_KEY_3: ${AGNES_API_KEY_3:-}
-    # If you prefer file outside repo (recommended, avoids literal in compose args):
-    # env_file:
-    #   - C:\octopus\secrets\agnes.env
+      # AGNES_API_KEY must NOT be here via ${VAR} because it would be visible in docker inspect
+      # Use env_file instead (secure, not visible in process args, supports restricted ACL)
+    env_file:
+      # Default path outside repo, can be overridden via AGNES_ENV_FILE env var
+      - ${AGNES_ENV_FILE:-C:\\octopus\\secrets\\agnes.env}
+      # Alternative local path for dev (gitignored cache):
+      # - ../../cache/upstreams/agnes-video-generator/.env
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
-      # Persist tasks, videos, config between restarts (bind mounts)
       - ../../cache/upstreams/agnes-video-generator/agnes_data/working:/app/.working_dir
       - ../../cache/upstreams/agnes-video-generator/agnes_data/config:/app/.agnes_config
     healthcheck:
-      # Upstream image is Python-based and does not guarantee curl; use Python for healthcheck
       test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=5).status==200 else 1)"]
       interval: 30s
       timeout: 10s
