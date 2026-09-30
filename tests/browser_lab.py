@@ -31,6 +31,7 @@ class Lab:
         self.submissions: list[dict] = []
         self.posts: list[str] = []
         self.on_confirm = None
+        self.recap_downloadable = True
         self.contact_first = seed % 2 == 0
         self._lock = threading.Lock()
         lab = self
@@ -168,14 +169,16 @@ class Lab:
         match = re.fullmatch(r"/devis/recap/(DV-\d+)\.txt", path)
         if match:
             sub = next((s for s in self.submissions if s["ref"] == match.group(1)), None)
-            if sub is None:
+            if sub is None or not self.recap_downloadable:
                 return self._send(handler, b"introuvable", 404)
             text = json.dumps(sub, ensure_ascii=False).encode("utf-8")
             return self._send(handler, text, headers={"Content-Type": "text/plain; charset=utf-8",
                                                       "Content-Disposition": f'attachment; filename="{sub["ref"]}.txt"'})
         if path == "/mes-demandes":
             rows = "".join(f"<li>{s['ref']} — {html.escape(s['societe'])} — {html.escape(s['prestation'])} "
-                           f"× {html.escape(s['quantite'])} — Demande enregistrée</li>" for s in self.submissions)
+                           f"× {html.escape(s['quantite'])} — Demande enregistrée — "
+                           f"<a href=\"/devis/recap/{s['ref']}.txt\">Télécharger le récapitulatif {s['ref']}</a></li>"
+                           for s in self.submissions)
             body = f"<h1>Mes demandes</h1><ul>{rows}</ul>" if rows else "<h1>Mes demandes</h1><p>Aucune demande envoyée.</p>"
             return self._send(handler, self._page("Mes demandes", body))
         return self._send(handler, b"introuvable", 404)
@@ -271,6 +274,9 @@ class ObservationDecider:
             return {"final": "Accès en écriture non accordé sur ce site : " + refused[:200]}
         if tool == "browser_download" and result.get("ok"):
             return {"final": f"Demande envoyée et vérifiée ; récapitulatif téléchargé ({result.get('file')})."}
+        if tool == "browser_download":
+            return {"final": "Demande envoyée et vérifiée, mais le récapitulatif n'a pas pu être téléchargé : "
+                             + str(result.get("error") or result.get("reason") or "")[:200]}
         if not page:
             return {"tool": "browser_snapshot", "args": {}}
         elements = _LINE_RE.findall(page)
@@ -282,10 +288,15 @@ class ObservationDecider:
             action_id = self._ambiguous_id(history)
             if action_id is not None and not any(h[0] == "browser_verify" for h in history[-1:]):
                 return {"tool": "browser_verify", "args": {"text": "Demande enregistrée", "action_id": action_id}}
-        if self.done_marker in text and "référence" in text:
-            link = self._find(page, ("link",), "télécharger")
-            ref = re.search(r"DV-\d+", page)
+        if result.get("already_done"):
+            # Déjà fait (tentative précédente) : retrouver le résultat sur le site plutôt que refaire.
+            link = self._find(page, ("link",), self.verify_link)
             if link:
+                return {"tool": "browser_click", "args": {"ref": "@" + link[2]}}
+        if self.done_marker in text and not any(h[0] == "browser_download" and h[1].get("ok") for h in history):
+            link = self._find(page, ("link",), "télécharger")
+            if link:
+                ref = re.search(r"DV-\d+", link[1]) or re.search(r"DV-\d+", page)
                 return {"tool": "browser_download", "args": {"ref": "@" + link[2],
                                                              "filename": f"{ref.group(0) if ref else 'recap'}.txt"}}
         if tool == "browser_verify" and result.get("verified"):

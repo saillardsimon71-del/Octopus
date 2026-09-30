@@ -7,6 +7,9 @@ registre d'outils sont réels. Le cycle avec Chromium réel : tests/test_browser
 from __future__ import annotations
 
 import json
+import os
+import threading
+import time
 
 import pytest
 
@@ -22,7 +25,8 @@ SITE = {
     "/form": ("Contact", [("textbox", "Nom", None), ("textbox", "Mot de passe", None),
                           ("combobox", "Sujet", None), ("checkbox", "J'accepte", None),
                           ("button", "Envoyer", "/done")], "Écrivez-nous."),
-    "/done": ("Merci", [("link", "Retour", "/")], "Merci, message reçu. Référence R-42"),
+    "/done": ("Merci", [("link", "Retour", "/"), ("link", "Télécharger le récapitulatif", "file:R-42.txt")],
+              "Merci, message reçu. Référence R-42"),
 }
 
 
@@ -76,14 +80,29 @@ class FakeSession:
                 if result is not None:
                     return result
             target = self._page()[1][int(key[1:]) - 1][2]
-            if target:
+            if target and target.startswith("file:"):
+                self._download(target[len("file:"):])  # pièce jointe : la page ne change pas
+            elif target:
                 self.path = target
             return ok({"clicked": args[0]})
         if command == "download":
-            with open(args[1], "w", encoding="utf-8") as handle:
-                handle.write("recap R-42")
-            return ok({"path": args[1]})
+            # agent-browser 0.26 sous Windows : répertoire canonicalisé en \\?\C:\... -> Chrome annule.
+            return {"success": False, "data": None, "error": "Download was canceled"}
         return ok()
+
+    def _download(self, name):
+        """Comme Chrome avec `--download-path` (comportement `allow`) : fichier partiel puis final,
+        de façon asynchrone, sous le nom suggéré par le serveur."""
+        partial = os.path.join(self.download_dir, name + ".crdownload")
+        with open(partial, "w", encoding="utf-8") as handle:
+            handle.write("recap")
+
+        def finish():
+            time.sleep(0.3)
+            with open(partial, "a", encoding="utf-8") as handle:
+                handle.write(" R-42")
+            os.replace(partial, os.path.join(self.download_dir, name))
+        threading.Thread(target=finish, daemon=True).start()
 
     def close(self):
         self.run("close")
@@ -364,10 +383,20 @@ def test_checkpoint_reopens_the_last_page_of_the_task_after_restart():
 
 def test_download_goes_to_the_task_inbox_and_upload_only_from_the_outbox():
     _channel()
-    space = _space("t5")
+    task_id = tasks.enqueue(BUSINESS, "supervisor.objective_work", {"objective_id": 1})
+    space = _space(f"t{task_id}", task_id)
     space.navigate(ORIGIN + "/done")
-    got = space.download(_ref(space, "Retour"), "recap.txt")
-    assert got["ok"] and got["bytes"] == len("recap R-42") and "/inbox/t5/" in got["file"].replace("\\", "/")
+    got = space.download(_ref(space, "Télécharger le récapitulatif"), "recap.txt")
+    inbox = bw.task_inbox(BUSINESS, f"t{task_id}")
+    assert got["ok"] and got["bytes"] == len("recap R-42"), got
+    assert os.path.samefile(got["file"], inbox / "recap.txt")
+    assert sorted(p.name for p in inbox.iterdir()) == ["recap.txt"]  # ni partiel ni nom d'origine
+    # Le chemin donné à Chromium est celui de la tâche, et la commande `download` (cassée sous
+    # Windows) n'est jamais utilisée.
+    session = FakeSession.instances[-1]
+    assert os.path.samefile(session.download_dir, inbox)
+    assert not any(c == "download" for c, _ in session.commands)
+    assert tasks.step_value(task_id, bw.FILES_KEY)[0]["sha256"] == got["sha256"]
     with pytest.raises(bw.Refused, match="nom de fichier"):
         space.download(_ref(space, "Retour"), "../evil.txt")
     _to_form(space)
@@ -377,6 +406,63 @@ def test_download_goes_to_the_task_inbox_and_upload_only_from_the_outbox():
     outbox.mkdir(parents=True)
     (outbox / "offre.pdf").write_bytes(b"%PDF-1.4")
     assert space.upload(_ref(space, "Nom"), "offre.pdf")["ok"]
+
+
+def test_a_link_that_downloads_nothing_is_reported_not_counted(monkeypatch):
+    monkeypatch.setattr(bw, "DOWNLOAD_START_S", 0.3)
+    task_id = tasks.enqueue(BUSINESS, "supervisor.objective_work", {"objective_id": 1})
+    space = _space(f"t{task_id}", task_id)
+    space.navigate(ORIGIN + "/done")
+    got = space.download(_ref(space, "Retour"), "recap.txt")  # simple navigation, aucun fichier
+    assert got["ok"] is False and "aucun fichier" in got["error"]
+    assert tasks.step_value(task_id, bw.FILES_KEY, []) == [] and bw.kept_files(BUSINESS, task_id) == []
+
+
+def test_kept_files_are_measured_on_disk_not_on_the_tool_result():
+    task_id = tasks.enqueue(BUSINESS, "supervisor.objective_work", {"objective_id": 1})
+    space = _space(f"t{task_id}", task_id)
+    space.navigate(ORIGIN + "/done")
+    assert space.download(_ref(space, "Télécharger le récapitulatif"), "DV.txt")["ok"]
+    assert [f["file"] for f in bw.kept_files(BUSINESS, task_id)] == ["DV.txt"]
+    path = bw.task_inbox(BUSINESS, f"t{task_id}") / "DV.txt"
+    path.write_text("altéré", encoding="utf-8")
+    assert bw.kept_files(BUSINESS, task_id) == []  # contenu différent du fichier téléchargé
+    path.unlink()
+    assert bw.kept_files(BUSINESS, task_id) == []  # fichier disparu
+    tasks.save_step(task_id, bw.FILES_KEY, [{"file": "../../secrets.txt", "sha256": "x"}])
+    assert bw.kept_files(BUSINESS, task_id) == []  # jamais hors de l'espace de la tâche
+
+
+def test_objective_requiring_a_kept_file_is_not_satisfied_by_a_verified_submission_alone():
+    _channel()
+    criterion = supervisor.criterion_for({"success_criteria": "verified_browser_actions>=1 ; kept_browser_files>=1"})
+    assert criterion == {"all": [{"metric": "verified_browser_actions", "gte": 1},
+                                 {"metric": "kept_browser_files", "gte": 1}]}
+    assert supervisor.parse_criterion("verified_browser_actions>=1 et kept_browser_files>=1") == criterion
+    assert supervisor.parse_criterion("verified_browser_actions>=1 et client signé") is None  # rien d'inventé
+    task_id = tasks.enqueue(BUSINESS, "supervisor.objective_work", {"objective_id": 1})
+    objective = {"id": 1, "business": BUSINESS}
+    space = _space(f"t{task_id}", task_id)
+    _to_form(space)
+    space.type(_ref(space, "Nom"), "Alice")
+    assert space.click(_ref(space, "Envoyer"), expect="message reçu")["effect"]["status"] == "verified"
+
+    output = supervisor.work_output(BUSINESS, objective, criterion, {"execution_status": "completed"},
+                                    task_id=task_id)
+    parts = {p["metric"]: p for p in output["objective_result"]["parts"]}
+    assert output["success"] is False and output["observed"] == 1 and output["objective_result"]["target"] == 2
+    assert parts["verified_browser_actions"]["success"] and not parts["kept_browser_files"]["success"]
+    assert output["human_boundary"] is None  # rien d'ambigu : simple nouvelle tentative possible
+
+    assert space.download(_ref(space, "Télécharger le récapitulatif"), "R-42.txt")["ok"]
+    output = supervisor.work_output(BUSINESS, objective, criterion, {"execution_status": "completed"},
+                                    task_id=task_id)
+    assert output["success"] is True and output["observed"] == 2
+    reason = supervisor._reason("satisfied", output, 1, 2)
+    assert "verified_browser_actions : 1 >= 1" in reason and "kept_browser_files : 1 >= 1" in reason
+    goal = supervisor.goal_text({"id": 1, "business": BUSINESS, "statement": "Devis",
+                                 "success_criteria": "verified_browser_actions>=1 ; kept_browser_files>=1"})
+    assert "kept_browser_files = fichiers téléchargés" in goal and "Tous les critères sont exigés" in goal
 
 
 # --- intégration runtime / superviseur --------------------------------------------------------
@@ -442,3 +528,31 @@ def test_cli_resolve_and_actions(capsys):
     assert "ambiguous" in capsys.readouterr().out
     assert main(["browser", "resolve", BUSINESS, str(action_id), "executed"]) == 0
     assert _rows()[-1]["status"] == "executed" and _rows()[-1]["decided_by"] == "human"
+
+
+def test_a_new_attempt_of_the_same_objective_never_repeats_a_verified_submission():
+    """Tentative 1 : envoi vérifié mais critère incomplet (ex. fichier non conservé) ; le
+    superviseur relance. Tentative 2 : même envoi -> `already_done`, aucun clic. Un AUTRE objectif
+    peut, lui, faire une nouvelle demande identique (décision de l'IA, sous canal humain)."""
+    _channel()
+
+    def attempt(objective_id: int, n: int) -> dict:
+        task_id = tasks.enqueue(BUSINESS, supervisor.WORK_KIND, {"objective_id": objective_id},
+                                idempotency_key=f"w{objective_id}-{n}")
+        space = _space(f"t{task_id}", task_id)
+        _to_form(space)
+        space.type(_ref(space, "Nom"), "Alice")
+        clicks = len(FakeSession.instances[-1].clicks)
+        result = space.click(_ref(space, "Envoyer"), expect="message reçu")
+        result["_clicked"] = len(FakeSession.instances[-1].clicks) - clicks
+        space.close()
+        return result
+
+    first = attempt(7, 1)
+    assert first["effect"]["status"] == "verified" and first["_clicked"] == 1
+    retry = attempt(7, 2)
+    assert retry["already_done"] is True and retry["_clicked"] == 0
+    assert retry["action_id"] == first["effect"]["action_id"] and retry["previous_task_id"]
+    other = attempt(8, 1)
+    assert other["effect"]["status"] == "verified" and other["_clicked"] == 1
+    assert [r["status"] for r in _rows()] == ["verified", "verified"]

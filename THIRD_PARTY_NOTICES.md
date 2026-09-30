@@ -13,6 +13,10 @@ workarounds, JSON interpretation), the line-boundary snapshot truncation of
 from the same NousResearch/hermes-agent commit. OCTOPUS supplies its own permissions,
 egress guard, ledger and resume logic in `octopus/browser_workspace.py`.
 
+The Chromium launch switches listed in `agents/agent_browser.py` (`_GUARD_ARGS`) partly follow
+the default switch list of Playwright (`packages/playwright-core/src/server/chromium/chromiumSwitches.ts`,
+Microsoft, Apache License 2.0); Playwright itself is an existing dependency of this repository.
+
 The browser backend binary itself is not vendored: `scripts/install_agent_browser.py`
 downloads agent-browser 0.26.0 (vercel-labs/agent-browser, Apache License 2.0,
 https://github.com/vercel-labs/agent-browser/blob/main/LICENSE) from the npm registry and

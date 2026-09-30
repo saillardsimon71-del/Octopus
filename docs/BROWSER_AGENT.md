@@ -50,7 +50,7 @@ structuré de l'effet (`effect.status`).
 | `browser_type`, `browser_select`, `browser_check`, `browser_upload` (uniquement depuis `browser_files/<business>/outbox/`) | édition de formulaire | canal `act` |
 | `browser_click(ref, expect?)` bouton/validation, `browser_press(Enter…)` | action à effet, registrée | canal `act` |
 | `browser_verify(text, action_id?)` | constat sur la page réelle | — |
-| `browser_download(ref, filename)` | fichier vers `agents/data/browser_files/<business>/inbox/<tâche>/` | lien simple : garde web ; sinon canal `act` |
+| `browser_download(ref, filename)` | clic du lien ; seul un fichier complet apparu dans `agents/data/browser_files/<business>/inbox/<tâche>/` compte (sha256 enregistré dans `task_step browser.files`) | lien simple : garde web ; sinon canal `act` |
 
 Un canal autorisé est un `economic_channel` `active`, accès `act` (accordé uniquement par un humain),
 capacité `browser_workspace`, dont le `locator` couvre la page (même origine et préfixe ; `https`
@@ -75,6 +75,10 @@ erreur inconnue). À la réouverture de la tâche, `proposed` devient `ambiguous
 - dans la tâche : `verified/executed` -> `already_done` sans rien exécuter ; `ambiguous` -> refus ;
 - dans une autre tâche : `proposed/ambiguous/executed` -> refus jusqu'à `browser_verify` ou humain.
 
+- dans une nouvelle tentative du MÊME objectif (tâche `supervisor.objective_work` suivante) :
+  `verified` -> `already_done` sans rien exécuter (l'IA retrouve le résultat sur le site). Un autre
+  objectif peut refaire une demande identique.
+
 Le modèle voit `reprise` (dernière URL, actions ambiguës) dans sa première observation. Le point de
 reprise (`task_step browser.workspace`) rouvre la dernière page si l'IA observe avant de naviguer.
 Le superviseur transforme une action ambiguë non levée en frontière humaine :
@@ -86,6 +90,34 @@ python -m octopus browser resolve <business> <id> executed|not_executed
 
 Limite connue (prudente) : deux envois différents par la même page sans saisie sur cette page, dans
 la même tâche, ont la même empreinte ; le second reçoit `already_done`. Une nouvelle tâche le permet.
+
+## Mesure par le superviseur
+
+`success_criteria` accepte `verified_browser_actions>=N` (effets constatés sur la page),
+`kept_browser_files>=N` (fichiers téléchargés par la tâche, toujours présents dans son espace avec le
+même sha256) et `usable_browse_count>=N`, seuls ou cumulés (`a>=1 ; b>=1`, `et`, `and`, `&&`) : tous
+sont alors exigés, et un seul critère illisible rend l'ensemble non mesurable. Un objectif « obtenir
+un devis ET conserver le récapitulatif » (`verified_browser_actions>=1 ; kept_browser_files>=1`) n'est
+donc jamais clos par un envoi vérifié seul.
+
+## Particularités Windows (validation native de la PR #109)
+
+- Téléchargement : la commande `download` d'agent-browser canonicalise le répertoire avec
+  `std::fs::canonicalize`, qui rend sous Windows un chemin verbatim `\\?\C:\...` ; Chrome accepte
+  `Browser.setDownloadBehavior` avec ce chemin puis annule chaque téléchargement
+  (`Download was canceled`, vercel-labs/agent-browser#1659, présent de 0.26.0 à 0.33.x, correctif
+  amont #1674 non fusionné). OCTOPUS n'utilise plus cette commande : le répertoire de la tâche est
+  donné au lancement (`--download-path`, chemin ordinaire `C:\...`, que Chrome accepte) et le lien
+  est cliqué ; le fichier est constaté sur le disque (complet, taille stable, dans l'espace).
+- Trafic propre au navigateur : depuis Playwright 1.57, `playwright install chromium` fournit
+  Chrome for Testing (Chromium open source seulement sur Linux ARM64). Il embarque les clés des
+  services Google et les contacte de lui-même (modèles, suggestions de formulaires, Safe Browsing,
+  field trials, mises à jour...), ce que ne fait pas un Chromium sans clés. Ces requêtes étaient
+  classées « lecture publique » par le garde. Correctif : interrupteurs de lancement repris de
+  Playwright (`chromiumSwitches.ts`) et refus, par le proxy et avant toute connexion, des points de
+  service du navigateur (`web_guard.browser_service`, liste `GuardProxy.browser_internal`). Pas de
+  `--disable-features` : agent-browser découpe `--args` aux virgules et Chrome ne garde que la
+  dernière occurrence de ce drapeau.
 
 ## Installation et validation (Windows, Linux, macOS)
 

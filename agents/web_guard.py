@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextvars
 import ipaddress
+import re
 import select
 import socket
 import socketserver
@@ -180,6 +181,29 @@ def request_allowed(url: str, state: BrowseState, *, account_context: bool,
 
 # --- proxy de garde pour un navigateur piloté hors Playwright (backend agent-browser) ----------
 
+# Points de service du NAVIGATEUR lui-même (mises à jour, field trials, modèles, suggestions de
+# formulaires, Safe Browsing, fuites de mots de passe, GCM, balises de fiabilité). Aucune page ne
+# les demande ; Chrome for Testing (fourni par Playwright sous Windows/macOS/Linux x64) les
+# contacte de lui-même parce qu'il embarque les clés Google, et certains transportent des données
+# dérivées des pages visitées (signatures de formulaires, préfixes d'URL, empreintes d'identifiants).
+# Ils ne sont donc ni une lecture publique ni une acquisition : refusés avant toute connexion.
+_BROWSER_SERVICE_HOSTS = frozenset({
+    "update.googleapis.com", "clientservices.googleapis.com", "content-autofill.googleapis.com",
+    "optimizationguide-pa.googleapis.com", "passwordsleakcheck-pa.googleapis.com",
+    "chromewebstore.googleapis.com", "safebrowsing.googleapis.com", "safebrowsingohttpgateway.googleapis.com",
+    "sb-ssl.google.com", "clients2.google.com", "clients2.googleusercontent.com", "android.clients.google.com",
+    "mtalk.google.com", "google-ohttp-relay-safebrowsing.fastly-edge.com",
+})
+_BROWSER_SERVICE_RE = re.compile(
+    r"^(?:chrome[a-z0-9-]*-pa\.googleapis\.com|(?:[a-z0-9-]+\.)*gvt[12]\.com)$")
+
+
+def browser_service(url: str) -> bool:
+    """Requête émise par le navigateur pour ses propres services, jamais par une page."""
+    host = (urlsplit(str(url)).hostname or "").lower().rstrip(".")
+    return host in _BROWSER_SERVICE_HOSTS or bool(_BROWSER_SERVICE_RE.match(host))
+
+
 _MAX_HEAD = 65536
 _HOP_HEADERS = {b"proxy-connection", b"proxy-authorization", b"connection", b"keep-alive"}
 
@@ -209,6 +233,7 @@ class GuardProxy:
         self.connect_timeout = connect_timeout
         self.blocked: list[str] = []
         self.allowed_urls: list[str] = []
+        self.browser_internal: list[str] = []  # services du navigateur refusés (hors vue du modèle)
         self._lock = threading.Lock()
         self._live: dict[int, tuple[str, list[socket.socket]]] = {}
         proxy = self
@@ -249,6 +274,11 @@ class GuardProxy:
 
     # -- contrôle ---------------------------------------------------------------------------
     def _check(self, url: str) -> bool:
+        if browser_service(url):
+            with self._lock:
+                self.browser_internal.append(url)
+                del self.browser_internal[:-200]
+            return False
         try:
             ok = bool(self.guard(url))
         except Exception:

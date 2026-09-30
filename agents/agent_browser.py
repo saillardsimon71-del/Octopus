@@ -56,9 +56,20 @@ _ENV_ALLOW = frozenset({
 })
 
 # Chromium ne doit sortir que par le proxy de garde : loopback compris (`<-loopback>`), sans QUIC
-# ni UDP WebRTC non proxifié.
+# ni UDP WebRTC non proxifié. Les services propres au navigateur (rapports de plantage, modèles de
+# phishing, fiabilité de domaine, pings d'audit, configuration de field trials) sont coupés : sous
+# Windows, Playwright fournit Chrome for Testing, qui embarque les clés des services Google et
+# les contacte de lui-même (le Chromium open source sans clés ne le fait pas). Interrupteurs repris
+# de la liste éprouvée de Playwright (`chromiumSwitches.ts`), en plus de ceux qu'agent-browser
+# pose déjà (`--disable-background-networking`, `--disable-component-update`, `--disable-sync`...).
+# Pas de `--disable-features` : agent-browser découpe `--args` aux virgules et Chrome ne garde que
+# la dernière occurrence ; les points de service restants sont refusés par le proxy
+# (`web_guard.browser_service`).
 _GUARD_ARGS = ("--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-               "--no-first-run", "--no-default-browser-check")
+               "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
+               "--disable-field-trial-config", "--disable-breakpad", "--disable-client-side-phishing-detection",
+               "--disable-component-extensions-with-background-pages", "--disable-domain-reliability",
+               "--no-pings", "--metrics-recording-only")
 
 
 class BackendUnavailable(RuntimeError):
@@ -131,6 +142,27 @@ def require_backend() -> tuple[str, str]:
         raise BackendUnavailable("Chromium introuvable : lancer `python -m playwright install chromium` "
                                  "(ou définir OCTOPUS_CHROMIUM)")
     return info["agent_browser"], info["chromium"]
+
+
+def plain_path(path) -> str:
+    """Chemin absolu ordinaire, sans préfixe verbatim Windows `\\\\?\\`.
+
+    Chrome annule tout téléchargement dont le répertoire porte ce préfixe ou des barres obliques
+    (vercel-labs/agent-browser#1659) ; seul `C:\\dossier` avec des barres inverses est accepté.
+    Les chemins UNC verbatim (`\\\\?\\UNC\\...`) redeviennent `\\\\serveur\\partage`.
+    """
+    text = os.fspath(path)
+    if text.startswith("\\\\?\\UNC\\"):
+        text = "\\\\" + text[8:]
+    elif text.startswith("\\\\?\\") and len(text) > 5 and text[5] == ":":
+        text = text[4:]
+    return os.path.abspath(text)
+
+
+def launch_args_ok(args) -> bool:
+    """agent-browser découpe `--args` aux virgules et aux retours à la ligne : un argument qui en
+    contient serait éclaté en morceaux que Chromium interpréterait autrement."""
+    return all("," not in a and "\n" not in a and "\r" not in a for a in args)
 
 
 def child_env(socket_dir: str) -> dict:
@@ -251,11 +283,14 @@ class Session:
     def _global_args(self) -> list[str]:
         launch = [*_GUARD_ARGS, f"--proxy-server={self.proxy_url}", "--proxy-bypass-list=<-loopback>",
                   *self.extra_args]
+        if not launch_args_ok(launch):
+            raise ValueError("argument Chromium contenant une virgule ou un retour à la ligne : agent-browser "
+                             "le découperait (OCTOPUS_BROWSER_ARGS attend des arguments séparés par des virgules)")
         args = ["--session", self.name, "--executable-path", self.chromium, "--args", ",".join(launch)]
         if self.profile_dir is not None:
             args += ["--profile", str(self.profile_dir)]
         if self.download_dir is not None:
-            args += ["--download-path", str(self.download_dir)]
+            args += ["--download-path", plain_path(self.download_dir)]
         if self.headed:
             args.append("--headed")
         return args

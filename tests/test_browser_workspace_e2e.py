@@ -96,7 +96,7 @@ def _objective(origin: str) -> int:
         statement=(f"Obtenir un devis de traduction auprès du portail fournisseurs Nova ({origin}/) pour la "
                    "société Atelier Nova (contact@atelier-nova.test), prestation Traduction, 3 documents ; "
                    "conserver le récapitulatif."),
-        success_criteria="verified_browser_actions>=1")
+        success_criteria="verified_browser_actions>=1 ; kept_browser_files>=1")
     strategy.transition("objective", objective_id, BUSINESS, "active", actor="human")
     return objective_id
 
@@ -120,6 +120,10 @@ def test_objective_to_verified_web_workflow_through_supervisor_and_real_browser(
     monkeypatch.setattr(deepseek, "call_json", decider)
     objective_id = _objective(site.origin)
     supervisor.bootstrap(BUSINESS, tick_every_s=0.2, retry_delay_s=0.0, max_steps=25)
+    sent: list[str] = []
+    real_run = agent_browser.Session.run
+    monkeypatch.setattr(agent_browser.Session, "run",
+                        lambda self, command, *a, **k: sent.append(command) or real_run(self, command, *a, **k))
 
     stop = threading.Event()
     thread = _run_worker(stop)
@@ -128,6 +132,8 @@ def test_objective_to_verified_web_workflow_through_supervisor_and_real_browser(
     finally:
         stop.set()
         thread.join(timeout=30)
+    # `download` d'agent-browser est cassé sous Windows (agent-browser#1659) : jamais envoyé au CLI.
+    assert "download" not in sent and "click" in sent
 
     # Effet réel côté site : exactement un envoi, avec les données de l'objectif.
     assert len(site.submissions) == 1
@@ -158,13 +164,48 @@ def test_objective_to_verified_web_workflow_through_supervisor_and_real_browser(
 
     # Nouvelle action autonome après la vérification : récapitulatif téléchargé depuis la page.
     inbox = browser_workspace._files_dir(BUSINESS) / "inbox" / f"t{work['id']}"
+    assert (inbox / "DV-1001.txt").is_file(), {"inbox": sorted(p.name for p in inbox.iterdir()),
+                                              "download_results": [o for o in decider.observed
+                                                                   if o.get("tool") == "browser_download"]}
     recap = json.loads((inbox / "DV-1001.txt").read_text(encoding="utf-8"))
     assert recap["ref"] == "DV-1001" and recap["societe"] == "Atelier Nova"
+    assert sorted(p.name for p in inbox.iterdir()) == ["DV-1001.txt"]
+    assert [f["file"] for f in browser_workspace.kept_files(BUSINESS, work["id"])] == ["DV-1001.txt"]
 
-    # Superviseur : critère mesuré sur le registre, objectif clos.
-    assert work["output"]["success"] is True and work["output"]["observed"] == 1
+    # Superviseur : les DEUX critères mesurés (registre + disque), objectif clos.
+    parts = {p["metric"]: p for p in work["output"]["objective_result"]["parts"]}
+    assert work["output"]["success"] is True and work["output"]["observed"] == 2
+    assert parts["verified_browser_actions"]["observed"] == 1 and parts["kept_browser_files"]["observed"] == 1
     decisions = strategy.list_items("decision", BUSINESS)
     assert any(d["decision"] == "satisfied" for d in decisions)
+
+
+def test_verified_submission_without_the_kept_recap_does_not_achieve_the_objective(handlers, lab, monkeypatch):
+    """L'objectif exige aussi de conserver le récapitulatif : une soumission vérifiée ne suffit pas."""
+    site = lab(2)
+    site.recap_downloadable = False  # le lien existe, mais le serveur ne livre aucun fichier
+    _grant_site(site.origin)
+    decider = ObservationDecider(None, FACTS)
+    monkeypatch.setattr(deepseek, "call_json", decider)
+    objective_id = _objective(site.origin)
+    supervisor.bootstrap(BUSINESS, tick_every_s=0.2, retry_delay_s=0.0, max_steps=25, max_attempts=1)
+
+    stop = threading.Event()
+    thread = _run_worker(stop)
+    try:
+        assert wait_until(lambda: _objective_status(objective_id) != "active", timeout=180), decider.calls
+    finally:
+        stop.set()
+        thread.join(timeout=30)
+
+    assert _objective_status(objective_id) == "paused"  # épuisé, jamais « achieved »
+    assert len(site.submissions) == 1
+    work = supervisor.work_tasks(BUSINESS, objective_id)[-1]
+    parts = {p["metric"]: p for p in work["output"]["objective_result"]["parts"]}
+    assert work["output"]["success"] is False
+    assert parts["verified_browser_actions"]["success"] is True and parts["kept_browser_files"]["observed"] == 0
+    assert "browser_download" in [c.get("tool") for c in decider.calls]
+    assert not any(d["decision"] == "satisfied" for d in strategy.list_items("decision", BUSINESS))
 
 
 def test_worker_killed_during_submission_resumes_without_blind_repeat(handlers, lab, monkeypatch, tmp_path):
@@ -248,7 +289,13 @@ def test_real_browser_egress_is_filtered_by_the_guard_proxy(lab):
         wait_until(lambda: "10.0.0.1" in blocked + " ".join(space._proxy.blocked), timeout=5)
         blocked += " ".join(space._proxy.blocked)
         assert "169.254.169.254" in blocked
-        assert all(site.origin in u for u in space._proxy.allowed_urls)
+        # Seule l'application a été contactée. Les services propres au navigateur (Chrome for
+        # Testing sous Windows embarque les clés Google) sont refusés avant connexion et listés à part.
+        unexpected = [u for u in space._proxy.allowed_urls if not u.startswith(site.origin + "/")]
+        assert not unexpected, json.dumps({"allowed_unexpected": unexpected,
+                                           "browser_internal_refused": space._proxy.browser_internal,
+                                           "chromium": agent_browser.chromium_executable()}, indent=1)
+        assert not any(web_guard.browser_service(u) for u in space._proxy.allowed_urls)
         # Un hôte privé non déclaré reste refusé, même demandé explicitement.
         refused = browser_workspace.call_on(space, "navigate", url="http://127.0.0.1:9/")
         assert refused.get("refused")

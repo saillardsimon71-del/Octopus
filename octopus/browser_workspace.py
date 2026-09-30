@@ -51,6 +51,10 @@ FULL_SNAPSHOT_CHARS = 15000
 PAGE_TEXT_CHARS = 20000
 VERIFY_WAIT_S = 5.0
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
+FILES_KEY = "browser.files"
+DOWNLOAD_TIMEOUT_S = 30.0
+DOWNLOAD_START_S = 5.0
+_PARTIAL_SUFFIXES = (".crdownload", ".tmp", ".part", ".partial")
 UNRESOLVED = ("proposed", "ambiguous", "executed")
 
 READ_SAFE_KEYS = frozenset({"Tab", "Shift+Tab", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
@@ -127,6 +131,31 @@ def outbox_dir(business: str) -> Path:
     return _files_dir(business) / "outbox"
 
 
+def task_inbox(business: str, scope_key: str) -> Path:
+    """Fichiers téléchargés par une tâche. Chemin absolu ordinaire (jamais `\\\\?\\`) : c'est celui
+    que reçoit Chromium comme répertoire de téléchargement au lancement."""
+    return Path(agent_browser.plain_path(_files_dir(business) / "inbox" / scope_key))
+
+
+def _within(child: Path, parent: Path) -> bool:
+    """`child` est-il physiquement dans `parent` ? Les deux côtés sont résolus (liens, noms courts
+    8.3 et préfixe `\\\\?\\` de Windows) avant comparaison."""
+    try:
+        child_real = Path(agent_browser.plain_path(Path(child).resolve()))
+        parent_real = Path(agent_browser.plain_path(Path(parent).resolve()))
+    except OSError:
+        return False
+    return parent_real in child_real.parents
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def _safe_filename(name: str) -> str:
     name = str(name or "").strip()
     if not name or name in {".", ".."} or re.search(r"[\\/:\x00]", name) or agent_browser.contains_secret(name):
@@ -171,7 +200,7 @@ class Workspace:
         if self._session is not None:
             return
         self._proxy = web_guard.GuardProxy(self._guard, allow_private=self._allow_private).start()
-        inbox = _files_dir(self.scope.business) / "inbox" / self.scope.key
+        inbox = task_inbox(self.scope.business, self.scope.key)
         inbox.mkdir(parents=True, exist_ok=True)
         self._inbox = inbox
         profile = (agents_config.DATA_DIR / "browser_profile") if self.account_mode else None
@@ -358,6 +387,7 @@ class Workspace:
         fingerprint, form = self._fingerprint(int(channel["id"]), kind, target_sig)
         key = f"browser:{fingerprint}:{self.scope.key}"
         mine = next((r for r in self._ledger(fingerprint) if r["idempotency_key"] == key), None)
+        lineage = _lineage(self.scope.task_id)
         for row in self._ledger(fingerprint):
             if row["idempotency_key"] == key:
                 continue
@@ -365,6 +395,12 @@ class Workspace:
                 raise Refused(f"action identique #{row['id']} ({row['status']}) non vérifiée dans une autre tâche : "
                               "ne pas la refaire. Vérifie son effet sur le site (browser_verify avec action_id) "
                               "ou laisse l'humain trancher (`python -m octopus browser resolve`).")
+            if row["status"] == "verified" and lineage and _lineage(_row_task(row)) == lineage:
+                # Nouvelle tentative du MÊME objectif : l'effet est déjà constaté, jamais refait.
+                return {"ok": True, "already_done": True, "action_id": row["id"], "status": row["status"],
+                        "previous_task_id": _row_task(row),
+                        "note": "action déjà exécutée et vérifiée lors d'une tentative précédente de cet objectif : "
+                                "non répétée. Poursuis avec ce qui reste à faire (retrouve le résultat sur le site)."}
         if mine is not None and mine["status"] in ("verified", "executed"):
             return {"ok": True, "already_done": True, "action_id": mine["id"], "status": mine["status"],
                     "note": "action déjà exécutée dans cette tâche : non répétée. Passe à la suite, ou "
@@ -613,19 +649,61 @@ class Workspace:
         return dict(rows[0]) if rows else None
 
     def download(self, ref: str, filename: str) -> dict:
+        """Télécharge un fichier dans l'espace de la tâche et le constate sur le disque.
+
+        La commande `download` d'agent-browser n'est PAS utilisée : sous Windows elle canonicalise
+        le répertoire en chemin verbatim `\\\\?\\C:\\...` que `Browser.setDownloadBehavior` accepte
+        puis dont Chrome annule chaque téléchargement (vercel-labs/agent-browser#1659, présent de
+        0.26.0 à 0.33.x). Le répertoire de la tâche est donc donné à Chromium au lancement
+        (`--download-path`, chemin ordinaire) et le lien est simplement cliqué ; seul un fichier
+        complet, apparu dans ce répertoire après le clic, compte comme téléchargé.
+        """
         self._ensure_page()
         target, info = self._target(ref)
         name = _safe_filename(filename)
         if str(info.get("role")) != "link" or _RISKY_LINK_RE.search(str(info.get("name") or "")):
             self._channel(None)
+        before = {p.name for p in self._inbox.iterdir()}
+        self._read("click", [target])
+        found = self._await_download(before)
+        if found is None:
+            return {"ok": False, "error": "aucun fichier complet apparu dans l'espace de la tâche après le clic "
+                                          "(lien non téléchargeable ou téléchargement annulé) ; observe la page"}
         path = self._inbox / name
-        data = self._read("download", [target, str(path)], timeout=60)
-        saved = Path(str(data.get("path") or path))
-        if not saved.is_file() or self._inbox not in saved.resolve().parents:
+        if found.name != name:
+            found.replace(path)
+        if not path.is_file() or not _within(path, self._inbox):
             return {"ok": False, "error": "téléchargement non constaté dans l'espace de la tâche"}
-        blob = saved.read_bytes()
-        return {"ok": True, "file": str(saved), "bytes": len(blob), "sha256": hashlib.sha256(blob).hexdigest(),
-                "url": agent_browser.redact(self._current_url())}
+        digest, size = _sha256(path), path.stat().st_size
+        url = agent_browser.redact(self._current_url())
+        self._record_file(name, digest, size, url)
+        return {"ok": True, "file": str(path), "bytes": size, "sha256": digest, "url": url}
+
+    def _await_download(self, before: set[str]) -> Path | None:
+        """Premier fichier nouveau, complet (pas de suffixe partiel) et de taille stable."""
+        started = time.monotonic()
+        seen: dict[str, int] = {}
+        while time.monotonic() - started < DOWNLOAD_TIMEOUT_S:
+            fresh = [p for p in self._inbox.iterdir() if p.name not in before]
+            if not fresh and time.monotonic() - started > DOWNLOAD_START_S:
+                return None
+            for candidate in fresh:
+                if candidate.name.lower().endswith(_PARTIAL_SUFFIXES) or not candidate.is_file():
+                    continue
+                size = candidate.stat().st_size
+                if seen.get(candidate.name) == size:
+                    return candidate
+                seen[candidate.name] = size
+            time.sleep(0.1)
+        return None
+
+    def _record_file(self, name: str, digest: str, size: int, url: str) -> None:
+        """Registre persistant des fichiers conservés par la tâche (mesuré par le superviseur)."""
+        if not self.scope.task_id:
+            return
+        files = [f for f in tasks.step_value(self.scope.task_id, FILES_KEY, []) if f.get("file") != name]
+        files.append({"file": name, "sha256": digest, "bytes": size, "url": url, "at": time.time()})
+        tasks.save_step(self.scope.task_id, FILES_KEY, files)
 
     def upload(self, ref: str, filename: str, channel_id=None) -> dict:
         self._ensure_page()
@@ -637,6 +715,26 @@ class Workspace:
             raise Refused("fichier trop volumineux")
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         return self._edit("upload", ref, digest, "upload", [str(path)], channel_id)
+
+
+def _row_task(row) -> int | None:
+    try:
+        task_id = json.loads(row["payload"] or "{}").get("task_id")
+        return int(task_id) if task_id else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _lineage(task_id: int | None) -> str | None:
+    """Objectif dont la tâche est une tentative (travail du superviseur), sinon None."""
+    if not task_id:
+        return None
+    from .supervisor import WORK_KIND
+    task = tasks.get(int(task_id))
+    if not task or task.get("kind") != WORK_KIND:
+        return None
+    objective_id = (task.get("input") or {}).get("objective_id")
+    return f"{task['business']}:objective:{int(objective_id)}" if objective_id else None
 
 
 def _action_summary(row) -> dict:
@@ -745,6 +843,24 @@ def list_actions(business: str, *, status: str | None = None, task_id: int | Non
         item.update(task_id=payload.get("task_id"), page=payload.get("page"), target=payload.get("target"))
         rows.append(item)
     return rows
+
+
+def kept_files(business: str, task_id: int) -> list[dict]:
+    """Fichiers téléchargés par la tâche ET toujours présents, intacts, dans son espace.
+
+    Un fichier absent, déplacé hors de l'espace ou modifié (sha256 différent) ne compte pas : la
+    mesure porte sur le disque, jamais sur une déclaration du modèle ou un résultat d'outil.
+    """
+    inbox = task_inbox(business, f"t{int(task_id)}")
+    kept = []
+    for entry in tasks.step_value(int(task_id), FILES_KEY, []):
+        try:
+            path = inbox / _safe_filename(entry.get("file"))
+        except Refused:
+            continue
+        if path.is_file() and _within(path, inbox) and _sha256(path) == entry.get("sha256"):
+            kept.append({**entry, "path": str(path)})
+    return kept
 
 
 def task_actions(business: str, task_id: int) -> list[dict]:

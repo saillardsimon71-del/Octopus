@@ -43,9 +43,17 @@ DEFAULT_MAX_DURATION_S = 900.0
 
 # Métriques réellement mesurables sans LLM : acquisitions publiques utilisables d'une mission
 # (`agents.task_handlers._mission_objective_result`) et actions navigateur dont l'effet a été
-# constaté sur le site (registre `channel_actions`, `octopus.browser_workspace`).
-SUPPORTED_METRICS = ("usable_browse_count", "verified_browser_actions")
+# constaté sur le site (registre `channel_actions`, `octopus.browser_workspace`) et fichiers
+# téléchargés toujours présents et intacts dans l'espace de la tâche (`browser_workspace.kept_files`).
+SUPPORTED_METRICS = ("usable_browse_count", "verified_browser_actions", "kept_browser_files")
+BROWSER_METRICS = ("verified_browser_actions", "kept_browser_files")
+METRIC_HELP = {
+    "verified_browser_actions": "actions à effet dont le résultat a été constaté sur la page réelle",
+    "kept_browser_files": "fichiers téléchargés avec browser_download et présents, intacts, dans l'espace de la tâche",
+}
 _CRITERION_RE = re.compile(r"^\s*([a-z_]+)\s*>=\s*(\d+)\s*$", re.IGNORECASE)
+# Critères cumulatifs : « a>=1 ; b>=1 », « a>=1 et b>=1 », « a>=1 and b>=1 », « a>=1 && b>=1 ».
+_CRITERIA_SPLIT_RE = re.compile(r"\s*(?:;|&&|\bet\b|\band\b)\s*", re.IGNORECASE)
 
 # Pannes qui exigent une ressource ou une autorisation que le superviseur ne crée jamais lui-même.
 HUMAN_BOUNDARY_STATUSES = {
@@ -108,21 +116,34 @@ def boundary_key(objective_id: int) -> str:
 
 # --- critère mesurable ----------------------------------------------------------------------------
 
+def criterion_parts(criterion: dict | None) -> list[dict]:
+    """Critère simple `{"metric", "gte"}` ou cumulatif `{"all": [...]}` -> liste de critères simples."""
+    if not criterion:
+        return []
+    return list(criterion["all"]) if "all" in criterion else [criterion]
+
+
 def parse_criterion(text) -> dict | None:
-    """`success_criteria` lisible -> critère mesurable. Rien d'inventé : None si non mesurable."""
-    match = _CRITERION_RE.match(str(text or ""))
-    if not match:
+    """`success_criteria` lisible -> critère mesurable. Rien d'inventé : None si non mesurable.
+
+    Plusieurs critères cumulatifs sont tous exigés ; un seul critère illisible rend l'ensemble
+    non mesurable (jamais un sous-ensemble plus facile à satisfaire)."""
+    pieces = [p for p in _CRITERIA_SPLIT_RE.split(str(text or "").strip()) if p.strip()]
+    parts = []
+    for piece in pieces:
+        match = _CRITERION_RE.match(piece)
+        if not match:
+            return None
+        metric, target = match.group(1).lower(), int(match.group(2))
+        if metric not in SUPPORTED_METRICS or target <= 0:
+            return None
+        parts.append({"metric": metric, "gte": target})
+    if not parts:
         return None
-    metric, target = match.group(1).lower(), int(match.group(2))
-    if metric not in SUPPORTED_METRICS or target <= 0:
-        return None
-    return {"metric": metric, "gte": target}
+    return parts[0] if len(parts) == 1 else {"all": parts}
 
 
-def criterion_for(objective: dict, default: dict | None = None) -> dict | None:
-    criterion = parse_criterion(objective.get("success_criteria")) or default
-    if criterion in (None, {}):
-        return None
+def _checked_part(criterion) -> dict:
     if not isinstance(criterion, dict):
         raise SupervisorError("success_criterion doit être un objet")
     metric = str(criterion.get("metric") or "")
@@ -138,10 +159,33 @@ def criterion_for(objective: dict, default: dict | None = None) -> dict | None:
     return {"metric": metric, "gte": target}
 
 
+def criterion_for(objective: dict, default: dict | None = None) -> dict | None:
+    criterion = parse_criterion(objective.get("success_criteria")) or default
+    if criterion in (None, {}):
+        return None
+    if not isinstance(criterion, dict):
+        raise SupervisorError("success_criterion doit être un objet")
+    if "all" in criterion:
+        parts = criterion["all"]
+        if not isinstance(parts, list) or not parts:
+            raise SupervisorError("success_criterion.all doit être une liste non vide")
+        return {"all": [_checked_part(p) for p in parts]}
+    return _checked_part(criterion)
+
+
+def describe_criterion(criterion: dict | None) -> str:
+    return " ET ".join(f"{p['metric']}>={p['gte']}" for p in criterion_parts(criterion))
+
+
 def goal_text(objective: dict) -> str:
     parts = [f"Objectif persistant #{objective['id']} : {objective['statement']}"]
     if objective.get("success_criteria"):
         parts.append(f"Critères de succès déclarés : {objective['success_criteria']}")
+        measured = criterion_parts(parse_criterion(objective["success_criteria"]))
+        helps = [f"{p['metric']} = {METRIC_HELP[p['metric']]}" for p in measured if p["metric"] in METRIC_HELP]
+        if helps:
+            parts.append("Mesure (sur le registre et le disque, pas sur ta réponse) : " + " ; ".join(helps)
+                         + (". Tous les critères sont exigés." if len(measured) > 1 else "."))
     if objective.get("timeframe"):
         parts.append(f"Horizon : {objective['timeframe']}")
     channels = browser_channels(objective.get("business") or "")
@@ -262,13 +306,38 @@ def _run_mission(ctx, objective: dict, criterion: dict | None) -> dict:
 
 
 def browser_result(business: str, task_id: int | None, criterion: dict) -> dict:
-    """Mesure sur le registre : actions navigateur de CETTE tâche dont l'effet est constaté."""
+    """Mesure sur le registre et le disque, pour CETTE tâche uniquement."""
+    target = int(criterion["gte"])
+    if criterion["metric"] == "kept_browser_files":
+        from .browser_workspace import kept_files
+        kept = kept_files(business, task_id) if task_id is not None else []
+        return {"metric": "kept_browser_files", "observed": len(kept), "target": target,
+                "success": len(kept) >= target, "files": [{k: f[k] for k in ("file", "sha256", "bytes")} for f in kept],
+                "scope": "task_steps+disque", "note": "fichier présent dans l'espace de la tâche, sha256 identique"}
     from .browser_workspace import task_actions
     rows = task_actions(business, task_id) if task_id is not None else []
     verified = [r for r in rows if r["status"] == "verified"]
-    return {"metric": "verified_browser_actions", "observed": len(verified), "target": int(criterion["gte"]),
-            "success": len(verified) >= int(criterion["gte"]), "verified_action_ids": [r["id"] for r in verified],
+    return {"metric": "verified_browser_actions", "observed": len(verified), "target": target,
+            "success": len(verified) >= target, "verified_action_ids": [r["id"] for r in verified],
             "scope": "channel_actions", "note": "effet constaté sur la page réelle (texte absent avant, présent après)"}
+
+
+def measure(business: str, task_id: int | None, criterion: dict, results: list) -> dict:
+    """Critère simple : sa mesure. Critère cumulatif : succès seulement si CHAQUE partie est
+    satisfaite ; `observed` compte alors les parties satisfaites (cible = nombre de parties)."""
+    from agents import task_handlers
+
+    def one(part: dict) -> dict:
+        if part["metric"] in BROWSER_METRICS:
+            return browser_result(business, task_id, part)
+        return task_handlers._mission_objective_result(results, part)
+
+    if "all" not in criterion:
+        return one(criterion)
+    parts = [one(p) for p in criterion["all"]]
+    satisfied = sum(1 for p in parts if p.get("success"))
+    return {"metric": "all", "observed": satisfied, "target": len(parts), "success": satisfied == len(parts),
+            "parts": parts, "note": "tous les critères sont exigés"}
 
 
 def work_output(business: str, objective: dict, criterion: dict | None, result: dict, *,
@@ -278,10 +347,7 @@ def work_output(business: str, objective: dict, criterion: dict | None, result: 
 
     from .browser_workspace import task_actions
     results = result.get("results") or []
-    if criterion and criterion.get("metric") == "verified_browser_actions":
-        objective_result = browser_result(business, task_id, criterion)
-    else:
-        objective_result = task_handlers._mission_objective_result(results, criterion) if criterion else None
+    objective_result = measure(business, task_id, criterion, results) if criterion else None
     execution_status = str(result.get("execution_status") or "unknown")
     ambiguous = [r["id"] for r in task_actions(business, task_id) if r["status"] in ("ambiguous", "proposed")] \
         if task_id is not None else []
@@ -343,9 +409,10 @@ def decide(business: str, objective: dict, work: dict, *, max_attempts: int = DE
 
 def _reason(outcome: str, output: dict, attempts: int, max_attempts: int) -> str:
     if outcome == "satisfied":
-        criterion = output.get("criterion") or {}
-        return (f"critère mesuré {criterion.get('metric')} : {output.get('observed')} >= "
-                f"{criterion.get('gte')} (tâche de travail)")
+        result = output.get("objective_result") or {}
+        parts = result.get("parts") or [result]
+        return "critère mesuré " + " ET ".join(f"{p.get('metric')} : {p.get('observed')} >= {p.get('target')}"
+                                               for p in parts) + " (tâche de travail)"
     if outcome == "human_boundary":
         return str(output.get("human_boundary"))
     if outcome == "exhausted":

