@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from octopus import economy, journal, strategy, tasks
+from octopus import builtin_handlers, economy, journal, strategy, tasks, worker
 from octopus.strategy import StrategyError
 
 B = "atelier_test"
@@ -403,3 +403,116 @@ def test_drive_queues_one_budgeted_exploration_mission_without_prescribing_a_bus
     assert economy.drive(B, now=now + 60)["status"] == "already_driven"
     assert economy.drive(B, now=now + 2 * DAY)["status"] == "mission_queued"
     assert transport.calls == []
+
+
+# --- consent coercion repair -----------------------------------------------------------------------
+
+def _make_economy_ctx(input_data=None):
+    task_id = tasks.enqueue(B, "economy.cycle", input_data)
+    task = tasks.get(task_id)
+    return worker.TaskContext(task, "test-worker", 60)
+
+
+def test_cycle_omitted_flags_default_false(monkeypatch):
+    calls = {"cycle": [], "portfolio": []}
+
+    def fake_cycle(business, *, now=None, drive_orbit=False, budget_usd=0.05):
+        calls["cycle"].append((business, drive_orbit, budget_usd))
+        return {"business": business, "evaluated": [], "reinvest": {"status": "no_policy"}}
+
+    def fake_portfolio(*, now=None, drive_all=False, budget_usd=0.05):
+        calls["portfolio"].append((drive_all, budget_usd))
+        return [{"business": B, "evaluated": [], "reinvest": {"status": "no_policy"}}]
+
+    monkeypatch.setattr(economy, "cycle", fake_cycle)
+    monkeypatch.setattr(economy, "portfolio_cycle", fake_portfolio)
+
+    ctx = _make_economy_ctx({})
+    result = builtin_handlers.economy_cycle(ctx)
+    assert calls["cycle"] == [(B, False, 0.05)]
+    assert calls["portfolio"] == []
+    assert result["evaluated"] == [] and result["reinvest"]["status"] == "no_policy"
+    handler_events = [e for e in tasks.events(task_id=ctx.id) if e["type"] in ("economy.cycle.done", "economy.portfolio.done")]
+    assert len(handler_events) == 1 and handler_events[0]["type"] == "economy.cycle.done"
+
+
+@pytest.mark.parametrize("drive", [False, True])
+@pytest.mark.parametrize("portfolio", [False, True])
+def test_cycle_valid_booleans_dispatch_and_propagate(monkeypatch, drive, portfolio):
+    calls = {"cycle": [], "portfolio": []}
+
+    def fake_cycle(business, *, now=None, drive_orbit=False, budget_usd=0.05):
+        calls["cycle"].append((business, drive_orbit, budget_usd))
+        return {"business": business, "evaluated": [], "reinvest": {"status": "no_policy"}}
+
+    def fake_portfolio(*, now=None, drive_all=False, budget_usd=0.05):
+        calls["portfolio"].append((drive_all, budget_usd))
+        return [{"business": B, "evaluated": [], "reinvest": {"status": "no_policy"}}]
+
+    monkeypatch.setattr(economy, "cycle", fake_cycle)
+    monkeypatch.setattr(economy, "portfolio_cycle", fake_portfolio)
+
+    ctx = _make_economy_ctx({"drive": drive, "portfolio": portfolio, "mission_budget_usd": 0.42})
+    result = builtin_handlers.economy_cycle(ctx)
+    if portfolio:
+        assert calls["portfolio"] == [(drive, 0.42)]
+        assert calls["cycle"] == []
+        assert result["portfolio"][0]["reinvest"]["status"] == "no_policy"
+        handler_events = [e for e in tasks.events(task_id=ctx.id) if e["type"] == "economy.portfolio.done"]
+    else:
+        assert calls["cycle"] == [(B, drive, 0.42)]
+        assert calls["portfolio"] == []
+        assert result["reinvest"]["status"] == "no_policy"
+        handler_events = [e for e in tasks.events(task_id=ctx.id) if e["type"] == "economy.cycle.done"]
+    assert len(handler_events) == 1
+
+
+@pytest.mark.parametrize("bad_value", [None, "yes", 1, [], {}])
+@pytest.mark.parametrize("portfolio", [None, True])
+def test_cycle_invalid_drive_rejected_both_modes(monkeypatch, bad_value, portfolio):
+    calls = {"cycle": [], "portfolio": []}
+
+    def fake_cycle(business, *, now=None, drive_orbit=False, budget_usd=0.05):
+        calls["cycle"].append(drive_orbit)
+        return {"business": business, "evaluated": [], "reinvest": {"status": "no_policy"}}
+
+    def fake_portfolio(*, now=None, drive_all=False, budget_usd=0.05):
+        calls["portfolio"].append(drive_all)
+        return [{"business": B, "evaluated": [], "reinvest": {"status": "no_policy"}}]
+
+    monkeypatch.setattr(economy, "cycle", fake_cycle)
+    monkeypatch.setattr(economy, "portfolio_cycle", fake_portfolio)
+
+    input_data = {"drive": bad_value}
+    if portfolio is not None:
+        input_data["portfolio"] = portfolio
+    ctx = _make_economy_ctx(input_data)
+    with pytest.raises(ValueError, match="drive must be a bool"):
+        builtin_handlers.economy_cycle(ctx)
+    assert calls["cycle"] == [] and calls["portfolio"] == []
+    handler_events = [e for e in tasks.events(task_id=ctx.id) if e["type"] in ("economy.cycle.done", "economy.portfolio.done")]
+    assert handler_events == []
+
+
+@pytest.mark.parametrize("bad_value", [None, "yes", 1, [], {}])
+@pytest.mark.parametrize("drive", [False, True])
+def test_cycle_invalid_portfolio_rejected_both_drive_values(monkeypatch, bad_value, drive):
+    calls = {"cycle": [], "portfolio": []}
+
+    def fake_cycle(business, *, now=None, drive_orbit=False, budget_usd=0.05):
+        calls["cycle"].append(drive_orbit)
+        return {"business": business, "evaluated": [], "reinvest": {"status": "no_policy"}}
+
+    def fake_portfolio(*, now=None, drive_all=False, budget_usd=0.05):
+        calls["portfolio"].append(drive_all)
+        return [{"business": B, "evaluated": [], "reinvest": {"status": "no_policy"}}]
+
+    monkeypatch.setattr(economy, "cycle", fake_cycle)
+    monkeypatch.setattr(economy, "portfolio_cycle", fake_portfolio)
+
+    ctx = _make_economy_ctx({"drive": drive, "portfolio": bad_value})
+    with pytest.raises(ValueError, match="portfolio must be a bool"):
+        builtin_handlers.economy_cycle(ctx)
+    assert calls["cycle"] == [] and calls["portfolio"] == []
+    handler_events = [e for e in tasks.events(task_id=ctx.id) if e["type"] in ("economy.cycle.done", "economy.portfolio.done")]
+    assert handler_events == []

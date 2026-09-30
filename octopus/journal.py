@@ -739,7 +739,10 @@ def subtree_cost(run_id: int) -> float:
 
 
 def budget_exhausted(ctx: RunContext) -> bool:
-    return any(subtree_cost(run_id) >= budget for run_id, budget in ctx.budgets)
+    # Equality still permits zero-cost work. The gateway checks spent + the
+    # candidate's estimate before every call; this historical circuit breaker
+    # must not prevent a free call at a zero (or exactly consumed) ceiling.
+    return any(subtree_cost(run_id) > budget for run_id, budget in ctx.budgets)
 
 
 def spent_today(business: str | None = None) -> float:

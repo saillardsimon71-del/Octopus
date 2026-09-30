@@ -1,33 +1,65 @@
 # Prochaines étapes
 
-État vérifié : `docs/CURRENT_STATE.md`. Protocole : `docs/HANDOFF_WORK.md`.
+État canonique: `docs/CURRENT_STATE.md`. Vision: `docs/VISION.md`.
+Protocole économique: `docs/HANDOFF_WORK.md`.
+Contrat et clôture de la phase G: `docs/migrations/OPERATIONALIZATION.md`.
 
-## P0 — Une expérience économique supervisée
+## P0 - Phase G : ce qui reste
 
-1. Vérifier l'offre sur quelques références réellement incomplètes et une source fabricant accessible.
-2. Créer une expérience bornée : au plus cinq contacts revus, sept jours, plafond de temps humain
-   de quatre heures ; aucun coût externe sans décision humaine explicite.
-3. Contacter manuellement ou via le canal existant explicitement autorisé ; respecter refus et opt-out.
-4. Si commande : exécuter un lot de 20 références, vérifier et livrer le CSV sourcé.
-5. Enregistrer séparément livraison, encaissement, acceptation/utilisation, coûts et minutes humaines.
-6. Lire `python -m octopus economy outcome BUSINESS EXPERIMENT`, puis enregistrer une décision.
+1. La boucle autonome est démontrée hors ligne avec de fausses missions. La prochaine observation
+   utile est un run réel autorisé par l'opérateur, avec une route LLM gratuite effectivement
+   disponible, pour constater une acquisition et un signal qualifié — ou un résultat `inconclusive`.
+2. Le critère I (constructeur Astra) reste non démontré : `powershell` et `docker` sont nécessaires.
+   Ne pas l'annoncer comme acquis.
+3. La reprise après expiration d'une demande humaine exige de relancer `python -m octopus runtime`.
+   Ne pas ajouter de réarmement automatique avant d'avoir observé un cas réel où c'est un frein.
+4. Un objectif sans critère mesurable (`usable_browse_count>=N`) finit suspendu. Si le pilote a
+   besoin d'autres métriques mesurables sans LLM, les ajouter une par une, sur obstacle observé.
 
-Le dépôt ne prouve encore **aucun paiement commercial**. Ne pas inventer un client pour remplir le rapport.
+## P0 - Préparation technique avant la première activité
 
-## P1 — Seulement après cette observation
+1. Checkpoint E acquis: `057fc6e`; routeur E5: `dbf30d2`. Conserver la revue avant transfert produit.
+2. Phase F : READY pour le dry run supervisé neutre ; suite complète hôte exit=0 sur `587001d`.
+   Résultat et limites consignés dans `CURRENT_STATE`, sans relancer le baseline.
+3. E5 terminée `inconclusive`: annonce acquise mais fermée, arrêt LLM gratuit sur 429.
+   Ne pas relancer la mission. La correction de la vue BROWSE est incluse dans l'état validé.
+   Son test économique proposé reste historique, soumis à revue humaine s'il est reconsidéré ;
+   il ne devient pas l'objectif du dry run neutre.
+4. Google seul via DDGS n'a pas fourni de résultat au probe; ne pas annoncer sa disponibilité.
+5. Réutiliser les décisions P0/P1 de la matrice Hermes, sans relancer l'audit historique.
+6. Extraire les commits produit relus hors de la branche du constructeur, puis mettre à jour la PR
+   produit sans y inclure `.codex/`, les scripts Astra ou leurs tests.
+7. Faire séparément le smoke test Agnes réel autorisé par l'opérateur. Ne pas le lancer dans les tests
+   ou dans le chantier Astra.
 
-- Répéter le travail si intérêt réel et économie soutenable, sans généraliser.
-- Sinon changer l'offre ou arrêter ; absence de données = améliorer la mesure, pas déclarer l'échec marché.
+## P0 - Première expérience économique supervisée
+
+Après validation technique, suivre le démarrage neutre de `docs/HANDOFF_WORK.md`:
+
+1. définir avec l'humain un objectif neutre et des limites, dans un business neuf;
+2. chercher une opportunité testable via SEARCH/BROWSE, sans reprendre E5 ni un ancien pilote;
+3. qualifier seulement les sources acquises et consigner les inconnues, éventuellement `inconclusive`;
+4. soumettre le prochain test à la revue humaine avant contact, dépense ou action externe;
+5. si une expérience est autorisée, enregistrer séparément livraison, encaissement, acceptation,
+   utilisation, coûts et minutes humaines, puis lire `economy outcome` et décider.
+
+Le CSV, Podalux, la vidéo, les artisans et l'accessibilité sont des contextes historiques,
+pas des objectifs hérités. Un compte connecté ou un site existant ne choisit pas l'activité.
+
+Le dépôt ne prouve encore aucun paiement commercial. Ne pas inventer un client, un résultat ou une
+preuve pour compléter le rapport.
+
+## P1 - Après observation
+
+- Répéter le travail seulement si l'intérêt et l'économie sont soutenables.
+- Sinon changer l'offre ou arrêter; absence de données signifie améliorer la mesure.
 - Identifier la phase qui consomme le plus de minutes ou produit le plus de corrections.
-- Une seule amélioration ciblée, reliée à la preuve existante ; mesurer avant/après sur le même périmètre.
+- Faire une seule amélioration reliée à cette preuve et mesurer avant/après sur le même périmètre.
 
-## P2 — Gelé jusqu'à besoin démontré
+## Gelé sans besoin démontré
 
-- nouvelles surfaces canary, Model Lab, capability acquisition, MCP discovery ;
-- refonte GUI / Web Control Plane ;
-- benchmarks GPU, nouveaux providers et moteurs vidéo ;
-- campagnes automatisées, CRM et connecteurs e-commerce ;
-- extension des probes sans scénario de régression réel à couvrir.
-
-Les protections existantes continuent d'être testées. G1 live et G3–G5 ne sont requis que si
-l'expérience utilise effectivement un LLM ou du compute ; ils ne bloquent pas un pilote manuel.
+- nouveau cerveau, planner, routeur LLM, mémoire ou UI Hermes;
+- discovery MCP générique sans consommateur;
+- campagnes automatisées, CRM, connecteurs e-commerce et nouvelle surface Web;
+- nouveau moteur vidéo, provider GPU ou benchmark sans scénario réel;
+- généralisation d'une capability, d'un scheduler ou de skills sans obstacle observé.

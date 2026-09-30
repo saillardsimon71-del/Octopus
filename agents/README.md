@@ -1,10 +1,11 @@
 # Groupe d'agents Podalux
 
-> **Sous-système historique conservé, pas identité d'OCTOPUS.** Ces rôles et le cycle vidéo
-> servent leurs consommateurs existants. La priorité est le pilote supervisé décrit dans
-> `../docs/HANDOFF_WORK.md`, sans ajout d'agents ni optimisation vidéo préalable.
+> **Maintenance du 2026-09-25 : moteur vidéo historique retiré.** Les rôles, missions,
+> offres et évaluations existants restent disponibles. Les commandes cycle/batch,
+> les outils render_offer/qc et le Studio de génération ont été supprimés.
 
-Orchestrateur de 6 agents pilotés par un gateway LLM compatible OpenAI. En configuration normale, les appels passent par OmniRoute en `zero_cost` ; RunPod reste un renderer legacy sous opt-in explicite.
+Les appels LLM normaux passent par OmniRoute en `zero_cost`. La frontière Agnes sera
+traitée dans la phase C ; aucune génération vidéo n'est disponible à la fin de la phase B.
 
 ## Roster
 
@@ -13,17 +14,9 @@ Orchestrateur de 6 agents pilotés par un gateway LLM compatible OpenAI. En conf
 | **ORBIT** | CEO | planifie, coordonne, arbitre et synthétise |
 | **GROWTH** | Acquisition / distribution | QC visuel + préparation distribution |
 | **LEDGER** | Data / finance | rubric /35, coûts, go/no-go |
-| **FORGE** | Production | TTS + Remotion + mux + QC |
+| **FORGE** | Production | préparation des livrables dans le runtime agent |
 | **CONVERT** | Monétisation | offre, prix, CTA, job vidéo |
 | **SOUT** | Recherche | veille, sources, sélection d'offres |
-
-## Cycle technique de production Podalux (pas preuve de résultat économique)
-
-```text
-SOUT → CONVERT → FORGE → GROWTH → LEDGER → ORBIT
-```
-
-FORGE conserve le pipeline historique en mode local par défaut. Le renderer RunPod est legacy et exige `PODALUX_VIDEO_RENDERER=cloud` ainsi que `OCTOPUS_ALLOW_LEGACY_RUNPOD=1`.
 
 ## Architecture LLM
 
@@ -66,7 +59,7 @@ La clé ne doit jamais entrer dans Git.
 └─ Système / Orca
 ```
 
-Le cockpit regroupe les commandes et observations déjà présentes dans le projet : cycle, mission ORBIT, worker, messages, publication dry-run, Studio vidéo, handoffs, navigateur, diagnostic et pont Orca. Il ne déplace pas la logique métier dans Tkinter.
+Le cockpit regroupe les commandes et observations déjà présentes dans le projet : mission ORBIT, worker, messages, publication dry-run, historique des livrables, handoffs, navigateur, diagnostic et pont Orca. Il ne déplace pas la logique métier dans Tkinter.
 
 Les opérations longues sont lancées par `agents.procs` ou dans des threads de fond afin de conserver une interface réactive. La documentation d'utilisation est dans `docs/GUI.md`.
 
@@ -96,40 +89,11 @@ Le pont n'écrit pas dans la base interne d'Orca. Il considère `live`, `unverif
 
 Voir `docs/ORCA_INTEGRATION.md` pour les règles et l'installation.
 
-## Vidéo et GPU
+## Vidéo
 
-### Cycle Podalux
-
-`agents/cycle.py` appelle `VideoService`. En cloud, un `VideoJob` autonome est envoyé au renderer distant et les artefacts/QC reviennent sous forme de manifest.
-
-### MiniMax H3
-
-MiniMax H3 est **cloud-only** pour cette configuration :
-
-```text
-media.video_generate
-       ↓
-MiniMaxH3RunPodClient
-       ↓
-RunPod Serverless / worker GPU
-       ↓
-ComfyUI H3
-       ↓
-vidéo + audio + artefacts
-```
-
-Le Studio GUI affiche H3 comme `MiniMax H3 [CLOUD RunPod — aucun téléchargement local]` et ne le sonde plus comme un modèle WanGP local.
-
-### Worker cloud
-
-`video_worker/` réutilise le pipeline existant :
-- Chatterbox via `CHATTERBOX_URL` configurable ;
-- Remotion/Chromium ;
-- FFmpeg ;
-- QC technique ;
-- stockage objet + manifest.
-
-Les modèles lourds ne sont pas installés par `requirements-local.txt`.
+Le moteur local et les adapters vidéo distants historiques sont retirés.
+Les artefacts et métriques historiques restent consultables, sans commande de génération.
+Voir `../docs/migrations/VIDEO_ENGINE_REMOVAL.md` pour le périmètre et les limites.
 
 ## Navigateur intégré
 

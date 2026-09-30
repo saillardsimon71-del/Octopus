@@ -1048,6 +1048,29 @@ def test_octopus_product_ticket_allows_scoped_non_python_product_files(tmp_path)
     assert dev_worker._validate_octopus_self_modification_policy(**values) is False
 
 
+def test_octopus_product_ticket_accepts_core_code_and_test_helper(tmp_path):
+    from octopus import dev_worker
+
+    values = _self_policy_kwargs(_octopus_self_repo(tmp_path))
+    values.update(
+        allowed_paths=["octopus/tasks.py", "octopus/worker.py", "tests/task_fixture.py"],
+        tests=[[sys.executable, "-m", "pytest", "-q", "tests/test_tasks.py"]],
+        test_sandbox="docker",
+        max_files_changed=3,
+        max_lines_added=1200,
+        max_lines_deleted=1200,
+        strict_repository_preflight=True,
+        require_baseline_oracle=True,
+        python_canary_ast=False,
+        product_ticket=True,
+    )
+
+    assert dev_worker._validate_octopus_self_modification_policy(**values) is False
+    dev_worker._enforce_allowed_paths(["octopus/tasks.py", "tests/task_fixture.py"], values["allowed_paths"])
+    with pytest.raises(dev_worker.DevWorkerError, match="hors périmètre autorisé"):
+        dev_worker._enforce_allowed_paths(["octopus/tasks.py", "octopus/promotion.py"], values["allowed_paths"])
+
+
 @pytest.mark.parametrize("change, message", [
     ({"allowed_paths": ["octopus/dev_worker.py"]}, "frontière de sécurité"),
     ({"allowed_paths": ["octopus/acceptance.py"]}, "frontière de sécurité"),
@@ -1410,6 +1433,51 @@ def test_product_ticket_requires_acceptance_contract_before_execution(tmp_path):
     assert "acceptance_contract explicite" in result["error"]
 
 
+@pytest.mark.parametrize("post_green", [True, False])
+def test_post_change_tests_run_only_after_oracle_baseline(tmp_path, monkeypatch, post_green):
+    from octopus import dev_worker
+
+    repo = repository(tmp_path)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_oracle.py").write_text("def test_ok(): assert True\n", encoding="utf-8")
+    git(repo, "add", "tests/test_oracle.py")
+    git(repo, "commit", "-qm", "oracle")
+    seen = []
+
+    def fake_tests(worktree, commands, **kwargs):
+        targets = dev_worker._pytest_targets(commands)
+        seen.append(targets)
+        if targets == ["tests/test_oracle.py"]:
+            return "PASSED tests/test_oracle.py::test_ok", True
+        assert targets == ["tests/test_new.py"]
+        return ("PASSED" if post_green else "FAILED") + " tests/test_new.py::test_new", post_green
+
+    def fake_kilo(worktree, goal, commands, max_steps, **kwargs):
+        assert dev_worker._pytest_targets(commands) == ["tests/test_oracle.py", "tests/test_new.py"]
+        (worktree / "calc.py").write_text("def answer():\n    return 2\n", encoding="utf-8")
+        (worktree / "tests" / "test_new.py").write_text("def test_new(): assert True\n", encoding="utf-8")
+        return '{"type":"text","text":"implemented"}\n'
+
+    monkeypatch.setattr(dev_worker, "_run_tests", fake_tests)
+    monkeypatch.setattr(dev_worker, "_run_kilo", fake_kilo)
+    worker.enqueue("octopus", "development.task", {
+        "repository": str(repo), "goal": "Add regression", "backend": "kilo",
+        "tests": [[sys.executable, "-m", "pytest", "-q", "tests/test_oracle.py"]],
+        "post_change_tests": ["tests/test_new.py"],
+        "allowed_paths": ["calc.py", "tests/test_new.py"],
+        "require_baseline_oracle": True, "allow_declarative_fallback": False,
+    })
+    result = worker.run_one("dev", kinds=["development.task"], log=lambda _: None)
+    assert seen[:2] == [["tests/test_oracle.py"], ["tests/test_oracle.py"]]
+    assert seen[2:4] == [["tests/test_oracle.py"], ["tests/test_new.py"]]
+    assert result["status"] == ("done" if post_green else "failed")
+    if post_green:
+        assert result["output"]["post_change_tests_passed"] is True
+        assert result["output"]["baseline_oracle_runs"] == 2
+    else:
+        assert "tests déterministes en échec" in result["error"]
+
+
 def test_development_task_commits_only_after_acceptance_gate(tmp_path, monkeypatch):
     from octopus import acceptance, dev_worker
 
@@ -1634,6 +1702,23 @@ def test_kilo_prompt_allows_broad_reading_but_keeps_write_scope():
     assert "REPOSITORY_FACTS: branch=topic; head=abc" in prompt
     assert "NO_CHANGE_NEEDED" in prompt
     assert "Do not survey the entire repository" not in prompt
+
+
+def test_kilo_retry_prompt_stays_below_windows_command_limit():
+    from octopus import dev_worker
+
+    prompt = dev_worker._build_kilo_prompt(
+        "Implement the selected task. " * 100,
+        [[sys.executable, "-m", "pytest", "-q", "tests/test_tasks_worker.py"]],
+        24,
+        last_test_output="failure details " * 400,
+        attempt=1,
+        allowed_paths=["octopus/tasks.py", "octopus/worker.py", "octopus/__main__.py"],
+    )
+
+    assert len(prompt) <= 6500
+    assert "PREVIOUS_FEEDBACK:" in prompt
+    assert prompt.endswith("failure details")
 
 
 def test_development_task_accepts_justified_noop_when_allowed(tmp_path, monkeypatch):

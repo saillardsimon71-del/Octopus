@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from agents import deepseek, runtime, web_guard
 from octopus import builtin_handlers, economy, journal, strategy, worker  # noqa: F401
 
@@ -592,3 +594,64 @@ def test_business_signal_unavailable_is_not_an_evaluated_empty_list(monkeypatch)
     assert result["evaluation_status"] == "unavailable"
     assert result["observed"] == 0 and not result["success"]
     assert done["output"]["business_signal_rejections"] == []
+
+
+
+def test_durable_mission_defaults_to_source_qualification(monkeypatch):
+    from agents import task_handlers  # noqa: F401
+    seen = {}
+    def fake(*a, **kw):
+        seen.update(kw)
+        return {"plan": [], "results": [], "rapport": "unsourced offer, 200 signups",
+                "synthesis_status": "validated", "execution_status": "completed",
+                "business_signals": []}
+    monkeypatch.setattr(runtime, "run_mission", fake)
+    objective = strategy.create("objective", B, "Opportunity", created_by="human", statement="Observe")
+    task_id = worker.enqueue(B, "orbit.mission", {"goal": "collect", "objective_id": objective})
+    done = worker.run_one("w", kinds=["orbit.mission"], log=lambda s: None)
+    assert seen["business_signal_focus"] is True
+    assert done["output"]["opportunity_status"] == "inconclusive"
+    assert "evidence_id" not in done["output"]["strategy"]
+    assert not [r for r in strategy.list_items("evidence", B) if r.get("origin_task_id") == task_id]
+
+
+def test_budget_stopped_task_never_creates_inferred_evidence(monkeypatch):
+    from agents import deepseek, task_handlers  # noqa: F401
+    objective = strategy.create("objective", B, "Opportunity", created_by="human", statement="Observe")
+    monkeypatch.setattr(deepseek, "call_json", lambda *a, **k: {
+        "tasks": [{"role": "SOUT", "task": "collect"}]})
+    monkeypatch.setattr(runtime, "_budget_exhausted", lambda: True)
+    task_id = worker.enqueue(B, "orbit.mission", {
+        "goal": "collect", "objective_id": objective, "business_signal_target": 1}, budget_usd=0)
+    done = worker.run_one("w", kinds=["orbit.mission"], log=lambda s: None)
+    assert done["status"] == "done_degraded"
+    assert done["output"]["execution_status"] == "budget_exceeded"
+    assert done["output"]["results"][0]["steps"] == []
+    assert "evidence_id" not in done["output"]["strategy"]
+    assert not [r for r in strategy.list_items("evidence", B) if r.get("origin_task_id") == task_id]
+
+
+
+@pytest.mark.parametrize("execution,signals,expected", [
+    ("completed", [{"evidence_acquisition": {"final_url": "https://example.org/source"}}], True),
+    ("incomplete", [{"evidence_acquisition": {"final_url": "https://example.org/source"}}], False),
+    ("unknown", [{"evidence_acquisition": {"final_url": "https://example.org/source"}}], False),
+    ("completed", [], False),
+])
+def test_mission_evidence_requires_completed_execution_and_qualified_signal(
+        monkeypatch, execution, signals, expected):
+    from agents import task_handlers  # noqa: F401
+    # The runtime's acquired-text gate has its own adversarial tests. This mock
+    # isolates the persistence contract after that gate, without a network call.
+    raw = [{"role": "SOUT", "steps": [{"tool": "browse", "result_data": {"page": {"main_text": "source"}}}]}]
+    monkeypatch.setattr(runtime, "run_mission", lambda *a, **k: {
+        "plan": [{"role": "SOUT"}], "results": raw, "rapport": "inference",
+        "synthesis_status": "validated", "execution_status": execution, "business_signals": signals})
+    objective = strategy.create("objective", B, "Opportunity", created_by="human", statement="Observe")
+    worker.enqueue(B, "orbit.mission", {"goal": "collect", "objective_id": objective})
+    done = worker.run_one("w", kinds=["orbit.mission"], log=lambda s: None)
+    assert ("evidence_id" in done["output"]["strategy"]) is expected
+    assert done["output"]["results"] == raw
+    if expected:
+        evidence = strategy.get("evidence", done["output"]["strategy"]["evidence_id"], B)
+        assert evidence["nature"] == "inferred"

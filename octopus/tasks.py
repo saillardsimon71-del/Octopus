@@ -139,12 +139,29 @@ def events(since_id: int = 0, task_id: int | None = None, limit: int = 200) -> l
 
 # --- exécution ------------------------------------------------------------------------------
 
-def claim(owner: str, *, lease_s: float = 60, kinds: list[str] | None = None) -> dict | None:
+def claim(owner: str, *, task_id: int | None = None, lease_s: float = 60, kinds: list[str] | None = None) -> dict | None:
     """Prend la tâche prête la plus prioritaire dont la ressource est libre. None si rien à faire."""
     with _tx() as conn:
         now = time.time()
         busy = {r["resource"] for r in conn.execute(
             "SELECT resource FROM tasks WHERE status='running' AND lease_until > ? AND resource IS NOT NULL", (now,))}
+        if task_id is not None:
+            row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None or row["status"] in FINAL or row["status"] != "queued":
+                return None
+            if row["not_before"] and row["not_before"] > now:
+                return None
+            if kinds is not None and row["kind"] not in kinds:
+                return None
+            if row["resource"] and row["resource"] in busy:
+                return None
+            updated = conn.execute("UPDATE tasks SET status='running', lease_owner=?, lease_until=?, attempts=attempts+1, "
+                                   "updated_at=? WHERE id=? AND status='queued'",
+                                   (owner, now + lease_s, now, row["id"])).rowcount
+            if updated == 0:
+                return None
+            _emit(conn, row["business"], row["id"], "task.started", {"owner": owner, "attempt": row["attempts"] + 1})
+            return get_in(conn, row["id"])
         sql = "SELECT * FROM tasks WHERE status='queued' AND not_before <= ?"
         params: list = [now]
         if kinds:
@@ -153,8 +170,11 @@ def claim(owner: str, *, lease_s: float = 60, kinds: list[str] | None = None) ->
         for row in conn.execute(sql + " ORDER BY priority DESC, id", params):
             if row["resource"] and row["resource"] in busy:
                 continue
-            conn.execute("UPDATE tasks SET status='running', lease_owner=?, lease_until=?, attempts=attempts+1, "
-                         "updated_at=? WHERE id=?", (owner, now + lease_s, now, row["id"]))
+            updated = conn.execute("UPDATE tasks SET status='running', lease_owner=?, lease_until=?, attempts=attempts+1, "
+                                   "updated_at=? WHERE id=? AND status='queued'",
+                                   (owner, now + lease_s, now, row["id"])).rowcount
+            if updated == 0:
+                continue
             _emit(conn, row["business"], row["id"], "task.started", {"owner": owner, "attempt": row["attempts"] + 1})
             return get_in(conn, row["id"])
     return None
@@ -336,10 +356,37 @@ def answer(request_id: int, text: str) -> int:
 
 # --- maintenance et planification -----------------------------------------------------------
 
+def _abandon_orphan_runs(conn, task_ids: list[int], now: float) -> list[int]:
+    """Clos les runs encore `running` d'une exécution morte (worker tué : aucun `finally` rejoué).
+
+    Sans cela un run reste `running` indéfiniment alors que sa tâche a déjà été reprise ou échouée :
+    l'état observable mentirait sur le travail réellement en cours.
+    """
+    closed: list[int] = []
+    for task_id in task_ids:
+        row = conn.execute("SELECT run_id, business FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is None or row["run_id"] is None:
+            continue
+        subtree = ("WITH RECURSIVE sub(id) AS (SELECT ?1 UNION ALL SELECT r.id FROM runs r JOIN sub "
+                   "ON r.parent_id=sub.id) ")
+        stale = [int(item["id"]) for item in conn.execute(
+            subtree + "SELECT r.id FROM runs r JOIN sub ON r.id=sub.id "
+                      "WHERE r.status='running' AND r.finished_at IS NULL", (row["run_id"],))]
+        if not stale:
+            continue
+        conn.execute(
+            subtree + "UPDATE runs SET status='abandoned', error=COALESCE(error, ?2), finished_at=?3 "
+                      "WHERE id IN (SELECT id FROM sub) AND status='running' AND finished_at IS NULL",
+            (row["run_id"], "exécution interrompue : bail de la tâche expiré (worker arrêté)", now))
+        closed.extend(stale)
+        _emit(conn, row["business"], task_id, "run.abandoned", {"run_id": int(row["run_id"]), "runs": stale})
+    return closed
+
+
 def reap(now: float | None = None) -> dict:
-    """Baux expirés (worker mort) et demandes humaines expirées."""
+    """Baux expirés (worker mort), demandes humaines expirées et runs orphelins."""
     now = now or time.time()
-    out = {"requeued": [], "failed": [], "expired_requests": [], "reconciled_media": []}
+    out = {"requeued": [], "failed": [], "expired_requests": [], "reconciled_media": [], "abandoned_runs": []}
     with _tx() as conn:
         for row in conn.execute("SELECT * FROM tasks WHERE status='running' AND lease_until <= ?", (now,)).fetchall():
             retry = row["attempts"] < row["max_attempts"] and not row["cancel_requested"]
@@ -351,6 +398,7 @@ def reap(now: float | None = None) -> dict:
             out["reconciled_media"].extend(_set_linked_media_state(conn, row["id"], status, error, now))
             _emit(conn, row["business"], row["id"], "task.lease_expired", {"owner": row["lease_owner"], "status": status})
             out["requeued" if retry else "failed"].append(row["id"])
+        out["abandoned_runs"] = _abandon_orphan_runs(conn, out["requeued"] + out["failed"], now)
         for req in conn.execute("SELECT * FROM human_requests WHERE status='pending' AND expires_at IS NOT NULL "
                                 "AND expires_at < ?", (now,)).fetchall():
             conn.execute("UPDATE human_requests SET status='expired' WHERE id=?", (req["id"],))
@@ -364,18 +412,26 @@ def reap(now: float | None = None) -> dict:
 
 
 def schedule(business: str, kind: str, interval_s: float, input: dict | None = None, *,
-             start_in_s: float = 0, enabled: bool = True, budget_usd: float | None = None) -> int:
+             start_in_s: float = 0, enabled: bool = True, budget_usd: float | None = None,
+             if_absent: bool = False) -> int:
     if interval_s < 60:
         raise TaskError("intervalle minimal : 60 s")
     now = time.time()
     with _tx() as conn:
-        conn.execute(
-            "INSERT INTO schedules (business, kind, input, interval_s, next_run, enabled, budget_usd) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(business, kind) DO UPDATE SET input=excluded.input, "
-            "interval_s=excluded.interval_s, next_run=excluded.next_run, enabled=excluded.enabled, "
-            "budget_usd=excluded.budget_usd",
-            (business, kind, json.dumps(input or {}, ensure_ascii=False), interval_s, now + start_in_s,
-             int(enabled), budget_usd))
+        if if_absent:
+            conn.execute(
+                "INSERT INTO schedules (business, kind, input, interval_s, next_run, enabled, budget_usd) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(business, kind) DO NOTHING",
+                (business, kind, json.dumps(input or {}, ensure_ascii=False), interval_s, now + start_in_s,
+                 int(enabled), budget_usd))
+        else:
+            conn.execute(
+                "INSERT INTO schedules (business, kind, input, interval_s, next_run, enabled, budget_usd) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(business, kind) DO UPDATE SET input=excluded.input, "
+                "interval_s=excluded.interval_s, next_run=excluded.next_run, enabled=excluded.enabled, "
+                "budget_usd=excluded.budget_usd",
+                (business, kind, json.dumps(input or {}, ensure_ascii=False), interval_s, now + start_in_s,
+                 int(enabled), budget_usd))
         return int(conn.execute("SELECT id FROM schedules WHERE business=? AND kind=?", (business, kind)).fetchone()[0])
 
 

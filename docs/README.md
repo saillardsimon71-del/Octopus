@@ -9,8 +9,8 @@ La documentation est organisée pour distinguer **état courant**, **runbooks te
 | `../AGENTS.md` | constitution du projet et règles globales pour agents |
 | `VISION.md` | pourquoi OCTOPUS existe et où il va |
 | `CURRENT_STATE.md` | source de vérité de l'état actuel |
-| `CODEX_START.md` | point d'entrée court pour une session Codex |
-| `HANDOFF_WORK.md` | protocole exact pour reprendre dans Work/Codex |
+| `migrations/CODEX_START_2026-09-27.md` | routeur du chantier Astra phase E |
+| `HANDOFF_WORK.md` | protocole de la première expérience économique supervisée |
 | `EVIDENCE_ACCEPTANCE.md` | frontière gouvernée, gate technique et limites de preuve |
 | `ACCEPTANCE_GATES.md` | critères binaires de progression et définition de la V1 |
 | `../NEXT_STEPS.md` | prochaines actions priorisées |
@@ -18,14 +18,16 @@ La documentation est organisée pour distinguer **état courant**, **runbooks te
 
 ## Installation / exploitation
 
-- `LOCAL_SETUP.md` — poste Windows / control-plane ;
-- `CLOUD_RENDERER_RUNBOOK.md` — renderer vidéo cloud historique ;
-- `RUNPOD_SETUP.md` — adapter RunPod existant, provider-spécifique ;
-- `GENERATION_VIDEO.md` — WanGP/Wan2GP local ;
-- `OMNIROUTE_SETUP.md` — gateway LLM ;
-- `RESOURCES.md` — inventaire de ressources réelles ;
-- `GUI.md` — Workbench ;
-- `ORCA_INTEGRATION.md` — pont de développement optionnel.
+- `LOCAL_SETUP.md` - poste Windows et control-plane;
+- `OMNIROUTE_SETUP.md` - gateway LLM;
+- `RESOURCES.md` - inventaire de ressources réelles;
+- `GUI.md` - Workbench;
+- `ORCA_INTEGRATION.md` - pont de développement optionnel.
+
+`CLOUD_RENDERER_RUNBOOK.md`, `RUNPOD_SETUP.md` et `GENERATION_VIDEO.md` décrivent l'ancien moteur
+vidéo retiré en phase B. Ils sont conservés pour l'historique et ne constituent plus le chemin
+d'exécution vidéo. Le remplacement actuel est le service Agnes externe pinné décrit dans
+`migrations/AGNES_VIDEO_REPLACEMENT.md`.
 
 ## Audits / designs techniques — conditionnels, pas roadmap active
 

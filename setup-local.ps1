@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 Write-Host "OCTOPUS — setup local cloud-first" -ForegroundColor Cyan
 Write-Host "Le poste local installe uniquement le control-plane, Chromium et OmniRoute." -ForegroundColor DarkGray
@@ -64,7 +64,6 @@ if (-not $docker) {
 [Environment]::SetEnvironmentVariable("OMNIROUTE_ENABLED", "1", "User")
 [Environment]::SetEnvironmentVariable("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1", "User")
 [Environment]::SetEnvironmentVariable("OMNIROUTE_MODEL", "auto/free", "User")
-[Environment]::SetEnvironmentVariable("PODALUX_VIDEO_RENDERER", "cloud", "User")
 [Environment]::SetEnvironmentVariable("PODALUX_PYTHON", $pythonExe, "User")
 
 Write-Host ""
@@ -72,9 +71,6 @@ Write-Host "Setup local terminé." -ForegroundColor Green
 Write-Host "Le terminal courant ne recharge pas automatiquement les nouvelles variables User." -ForegroundColor DarkGray
 Write-Host "Fermer/réouvrir PowerShell, puis définir les secrets suivants sans les committer :" -ForegroundColor Yellow
 Write-Host '  OMNIROUTE_API_KEY'
-Write-Host '  PODALUX_RUNPOD_ENDPOINT_ID'
-Write-Host '  PODALUX_RUNPOD_API_TOKEN'
-Write-Host '  (H3 uniquement) OCTOPUS_MINIMAX_H3_ENDPOINT_ID / OCTOPUS_MINIMAX_H3_API_TOKEN'
 Write-Host ""
 Write-Host "Ensuite : .\.venv\Scripts\python.exe -m agents.run doctor" -ForegroundColor Cyan
 Write-Host "Puis : .\.venv\Scripts\python.exe run_gui.py" -ForegroundColor Cyan

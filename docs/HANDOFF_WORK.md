@@ -1,9 +1,31 @@
-# Golden path — première expérience économique supervisée
+# Golden path — expérience économique supervisée
+
+## Démarrage neutre (phase F)
+
+Ce protocole décrit une méthode ; le pilote CSV ci-dessous est un **exemple historique**,
+pas une hypothèse active ni la prochaine mission. E5 est terminée, ne pas la reprendre.
+L'objectif vient de l'humain et des preuves acquises pendant la nouvelle mission.
+Les comptes, sites existants et ressources disponibles ne constituent pas des objectifs.
+
+Pour le dry run supervisé, choisir un business neuf dans le journal existant (vérifier
+son absence dans les objets stratégiques et les tâches persistantes), sans identifiant d'objectif,
+d'hypothèse ou d'expérience historique. Utiliser une tâche `orbit.mission` avec un objectif
+neutre explicite, `allowed_tools=["search", "browse"]`, `profile="zero_cost"`,
+`business_signal_focus=true` et des limites humaines d'étapes et de durée.
+Ne pas appeler `octopus.economy.drive` sur le business historique `octopus` : il reprend les
+expériences en cours. Ne pas utiliser les entrées legacy `podalux.*` ou la mémoire
+historique comme point de départ. Aucun compte à connecter pour ce parcours.
+
+SEARCH découvre, BROWSE acquiert les sources ; les citations et inconnues doivent rester
+vérifiables. La synthèse ne vaut ni preuve client ni autorisation. Après revue humaine,
+créer seulement l'expérience justifiée par ces sources, puis appliquer le protocole
+ci-dessous en remplaçant toutes les valeurs de l'exemple. Les actions externes restent
+conditionnées au canal autorisé et à l'accord humain ; le dry run s'arrête avant elles.
 
 ## 1. Périmètre, bornes et règles
 
 **Une expérience = un lot client / une offre pilote**, pas un CRM.
-Hypothèse : une boutique multimarque française achèterait un CSV de 20 références enrichies
+Exemple historique d'hypothèse : une boutique multimarque française achèterait un CSV de 20 références enrichies
 avec quelques caractéristiques factuelles manquantes, chacune reliée à une source fabricant.
 Prix à tester : environ 99 € HT. Ce n'est ni un tarif validé ni une vente acquise.
 

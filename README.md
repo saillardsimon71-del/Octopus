@@ -27,6 +27,25 @@ objectif humain + limites
 
 ## Utiliser le système maintenant
 
+### Démarrage durable (phase G)
+
+Une seule commande lance le runtime autonome supervisé : le superviseur transforme les objectifs
+persistants actifs en travail durable, évalue le résultat mesuré et décide seul de la suite
+(nouvelle tâche, clôture, attente humaine). Aucune commande intermédiaire n'est requise.
+
+```bash
+python -m octopus runtime                    # superviseur + worker ; le tick se réarme seul
+python -m octopus status                     # objectif, tâche/run courants, attentes, échecs, coûts
+python -m octopus ask                        # frontières humaines ouvertes
+python -m octopus answer REQUEST_ID "texte"  # lever une frontière
+```
+
+Le superviseur ne déclare jamais un objectif atteint sans mesure, n'accorde aucun droit et ne
+dépense rien : `READ / PREPARE / ACT` et les gates de preuve restent inchangés.
+Contrat et critères d'acceptation : `docs/migrations/OPERATIONALIZATION.md`.
+
+### Protocole supervisé
+
 Le [protocole supervisé](docs/HANDOFF_WORK.md) utilise les commandes existantes pour lancer
 un pilote d'enrichissement factuel sourcé de fiches produits. Aucun nouveau business module,
 scraper, CRM, LLM ou service payant n'est nécessaire pour commencer.

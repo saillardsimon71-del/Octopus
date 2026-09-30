@@ -10,3 +10,6 @@ RUN apt-get update \
     && python -m pip install --no-cache-dir pytest==9.0.3 customtkinter==5.2.2 "Pillow>=10,<13"
 
 WORKDIR /workspace
+
+COPY requirements-local.txt /tmp/requirements-local.txt
+RUN python -m pip install --no-cache-dir -r /tmp/requirements-local.txt

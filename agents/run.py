@@ -1,8 +1,6 @@
 """Point d'entrée CLI du groupe d'agents Podalux.
 
 Usage :
-  python -m agents.run cycle [--offer <offer_id>]
-  python -m agents.run batch
   python -m agents.run publish <offer_id> [--real]
   python -m agents.run status
   python -m agents.run report
@@ -16,36 +14,6 @@ import json
 import sqlite3
 
 from . import config, db
-from .cycle import CycleBusy, run_cycle
-
-
-def cmd_cycle(offer_id=None):
-    db.init_db()
-    try:
-        res = run_cycle(offer_id)
-    except CycleBusy:
-        print(f"refusé : un autre cycle tourne déjà ({db.run_lock_holder()})")
-        raise SystemExit(3)
-    print(json.dumps(res, ensure_ascii=False, indent=2))
-
-
-def cmd_batch():
-    from .cycle import already_produced
-    from .agents import CATALOG
-    db.init_db()
-    todo = [k for k in CATALOG if k not in already_produced()]
-    if not todo:
-        print("toutes les offres du catalogue sont déjà produites.")
-        return
-    print(f"BATCH : {len(todo)} offres à produire : {todo}")
-    for oid in todo:
-        print(f"\n=== {oid} ===")
-        res = run_cycle(offer_id=oid)
-        led = res.get("ledger", {})
-        print(f"  -> score {led.get('score')}/35 · warm {led.get('warm_pass')} · "
-              f"{res.get('orbit', {}).get('decision')} (itérations {len(res.get('iterations', []))})")
-
-
 def cmd_publish(offer_id, real=False):
     from .publish import publish
     db.init_db()
@@ -189,14 +157,11 @@ def cmd_orca_check(args):
 def main():
     parser = argparse.ArgumentParser(prog="podalux", description="Groupe d'agents Podalux")
     sub = parser.add_subparsers(dest="cmd")
-    p_cycle = sub.add_parser("cycle", help="lance un cycle complet (produit une vidéo)")
-    p_cycle.add_argument("--offer", default=None, help="forcer un offer_id")
-    sub.add_parser("batch", help="cycle pour toutes les offres non produites")
     p_pub = sub.add_parser("publish", help="plan de publication (dry-run par défaut)")
     p_pub.add_argument("offer_id")
     p_pub.add_argument("--real", action="store_true", help="upload réel (nécessite validation)")
     sub.add_parser("status", help="coûts et dernières décisions")
-    sub.add_parser("doctor", help="diagnostic avant un cycle réel (rien de payant ni de lourd)")
+    sub.add_parser("doctor", help="diagnostic du contrôle local (rien de payant ni de lourd)")
     sub.add_parser("report", help="tableau de bord (coûts + QC + J+1)")
     sub.add_parser("gui", help="ouvre l'interface graphique")
     p_browser = sub.add_parser("browser", help="teste le navigateur (navigation + vision)")
@@ -208,7 +173,7 @@ def main():
     p_goal = sub.add_parser("goal", help="donne un objectif en langage naturel au groupe")
     p_goal.add_argument("text", nargs="+", help="l'objectif")
     p_mission = sub.add_parser("mission", help="objectif multi-agents (ORBIT planifie + délègue)")
-    p_mission.add_argument("--business", default=None, help="business du run et des coûts (défaut : podalux)")
+    p_mission.add_argument("--business", default=None, help="business du run et des coûts (défaut : octopus)")
     p_mission.add_argument("text", nargs="+", help="l'objectif")
     p_msg = sub.add_parser("msg", help="message à un agent (@ROLE) → réponse directe")
     p_msg.add_argument("role", help="rôle cible (ORBIT, SOUT, …)")
@@ -234,11 +199,7 @@ def main():
 
     args = parser.parse_args()
 
-    if args.cmd == "cycle":
-        cmd_cycle(args.offer)
-    elif args.cmd == "batch":
-        cmd_batch()
-    elif args.cmd == "publish":
+    if args.cmd == "publish":
         cmd_publish(args.offer_id, real=args.real)
     elif args.cmd == "status":
         cmd_status()

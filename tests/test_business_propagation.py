@@ -43,12 +43,13 @@ def test_mission_plan_is_capped(monkeypatch):
     assert len(result["plan"]) == runtime.MAX_PLAN_TASKS == len(result["results"]) and result["rapport"] == "r"
 
 
-def test_render_offer_is_refused_outside_podalux(monkeypatch):
-    from agents import cycle
-    monkeypatch.setattr(cycle, "run_cycle", lambda **k: (_ for _ in ()).throw(AssertionError("rendu lancé")))
-    with journal.run("atelier_test", "mission"):
-        refused = runtime.TOOLS["render_offer"]["fn"]({"offer_id": "cash_devis_cgv01"})
-    assert refused["refuse"] is True and "atelier_test" in refused["note"]
+def test_legacy_render_tools_are_unavailable_for_every_business():
+    for business in ("podalux", "atelier_test"):
+        with journal.run(business, "mission"):
+            assert "render_offer" not in runtime.TOOLS
+            assert "qc" not in runtime.TOOLS
+            prompt = runtime.build_prompts("FORGE", "x")[0]
+            assert "render_offer" not in prompt
 
 
 def test_agent_identity_follows_the_business():
@@ -81,4 +82,4 @@ def test_roles_are_business_neutral_outside_podalux():
     podalux = runtime.build_prompts("FORGE", "x")[0]
     with journal.run("atelier_test", "mission"):
         neutral = runtime.build_prompts("FORGE", "x")[0]
-    assert "vidéo" in podalux and "vidéo" not in neutral.split("Outils disponibles")[0]
+    assert runtime.ROLES["FORGE"] in podalux and runtime.ROLES["FORGE"] not in neutral

@@ -1,7 +1,8 @@
 # Reprise agent
 
-Lire `AGENTS.md`, `docs/VISION.md`, `docs/CURRENT_STATE.md`, puis `docs/HANDOFF_WORK.md`.
-Ces documents remplacent les anciens ordres de mission GPU, GUI et autonomie générique.
+Lire `AGENTS.md`. Pour le chantier constructeur actuel, suivre ensuite
+`docs/migrations/CODEX_START_2026-09-27.md`, qui donne l'ordre de lecture borné.
+Les documents canoniques remplacent les anciens ordres GPU, GUI et autonomie générique.
 
 - Git réel prime ; vérifier HEAD/main, branche, modifications et historique.
 - Garder SQLite, strategy, tasks, actions et l'unique ledger existants.
@@ -11,4 +12,4 @@ Ces documents remplacent les anciens ordres de mission GPU, GUI et autonomie gé
 - Tests hors ligne et DB temporaires ; ne pas toucher les données réelles.
 - Aucun push/merge automatique dans main ; revue humaine obligatoire.
 
-Protocole détaillé : `docs/CODEX_START.md`. Backlog : `NEXT_STEPS.md`.
+Protocole économique: `docs/HANDOFF_WORK.md`. Backlog: `NEXT_STEPS.md`.

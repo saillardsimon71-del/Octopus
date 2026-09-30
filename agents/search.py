@@ -1,7 +1,8 @@
-"""Recherche web : API (Brave/Tavily) si clé, sinon flux RSS / API keyless.
+"""Recherche web : DDGS dérivé de Hermes, puis API autorisées et RSS keyless.
 
 Le problème des moteurs classiques (DuckDuckGo, Bing HTML) est le blocage anti-bot.
 On contourne avec des sources bot-friendly :
+- DDGS : métarecherche Web sans clé, isolée et bornée (adapter Hermes).
 - Brave / Tavily : vraie recherche web (clé gratuite requise).
 - Bing Web RSS : recherche web keyless, priorité stable du fallback sans clé.
 - Bing News RSS : actualités avec URL éditeur directe, utilisées en complément.
@@ -23,7 +24,8 @@ from urllib.parse import parse_qsl, quote, urlparse
 
 import requests
 
-from . import config
+from . import cancel, config
+from .search_ddgs import available as _ddgs_available, search_items as _ddgs_items
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                      "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"}
@@ -44,10 +46,8 @@ SEARCH_PURPOSE_GENERAL = "general"
 SEARCH_PURPOSE_BUSINESS = "business_signal"
 SEARCH_PURPOSES = (SEARCH_PURPOSE_GENERAL, SEARCH_PURPOSE_BUSINESS)
 
-# Deux politiques de complément keyless : `general` garde l'historique (Bing Web, Bing News,
-# puis Google News/Wikipédia sur une recherche non contrainte), `business_signal` s'arrête
-# après Bing Web. Une encyclopédie ou une actualité générale complète le bruit, pas un
-# signal d'affaires.
+# Après les providers Web, `general` complète avec les RSS et Wikipédia;
+# `business_signal` refuse ces compléments encyclopédiques et d'actualité générale.
 
 # Bornes des VUES texte. La structure, elle, garde l'extrait complet.
 VIEW_SNIPPET_CHARS = 300
@@ -301,7 +301,8 @@ def _wikipedia_items(query: str, max_results: int) -> list[dict]:
             for h in r.json().get("query", {}).get("search", [])]
 
 
-PROVIDERS = (("Brave", "_brave_items", lambda: bool(config.BRAVE_API_KEY)),
+PROVIDERS = (("DDGS", "_ddgs_items", lambda: _ddgs_available()),
+             ("Brave", "_brave_items", lambda: bool(config.BRAVE_API_KEY)),
              ("Tavily", "_tavily_items", lambda: bool(config.TAVILY_API_KEY)))
 
 
@@ -328,6 +329,8 @@ def search_envelope(query: str, max_results: int = 6, site: str | None = None,
     def attempt(name, fn_name):
         try:
             raw_items = globals()[fn_name](q, max_results) or []
+        except cancel.Cancelled:
+            raise
         except Exception as exc:
             errors.append(f"{name} : {type(exc).__name__} {str(exc)[:160]}")
             return []
@@ -341,7 +344,7 @@ def search_envelope(query: str, max_results: int = 6, site: str | None = None,
                 return _envelope(query, q, purpose, _merge_unique(items, max_results=max_results), errors)
 
     if purpose == SEARCH_PURPOSE_BUSINESS:
-        # Politique business : Bing Web keyless puis arrêt. Pas de complément
+        # Dernier repli Web keyless, puis arrêt. Pas de complément
         # encyclopédique ni d'actualité générale : ce ne sont pas des signaux d'affaires.
         web = attempt("Bing Web", "_bing_web_items")
         return _envelope(query, q, purpose, _merge_unique(web, max_results=max_results), errors)
@@ -362,7 +365,7 @@ def search_envelope(query: str, max_results: int = 6, site: str | None = None,
 
 def search_items(query: str, max_results: int = 6, site: str | None = None,
                  purpose: str = SEARCH_PURPOSE_GENERAL) -> tuple[list[dict], list[str]]:
-    """Recherche stable : API si disponible, sinon Bing Web puis News, avec filtre site local."""
+    """Recherche structurée multi-provider, avec filtre site local."""
     envelope = search_envelope(query, max_results=max_results, site=site, purpose=purpose)
     return envelope["items"], envelope["errors"]
 

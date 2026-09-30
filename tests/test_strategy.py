@@ -22,16 +22,17 @@ def _chain(business: str = "podalux"):
     return objective, hypothesis, experiment
 
 
-def test_strategy_mission_cli_passes_profile_and_budget(monkeypatch):
+@pytest.mark.parametrize("budget_option", ["--budget-usd", "--llm-budget-usd"])
+@pytest.mark.parametrize("profile,budget", [("zero_cost", 0), ("flash_fallback", 2), ("zero_cost", None)])
+def test_strategy_mission_cli_passes_profile_and_budget(monkeypatch, profile, budget, budget_option):
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     strategy_cli.add_parser(sub)
     args = parser.parse_args([
         "strategy", "mission", "octopus", "collecte",
-        "--profile", "flash_fallback",
-        "--budget-usd", "0.05",
+        "--profile", profile,
         "--allow-tools", "search,browse",
-    ])
+    ] + ([budget_option, str(budget)] if budget is not None else []))
 
     captured = {}
     monkeypatch.setattr(worker, "load_handlers", lambda: {})
@@ -47,9 +48,27 @@ def test_strategy_mission_cli_passes_profile_and_budget(monkeypatch):
 
     assert strategy_cli.run(args) == 0
     assert captured["kind"] == "orbit.mission"
-    assert captured["input"]["profile"] == "flash_fallback"
+    assert captured["input"]["profile"] == profile
     assert captured["input"]["allowed_tools"] == ["search", "browse"]
-    assert captured["kwargs"]["budget_usd"] == pytest.approx(0.05)
+    assert captured["kwargs"]["budget_usd"] == budget
+
+
+@pytest.mark.parametrize("budget_option", ["--budget-usd", "--llm-budget-usd"])
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "-1"])
+def test_strategy_mission_cli_rejects_invalid_budget_before_enqueue(monkeypatch, budget_option, value):
+    parser = argparse.ArgumentParser()
+    strategy_cli.add_parser(parser.add_subparsers(dest="command", required=True))
+    args = parser.parse_args([
+        "strategy", "mission", "octopus", "collecte", f"{budget_option}={value}",
+    ])
+    monkeypatch.setattr(worker, "load_handlers", lambda: {})
+    monkeypatch.setattr(strategy, "mission_context", lambda *a, **k: {
+        "objective_id": None, "hypothesis_id": None, "experiment_id": None,
+    })
+    calls = []
+    monkeypatch.setattr(worker, "enqueue", lambda *a, **k: calls.append((a, k)))
+    assert strategy_cli.run(args) == 2
+    assert calls == []
 
 
 # --- migration ---------------------------------------------------------------------------

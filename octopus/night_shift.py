@@ -9,6 +9,7 @@ Nothing is pushed or merged into main.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -123,10 +124,10 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
             if path not in PYTHON_CANARY_ALLOWED:
                 raise NightShiftError(f"ticket #{index}: fichier hors allowlist python_canary: {path}")
         elif policy == "product_ticket":
-            if path in dev_worker.OCTOPUS_PRODUCT_PROTECTED_PATHS:
+            if dev_worker._product_ticket_protected_path(path):
                 raise NightShiftError(f"ticket #{index}: noyau product_ticket protégé: {path}")
-            if path.startswith("tests/") or path.endswith("/conftest.py") or path == "conftest.py":
-                raise NightShiftError(f"ticket #{index}: oracles de test non modifiables: {path}")
+            if path.endswith("/conftest.py") or path == "conftest.py":
+                raise NightShiftError(f"ticket #{index}: conftest.py non modifiable: {path}")
             try:
                 dev_worker._validate_allowed_paths([path])
             except dev_worker.DevWorkerError as exc:
@@ -135,6 +136,8 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
             allowed_paths.append(path)
     if policy == "python_canary" and len(allowed_paths) != 1:
         raise NightShiftError(f"ticket #{index}: python_canary exige exactement un fichier source")
+    if policy == "product_ticket" and len(allowed_paths) > dev_worker.PRODUCT_TICKET_MAX_FILES:
+        raise NightShiftError(f"ticket #{index}: allowed_paths dépasse {dev_worker.PRODUCT_TICKET_MAX_FILES} fichiers")
 
     targets_raw = raw.get("test_targets")
     if policy == "product_ticket" and not targets_raw:
@@ -150,6 +153,20 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
         if not target.startswith("tests/") or not target.endswith(".py"):
             raise NightShiftError(f"ticket #{index}: cible pytest refusée: {value}")
         test_targets.append(value)
+    if policy == "product_ticket" and set(allowed_paths) & {target.split("::", 1)[0] for target in test_targets}:
+        raise NightShiftError(f"ticket #{index}: oracles de test non modifiables")
+    post_raw = raw.get("post_change_tests", [])
+    if not isinstance(post_raw, list) or len(post_raw) > 20:
+        raise NightShiftError(f"ticket #{index}: post_change_tests doit être une liste bornée")
+    post_change_tests = []
+    for value in post_raw:
+        if not isinstance(value, str) or re.search(r"[*?\[\]:\x00-\x1f]", value):
+            raise NightShiftError(f"ticket #{index}: post_change_tests exige des fichiers explicites")
+        path = _normalize_relative_path(value)
+        if not path.startswith("tests/") or not path.endswith(".py"):
+            raise NightShiftError(f"ticket #{index}: post_change_tests sous tests/ en .py requis: {value}")
+        if path not in post_change_tests:
+            post_change_tests.append(path)
 
     if policy == "python_canary":
         required_targets = []
@@ -237,6 +254,7 @@ def _validate_ticket(raw: dict, index: int, policy: str = NIGHT_POLICY) -> dict:
         "goal": goal,
         "allowed_paths": allowed_paths,
         "test_targets": test_targets,
+        "post_change_tests": post_change_tests,
         "max_steps": max_steps,
         "acceptance_criteria": acceptance_criteria,
         "acceptance_contract": acceptance_contract,
@@ -457,6 +475,7 @@ def run(
                     "repository": str(night_worktree),
                     "goal": ticket["goal"],
                     "tests": tests,
+                    "post_change_tests": ticket["post_change_tests"],
                     "max_steps": ticket["max_steps"],
                     "backend": "kilo",
                     "allowed_paths": ticket["allowed_paths"],
