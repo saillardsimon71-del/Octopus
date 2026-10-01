@@ -2,6 +2,8 @@
 
 État du chantier : 2026-10-01. Implémentation sur `codex/foundation-realignment`,
 PR #114 en brouillon, basée sur la PR #113. Aucune fusion automatique.
+La stabilisation et le contrôle du DataRoot existant sont décrits dans
+[STABILIZATION_2026-10-01.md](STABILIZATION_2026-10-01.md).
 
 ## Référence et portée
 
@@ -34,8 +36,10 @@ délai jusqu'à son timeout. Chaque rôle a au plus six étapes.
 La reprise réutilise l'objectif et les tâches existants. Une demande humaine
 conserve le résultat avant de suspendre le travail ; sa réponse ne rejoue pas
 la mission et n'accorde aucune permission. Après un arrêt brutal, les baux du
-worker sont réconciliés au démarrage. Les observations déjà persistées servent
-au réexamen ; une lecture interrompue avant sa persistance peut être répétée.
+worker sont réconciliés au démarrage. Le plan, les sous-tâches terminées et les
+étapes d'observation sont enregistrés progressivement. Une reprise après crash
+ou synthèse indisponible réutilise ces résultats ; une lecture interrompue
+avant son checkpoint peut encore être répétée.
 Les effets externes sont exclus de ce parcours initial.
 
 Hermes fournit la navigation réelle, derrière les gardes existants. OCTOPUS
@@ -60,10 +64,12 @@ s'arrêter, adapter sa stratégie ou demander l'autorisation nécessaire.
 - Aucun envoi, contact commercial, publication, contrat, achat, paiement,
   génération vidéo ou installation autonome.
 - Un canal déjà autorisé dans les données ne débloque pas d'autre outil ici.
-- Deux essais gratuits au plus par appel logique, puis DeepSeek seul sous plafond.
-  Sans route gratuite ni DeepSeek disponible, ou si le plafond LLM est atteint,
-  arrêt explicite `llm_unavailable`. Désactiver la passerelle bloque le démarrage,
-  sans appel direct.
+- Deux routes gratuites et trois requêtes gratuites au plus par appel logique,
+  puis DeepSeek seul sous plafond. Une incompatibilité structurée autorise une
+  seconde méthode du même modèle. Sans route disponible, la panne technique
+  reste bornée aux trois cycles puis l'objectif est mis en pause ; elle ne crée
+  pas de demande de permission. Un plafond LLM explicitement atteint reste une
+  vraie frontière humaine. Désactiver la passerelle bloque le démarrage, sans appel direct.
 - Une réponse dans "Humain" ne modifie ni droits, ni budget. Les permissions
   spécialisées restent administrées par leurs mécanismes existants.
 
