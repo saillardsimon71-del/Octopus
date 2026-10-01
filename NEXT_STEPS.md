@@ -51,6 +51,12 @@ preuve pour compléter le rapport.
 
 ## P1 - Après observation
 
+- Le mécanisme d'écarts de capacité est en place (`docs/CAPABILITY_ACQUISITION_2026-10-01.md`).
+  Au premier run réel, lire `python -m octopus capability state` et `capability gaps BUSINESS
+  --objective N` avant de conclure qu'une capacité manque, qu'elle exige une frontière humaine ou
+  qu'elle vaut la peine d'être acquise. Aucun connecteur réel n'est construit : ne pas annoncer
+  `phone_call`, `sms_send` ou `payment_receive` comme disponibles.
+
 - Répéter le travail seulement si l'intérêt et l'économie sont soutenables.
 - Sinon changer l'offre ou arrêter; absence de données signifie améliorer la mesure.
 - Identifier la phase qui consomme le plus de minutes ou produit le plus de corrections.
