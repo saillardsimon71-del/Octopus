@@ -30,7 +30,7 @@ actions    → actions externes contrôlées
 ### Politique normale
 
 ```text
-zero_cost uniquement
+zero_cost par défaut ; economical borné pour le premier démarrage autonome autorisé
 ```
 
 Un caller du noyau ne doit jamais sélectionner DeepSeek, Gemini, Groq ou autre fournisseur par marque sauf adapter/compatibilité.

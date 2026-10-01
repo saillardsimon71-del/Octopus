@@ -87,10 +87,10 @@ class BackendUnavailable(RuntimeError):
 # --- découverte (jamais d'installation) -------------------------------------------------------
 
 def platform_target() -> str:
-    machine = platform.machine().lower()
-    arch = "arm64" if machine in {"arm64", "aarch64"} else "x64"
     if sys.platform.startswith("win"):
         return "win32-x64"  # agent-browser ne publie que x64 ; ARM64 l'émule (comme Hermes)
+    machine = platform.machine().lower()
+    arch = "arm64" if machine in {"arm64", "aarch64"} else "x64"
     if sys.platform == "darwin":
         return f"darwin-{arch}"
     return f"linux-{arch}"

@@ -178,6 +178,27 @@ def load(path: Path | None = None) -> Catalog:
         return cached[1]
     raw = json.loads(p.read_text(encoding="utf-8"))
     raw = _overlay_omniroute(raw)
+    economical_free = {
+        "agent.react_step": ["omniroute/devworker-groq", "openrouter/dots-3-free", "groq/gpt-oss-120b"],
+        "agent.plan": ["openrouter/dots-3-free", "omniroute/devworker-groq", "groq/gpt-oss-120b"],
+        "agent.synthesize": ["openrouter/dots-3-free", "omniroute/devworker-groq", "groq/gpt-oss-120b"],
+        "agent.decision": ["openrouter/dots-3-free", "omniroute/devworker-groq", "groq/gpt-oss-120b"],
+        "web.summarize": ["openrouter/dots-3-free", "omniroute/devworker-groq", "groq/gpt-oss-120b"],
+        "web.inspect_page": ["openrouter/dots-3-free", "omniroute/devworker-groq", "groq/gpt-oss-120b"],
+    }
+    for name, task in raw.get("tasks", {}).items():
+        candidates = task.setdefault("candidates", {})
+        free = [model_id for model_id in candidates.get("low_cost", candidates.get("zero_cost", []))
+                if raw["models"][model_id]["cost_class"] != "paid"]
+        baseline = task.get("baseline")
+        eligible_baseline = (baseline and (task.get("privacy") != "sensitive"
+                                           or raw["models"][baseline]["cost_class"] == "local"))
+        preferred = [model_id for model_id in economical_free.get(name, []) if model_id in raw["models"]]
+        paid = "deepseek/flash" if name in {"agent.plan", "agent.synthesize"} else baseline
+        if not eligible_baseline:
+            paid = None
+        free_candidates = [] if name == "agent.decision" else (preferred if preferred else free)
+        candidates["economical"] = list(dict.fromkeys(free_candidates)) + ([paid] if paid else [])
     validate(raw)
     cat = Catalog(raw=raw, path=p)
     _cache[cache_key] = (mtime, cat)

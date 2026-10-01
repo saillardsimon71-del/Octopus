@@ -9,6 +9,26 @@ from __future__ import annotations
 from . import cancel
 
 
+def technical_refusal(reason: str) -> bool:
+    """Known invalid inputs/sources are observations, not missing authority.
+
+    Deliberately anchored: a policy refusal containing a DNS error remains a policy
+    refusal. Unknown refusals remain human boundaries in the supervisor.
+    """
+    return reason.startswith((
+        "argument obligatoire manquant :", "args doit être un objet", "outil inconnu :",
+        "hôte local refusé :", "adresse locale ou privée refusée :", "adresse privée refusée :",
+        "hôte non résolvable :", "URL sans hôte", "schéma refusé :",
+        "aucune page ouverte :", "ref attendue de la forme", "ref @",
+        "direction : up, down, left ou right", "text requis :", "touche invalide",
+        "HTTP 404", "HTTP 403", "timeout réseau", "source Web inaccessible",
+        "JSON invalide", "JSONDecodeError:", "InvalidOutput:",
+        "sortie structurée invalide", "HTTP 429", "429", "cooldown",
+        "TimeoutError:", "ConnectionError:",
+        "provider temporairement indisponible", "navigateur indisponible :",
+    )) or (reason.startswith("argument ") and " : type attendu " in reason)
+
+
 def _matches_tool_type(value, token: str) -> bool:
     if token.endswith("_id"):
         token = "int"

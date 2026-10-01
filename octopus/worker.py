@@ -185,7 +185,9 @@ def run_one(owner: str | None = None, *, task_id: int | None = None, lease_s: fl
     started = time.time()
     try:
         with journal.run(task["business"], f"task:{task['kind']}", label=f"tâche #{task['id']}",
-                         budget_usd=task.get("budget_usd")) as run:
+                         budget_usd=task.get("budget_usd"),
+                         resume_run_id=(task.get("run_id") if task.get("budget_usd") is not None
+                                        and journal.current_run() is None else None)) as run:
             if run is not None:
                 tasks.set_run(task["id"], run.id, owner=owner)
             ctx.check_cancel()

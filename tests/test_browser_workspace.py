@@ -507,6 +507,31 @@ def test_supervisor_measures_verified_browser_actions_and_escalates_ambiguity():
     assert output["success"] is True and output["observed"] == 1 and output["human_boundary"] is None
 
 
+def test_closed_browser_read_can_reopen_without_replaying_an_effect(monkeypatch):
+    task_id = tasks.enqueue(BUSINESS, "supervisor.objective_work", {"objective_id": 1, "pursuit": True})
+    space = _space(f"t{task_id}", task_id)
+    monkeypatch.setattr(bw, "workspace", lambda: space)
+    assert bw.call("navigate", url=ORIGIN + "/")["ok"]
+    saved = tasks.step_value(task_id, "browser.observation")
+    original = FakeSession.run
+
+    def run(session, command, args=(), **kwargs):
+        if session.path is None and command == "snapshot":
+            return {"success": False, "error": "Target page, context or browser has been closed"}
+        return original(session, command, args, **kwargs)
+
+    monkeypatch.setattr(FakeSession, "run", run)
+    FakeSession.instances[-1].path = None
+    lost = bw.call("snapshot")
+    assert lost["ok"] is False and "closed" in lost["error"]
+    assert tasks.step_value(task_id, "browser.observation")["snapshot"] == saved["snapshot"]
+    reopened = bw.call("navigate", url=ORIGIN + "/")
+    assert reopened["ok"] and "Accueil" in reopened["snapshot"]
+    assert tasks.pending_human_requests(BUSINESS) == []
+    assert _rows() == []
+    assert space._commands < bw.MAX_COMMANDS
+
+
 def test_goal_text_lists_only_human_granted_browser_sites():
     objective_id = strategy.create("objective", BUSINESS, "Devis", created_by="human", statement="Obtenir un devis")
     objective = strategy.get("objective", objective_id, BUSINESS)

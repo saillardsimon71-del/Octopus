@@ -7,6 +7,7 @@ that the fact an agent needs survives acquisition while navigation chrome does n
 from __future__ import annotations
 
 import json
+import ipaddress
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,16 @@ from agents import browser, runtime, web_guard
 
 FIXTURES = Path(__file__).parent / "fixtures" / "web_pages.json"
 SEARCH_FIXTURES = Path(__file__).parent / "fixtures" / "search_results.json"
+
+
+@pytest.fixture
+def public_dns(monkeypatch):
+    # The acquisition is mocked below; keep DNS equally offline while retaining
+    # the real public/private address classification in web_guard.
+    def resolve(host):
+        assert host == "example.com"
+        return [ipaddress.ip_address("93.184.216.34")]
+    monkeypatch.setattr(web_guard, "_resolved_ips", resolve)
 
 
 def _cases():
@@ -232,7 +243,7 @@ def test_structured_page_record_survives_agent_step_while_prompt_is_compact(monk
     assert "extraction_method" in step["result"]
 
 
-def test_blocked_or_empty_public_page_is_not_marked_as_visited(monkeypatch):
+def test_blocked_or_empty_public_page_is_not_marked_as_visited(monkeypatch, public_dns):
     url = "https://example.com/blocked"
     blocked = browser.PublicPageRecord(
         requested_url=url,
@@ -258,7 +269,7 @@ def test_blocked_or_empty_public_page_is_not_marked_as_visited(monkeypatch):
         assert url not in web_guard.current().visited
 
 
-def test_public_browse_does_not_spend_an_llm_call_for_page_inspection(monkeypatch):
+def test_public_browse_does_not_spend_an_llm_call_for_page_inspection(monkeypatch, public_dns):
     url = "https://example.com/no-llm"
     text = "contenu principal directement extrait " * 20
     record = browser.PublicPageRecord(
@@ -291,7 +302,7 @@ def test_public_browse_does_not_spend_an_llm_call_for_page_inspection(monkeypatc
     assert result["vision"] is None
 
 
-def test_usable_public_page_is_marked_as_visited(monkeypatch):
+def test_usable_public_page_is_marked_as_visited(monkeypatch, public_dns):
     url = "https://example.com/usable"
     text = "preuve factuelle exploitable " * 20
     usable = browser.PublicPageRecord(

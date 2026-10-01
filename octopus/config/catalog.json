@@ -60,8 +60,8 @@
       "base_url": "https://openrouter.ai/api/v1",
       "api_key_env": "OPENROUTER_API_KEY",
       "timeout_s": 90,
-      "max_retries": 1,
-      "quota_note": "Modeles :free : 20 requetes/min ; 50 requetes/jour, 1 000 apres 10 credits achetes au total.",
+      "max_retries": 0,
+      "quota_note": "Routes :free uniquement ; prix plafonne a zero dans chaque requete.",
       "data_policy": "Depend du fournisseur final de chaque modele gratuit : a verifier modele par modele.",
       "sources": ["https://openrouter.ai/docs/api-reference/limits"]
     },
@@ -90,6 +90,7 @@
     "deepseek/flash": {
       "provider": "deepseek", "api_model": "deepseek-flash", "cost_class": "paid",
       "capabilities": ["json", "vision", "tools"],
+      "structured_methods": ["tool_call", "json_object", "text"],
       "params": {"extra_body": {"thinking": {"type": "disabled"}}},
       "price": {"input_cache_hit": 0.003, "input_cache_miss": 0.15, "output": 0.60, "peak_multiplier": 2.0},
       "notes": "DeepSeek-V4.1-Flash. Mode reflexion desactive (sinon il consomme max_tokens)."
@@ -116,7 +117,18 @@
     "groq/gpt-oss-120b": {
       "provider": "groq", "api_model": "openai/gpt-oss-120b", "cost_class": "free_quota",
       "capabilities": ["json", "tools", "reasoning_effort"],
+      "structured_methods": ["tool_call", "json_object", "text"],
       "notes": "Apache 2.0. Quota gratuit Groq."
+    },
+    "openrouter/qwen3.8-27b-free": {
+      "provider": "openrouter", "api_model": "qwen/qwen3.8-27b:free", "cost_class": "free_quota",
+      "capabilities": ["json", "tools"], "structured_methods": ["tool_call", "text"],
+      "params": {"extra_body": {"reasoning": {"enabled": false}}}
+    },
+    "openrouter/dots-3-free": {
+      "provider": "openrouter", "api_model": "dots-studio/dots-3-note-preview:free", "cost_class": "free_quota",
+      "capabilities": ["json"], "structured_methods": ["json_object", "text"],
+      "params": {"extra_body": {"reasoning": {"enabled": false}}}
     },
     "groq/qwen3.8-27b": {
       "provider": "groq", "api_model": "qwen/qwen3.8-27b", "cost_class": "free_quota",
@@ -152,6 +164,12 @@
     "low_cost": {
       "description": "Local et gratuit d'abord ; payant seulement si aucune alternative validee, dans le budget.",
       "honor_pins": false, "allowed_cost_classes": ["local", "free_quota", "paid"], "require_evidence": true, "fallback": true
+    },
+    "economical": {
+      "description": "Au plus deux essais gratuits, puis DeepSeek seul sous plafond LLM du run.",
+      "honor_pins": false, "allowed_cost_classes": ["local", "free_quota", "paid"],
+      "allowed_paid_providers": ["deepseek"], "max_free_attempts": 2,
+      "paid_timeout_s": 90, "require_evidence": true, "fallback": true
     },
     "flash_fallback": {
       "description": "Profil experimental : routes gratuites d'abord, puis uniquement DeepSeek-V4.1-Flash payant sous budget de mission.",
@@ -226,6 +244,14 @@
         "quality_first": ["deepseek/v4-pro"]
       }
     },
+    "agent.decision": {
+      "needs": ["json"], "privacy": "internal", "baseline": "deepseek/flash",
+      "candidates": {
+        "zero_cost": ["groq/gpt-oss-120b"],
+        "low_cost": ["groq/gpt-oss-120b", "deepseek/flash"],
+        "quality_first": ["deepseek/flash"]
+      }
+    },
     "development.step": {
       "needs": ["json"], "privacy": "internal", "baseline": "deepseek/v4-pro",
       "candidates": {
@@ -275,6 +301,7 @@
     "ORBIT/arbitrage": "podalux.arbitrate",
     "ORBIT/planification": "agent.plan",
     "ORBIT/synthese": "agent.synthesize",
+    "ORBIT/determination": "agent.decision",
     "SOUT/veille_synthese": "web.summarize",
     "SOUT/voir_page": "web.describe_page",
     "*/voir_page": "web.describe_page",

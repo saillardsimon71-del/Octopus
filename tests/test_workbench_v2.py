@@ -43,6 +43,28 @@ def test_snapshot_is_read_only_and_task_done_does_not_close_objective(monkeypatc
     assert read_snapshot("autre")["objectives"] == []
 
 
+def test_snapshot_shows_llm_route_cost_reason_and_remaining_budget():
+    objective_id = supervisor.start_pursuit()
+    task = supervisor.work_tasks("octopus", objective_id)[0]
+    with journal.run("octopus", "task:supervisor.objective_work", budget_usd=0.20,
+                     profile="economical") as run:
+        journal.record_llm_call({"ts": time.time(), "run_id": run.id, "root_run_id": run.root_id,
+                                 "business": "octopus", "task": "agent.plan", "profile": "economical",
+                                 "model": "deepseek/v4-pro", "provider": "deepseek", "cost_class": "paid",
+                                 "attempt": 2, "status": "ok", "cost_usd": 0.01,
+                                 "justification": '{"explanation":"repli apres echec gratuit",'
+                                                  '"considered":[{"reason":"echec gratuit"}]}'})
+    with journal.connect() as connection:
+        connection.execute("UPDATE tasks SET run_id=? WHERE id=?", (run.id, task["id"]))
+    state = read_snapshot("octopus")
+    assert state["pursuit_llm"] == {"spent_usd": 0.01, "budget_usd": 0.20,
+                                    "remaining_usd": 0.19}
+    assert state["llm_calls"][0]["provider"] == "deepseek"
+    assert state["llm_calls"][0]["cost_usd"] == 0.01
+    assert state["llm_calls"][0]["fallback"] is True
+    assert "echec gratuit" in state["llm_calls"][0]["route_reason"]
+
+
 def test_smoke_video_without_objective_requires_file_decode_sha_and_active_evidence(tmp_path):
     agnes_production.ensure_schema()
     target = tmp_path / "livrable.mp4"

@@ -2,6 +2,11 @@
 from __future__ import annotations
 
 import time
+import hashlib
+import sqlite3
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -10,12 +15,75 @@ from agents import config, db, deepseek, runtime
 from octopus import journal
 
 
+@pytest.mark.parametrize("version", [0, 8])
+def test_migrations_converge_across_processes(version):
+    path = journal.paths.journal_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if version:
+        with sqlite3.connect(path) as conn:
+            for target, script in journal._MIGRATIONS:
+                if target <= version:
+                    conn.executescript(script)
+            conn.execute(f"PRAGMA user_version={version}")
+    command = [sys.executable, "-c", "from octopus import journal; "
+               "c=journal.connect(); "
+               "assert c.execute('PRAGMA integrity_check').fetchone()[0]=='ok'; "
+               "assert c.execute('PRAGMA user_version').fetchone()[0]==journal.SCHEMA_VERSION; "
+               "c.close()"]
+    processes = [subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  env=os.environ.copy()) for _ in range(8)]
+    for process in processes:
+        stdout, stderr = process.communicate(timeout=30)
+        assert process.returncode == 0, (stdout, stderr)
+    conn = journal.connect()
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(llm_calls)")}
+        assert all(name in columns for name, _ in journal._SCHEMA_V9_COLUMNS)
+    finally:
+        conn.close()
+
+
+def test_failed_migration_rolls_back_schema_and_version(monkeypatch):
+    monkeypatch.setattr(journal, "_MIGRATIONS", ((1, "CREATE TABLE example(id INTEGER);\n"),
+                                               (2, "INVALID SQL;\n")))
+    with pytest.raises(sqlite3.OperationalError):
+        journal.connect()
+    with sqlite3.connect(journal.paths.journal_path()) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name='example'").fetchone() is None
+
+
 def test_journal_enables_foreign_keys_on_every_connection():
     conn = journal.connect()
     try:
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("wal", [False, True])
+def test_readonly_snapshot_includes_wal_without_touching_source(tmp_path, wal):
+    source = tmp_path / "source.db"
+    writer = sqlite3.connect(source)
+    if wal:
+        writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("CREATE TABLE facts(value TEXT)")
+    writer.execute("INSERT INTO facts VALUES('observation conservée')")
+    writer.commit()
+    if not wal:
+        writer.close()
+    def hashes():
+        return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in tmp_path.glob("source.db*")}
+    before = hashes()
+    view = journal.readonly_connection(source)
+    try:
+        assert view.execute("SELECT value FROM facts").fetchone()[0] == "observation conservée"
+        with pytest.raises(sqlite3.OperationalError):
+            view.execute("DELETE FROM facts")
+    finally:
+        view.close()
+    assert hashes() == before
+    writer.close()
 
 
 def runs() -> list[dict]:

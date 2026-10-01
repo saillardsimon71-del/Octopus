@@ -10,7 +10,7 @@ import pytest
 
 from agents import config, deepseek, evals
 from agents.agents import CATALOG, ORBIT
-from octopus import bench, journal, report
+from octopus import bench, journal, octopus_evals, report
 from octopus.bench import CheckResult, EvalItem, EvalTask
 from octopus.pricing import Usage
 
@@ -80,6 +80,41 @@ def test_checker_crash_does_not_break_the_bench(transport, providers_up, monkeyp
     transport.reply("{}")
     result = bench.run_bench("crash_suite", ["ollama/qwen3.5-2b"], out_dir=tmp_path, log=lambda s: None)
     assert result["rows"][0]["passed"] == 0
+
+
+def test_bench_records_valid_structured_tool_call(transport, providers_up, monkeypatch, tmp_path):
+    schema = {"type": "object", "properties": {"id": {"type": "string"}},
+              "required": ["id"], "additionalProperties": False}
+    tool = {"type": "function", "function": {"name": "lookup_record", "parameters": schema}}
+    module = types.ModuleType("tool_suite")
+    module.build_suite = lambda root: [EvalTask("octopus.tool", "tool", [
+        EvalItem("lookup", MSG,
+                 lambda text: CheckResult(json.loads(text) == {"action": "lookup_record", "id": "R-17"},
+                                          1.0, {"json": True}),
+                 json_mode=True, json_schema=schema, tool_schemas=[tool],
+                 require_tool_call=True, needs=("tools",))])]
+    monkeypatch.setitem(sys.modules, "tool_suite", module)
+    transport.reply('{"action":"lookup_record","id":"R-17"}')
+
+    result = bench.run_bench("tool_suite", ["groq/gpt-oss-120b"], out_dir=tmp_path,
+                             log=lambda s: None)
+
+    assert result["rows"][0]["tool_valid"] is True
+    assert transport.calls[0][1]["tool_choice"] == "required"
+
+
+def test_octopus_suite_checks_runtime_contracts():
+    tasks = {task.name: task.items[0] for task in octopus_evals.build_suite(None)}
+    assert tasks["octopus.plan"].check('{"tasks":[{"role":"SOUT","task":"Collecter les prix"},'
+                                       '{"role":"SOUT","task":"Vérifier les prix sans prise de contact"}]}').passed
+    assert not tasks["octopus.plan"].check('{"tasks":["Collecter et vérifier"]}').passed
+    assert tasks["octopus.json"].check('{"tool":"search","args":{"query":"Atelier Delta tarif"}}').passed
+    assert not tasks["octopus.json"].check('{"tool":"publish","args":{}}').passed
+    assert tasks["octopus.synthesis"].check('{"rapport":"49 puis 59 EUR, aucune vente prouvée."}').passed
+    assert not tasks["octopus.synthesis"].check('{"rapport":{"summary":"49 puis 59"}}').passed
+    assert tasks["octopus.decision"].check('{"rapport":"Paiement sans preuve.","determination":'
+                                           '{"action":"pause","reason":"preuve bancaire absente",'
+                                           '"next_goal":"vérifier le relevé","permission":""}}').passed
 
 
 # --- suite Podalux -------------------------------------------------------------------------

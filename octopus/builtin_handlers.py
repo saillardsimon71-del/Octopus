@@ -114,7 +114,7 @@ def supervisor_objective_work(ctx):
     """
     from . import supervisor
     result = supervisor.execute_objective_work(ctx)
-    ctx.emit("supervisor.work.done", {k: result[k] for k in
+    ctx.emit("supervisor.work.done", {k: result.get(k) for k in
                                       ("objective_id", "execution_status", "synthesis_status", "observed",
                                        "success", "measured", "human_boundary")})
     return result

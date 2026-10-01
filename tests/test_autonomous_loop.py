@@ -38,12 +38,13 @@ def _acquisition(url: str = "https://example.com/demande-ouverte") -> dict:
             "result": json.dumps({"url": url, "texte": "besoin explicité par l'acheteur. " * 40})}
 
 
-def _fake_mission(calls: list, *, urls=(), execution_status="completed", synthesis_status="validated"):
+def _fake_mission(calls: list, *, urls=(), execution_status="completed", synthesis_status="validated",
+                  synthesis_error=None):
     def run_mission(goal, **kwargs):
         calls.append({"goal": goal, **kwargs})
         return {"results": [{"steps": [_acquisition(url) for url in urls]}], "plan": [{"id": 1}],
                 "execution_status": execution_status, "synthesis_status": synthesis_status,
-                "business_signals": []}
+                "business_signals": [], "synthesis_error": synthesis_error}
     return run_mission
 
 
@@ -168,11 +169,52 @@ def test_autonomous_loop_never_declares_success_without_a_measurement(handlers, 
     assert not strategy.list_items("evidence", BUSINESS)
 
 
-def test_autonomous_loop_requests_human_boundary_then_resumes_without_repeating_work(handlers, monkeypatch):
-    """F.4 + D : frontière humaine réelle, réponse, reprise sans rejouer le travail déjà persisté."""
+@pytest.mark.parametrize("error", [
+    "InvalidOutput: JSONDecodeError: Invalid control character",
+    "NoEligibleModel: tous les candidats en cooldown 429",
+])
+def test_llm_technical_failure_retries_without_human_boundary(handlers, monkeypatch, error):
     calls: list = []
-    monkeypatch.setattr(runtime, "run_mission", _fake_mission(calls, execution_status="llm_unavailable",
-                                                              synthesis_status="degraded"))
+    def unavailable(goal, **kwargs):
+        calls.append({"goal": goal, **kwargs})
+        return {"results": [{"steps": [_acquisition()]}], "plan": [{"id": 1}],
+                "execution_status": "llm_unavailable", "synthesis_status": "degraded",
+                "synthesis_error": error}
+
+    monkeypatch.setattr(runtime, "run_mission", unavailable)
+    objective_id = _active_objective(criteria="usable_browse_count>=2")
+    first_id = supervisor.plan_work(BUSINESS, strategy.get("objective", objective_id, BUSINESS))
+    assert worker.run_one(task_id=first_id, **QUIET)["status"] == "done_degraded"
+    first = tasks.get(first_id)
+    assert first["output"]["results"][0]["steps"] == [_acquisition()]
+    report = supervisor.tick(businesses=[BUSINESS], max_attempts=2, retry_delay_s=0)
+    decision = report["objectives"][0]["decision"]
+    assert decision["outcome"] == "retry"
+    assert report["human_boundaries"] == []
+    assert tasks.pending_human_requests(BUSINESS) == []
+    second_id = decision["next_work_task_id"]
+    assert worker.run_one(task_id=second_id, **QUIET)["status"] == "done_degraded"
+    report = supervisor.tick(businesses=[BUSINESS], max_attempts=2, retry_delay_s=0)
+    assert report["objectives"][0]["decision"]["outcome"] == "exhausted"
+    assert report["human_boundaries"] == []
+    assert tasks.pending_human_requests(BUSINESS) == []
+    assert len(calls) == 2
+    decisions = {d["decision"] for d in strategy.list_items("decision", BUSINESS)}
+    assert {"retry", "exhausted"} <= decisions
+    assert strategy.get("objective", objective_id, BUSINESS)["status"] == "paused"
+
+
+@pytest.mark.parametrize("execution_status,error", [
+    ("llm_unavailable", "BudgetExceeded: plafond LLM atteint"),
+    ("synthesis_unavailable", "BudgetExceeded: plafond LLM atteint"),
+    ("budget_exceeded", "(budget dépassé)"),
+])
+def test_autonomous_loop_budget_boundary_resumes_without_repeating_work(handlers, monkeypatch, execution_status,
+                                                                          error):
+    calls: list = []
+    monkeypatch.setattr(runtime, "run_mission", _fake_mission(
+        calls, execution_status=execution_status, synthesis_status="degraded",
+        synthesis_error=error))
     objective_id = _active_objective()
     supervisor.bootstrap(BUSINESS, tick_every_s=0.05)
 
@@ -182,20 +224,18 @@ def test_autonomous_loop_requests_human_boundary_then_resumes_without_repeating_
         assert _wait(lambda: bool(tasks.pending_human_requests(BUSINESS)))
         (request,) = tasks.pending_human_requests(BUSINESS)
         assert request["key"] == supervisor.boundary_key(objective_id)
-        assert "route LLM gratuite" in request["question"]
+        assert "plafond LLM atteint" in request["question"]
         assert len(calls) == 1
-        # Le tick suivant ne duplique jamais la demande humaine déjà ouverte.
         assert supervisor.tick(businesses=[BUSINESS])["human_boundaries"][0]["action"] == "waiting_human"
         assert len(tasks.pending_human_requests(BUSINESS)) == 1
-        # Réponse humaine = autorisation : le travail reprend, sans rejouer la mission mémoïsée.
-        assert tasks.answer(request["id"], "route gratuite rétablie") == request["task_id"]
+        assert tasks.answer(request["id"], "Plafond examiné") == request["task_id"]
         assert _wait(lambda: len(supervisor.work_tasks(BUSINESS, objective_id)) >= 2
                      and supervisor.work_tasks(BUSINESS, objective_id)[1]["status"] not in tasks.ACTIVE)
     finally:
         stop.set()
         thread.join(timeout=5)
 
-    assert len(calls) == 2, "une mission par tâche de travail : aucune étape persistée n'est rejouée"
+    assert len(calls) == 2
     decisions = {d["decision"] for d in strategy.list_items("decision", BUSINESS)}
     assert {"human_boundary", "human_answer"} <= decisions
     assert strategy.get("objective", objective_id, BUSINESS)["status"] == "active"

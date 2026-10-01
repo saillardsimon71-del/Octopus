@@ -16,11 +16,12 @@ from . import config
 
 
 def _conn() -> sqlite3.Connection:
+    from octopus.journal import readonly_connection
     readonly = os.environ.get("OCTOPUS_WORKBENCH_READONLY") == "1"
     if not readonly:
         config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     # GUI, cycle et agents écrivent depuis des processus distincts : attendre plutôt qu'échouer (audit M6)
-    conn = (sqlite3.connect(config.DB_PATH.as_uri() + "?mode=ro", uri=True, timeout=10)
+    conn = (readonly_connection(config.DB_PATH)
             if readonly else sqlite3.connect(str(config.DB_PATH), timeout=10))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=10000")

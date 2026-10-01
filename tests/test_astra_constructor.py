@@ -1,6 +1,7 @@
 import json
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +16,8 @@ POWERSHELL = "powershell"
 
 
 def run(*args: str, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
+    if args and args[0] in {POWERSHELL, "docker"} and not shutil.which(args[0]):
+        pytest.skip(f"prérequis de plateforme absent : {args[0]}")
     return subprocess.run(
         args,
         cwd=cwd,
@@ -880,6 +883,7 @@ def test_worker_uncommitted_protected_path_is_fatal(tmp_path: Path):
     assert "uncommitted path" in payload["error"]
 
 
+@pytest.mark.skipif(not shutil.which(POWERSHELL), reason="constructeur Windows : powershell absent")
 def test_external_runner_emits_baseline_failure_receipt_and_review_continues(tmp_path: Path):
     repo = init_repo(tmp_path)
     request_id = "baseline-failure-001"

@@ -4,11 +4,13 @@ from __future__ import annotations
 import json
 import hashlib
 import http.client
+import os
 import sqlite3
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from octopus import agnes, paths
+from octopus import agnes, journal, paths
 
 
 def _agnes_health(channels: list[dict]) -> str:
@@ -38,8 +40,10 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
         return {"objectives": [], "tasks": [], "generations": [], "events": [],
                 "requests": [], "channels": [], "allowances": [], "ledger": [],
                 "businesses": [], "token_cost_usd": 0.0, "agnes_api_cost": None,
-                "agnes_health": "Non sondé"}
-    connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
+                "agnes_health": "Non sondé", "decisions": [], "evidence": [], "browser": [],
+                "llm_calls": [], "pursuit_llm": None}
+    connection = (journal.readonly_connection(path) if os.environ.get("OCTOPUS_WORKBENCH_READONLY") == "1"
+                  else sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10))
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only=ON")
     clause = "" if business == "all" else " WHERE business=?"
@@ -61,17 +65,81 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
         generations = rows("agnes_video_generations")
         events = rows("events", limit=100)
         requests = rows("human_requests")
+        from octopus.supervisor import technical_pursuit_request
+        by_task = {task["id"]: task for task in tasks}
+        for request in requests:
+            work = by_task.get(request["task_id"])
+            request["technical_obsolete"] = False
+            if not work or "task_steps" not in present or request["status"] != "pending":
+                continue
+            memo = connection.execute("SELECT value FROM task_steps WHERE task_id=? AND key='determination'",
+                                      (work["id"],)).fetchone()
+            request["technical_obsolete"] = technical_pursuit_request(
+                {**work, "input": json.loads(work["input"] or "{}")}, request,
+                json.loads(memo["value"]) if memo else {})
         channels = rows("economic_channels")
         allowances = rows("spend_allowances")
         ledger = rows("ledger_entries")
-        evidence = {row["id"]: row for row in rows("strategy_evidence", "id, business, status, nature, source_type, source_ref")}
+        evidence = {row["id"]: row for row in rows("strategy_evidence")}
         links = rows("strategy_links", "business, from_type, from_id, to_type, to_id, relation")
         decisions = {row["id"]: row for row in rows("strategy_decisions")}
+        browser = []
+        if "task_steps" in present:
+            browser = [dict(row) for row in connection.execute(
+                "SELECT s.task_id, s.value, t.status, t.lease_until, t.business, t.input FROM task_steps s "
+                "JOIN tasks t ON t.id=s.task_id WHERE s.key='browser.observation'" +
+                ("" if business == "all" else " AND t.business=?") + " ORDER BY s.ts DESC LIMIT 30", args)]
+            for observation in browser:
+                observation.update(json.loads(observation.pop("value")))
+                work_input = json.loads(observation.pop("input") or "{}")
+                objective = next((o for o in objectives if o["id"] == work_input.get("objective_id")), None)
+                observation["goal"] = objective["statement"] if objective else work_input.get("goal", "")
+                if observation["session"] == "open" and (observation["status"] != "running" or
+                        (observation["lease_until"] or 0) < time.time()):
+                    observation["session"] = "unknown"
         if "llm_calls" in present:
             token_sql = "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls" + clause
             token_cost = round(float(connection.execute(token_sql, args).fetchone()[0]), 6)
+            llm_calls = [dict(row) for row in connection.execute(
+                "SELECT ts, task, provider, model, resolved_provider, resolved_model, cost_class, "
+                "attempt, status, error, cost_usd, provider_cost_usd, justification FROM llm_calls" + clause +
+                " ORDER BY id DESC LIMIT 20", args)]
+            for call in llm_calls:
+                reason = json.loads(call.pop("justification") or "{}")
+                failures = [item["reason"] for item in reason.get("considered", [])
+                            if item.get("reason", "").startswith(("echec", "sortie invalide"))]
+                call["fallback"] = call["status"] == "ok" and bool(failures)
+                call["route_reason"] = reason.get("explanation") or "; ".join(failures) or call["error"]
         else:
             token_cost = 0.0
+            llm_calls = []
+        pursuit = next((task for task in tasks if task["kind"] == "supervisor.objective_work"
+                        and json.loads(task["input"] or "{}").get("pursuit")), None)
+        pursuit_llm = None
+        if pursuit:
+            spent = 0.0
+            cost_roots = set()
+            cursor = pursuit
+            by_task_id = {task["id"]: task for task in tasks}
+            while cursor:
+                if cursor["run_id"] and "runs" in present and "llm_calls" in present:
+                    root = connection.execute(
+                        "WITH RECURSIVE a(id, parent_id) AS (SELECT id, parent_id FROM runs WHERE id=? "
+                        "UNION ALL SELECT r.id, r.parent_id FROM runs r JOIN a ON r.id=a.parent_id) "
+                        "SELECT id FROM a WHERE parent_id IS NULL", (cursor["run_id"],)).fetchone()
+                    if root and root["id"] not in cost_roots:
+                        spent += float(connection.execute(
+                            "WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT r.id FROM runs r JOIN sub ON r.parent_id=sub.id) "
+                            "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls WHERE run_id IN (SELECT id FROM sub)",
+                            (root["id"],)).fetchone()[0])
+                        cost_roots.add(root["id"])
+                task_input = json.loads(cursor["input"] or "{}")
+                if task_input.get("round") == 1:
+                    break
+                cursor = by_task_id.get(task_input.get("previous_id"))
+            cap = json.loads(pursuit["input"] or "{}").get("llm_cap_usd", pursuit["budget_usd"])
+            pursuit_llm = {"spent_usd": round(spent, 6), "budget_usd": cap,
+                           "remaining_usd": round(max(0.0, cap - spent), 6) if cap is not None else None}
     finally:
         connection.close()
 
@@ -89,6 +157,10 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
                                                   else result.get("reason", "SHA-256 différent"))
 
     by_id = {task["id"]: task for task in tasks}
+    for task in tasks:
+        task["result"] = json.loads(task.get("output") or "{}") or {}
+        task["technical_obsolete"] = any(r["task_id"] == task["id"] and r["technical_obsolete"] for r in requests) \
+            and not any(r["task_id"] == task["id"] and r["status"] == "pending" and not r["technical_obsolete"] for r in requests)
     for objective in objectives:
         linked = [by_id[link["to_id"]] for link in links if link["business"] == objective["business"]
                   and link["from_id"] == objective["id"] and link["to_id"] in by_id
@@ -117,10 +189,12 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
             event["data"] = {}
     return {"objectives": objectives, "tasks": tasks, "generations": generations,
             "events": events, "requests": requests, "channels": channels,
-            "allowances": allowances, "ledger": ledger,
+            "allowances": allowances, "ledger": ledger, "decisions": list(decisions.values()),
+            "evidence": list(evidence.values()), "browser": browser,
             "businesses": sorted({item["business"] for group in
                                    (objectives, tasks, generations, channels, ledger) for item in group}),
-            "token_cost_usd": token_cost, "agnes_api_cost": None,
+            "token_cost_usd": token_cost, "llm_calls": llm_calls, "pursuit_llm": pursuit_llm,
+            "agnes_api_cost": None,
             "agnes_health": _agnes_health(channels) if check_health else "Non sondé"}
 
 
@@ -131,16 +205,21 @@ def mission_state(objective: dict) -> tuple[str, str]:
             return "À examiner", "Objectif historiquement atteint, mais le MP4 n'est plus vérifiable."
         return "Objectif atteint", "Le Supervisor a clos l'objectif après vérification de la preuve."
     if objective["status"] == "paused":
-        return "En pause", "Une intervention ou une nouvelle décision est nécessaire."
+        latest = (objective.get("work_tasks") or [{}])[-1]
+        return "En pause", (latest.get("result") or {}).get("reason") or latest.get("error") or "Reprendre pour réexaminer l'état dans les limites existantes."
     tasks = objective["work_tasks"]
     if not tasks:
         return "Planification", "L'objectif est autorisé. Le travail n'est pas encore planifié."
     latest = tasks[-1]
-    if latest["status"] == "done":
+    if latest["status"] in ("done", "done_degraded"):
         if any(g["verified"] for g in objective["generations"]):
             return "Vérification", "Le MP4 est vérifié. Le Supervisor doit encore clore l'objectif."
-        return "Vérification", "La tâche est terminée. La preuve MP4 reste à confirmer."
+        if objective.get("success_criteria") == "kept_video_files>=1":
+            return "Vérification", "La tâche est terminée. La preuve MP4 reste à confirmer."
+        return "Travail terminé", "Résultats disponibles. Aucun résultat économique n'est déduit du statut de la tâche."
     if latest["status"] == "waiting_human":
+        if latest.get("technical_obsolete"):
+            return "Reprise technique disponible", "Ancienne source invalide. Cliquer sur Reprendre réconciliera la demande sans accorder de droits."
         return "Votre réponse attendue", latest.get("error") or "Une autorisation ou une réponse est requise."
     if latest["status"] in ("failed", "cancelled"):
         return "À examiner", latest.get("error") or "La tâche s'est interrompue."

@@ -160,6 +160,19 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_pursue(args) -> int:
+    from . import supervisor
+    if args.pause:
+        if args.objective is None:
+            raise ValueError("--pause exige --objective")
+        supervisor.pause_pursuit(args.objective)
+        return 0
+    objective_id = supervisor.start_pursuit(args.goal, objective_id=args.objective)
+    print(f"Objectif #{objective_id} : 0 EUR, zero_cost, consultation, trois cycles maximum.")
+    supervisor.run_pursuit(objective_id)
+    return 0
+
+
 def cmd_runtime(args) -> int:
     """Démarrage durable unique : superviseur autonome + worker, sans chorégraphie manuelle.
 
@@ -416,6 +429,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-tasks", type=int, default=4)
     p.add_argument("--max-failures", type=int, default=2)
     p.add_argument("--dry-run", action="store_true")
+    p = sub.add_parser("pursue", help="démarrer ou reprendre OCTOPUS à budget nul")
+    entry = p.add_mutually_exclusive_group()
+    entry.add_argument("--goal", help="mission libre facultative")
+    entry.add_argument("--objective", type=int, help="objectif existant à reprendre")
+    p.add_argument("--pause", action="store_true", help="suspendre cet objectif")
     p = sub.add_parser("runtime", help="démarrage durable unique : superviseur autonome + worker")
     p.add_argument("--business", default="octopus", help="business porteur du tick superviseur")
     p.add_argument("--tick-every", type=float, default=300.0,
@@ -506,7 +524,7 @@ def main(argv: list[str] | None = None) -> int:
         if not math.isfinite(args.poll) or args.poll <= 0:
             parser.error("worker --poll doit etre fini et strictement positif")
     commands = {"report": cmd_report, "bench": cmd_bench, "models": cmd_models, "doctor": cmd_doctor,
-                "worker": cmd_worker, "runtime": cmd_runtime, "status": cmd_status,
+                "worker": cmd_worker, "runtime": cmd_runtime, "pursue": cmd_pursue, "status": cmd_status,
                 "night-shift": cmd_night_shift, "night-stop": cmd_night_stop,
                 "night-resume": cmd_night_resume, "promotion": cmd_promotion, "enqueue": cmd_enqueue,
                 "tasks": cmd_tasks, "cancel": cmd_cancel,

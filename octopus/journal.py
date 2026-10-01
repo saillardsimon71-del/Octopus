@@ -8,11 +8,14 @@ from __future__ import annotations
 import contextvars
 import functools
 import os
+import shutil
 import sqlite3
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import enabled, paths
 
@@ -586,12 +589,49 @@ def _migrate_v9(conn: sqlite3.Connection) -> None:
         raise
 
 
+def readonly_connection(path) -> sqlite3.Connection:
+    # SQLite mode=ro peut créer/modifier -shm/-wal. Copier les fichiers sans
+    # connexion à la source, puis inclure les transactions WAL dans une vue mémoire.
+    path = Path(path)
+    sources = (path, Path(str(path) + "-wal"))
+
+    def signature():
+        return [(p.stat().st_size, p.stat().st_mtime_ns) if p.exists() else None for p in sources]
+
+    for _ in range(3):
+        with tempfile.TemporaryDirectory(prefix="octopus-readonly-") as directory:
+            before = signature()
+            if before[0] is None:
+                raise sqlite3.OperationalError("Base absente en consultation")
+            target = Path(directory) / "snapshot.db"
+            try:
+                for source, stamp, suffix in zip(sources, before, ("", "-wal")):
+                    if stamp is not None:
+                        shutil.copyfile(source, str(target) + suffix)
+            except FileNotFoundError:
+                continue
+            if signature() != before:
+                continue
+            copied = sqlite3.connect(str(target), timeout=10)
+            memory = sqlite3.connect(":memory:")
+            try:
+                copied.backup(memory)
+                memory.execute("PRAGMA query_only=ON")
+                return memory
+            except BaseException:
+                memory.close()
+                raise
+            finally:
+                copied.close()
+    raise sqlite3.OperationalError("Base en modification pendant la copie ; réessayer la consultation")
+
+
 def connect() -> sqlite3.Connection:
     path = paths.journal_path()
     readonly = os.environ.get("OCTOPUS_WORKBENCH_READONLY") == "1"
     if not readonly:
         path.parent.mkdir(parents=True, exist_ok=True)
-    conn = (sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
+    conn = (readonly_connection(path)
             if readonly else sqlite3.connect(str(path), timeout=10))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=10000")
@@ -603,16 +643,41 @@ def connect() -> sqlite3.Connection:
         conn.close()
         raise RuntimeError("Journal trop ancien pour la consultation ; ouvrir une copie migrée")
     if version < SCHEMA_VERSION:
-        conn.execute("PRAGMA journal_mode=WAL")
-        for target, script in _MIGRATIONS:
-            if version < target:
-                if target == 9:
-                    _migrate_v9(conn)
-                else:
-                    conn.executescript(script)
+        try:
+            # Le changement de mode peut retourner BUSY sans respecter busy_timeout
+            # lorsque deux processus ouvrent un journal neuf en même temps.
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.05)
+            conn.execute("BEGIN IMMEDIATE")
+            # Relire sous le verrou : un autre ouvreur peut avoir déjà migré.
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            for target, script in _MIGRATIONS:
+                if version < target < 9:
+                    statement = ""
+                    for line in script.splitlines(keepends=True):
+                        statement += line
+                        if sqlite3.complete_statement(statement):
+                            conn.execute(statement)
+                            statement = ""
+                    if statement.strip():
+                        conn.execute(statement)
                     conn.execute(f"PRAGMA user_version={target}")
-                    conn.commit()
-                version = target
+                    version = target
+            # executescript ferait un COMMIT implicite et libérerait le verrou.
+            conn.commit()
+            if version < 9:
+                _migrate_v9(conn)
+        except BaseException:
+            conn.rollback()
+            conn.close()
+            raise
     return conn
 
 
@@ -671,29 +736,41 @@ def current_run() -> RunContext | None:
 
 @contextmanager
 def run(business: str, kind: str, *, label: str | None = None, budget_usd: float | None = None,
-        profile: str | None = None):
+        profile: str | None = None, resume_run_id: int | None = None):
     """Ouvre un run (imbrique dans le run courant s'il existe). Cede None si OCTOPUS=off."""
     if not enabled():
         yield None
         return
     parent = _current.get()
-    effective_profile = profile or (parent.profile if parent else None)
+    previous = query("SELECT id, root_id, business, kind, profile FROM runs WHERE id=?", (resume_run_id,))[0] if resume_run_id else None
+    if previous and (parent is not None or previous["business"] != business or previous["kind"] != kind):
+        raise ValueError("reprise de run incompatible")
+    effective_profile = profile or (parent.profile if parent else previous["profile"] if previous else None)
+    parent_id = parent.id if parent else previous["id"] if previous else None
+    root_id = parent.root_id if parent else root_run_id(previous["id"]) if previous else None
     conn = connect()
     try:
         cur = conn.execute(
             "INSERT INTO runs (parent_id, root_id, business, kind, label, profile, budget_usd, status, "
             "started_at, pid) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)",
-            (parent.id if parent else None, parent.root_id if parent else None, business, kind,
+            (parent_id, root_id, business, kind,
              (label or "")[:200], effective_profile, budget_usd, time.time(), os.getpid()),
         )
         run_id = int(cur.lastrowid)
-        if parent is None:
+        if parent is None and previous is None:
             conn.execute("UPDATE runs SET root_id=? WHERE id=?", (run_id, run_id))
         conn.commit()
     finally:
         conn.close()
-    budgets = (parent.budgets if parent else ()) + (((run_id, budget_usd),) if budget_usd is not None else ())
-    ctx = RunContext(run_id, parent.root_id if parent else run_id, business, kind, effective_profile,
+    prior_budgets = ()
+    if previous:
+        ancestors = query("WITH RECURSIVE a(id, parent_id, budget_usd) AS ("
+                          "SELECT id, parent_id, budget_usd FROM runs WHERE id=? UNION ALL "
+                          "SELECT r.id, r.parent_id, r.budget_usd FROM runs r JOIN a ON a.parent_id=r.id) "
+                          "SELECT id, budget_usd FROM a WHERE budget_usd IS NOT NULL", (resume_run_id,))
+        prior_budgets = tuple((row["id"], row["budget_usd"]) for row in ancestors)
+    budgets = (parent.budgets if parent else prior_budgets) + (((run_id, budget_usd),) if budget_usd is not None else ())
+    ctx = RunContext(run_id, root_id if root_id else run_id, business, kind, effective_profile,
                      budget_usd, budgets)
     token = _current.set(ctx)
     status, error = "done", None
@@ -735,6 +812,16 @@ def with_run(business: str, kind: str, *, budget_usd: float | None = None, profi
                 return fn(*args, **kwargs)
         return wrapper
     return decorator
+
+
+def root_run_id(run_id: int) -> int:
+    """Structural root, including historical resumptions with stale root_id metadata."""
+    rows = query("WITH RECURSIVE a(id, parent_id) AS (SELECT id, parent_id FROM runs WHERE id=? "
+                 "UNION ALL SELECT r.id, r.parent_id FROM runs r JOIN a ON r.id=a.parent_id) "
+                 "SELECT id FROM a WHERE parent_id IS NULL", (run_id,))
+    if not rows:
+        raise ValueError(f"racine du run #{run_id} introuvable")
+    return int(rows[0]["id"])
 
 
 def subtree_cost(run_id: int) -> float:
