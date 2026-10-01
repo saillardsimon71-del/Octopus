@@ -88,6 +88,19 @@ def resources_acquire(ctx):
             "detail": state["last_check_detail"], "answer": answer[:200]}
 
 
+@handler("capability.acquire", max_attempts=2, retry_delay_s=60)
+def capability_acquire(ctx):
+    """Acquisition bornée d'une capacité décidée : construction locale puis validation déterministe.
+
+    Aucune dépense, aucun effet externe, aucune permission élargie : une capacité techniquement
+    acquise hors de l'ensemble autorisé reste non exécutable. Rejouable après crash (construction
+    mémoïsée, clef d'idempotence) et la disponibilité est toujours recalculée depuis les registres
+    réels, jamais lue dans une déclaration.
+    """
+    from . import capability_acquisition
+    return capability_acquisition.execute_acquisition(ctx)
+
+
 @handler("supervisor.tick", max_attempts=3, retry_delay_s=60)
 def supervisor_tick(ctx):
     """Une passe du superviseur autonome : objectifs actifs -> travail -> évaluation -> décision.
