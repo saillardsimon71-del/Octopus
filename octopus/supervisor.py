@@ -65,12 +65,6 @@ _CRITERION_RE = re.compile(r"^\s*([a-z_]+)\s*>=\s*(\d+)\s*$", re.IGNORECASE)
 # Critères cumulatifs : « a>=1 ; b>=1 », « a>=1 et b>=1 », « a>=1 and b>=1 », « a>=1 && b>=1 ».
 _CRITERIA_SPLIT_RE = re.compile(r"\s*(?:;|&&|\bet\b|\band\b)\s*", re.IGNORECASE)
 
-# Pannes qui exigent une ressource ou une autorisation que le superviseur ne crée jamais lui-même.
-HUMAN_BOUNDARY_STATUSES = {
-    "llm_unavailable": "route LLM indisponible ou plafond LLM atteint",
-}
-
-
 class SupervisorError(ValueError):
     pass
 
@@ -216,6 +210,8 @@ def _pursuit_mission(ctx, objective):
 
 
 def execute_pursuit(ctx) -> dict:
+    from agents.runtime import TOOLS
+
     objective_id = int(ctx.input["objective_id"])
     objective = strategy.get("objective", objective_id, ctx.business)
     if not objective or objective["status"] != "active":
@@ -228,9 +224,14 @@ def execute_pursuit(ctx) -> dict:
     for subtask in result.get("results") or []:
         for step in subtask.get("steps") or []:
             data = step.get("result_data") or {}
-            if isinstance(data, dict) and data.get("refused"):
-                permission = data.get("reason") or "Action refusée par le navigateur"
-            if step.get("tool") and step["tool"] not in PURSUIT_TOOLS:
+            refused = isinstance(data, dict) and bool(data.get("refused"))
+            refusal = str(data.get("reason") or "") if refused else ""
+            technical = (refusal.startswith(("argument obligatoire manquant :", "args doit être un objet",
+                                              "hôte non résolvable :", "URL sans hôte", "outil inconnu :"))
+                         or refusal.startswith("argument ") and " : type attendu " in refusal)
+            if refused and not technical:
+                permission = refusal or "Action refusée par le navigateur"
+            if step.get("tool") in TOOLS and step["tool"] not in PURSUIT_TOOLS:
                 permission = f"L'outil {step['tool']} dépasse les outils autorisés pour ce démarrage."
     if result.get("execution_status") not in ("completed", "incomplete"):
         action = "pause"
@@ -706,7 +707,11 @@ def work_output(business: str, objective: dict, criterion: dict | None, result: 
         except Exception:
             ambiguous_agnes = []
 
-    boundary = HUMAN_BOUNDARY_STATUSES.get(execution_status)
+    # Ces statuts incluent InvalidOutput et les cooldowns : seul le plafond explicite requiert l'humain.
+    error = str(result.get("synthesis_error") or "")
+    boundary = ("plafond LLM atteint" if execution_status == "budget_exceeded"
+                or (execution_status in {"llm_unavailable", "synthesis_unavailable"}
+                    and error.startswith("BudgetExceeded:")) else None)
     if ambiguous_browser and not (objective_result or {}).get("success"):
         boundary = (f"action(s) navigateur au résultat inconnu {', '.join(f'#{i}' for i in ambiguous_browser)} : vérifier "
                     f"sur le site puis `python -m octopus browser resolve {business} <id> executed|not_executed`")

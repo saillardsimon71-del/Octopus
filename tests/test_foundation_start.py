@@ -192,6 +192,66 @@ def test_runtime_refuses_effect_even_when_model_asks_and_exposes_request(monkeyp
     assert not journal.query("SELECT id FROM channel_actions")
 
 
+@pytest.mark.parametrize("bad_action", [
+    {"tool": "search", "args": {}},
+    {"tool": "search", "args": {"query": 42}},
+    {"tool": "outil_inexistant", "args": {}},
+])
+def test_invalid_tool_call_can_recover_without_human_request(monkeypatch, bad_action):
+    actions = iter([bad_action, {"tool": "search", "args": {"query": "source publique"}},
+                    {"final": "Recherche publique terminée."}])
+
+    def model(agent, stage, model, messages, **kwargs):
+        if stage == "planification":
+            return {"tasks": [{"role": "SOUT", "task": "Chercher une source publique"}]}
+        if stage == "action":
+            return next(actions)
+        return result()
+
+    monkeypatch.setattr(deepseek, "call_json", model)
+    monkeypatch.setitem(runtime.TOOLS["search"], "fn", lambda args: {"ok": True, "query": args["query"]})
+    oid = supervisor.start_pursuit("Chercher une source publique")
+    supervisor.run_pursuit(oid)
+    work = supervisor.work_tasks("octopus", oid)[0]
+    steps = work["output"]["results"][0]["steps"]
+    assert len(steps) == 2
+    assert steps[1]["result_data"]["ok"] is True
+    assert work["output"]["reason"] == "Aucune expérience actuellement justifiée"
+    assert tasks.pending_human_requests("octopus") == []
+
+
+def test_unresolvable_browser_host_can_use_public_alternative_without_human_request(monkeypatch):
+    actions = iter([
+        {"tool": "browser_navigate", "args": {"url": "https://unresolvable.example/page"}},
+        {"tool": "browser_navigate", "args": {"url": "https://alternative.example/page"}},
+        {"final": "Source publique alternative observée."},
+    ])
+    visited = []
+
+    def model(agent, stage, model, messages, **kwargs):
+        if stage == "planification":
+            return {"tasks": [{"role": "SOUT", "task": "Observer une source publique"}]}
+        if stage == "action":
+            return next(actions)
+        return result()
+
+    def navigate(method, **kwargs):
+        visited.append(kwargs["url"])
+        if len(visited) == 1:
+            return {"ok": False, "refused": True, "reason": "hôte non résolvable : unresolvable.example"}
+        return {"ok": True, "url": kwargs["url"], "snapshot": "Observation publique alternative"}
+
+    monkeypatch.setattr(deepseek, "call_json", model)
+    monkeypatch.setattr(browser_workspace, "call", navigate)
+    oid = supervisor.start_pursuit("Observer une source publique")
+    supervisor.run_pursuit(oid)
+    work = supervisor.work_tasks("octopus", oid)[0]
+    assert len(visited) == 2
+    assert work["output"]["results"][0]["steps"][1]["result_data"]["ok"] is True
+    assert work["output"]["reason"] == "Aucune expérience actuellement justifiée"
+    assert tasks.pending_human_requests("octopus") == []
+
+
 def test_legacy_bypass_cannot_spend_in_first_start(monkeypatch):
     monkeypatch.setenv("OCTOPUS", "off")
     monkeypatch.setenv("OCTOPUS_ALLOW_LEGACY_DIRECT", "1")

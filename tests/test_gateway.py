@@ -108,6 +108,14 @@ def test_echoed_response_format_does_not_fake_structured_error():
     assert llm._structured_method_error(EchoedBadRequest("400 response_format echoed")) is False
 
 
+def test_unrelated_http_400_with_echoed_format_does_not_retry_method():
+    class BadRequest(Exception):
+        status_code = 400
+        body = {"error": {"message": "max_tokens invalide; response_format=json_object"}}
+
+    assert llm._structured_method_error(BadRequest("400")) is False
+
+
 def test_failed_generation_field_is_structured_error():
     class FailedGeneration(Exception):
         body = {
@@ -756,6 +764,150 @@ def test_economical_invalid_free_json_falls_back_once_to_deepseek(transport, pro
     assert result.model == "deepseek/flash"
     assert transport.models == ["openai/gpt-oss-120b", "deepseek-flash"]
     assert [row["status"] for row in calls()] == ["invalid", "ok"]
+
+
+def test_economical_repairs_control_character_without_another_provider_call(transport, providers_up):
+    from agents import runtime
+    transport.reply('{"rapport":"ligne 1\nligne 2","determination":'
+                    '{"action":"pause","reason":"preuve absente","next_goal":"","permission":""}}',
+                    prompt_tokens=10, completion_tokens=20)
+
+    result = llm.complete("agent.decision", MSG, profile="economical", json_mode=True,
+                          validate=lambda text: runtime._validate_synthesis_contract(llm.parse_json(text), True))
+
+    assert result.data["rapport"] == "ligne 1\nligne 2"
+    assert result.data["determination"]["action"] == "pause"
+    assert transport.models == ["deepseek-flash"]
+    row = calls()[0]
+    assert row["status"] == "ok" and row["cost_usd"] > 0
+    assert json.loads(row["justification"])["json_repair"] == "control_chars"
+
+
+def test_economical_failed_single_repair_falls_back_without_second_repair(transport, providers_up):
+    prove("agent.react_step", "groq/gpt-oss-120b")
+    transport.handler = by_model({"openai/gpt-oss-120b": '{"final":"line\nbreak" "other":1}',
+                                  "deepseek-flash": '{"final":"line\nbreak" "other":1}'})
+
+    with pytest.raises(llm.InvalidOutput):
+        llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
+                     validate=llm.parse_json)
+
+    assert transport.models == ["openai/gpt-oss-120b", "deepseek-flash"]
+    rows = calls()
+    assert [row["status"] for row in rows] == ["invalid", "invalid"]
+    assert json.loads(rows[0]["justification"])["json_repair_attempted"] is True
+    assert "json_repair_attempted" not in json.loads(rows[1]["justification"])
+
+
+@pytest.mark.parametrize("arguments", ["", "[]", '{"query":"prix","extra":1}', '{"query":42}', "{}"])
+def test_economical_invalid_tool_arguments_try_structured_alternative(transport, providers_up, arguments):
+    from types import SimpleNamespace
+    prove("agent.react_step", "groq/gpt-oss-120b")
+    schema = {"type": "object", "properties": {"query": {"type": "string"}},
+              "required": ["query"], "additionalProperties": False}
+    tool = {"type": "function", "function": {"name": "search", "parameters": schema}}
+
+    def handler(provider, request):
+        if request.get("tool_choice") == "required":
+            message = SimpleNamespace(tool_calls=[SimpleNamespace(
+                function=SimpleNamespace(name="search", arguments=arguments))])
+            return llm._declarative_tool_text(request, message)
+        return ('{"tool":"search","args":{"query":"prix"}}', Usage(prompt_tokens=20, completion_tokens=10))
+
+    transport.handler = handler
+    result = llm.complete("agent.react_step", MSG, profile="economical", json_schema=schema,
+                          tool_schemas=[tool], validate=llm.parse_json)
+
+    assert result.data["args"]["query"] == "prix"
+    assert transport.models == ["openai/gpt-oss-120b"] * 2
+    assert transport.calls[0][1]["tool_choice"] == "required"
+    assert transport.calls[1][1]["response_format"] == {"type": "json_object"}
+    assert [row["status"] for row in calls()] == ["error", "ok"]
+
+
+def test_transport_preserves_usage_when_tool_call_is_invalid(monkeypatch):
+    from types import SimpleNamespace
+    provider = {"base_url": "mock", "api_key_env": None, "timeout_s": 1, "max_retries": 0}
+    request = {"model": "deepseek-flash", "messages": MSG, "tool_choice": "required",
+               "tools": [{"type": "function", "function": {"name": "search", "parameters": {
+                   "type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}}]}
+    message = SimpleNamespace(content="", tool_calls=[SimpleNamespace(
+        function=SimpleNamespace(name="search", arguments="{}"))])
+    response = SimpleNamespace(choices=[SimpleNamespace(message=message)],
+                               usage=SimpleNamespace(prompt_tokens=20, completion_tokens=10), model="deepseek-flash")
+    raw = SimpleNamespace(parse=lambda: response, headers={}, request_id="request-1")
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        with_raw_response=SimpleNamespace(create=lambda **kwargs: raw))))
+    monkeypatch.setattr(llm, "_transport_override", None)
+    llm._clients[("mock", None, 1, 0)] = client
+
+    with pytest.raises(llm.StructuredResponseError) as error:
+        llm._transport(provider, request)
+
+    result = error.value.result
+    assert str(error.value).startswith("arguments requis absents")
+    assert result.usage.prompt_tokens == 20 and result.usage.completion_tokens == 10
+    assert result.request_id == "request-1"
+
+
+def test_paid_malformed_tool_response_is_charged_before_method_fallback(transport, providers_up):
+    schema = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
+    tool = {"type": "function", "function": {"name": "search", "parameters": schema}}
+    transport.handler = lambda provider, request: llm.StructuredResponseError(
+        "arguments requis absents pour l'outil structuré search: ['query']",
+        llm.TransportResult("", Usage(prompt_tokens=20, completion_tokens=10), request["model"],
+                            resolved_model=request["model"], resolved_provider="deepseek", provider_cost_usd=0.001))
+
+    with journal.run("octopus", "task:mission", budget_usd=0.001, profile="economical") as run:
+        with pytest.raises(llm.BudgetExceeded, match="budget du run"):
+            llm.complete("agent.decision", MSG, profile="economical", json_schema=schema,
+                         tool_schemas=[tool], validate=llm.parse_json, max_tokens=50)
+        assert journal.subtree_cost(run.id) == pytest.approx(0.001)
+
+    assert transport.models == ["deepseek-flash"]
+    assert calls()[0]["status"] == "invalid" and calls()[0]["cost_usd"] == pytest.approx(0.001)
+
+
+def test_economical_method_change_rechecks_consumed_run_budget(transport, providers_up):
+    class UnsupportedFormat(Exception):
+        status_code = 400
+        body = {"error": {"message": "response_format is not supported"}}
+
+    def handler(provider, request):
+        run = journal.current_run()
+        journal.record_llm_call({"ts": time.time(), "run_id": run.id, "root_run_id": run.root_id,
+                                 "business": "octopus", "task": "other", "model": "deepseek/flash",
+                                 "provider": "deepseek", "profile": "economical", "cost_class": "paid",
+                                 "status": "ok", "cost_usd": 0.001})
+        return UnsupportedFormat("400")
+
+    transport.handler = handler
+    with journal.run("octopus", "task:mission", budget_usd=0.001, profile="economical"):
+        with pytest.raises(llm.BudgetExceeded, match="budget du run"):
+            llm.complete("agent.decision", MSG, profile="economical", json_mode=True,
+                         max_tokens=50, validate=llm.parse_json)
+
+    assert transport.models == ["deepseek-flash"]
+
+
+def test_economical_deepseek_structured_400_uses_one_text_alternative(transport, providers_up):
+    class UnsupportedFormat(Exception):
+        status_code = 400
+        body = {"error": {"message": "json_object response_format is not supported"}}
+
+    def handler(provider, request):
+        if "response_format" in request:
+            return UnsupportedFormat("400")
+        return ('{"rapport":"Aucune preuve bancaire."}', Usage(prompt_tokens=20, completion_tokens=10))
+
+    transport.handler = handler
+    result = llm.complete("agent.decision", MSG, profile="economical", json_mode=True,
+                          validate=llm.parse_json)
+
+    assert result.data == {"rapport": "Aucune preuve bancaire."}
+    assert transport.models == ["deepseek-flash", "deepseek-flash"]
+    assert "response_format" not in transport.calls[1][1]
+    assert [row["status"] for row in calls()] == ["error", "ok"]
 
 
 def test_economical_invalid_plan_contract_falls_back_to_deepseek(transport, providers_up):
