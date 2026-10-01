@@ -325,10 +325,16 @@ def llm_cost_usd(business: str, *, experiment_id: int | None = None, since: floa
             sql += " AND ts>=?"
             params.append(since)
         return round(float(journal.query(sql, tuple(params))[0]["c"]), 6)
-    run_ids = [r["run_id"] for r in journal.query(
-        "SELECT t.run_id FROM strategy_links l JOIN tasks t ON t.id=l.to_id WHERE l.business=? AND l.from_type="
-        "'experiment' AND l.from_id=? AND l.to_type='task' AND t.run_id IS NOT NULL", (business, experiment_id))]
-    return round(sum(journal.subtree_cost(run_id) for run_id in set(run_ids)), 6)
+    rows = journal.query(
+        "WITH RECURSIVE linked_runs(id) AS ("
+        "SELECT DISTINCT t.run_id FROM strategy_links l JOIN tasks t ON t.id=l.to_id "
+        "WHERE l.business=? AND l.from_type='experiment' AND l.from_id=? "
+        "AND l.to_type='task' AND l.relation='executed_by' AND t.run_id IS NOT NULL), "
+        "subtree(id) AS (SELECT id FROM linked_runs UNION "
+        "SELECT r.id FROM runs r JOIN subtree s ON r.parent_id=s.id) "
+        "SELECT COALESCE(SUM(c.cost_usd), 0) AS cost FROM llm_calls c "
+        "WHERE c.run_id IN (SELECT id FROM subtree)", (business, experiment_id))
+    return round(float(rows[0]["cost"]), 6)
 
 
 # --- dépenses --------------------------------------------------------------------------------------
@@ -533,18 +539,254 @@ def metric_value(business: str, experiment: dict) -> tuple[float | None, str]:
     return (round(sum(r["value"] for r in rows), 6) if rows else None), "computed"
 
 
-def evaluate_experiment(business: str, experiment_id: int, *, apply: bool = True, now: float | None = None) -> dict:
-    """Verdict calculé en code. Avec `apply`, conclut une expérience tranchée et propose la décision suivante.
+def _evaluation_evidence(business: str, experiment_id: int, *, _conn=None) -> tuple[dict, dict] | None:
+    """Retourne une évaluation calculée encore active, sans jamais réécrire la preuve."""
+    query = journal.query if _conn is None else lambda sql, params: _conn.execute(sql, params).fetchall()
+    rows = query(
+        "SELECT * FROM strategy_evidence WHERE business=? AND experiment_id=? AND status='active' "
+        "AND nature='computed' AND source_type='economy.evaluate' AND source_ref=? "
+        "AND created_by='policy:evaluate' ORDER BY id", (business, experiment_id, f"experiment#{experiment_id}"))
+    for row in rows:
+        try:
+            payload = json.loads(row["observation"])
+        except (TypeError, ValueError):
+            continue
+        if (isinstance(payload, dict) and payload.get("experiment_id") == experiment_id
+                and payload.get("verdict") in strategy.OUTCOMES
+                and payload.get("verdict_scope") == "configured_metric_only"):
+            return dict(row), payload
+    return None
 
-    supports : valeur >= cible ; refutes : à l'échéance valeur <= seuil d'arrêt, ou budget
-    effectivement consommé sans succès ; inconclusive : mesure absente/insuffisante à l'échéance.
-    Ce verdict porte uniquement sur la métrique configurée, jamais sur le succès économique global.
+
+def _lesson_content(experiment: dict, evaluated: dict, evidence_id: int, decision_id: int, *, _conn=None) -> dict:
+    query = journal.query if _conn is None else lambda sql, params: _conn.execute(sql, params).fetchall()
+    outcomes = evaluated.get("outcomes") if isinstance(evaluated.get("outcomes"), dict) else {}
+    contribution = outcomes.get("contribution_by_currency") or {}
+    receipts = {currency: values.get("customer_receipts_observed") for currency, values in contribution.items()
+                if values.get("customer_receipts_observed") is not None}
+    refunds = {currency: values.get("customer_refunds_observed") for currency, values in contribution.items()
+               if values.get("customer_refunds_observed") is not None}
+    variable_costs = {currency: values.get("variable_cost_observed") for currency, values in contribution.items()
+                      if values.get("variable_cost_observed") is not None}
+    recorded_margin = {currency: values.get("recorded_contribution") for currency, values in contribution.items()
+                       if values.get("recorded_contribution") is not None}
+    if not receipts:
+        economic_status = "unknown_no_observed_customer_payment"
+        economic_note = "Encaissement client non établi par les preuves de cette expérience; il reste inconnu."
+    elif any(value > 0 for value in receipts.values()):
+        economic_status = "customer_receipts_observed"
+        economic_note = "Encaissement client observé, distinct de la marge complète et de la récurrence."
+    elif all(value == 0 for value in receipts.values()):
+        economic_status = "observed_zero_net_customer_receipts"
+        economic_note = "Les écritures indiquent zéro encaissement client net observé dans les devises listées."
+    else:
+        economic_status = "nonpositive_net_customer_receipts_observed"
+        economic_note = "Les écritures indiquent des encaissements nets non positifs; aucune réussite économique n'en est inférée."
+
+    raw_values = outcomes.get("evidence_ids", [])
+    raw_ids = (sorted({int(item) for item in raw_values if type(item) is int and item > 0})
+               if isinstance(raw_values, list) else [])
+    supporting_evidence = []
+    unverified_claims = []
+    if raw_ids:
+        placeholders = ",".join("?" for _ in raw_ids)
+        evidence_rows = query(
+            f"SELECT id, nature, summary, source_type, source_ref, captured_at, observation, metric, value, unit, created_by "
+            f"FROM strategy_evidence WHERE business=? AND experiment_id=? "
+            f"AND id IN ({placeholders}) ORDER BY id",
+            (experiment["business"], experiment["id"], *raw_ids))
+        for row in evidence_rows:
+            # Contenu historique immuable, même après retrait. learning_context vérifie
+            # séparément les statuts actifs avant de réutiliser cette conclusion.
+            item = dict(row)
+            if ((item["nature"] == "observed" and item["source_ref"] and item["captured_at"])
+                    or (item["nature"] == "computed" and item["source_ref"]
+                        and item["source_type"] == "economy.evaluate" and item["created_by"] == "policy:evaluate")):
+                supporting_evidence.append({
+                    "id": int(item["id"]), "nature": item["nature"],
+                    "kind": "observation" if item["nature"] == "observed" else "computed_evidence",
+                    "summary": item["summary"], "source_type": item["source_type"],
+                    "source_ref": item["source_ref"], "captured_at": item["captured_at"],
+                    "observation": str(item["observation"] or "")[:1200], "metric": item["metric"],
+                    "value": item["value"], "unit": item["unit"],
+                })
+            else:
+                unverified_claims.append({"id": int(item["id"]), "nature": item["nature"],
+                                          "summary": item["summary"],
+                                          "observation": str(item["observation"] or "")[:800]})
+
+    verdict = evaluated["verdict"]
+    if verdict == "supports":
+        metric_note = ("La métrique configurée a atteint sa cible; cela n'établit pas à lui seul la livraison, "
+                       "l'acceptation, l'usage, les encaissements client ni une marge positive.")
+    elif verdict == "refutes":
+        metric_note = ("La métrique configurée réfute l'hypothèse; ne pas répéter la même voie sans preuve "
+                       "observée nouvelle qui la reconsidère explicitement.")
+    else:
+        metric_note = "Résultat inconclusif : une donnée absente reste inconnue, pas un zéro ni un échec."
+    lesson = f"{metric_note} {economic_note}"
+    next_action = {
+        "supports": "Examiner encaissements, marge, récurrence, acceptation et coûts futurs avant toute reproduction.",
+        "refutes": "Éviter de répéter cette hypothèse sans nouvelle preuve observée explicite; comparer une autre voie.",
+        "inconclusive": "Choisir une mesure directe ou abandonner; l'activité ou le travail livré ne prouve pas un succès économique.",
+    }[verdict]
+    return {
+        "schema": "octopus.experiment_learning.v1",
+        "experiment_id": int(experiment["id"]),
+        "hypothesis_id": int(experiment["hypothesis_id"]),
+        "evaluation_evidence_id": evidence_id,
+        "decision_id": decision_id,
+        "metric_result": {"verdict": verdict, "metric": evaluated.get("metric"), "value": evaluated.get("value"),
+                          "scope": "configured_metric_only", "reason": evaluated.get("reason")},
+        "economic_result": {"status": economic_status, "note": economic_note,
+                            "customer_receipts_observed_by_currency": receipts,
+                            "customer_refunds_observed_by_currency": refunds,
+                            "variable_cost_observed_by_currency": variable_costs,
+                            "recorded_contribution_by_currency": recorded_margin,
+                            "contribution_scope": "cash_basis_recorded_only_excludes_human_time_not_full_margin",
+                            "cash_by_currency": outcomes.get("cash_by_currency") or {},
+                            "customer_acceptance": outcomes.get("customer_acceptance", {"status": "unknown"}),
+                            "customer_use": outcomes.get("customer_use", {"status": "unknown"})},
+        "technical_result": outcomes.get("technical_completion", {"status": "unknown", "tasks": []}),
+        "delivery": outcomes.get("delivery", {"status": "unknown"}),
+        "supporting_evidence": supporting_evidence,
+        "unverified_claims_not_used_as_proof": unverified_claims,
+        "historical_costs": {"llm_cost_usd": evaluated.get("llm_cost_usd"),
+                             "cash_by_currency": evaluated.get("cash") or {},
+                             "sunk_costs_are_not_a_decision_input": True},
+        "lesson": lesson,
+        "next_action": next_action,
+        "limitations": ["Verdict porte uniquement sur la métrique configurée.",
+                        "La livraison, l'acceptation, l'usage, le cash reçu et la marge sont des dimensions distinctes.",
+                        "Les coûts passés sont comptables, pas une raison de poursuivre, abandonner ou dépenser davantage.",
+                        "Aucune sortie LLM n'est enregistrée comme résultat ou preuve."],
+    }
+
+
+def _ensure_experiment_lesson(business: str, experiment_id: int, evaluated: dict) -> dict:
+    """Termine de façon rejouable une évaluation, sa chaîne de décisions et sa review."""
+    with tasks._tx() as conn:
+        query = lambda sql, params: conn.execute(sql, params).fetchall()
+        experiment = strategy.get("experiment", experiment_id, business, _conn=conn)
+        if experiment is None:
+            raise StrategyError(f"experiment #{experiment_id} introuvable pour {business!r}")
+        evidence_row, persisted = _evaluation_evidence(business, experiment_id, _conn=conn) or (None, None)
+        if evidence_row is not None:
+            # Le premier verdict persisté fait foi : un retry ne remplace jamais sa preuve historique.
+            evaluated = persisted
+            evidence_id = int(evidence_row["id"])
+        else:
+            if experiment["status"] != "running":
+                return {**evaluated, "lesson_recorded": False}
+            evidence_id = strategy.create(
+                "evidence", business, f"Évaluation de l'expérience #{experiment_id} : {evaluated['verdict']}",
+                _conn=conn, created_by="policy:evaluate", nature="computed", source_type="economy.evaluate",
+                source_ref=f"experiment#{experiment_id}", observation=json.dumps(evaluated, ensure_ascii=False),
+                experiment_id=experiment_id, metric=evaluated.get("metric"), value=evaluated.get("value"))
+            evidence_row = next(dict(row) for row in query(
+                "SELECT * FROM strategy_evidence WHERE id=? AND business=?", (evidence_id, business)))
+
+        experiment = strategy.get("experiment", experiment_id, business, _conn=conn)
+        if experiment["status"] == "running":
+            strategy.transition("experiment", experiment_id, business, "completed", _conn=conn, actor="policy:evaluate",
+                                outcome=evaluated["verdict"], actual_result=str(evaluated.get("reason") or evaluated["verdict"]),
+                                note=f"evidence#{evidence_id}")
+            experiment = strategy.get("experiment", experiment_id, business, _conn=conn)
+
+        hypothesis = strategy.get("hypothesis", int(experiment["hypothesis_id"]), business, _conn=conn)
+        target_status = {"supports": "validated", "refutes": "invalidated", "inconclusive": "inconclusive"}[evaluated["verdict"]]
+        if hypothesis and hypothesis["status"] in {"proposed", "inconclusive"} and hypothesis["status"] != target_status:
+            strategy.transition("hypothesis", int(hypothesis["id"]), business, "testing", _conn=conn, actor="policy:evaluate",
+                                note=f"experiment#{experiment_id}")
+            hypothesis = strategy.get("hypothesis", int(hypothesis["id"]), business, _conn=conn)
+        if (hypothesis and hypothesis["status"] in {"testing", "inconclusive"}
+                and hypothesis["status"] != target_status):
+            strategy.transition("hypothesis", int(hypothesis["id"]), business, target_status, _conn=conn, actor="policy:evaluate",
+                                note=f"experiment#{experiment_id}: verdict limité à la métrique configurée")
+
+        # Les liens dirigés gardent toute la provenance visible dans le graphe stratégique.
+        strategy.link(business, "hypothesis", int(experiment["hypothesis_id"]), "experiment", experiment_id, "tests", _conn=conn)
+        strategy.link(business, "evidence", evidence_id, "experiment", experiment_id, "evaluates", _conn=conn)
+        strategy.link(business, "experiment", experiment_id, "evidence", evidence_id, "produced", _conn=conn)
+
+        decision_summary = f"Suite de l'expérience #{experiment_id}"
+        decision_text = {
+            "supports": "Examiner encaissement, résultats client, coûts et temps humain avant de reproduire",
+            "refutes": "Éviter cette voie et réallouer l'effort; reconsidérer seulement avec une nouvelle preuve explicite",
+            "inconclusive": "Relancer avec une mesure plus directe ou abandonner; résultat économique inconnu",
+        }[evaluated["verdict"]]
+        linked_decisions = query(
+            "SELECT d.id FROM strategy_decisions d JOIN strategy_links l ON l.business=d.business "
+            "AND l.from_type='decision' AND l.from_id=d.id AND l.to_type='evidence' AND l.to_id=? "
+            "AND l.relation='considers' WHERE d.business=? AND d.created_by='policy:evaluate' ORDER BY d.id LIMIT 1", (evidence_id, business))
+        if linked_decisions:
+            decision_id = int(linked_decisions[0]["id"])
+        else:
+            prior_decisions = query(
+                "SELECT id FROM strategy_decisions WHERE business=? AND created_by='policy:evaluate' AND summary=? "
+                "AND decision=? AND rationale=? ORDER BY id LIMIT 1",
+                (business, decision_summary, decision_text, str(evaluated.get("reason") or evaluated["verdict"])))
+            decision_id = int(prior_decisions[0]["id"]) if prior_decisions else strategy.create(
+                "decision", business, decision_summary, _conn=conn, created_by="policy:evaluate", decision=decision_text,
+                rationale=str(evaluated.get("reason") or evaluated["verdict"]))
+        strategy.link(business, "decision", decision_id, "evidence", evidence_id, "considers", _conn=conn)
+        strategy.link(business, "evidence", evidence_id, "decision", decision_id, "informs", _conn=conn)
+
+        lesson = _lesson_content(experiment, evaluated, evidence_id, decision_id, _conn=conn)
+        review_summary = f"Leçon d'expérience #{experiment_id}"
+        prior_reviews = query(
+            "SELECT * FROM strategy_reviews WHERE business=? AND created_by='policy:evaluate' AND summary=? "
+            "ORDER BY id", (business, review_summary))
+        review_row = None
+        for candidate in prior_reviews:
+            try:
+                content = json.loads(candidate["evidence_summary"] or "null")
+            except (TypeError, ValueError):
+                continue
+            if ((candidate["status"] == "scheduled" and not candidate["evidence_summary"])
+                    or (candidate["status"] in {"scheduled", "done"} and content == lesson)):
+                review_row = dict(candidate)
+                break
+        if review_row is None:
+            review_id = strategy.create("review", business, review_summary, _conn=conn, created_by="policy:evaluate")
+            review_row = strategy.get("review", review_id, business, _conn=conn)
+        else:
+            review_id = int(review_row["id"])
+        if review_row["status"] == "scheduled":
+            strategy.update("review", review_id, business, _conn=conn,
+                            evidence_summary=json.dumps(lesson, ensure_ascii=False, sort_keys=True),
+                            next_actions=lesson["next_action"], period_start=experiment["created_at"],
+                            period_end=float(evidence_row["created_at"]))
+            strategy.transition("review", review_id, business, "done", _conn=conn, actor="policy:evaluate",
+                                note=f"experiment#{experiment_id}; evidence#{evidence_id}")
+        strategy.link(business, "review", review_id, "experiment", experiment_id, "reviews", _conn=conn)
+        strategy.link(business, "review", review_id, "evidence", evidence_id, "based_on", _conn=conn)
+        strategy.link(business, "review", review_id, "decision", decision_id, "reviews_decision", _conn=conn)
+        strategy.link(business, "decision", decision_id, "review", review_id, "reviewed_in", _conn=conn)
+        objective_id = int(hypothesis["objective_id"]) if hypothesis else None
+        if objective_id is not None:
+            strategy.link(business, "review", review_id, "objective", objective_id, "reviews", _conn=conn)
+        return {**evaluated, "evidence_id": evidence_id, "decision_id": decision_id,
+                "review_id": review_id, "lesson": lesson, "lesson_recorded": True}
+
+
+def evaluate_experiment(business: str, experiment_id: int, *, apply: bool = True, now: float | None = None) -> dict:
+    """Verdict calculé en code; il porte uniquement sur la métrique configurée.
+
+    supports : valeur >= cible ; refutes : à l'échéance valeur <= seuil d'arrêt ; inconclusive :
+    mesure absente/insuffisante à l'échéance ou plafond consommé sans preuve de réfutation.
+    Un coût historique ou un plafond atteint ne transforme pas à lui seul l'hypothèse en échec.
+    Une tâche terminée ne signifie ni succès commercial ni succès économique.
     """
     business = strategy._business(business)
     now = now or time.time()
     experiment = strategy.get("experiment", experiment_id, business)
     if experiment is None:
         raise StrategyError(f"experiment #{experiment_id} introuvable pour {business!r}")
+    if apply and experiment["status"] in {"running", "completed"}:
+        existing = _evaluation_evidence(business, experiment_id)
+        if existing:
+            return _ensure_experiment_lesson(business, experiment_id, existing[1])
     value, _ = metric_value(business, experiment) if experiment["metric"] else (None, "computed")
     cash = cash_summary(business, experiment_id=experiment_id)
     llm = llm_cost_usd(business, experiment_id=experiment_id)
@@ -560,7 +802,8 @@ def evaluate_experiment(business: str, experiment_id: int, *, apply: bool = True
     elif value is not None and stop is not None and value <= stop and expired:
         verdict, why = "refutes", f"{experiment['metric']} = {value} <= seuil d'arrêt {stop}"
     elif spent is not None and spent > 0 and spent >= experiment["budget_limit"]:
-        verdict, why = "refutes", f"budget consommé ({spent} {experiment['budget_currency']}) sans atteindre la cible"
+        verdict, why = ("inconclusive", f"plafond budgétaire atteint ({spent} {experiment['budget_currency']}) "
+                        "sans résultat concluant; ce coût passé ne réfute pas l'hypothèse")
     elif expired and value is None:
         verdict, why = "inconclusive", "échéance passée sans mesure observée"
     elif expired:
@@ -568,25 +811,21 @@ def evaluate_experiment(business: str, experiment_id: int, *, apply: bool = True
     else:
         verdict, why = "pending", "en cours"
     result = {"experiment_id": experiment_id, "verdict": verdict, "reason": why, "metric": experiment["metric"],
-              "value": value, "cash": cash, "llm_cost_usd": llm, "spent_in_budget_currency": spent, "nature": "computed",
-              "verdict_scope": "configured_metric_only", "outcomes": experiment_outcomes(business, experiment_id)}
-    if not apply or verdict == "pending" or experiment["status"] != "running":
+              "value": value, "cash": cash, "llm_cost_usd": llm, "spent_in_budget_currency": spent,
+              "nature": "computed", "verdict_scope": "configured_metric_only",
+              "outcomes": experiment_outcomes(business, experiment_id)}
+    if not apply or verdict == "pending":
         return result
-    evidence_id = strategy.create(
-        "evidence", business, f"Évaluation de l'expérience #{experiment_id} : {verdict}", created_by="policy:evaluate",
-        nature="computed", source_type="economy.evaluate", source_ref=f"experiment#{experiment_id}",
-        observation=json.dumps(result, ensure_ascii=False), experiment_id=experiment_id,
-        metric=experiment["metric"], value=value)
-    strategy.transition("experiment", experiment_id, business, "completed", actor="policy:evaluate", outcome=verdict,
-                        actual_result=why, note=f"evidence#{evidence_id}")
-    next_step = {"supports": "Revoir livraison, encaissement, résultat client, coûts et temps humain avant de reproduire",
-                 "refutes": "Arrêter cette voie et réallouer l'effort vers une autre hypothèse",
-                 "inconclusive": "Relancer avec une mesure plus directe ou abandonner"}[verdict]
-    decision_id = strategy.create("decision", business, f"Suite de l'expérience #{experiment_id}", created_by="policy:evaluate",
-                                  decision=next_step, rationale=why)
-    strategy.link(business, "decision", decision_id, "evidence", evidence_id, "considers")
-    strategy.link(business, "evidence", evidence_id, "experiment", experiment_id, "evaluates")
-    return {**result, "evidence_id": evidence_id, "decision_id": decision_id}
+    existing = _evaluation_evidence(business, experiment_id)
+    if experiment["status"] == "completed":
+        if existing:
+            return _ensure_experiment_lesson(business, experiment_id, existing[1])
+        # Une clôture legacy sans preuve d'évaluation n'est ni réécrite ni promue en leçon.
+        return result
+    if experiment["status"] != "running":
+        return result
+    return _ensure_experiment_lesson(business, experiment_id, result)
+
 
 
 # --- réinvestissement ------------------------------------------------------------------------------
