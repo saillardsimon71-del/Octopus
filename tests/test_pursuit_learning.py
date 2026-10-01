@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
@@ -382,3 +384,269 @@ def test_determination_contract_discards_malformed_optional_hypothesis_only():
     accepted = runtime._validate_synthesis_contract({"rapport": "Résumé", "determination": bad_decision}, True)
     assert "hypothesis" not in accepted["determination"]
     assert accepted["determination"]["action"] == "continue"
+
+
+def test_second_experiment_can_resolve_an_inconclusive_hypothesis():
+    history = _experience()
+    old = strategy.create("hypothesis", BUSINESS, "Sans mesure", created_by="human",
+                          parent_id=history["objective_id"], statement="Hypothèse à réexaminer")
+    strategy.transition("hypothesis", old, BUSINESS, "testing", actor="human")
+    strategy.transition("hypothesis", old, BUSINESS, "inconclusive", actor="human")
+    exp = strategy.create("experiment", BUSINESS, "Nouvelle mesure", created_by="human", parent_id=old,
+                          action="Mesurer la livraison", metric="delivery", target_value=1)
+    strategy.transition("experiment", exp, BUSINESS, "running", actor="human")
+    strategy.create("evidence", BUSINESS, "Livraison constatée", created_by="human", nature="observed",
+                    source_type="fixture", source_ref="fixture://delivery", captured_at=time.time(),
+                    observation="Livraison", metric="delivery", value=1, experiment_id=exp)
+    result = economy.evaluate_experiment(BUSINESS, exp)
+    assert result["lesson_recorded"] and result["verdict"] == "supports"
+    assert strategy.get("hypothesis", old, BUSINESS)["status"] == "validated"
+
+
+def test_partial_evaluation_is_recovered_even_if_live_metric_now_becomes_pending():
+    history = _experience()
+    exp = history["experiment_id"]
+    evaluation_id = history["result"]["evidence_id"]
+    proof = strategy.get("evidence", evaluation_id, BUSINESS)
+    # État d'une ancienne interruption après clôture, avant création de la review.
+    with tasks._tx() as conn:
+        conn.execute("DELETE FROM strategy_links WHERE from_type='review' OR to_type='review'")
+        conn.execute("DELETE FROM strategy_reviews")
+        conn.execute("DELETE FROM ledger_entries WHERE experiment_id=?", (exp,))
+    result = economy.evaluate_experiment(BUSINESS, exp)
+    assert result["evidence_id"] == evaluation_id and result["verdict"] == "supports"
+    assert result["lesson_recorded"]
+    assert strategy.get("evidence", evaluation_id, BUSINESS) == proof
+
+
+def test_concurrent_evaluations_converge_to_one_complete_chain(monkeypatch):
+    history = _experience()
+    exp = history["experiment_id"]
+    with tasks._tx() as conn:
+        conn.execute("DELETE FROM strategy_links WHERE from_type IN ('review','decision','evidence') "
+                     "OR to_type IN ('review','decision','evidence')")
+        conn.execute("DELETE FROM strategy_reviews")
+        conn.execute("DELETE FROM strategy_decisions")
+        conn.execute("DELETE FROM strategy_evidence WHERE source_type='economy.evaluate'")
+        conn.execute("UPDATE strategy_experiments SET status='running',outcome=NULL WHERE id=?", (exp,))
+    original = strategy.create
+    collision = Barrier(2)
+
+    def delayed_create(kind, *args, **kwargs):
+        # Force la course ancienne check/create; un appel dans une transaction partagée
+        # possède déjà le verrou SQLite et ne doit pas attendre l'autre écrivain.
+        if kind == "evidence" and kwargs.get("source_type") == "economy.evaluate" and kwargs.get("_conn") is None:
+            collision.wait(timeout=5)
+        return original(kind, *args, **kwargs)
+
+    monkeypatch.setattr(strategy, "create", delayed_create)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(economy.evaluate_experiment, BUSINESS, exp) for _ in range(2)]
+        results = [future.result() for future in futures]
+    assert results[0]["evidence_id"] == results[1]["evidence_id"]
+    assert results[0]["decision_id"] == results[1]["decision_id"]
+    assert results[0]["review_id"] == results[1]["review_id"]
+    assert len(strategy.list_items("review", BUSINESS)) == 1
+    assert len(strategy.list_items("decision", BUSINESS)) == 1
+
+
+def test_evaluation_failure_rolls_back_the_entire_chain(monkeypatch):
+    history = _experience()
+    exp = history["experiment_id"]
+    with tasks._tx() as conn:
+        conn.execute("DELETE FROM strategy_links WHERE from_type IN ('review','decision','evidence') "
+                     "OR to_type IN ('review','decision','evidence')")
+        conn.execute("DELETE FROM strategy_reviews")
+        conn.execute("DELETE FROM strategy_decisions")
+        conn.execute("DELETE FROM strategy_evidence WHERE source_type='economy.evaluate'")
+        conn.execute("UPDATE strategy_experiments SET status='running',outcome=NULL WHERE id=?", (exp,))
+    original = strategy.link
+
+    def crash(business, from_type, *args, **kwargs):
+        if from_type == "review":
+            raise RuntimeError("fixture interruption avant liens de review")
+        return original(business, from_type, *args, **kwargs)
+
+    monkeypatch.setattr(strategy, "link", crash)
+    with pytest.raises(RuntimeError, match="fixture interruption"):
+        economy.evaluate_experiment(BUSINESS, exp)
+    assert strategy.get("experiment", exp, BUSINESS)["status"] == "running"
+    assert not strategy.list_items("review", BUSINESS)
+    assert not strategy.list_items("decision", BUSINESS)
+    assert not journal.query("SELECT id FROM strategy_evidence WHERE source_type='economy.evaluate'")
+    monkeypatch.setattr(strategy, "link", original)
+    results = [economy.evaluate_experiment(BUSINESS, exp) for _ in range(3)]
+    assert len({result["review_id"] for result in results}) == 1
+
+
+def test_anti_repetition_does_not_block_a_goal_to_avoid_the_old_action():
+    history = _experience(outcome="zero_margin")
+    old_action = strategy.get("experiment", history["experiment_id"], BUSINESS)["action"]
+    assert strategy.repeated_invalidated_strategy(BUSINESS, "Ne pas " + old_action + "; comparer une autre offre") is None
+    assert strategy.repeated_invalidated_strategy(BUSINESS, old_action.upper() + " !!!")["hypothesis_id"] == history["hypothesis_id"]
+
+
+def test_learning_context_uses_the_evaluation_decision_not_a_later_free_claim():
+    history = _experience()
+    other = strategy.create("decision", BUSINESS, "Interprétation libre", created_by="agent:fixture",
+                            decision="FREE_CLAIM_IS_MARKET_PROOF", rationale="Sans observation")
+    strategy.link(BUSINESS, "decision", other, "evidence", history["result"]["evidence_id"], "considers")
+    lesson = strategy.learning_context(BUSINESS)["lessons"][0]
+    assert lesson["lesson_status"] == "persisted"
+    assert lesson["decision"]["id"] == history["result"]["decision_id"]
+
+
+def test_pursuit_context_is_bounded_with_large_historical_observations(monkeypatch):
+    history = _experience()
+    strategy.create("evidence", BUSINESS, "Observation longue", created_by="human", nature="observed",
+                    source_type="fixture", source_ref="fixture://large", captured_at=time.time(),
+                    observation="OBSERVATION " * 50000, experiment_id=history["experiment_id"])
+    captured = []
+    def offline(goal, **kwargs):
+        captured.append(_state_from_goal(goal))
+        return _runtime_result()
+    monkeypatch.setattr(octopus, "enabled", lambda: True)
+    monkeypatch.setattr(runtime, "run_mission", offline)
+    pursuit = supervisor.start_pursuit("Mesurer les paiements clients")
+    supervisor.run_pursuit(pursuit)
+    assert len(json.dumps(captured[0], ensure_ascii=False)) <= 64000
+
+
+def test_pursuit_does_not_inject_unverified_claims_as_historical_proofs(monkeypatch):
+    history = _experience(unverified_claim=True)
+    captured = []
+    def offline(goal, **kwargs):
+        captured.append(_state_from_goal(goal))
+        return _runtime_result()
+    monkeypatch.setattr(octopus, "enabled", lambda: True)
+    monkeypatch.setattr(runtime, "run_mission", offline)
+    supervisor.run_pursuit(supervisor.start_pursuit("Comparer les paiements"))
+    assert "LLM_ONLY_MARKET_SUCCESS" not in json.dumps(captured[0], ensure_ascii=False)
+    assert history["unverified_id"] not in captured[0]["identifiants_de_preuves_persistées_disponibles"]
+
+
+def test_concurrent_hypothesis_proposals_are_idempotent(monkeypatch):
+    history = _experience()
+    objective = strategy.create("objective", BUSINESS, "Pursuit", created_by="human", statement="Mesurer")
+    strategy.transition("objective", objective, BUSINESS, "active", actor="human")
+    work = tasks.enqueue(BUSINESS, supervisor.WORK_KIND, {"pursuit": True})
+    evidence_id = history["result"]["evidence_id"]
+    proposal = {"statement": "Une nouvelle offre peut produire des paiements répétés",
+                "expected_signal": "Paiement", "stop_criterion": "Aucune vente", "evidence_ids": [evidence_id]}
+    original = strategy.create
+    collision = Barrier(2)
+    def delayed_create(kind, *args, **kwargs):
+        if kind == "hypothesis" and kwargs.get("_conn") is None:
+            collision.wait(timeout=5)
+        return original(kind, *args, **kwargs)
+    monkeypatch.setattr(strategy, "create", delayed_create)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(strategy.propose_pursuit_hypothesis, BUSINESS, objective, work, proposal,
+                               available_evidence_ids=[evidence_id]) for _ in range(2)]
+        results = [future.result() for future in futures]
+    assert results[0]["hypothesis_id"] == results[1]["hypothesis_id"]
+    assert len(strategy.list_items("hypothesis", BUSINESS, parent_id=objective)) == 1
+
+
+def test_anti_repetition_handles_underscore_punctuation_and_short_statements():
+    history = _experience(outcome="zero_margin")
+    old = strategy.get("hypothesis", history["hypothesis_id"], BUSINESS)
+    assert strategy.repeated_invalidated_strategy(BUSINESS, old["statement"].replace(" ", "_"))
+    with tasks._tx() as conn:
+        conn.execute("UPDATE strategy_hypotheses SET statement='Ça se vend' WHERE id=?", (old["id"],))
+    assert strategy.repeated_invalidated_strategy(BUSINESS, "  ÇA  SE VEND!!!  ")
+
+
+def test_reconsideration_retains_the_complete_reason():
+    history = _experience(outcome="zero_margin")
+    old = strategy.get("hypothesis", history["hypothesis_id"], BUSINESS)
+    with tasks._tx() as conn:
+        conn.execute("UPDATE strategy_hypotheses SET updated_at=1 WHERE id=?", (old["id"],))
+    proof = strategy.create("evidence", BUSINESS, "Nouvelle mesure", created_by="human", nature="observed",
+                            source_type="fixture", source_ref="fixture://new", captured_at=2, observation="Mesure")
+    strategy.link(BUSINESS, "evidence", proof, "hypothesis", old["id"], "reconsiders")
+    obj = strategy.create("objective", BUSINESS, "Réexaminer", created_by="human", statement="Réexaminer")
+    strategy.transition("objective", obj, BUSINESS, "active", actor="human")
+    work = tasks.enqueue(BUSINESS, supervisor.WORK_KIND, {})
+    reason = "Contexte à expliquer. " * 12 + "LA NOUVELLE MESURE INDÉPENDANTE CHANGE LE PRIX."
+    result = strategy.propose_pursuit_hypothesis(
+        BUSINESS, obj, work, {"statement": old["statement"], "expected_signal": "Paiement",
+                             "stop_criterion": "Aucun paiement", "evidence_ids": [proof],
+                             "reconsiders_hypothesis_id": old["id"], "reconsideration_reason": reason},
+        available_evidence_ids=[proof])
+    assert reason in strategy.get("hypothesis", result["hypothesis_id"], BUSINESS)["summary"]
+
+
+@pytest.mark.parametrize("kind", ["old", "future", "unlinked", "unverified", "missing_reason"])
+def test_reconsideration_refuses_unusable_or_undated_new_proof(kind):
+    history = _experience(outcome="zero_margin")
+    old = strategy.get("hypothesis", history["hypothesis_id"], BUSINESS)
+    at = old["updated_at"] - 1 if kind == "old" else time.time() + (86400 if kind == "future" else 0)
+    proof = strategy.create("evidence", BUSINESS, "Mesure candidate", created_by="human",
+                            nature="unverified" if kind == "unverified" else "observed",
+                            source_type="fixture", source_ref="fixture://new", captured_at=at, observation="Mesure")
+    if kind != "unlinked":
+        strategy.link(BUSINESS, "evidence", proof, "hypothesis", old["id"], "reconsiders")
+    obj = strategy.create("objective", BUSINESS, "Réexaminer", created_by="human", statement="Réexaminer")
+    strategy.transition("objective", obj, BUSINESS, "active", actor="human")
+    work = tasks.enqueue(BUSINESS, supervisor.WORK_KIND, {})
+    result = strategy.propose_pursuit_hypothesis(
+        BUSINESS, obj, work, {"statement": old["statement"], "expected_signal": "Paiement",
+                             "stop_criterion": "Aucun paiement", "evidence_ids": [proof],
+                             "reconsiders_hypothesis_id": old["id"],
+                             "reconsideration_reason": "" if kind == "missing_reason" else "Nouvelle mesure"},
+        available_evidence_ids=[proof])
+    assert result["status"] == "ignored"
+    assert not strategy.list_items("hypothesis", BUSINESS, parent_id=obj)
+
+
+def test_lexical_selection_is_stable_for_ties_and_has_no_semantic_inference():
+    histories = [_experience(theme="offres clients indépendants") for _ in range(3)]
+    with tasks._tx() as conn:
+        conn.execute("UPDATE strategy_experiments SET updated_at=1")
+    first = strategy.learning_context(BUSINESS, limit=2, topic="offres clients indépendants")
+    assert first == strategy.learning_context(BUSINESS, limit=2, topic="offres clients indépendants")
+    # Synonymes et flexions ne sont pas rapprochés : limite explicite du classement lexical.
+    assert not strategy._learning_terms("achats réguliers") & strategy._learning_terms("paiements récurrents")
+    assert not strategy._learning_terms("paiement") & strategy._learning_terms("paiements")
+    assert strategy.repeated_invalidated_strategy(BUSINESS, "Une reformulation indépendante") is None
+    assert len(first["lessons"]) == 2
+
+
+def test_large_evaluated_corpus_stays_bounded_in_pursuit(monkeypatch):
+    history = _experience()
+    hypothesis = strategy.create("hypothesis", BUSINESS, "Corpus", created_by="human",
+                                 parent_id=history["objective_id"], statement="Mesure de corpus")
+    exp = strategy.create("experiment", BUSINESS, "Mesure", created_by="human", parent_id=hypothesis,
+                          action="Mesurer", metric="delivery", target_value=1)
+    strategy.transition("experiment", exp, BUSINESS, "running", actor="human")
+    for index in range(70):
+        strategy.create("evidence", BUSINESS, f"Observation {index}", created_by="human", nature="observed",
+                        source_type="fixture", source_ref=f"fixture://large/{index}", captured_at=time.time(),
+                        observation="OBSERVATION " * 150, experiment_id=exp, metric="delivery", value=1)
+    economy.evaluate_experiment(BUSINESS, exp)
+    captured = []
+    def offline(goal, **kwargs):
+        captured.append(_state_from_goal(goal))
+        return _runtime_result()
+    monkeypatch.setattr(octopus, "enabled", lambda: True)
+    monkeypatch.setattr(runtime, "run_mission", offline)
+    supervisor.run_pursuit(supervisor.start_pursuit("Mesurer le corpus"))
+    assert len(json.dumps(captured[0], ensure_ascii=False)) <= 64000
+
+
+def test_retracted_source_excludes_a_lesson_without_mutating_the_snapshot():
+    history = _experience()
+    hypothesis = strategy.create("hypothesis", BUSINESS, "Livraison", created_by="human",
+                                 parent_id=history["objective_id"], statement="La livraison sera attestée")
+    exp = strategy.create("experiment", BUSINESS, "Livraison", created_by="human", parent_id=hypothesis,
+                          action="Vérifier la livraison", metric="delivery", target_value=1)
+    strategy.transition("experiment", exp, BUSINESS, "running", actor="human")
+    source = strategy.create("evidence", BUSINESS, "Livraison", created_by="human", nature="observed",
+                             source_type="fixture", source_ref="fixture://delivery", captured_at=time.time(),
+                             observation="Livraison", experiment_id=exp, metric="delivery", value=1)
+    result = economy.evaluate_experiment(BUSINESS, exp)
+    proof = strategy.get("evidence", result["evidence_id"], BUSINESS)
+    strategy.transition("evidence", source, BUSINESS, "retracted", actor="human")
+    assert all(item["experiment"]["id"] != exp for item in strategy.learning_context(BUSINESS)["lessons"])
+    assert strategy.get("evidence", proof["id"], BUSINESS) == proof

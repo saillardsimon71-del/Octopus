@@ -18,6 +18,7 @@ import json
 import math
 import re
 import time
+from contextlib import nullcontext
 
 from . import connectors, journal, tasks
 
@@ -191,7 +192,7 @@ def _check_ref(conn, kind: str, item_id: int, business: str) -> None:
 
 
 def create(kind: str, business: str, summary: str, *, created_by: str, parent_id: int | None = None,
-           origin_task_id: int | None = None, origin_run_id: int | None = None, **fields) -> int:
+           origin_task_id: int | None = None, origin_run_id: int | None = None, _conn=None, **fields) -> int:
     spec = _spec(kind)
     business = _business(business)
     _check_fields(spec, fields)
@@ -202,7 +203,7 @@ def create(kind: str, business: str, summary: str, *, created_by: str, parent_id
     row = {"business": business, "status": spec["initial"], "summary": _text(summary, "summary"),
            "created_by": _text(created_by, "created_by"), "origin_task_id": origin_task_id,
            "origin_run_id": origin_run_id, **fields}
-    with tasks._tx() as conn:
+    with (nullcontext(_conn) if _conn is not None else tasks._tx()) as conn:
         if spec["parent"]:
             column, parent_kind = spec["parent"]
             if parent_id is None:
@@ -229,14 +230,15 @@ def create(kind: str, business: str, summary: str, *, created_by: str, parent_id
     return item_id
 
 
-def get(kind: str, item_id: int, business: str) -> dict | None:
-    rows = journal.query(f"SELECT * FROM {_spec(kind)['table']} WHERE id=? AND business=?",
+def get(kind: str, item_id: int, business: str, *, _conn=None) -> dict | None:
+    query = journal.query if _conn is None else lambda sql, params: _conn.execute(sql, params).fetchall()
+    rows = query(f"SELECT * FROM {_spec(kind)['table']} WHERE id=? AND business=?",
                          (item_id, _business(business)))
     return dict(rows[0]) if rows else None
 
 
 def list_items(kind: str, business: str, *, status: str | None = None, parent_id: int | None = None,
-               limit: int = 100) -> list[dict]:
+               limit: int = 100, _conn=None) -> list[dict]:
     spec = _spec(kind)
     sql, params = f"SELECT * FROM {spec['table']} WHERE business=?", [_business(business)]
     if status:
@@ -247,10 +249,11 @@ def list_items(kind: str, business: str, *, status: str | None = None, parent_id
             raise StrategyError(f"{kind} n'a pas de parent")
         sql += f" AND {spec['parent'][0]}=?"
         params.append(parent_id)
-    return [dict(r) for r in journal.query(sql + " ORDER BY id DESC LIMIT ?", tuple(params + [limit]))]
+    query = journal.query if _conn is None else lambda sql, params: _conn.execute(sql, params).fetchall()
+    return [dict(r) for r in query(sql + " ORDER BY id DESC LIMIT ?", tuple(params + [limit]))]
 
 
-def update(kind: str, item_id: int, business: str, **fields) -> None:
+def update(kind: str, item_id: int, business: str, *, _conn=None, **fields) -> None:
     """Modifie les champs descriptifs d'un objet ouvert (le statut passe par `transition`)."""
     spec = _spec(kind)
     business = _business(business)
@@ -265,7 +268,7 @@ def update(kind: str, item_id: int, business: str, **fields) -> None:
         fields["summary"] = _text(summary, "summary")
     if not fields:
         return
-    with tasks._tx() as conn:
+    with (nullcontext(_conn) if _conn is not None else tasks._tx()) as conn:
         current = _fetch(conn, kind, item_id, business)
         if current["status"] in spec["closed"]:
             raise StrategyError(f"{kind} #{item_id} est clos ({current['status']})")
@@ -277,7 +280,7 @@ def update(kind: str, item_id: int, business: str, **fields) -> None:
 
 
 def transition(kind: str, item_id: int, business: str, status: str, *, actor: str,
-               outcome: str | None = None, actual_result: str | None = None, note: str | None = None) -> None:
+               outcome: str | None = None, actual_result: str | None = None, note: str | None = None, _conn=None) -> None:
     spec = _spec(kind)
     business = _business(business)
     actor = _text(actor, "actor")
@@ -291,10 +294,10 @@ def transition(kind: str, item_id: int, business: str, status: str, *, actor: st
     elif outcome is not None or actual_result is not None:
         raise StrategyError("outcome et actual_result ne concernent que la fin d'une expérience")
     if kind == "decision" and status == "approved" and actor != "human":
-        pending = get(kind, item_id, business)
+        pending = get(kind, item_id, business, _conn=_conn)
         if pending and pending["spend_amount"]:
             raise StrategyError("une décision qui engage de l'argent n'est approuvée que par un humain")
-    with tasks._tx() as conn:
+    with (nullcontext(_conn) if _conn is not None else tasks._tx()) as conn:
         current = _fetch(conn, kind, item_id, business)
         if status not in spec["transitions"].get(current["status"], set()):
             raise StrategyError(f"{kind} #{item_id} : transition {current['status']} -> {status} interdite")
@@ -309,14 +312,14 @@ def transition(kind: str, item_id: int, business: str, status: str, *, actor: st
                      "note": (note or "")[:500] or None})
 
 
-def link(business: str, from_kind: str, from_id: int, to_kind: str, to_id: int, relation: str) -> int:
+def link(business: str, from_kind: str, from_id: int, to_kind: str, to_id: int, relation: str, *, _conn=None) -> int:
     """Relation N-N (revue -> objectif, décision -> expérience, expérience -> tâche...). Idempotent."""
     business = _business(business)
     relation = _text(relation, "relation")
     _spec(from_kind)
     if to_kind not in KINDS and to_kind not in EXTERNAL:
         raise StrategyError(f"cible de lien inconnue : {to_kind!r}")
-    with tasks._tx() as conn:
+    with (nullcontext(_conn) if _conn is not None else tasks._tx()) as conn:
         _check_ref(conn, from_kind, from_id, business)
         _check_ref(conn, to_kind, to_id, business)
         existing = conn.execute("SELECT id FROM strategy_links WHERE from_type=? AND from_id=? AND to_type=? "
@@ -341,7 +344,7 @@ def links(business: str, kind: str, item_id: int) -> list[dict]:
 
 
 def _hypothesis_key(value: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^\w]+", " ", str(value or "").casefold(), flags=re.UNICODE)).strip()
+    return re.sub(r"\s+", " ", re.sub(r"[\W_]+", " ", str(value or "").casefold(), flags=re.UNICODE)).strip()
 
 
 def _mentions_legacy_business(*values: str | None) -> bool:
@@ -466,7 +469,8 @@ def learning_context(business: str, *, limit: int = 8, topic: str | None = None)
         decision_rows = journal.query(
             "SELECT d.* FROM strategy_decisions d JOIN strategy_links l ON l.business=d.business "
             "AND l.from_type='decision' AND l.from_id=d.id AND l.to_type='evidence' AND l.to_id=? "
-            "AND l.relation='considers' WHERE d.business=? ORDER BY d.id DESC LIMIT 1",
+            "AND l.relation='considers' WHERE d.business=? AND d.created_by='policy:evaluate' "
+            "ORDER BY d.id LIMIT 1",
             (row["evaluation_evidence_id"], business))
         if not decision_rows:
             continue
@@ -585,7 +589,7 @@ def repeated_invalidated_strategy(business: str, proposed_goal: str) -> dict | N
     """
     business = _business(business)
     goal = _hypothesis_key(proposed_goal)
-    if len(goal) < 12:
+    if not goal:
         return None
     rows = journal.query(
         "SELECT h.id AS hypothesis_id, h.statement AS hypothesis, x.id AS experiment_id, x.action, "
@@ -610,7 +614,7 @@ def repeated_invalidated_strategy(business: str, proposed_goal: str) -> dict | N
                 or evaluated.get("verdict") != "refutes"
                 or evaluated.get("verdict_scope") != "configured_metric_only"):
             continue
-        if any((candidate := _hypothesis_key(value)) and len(candidate) >= 12 and candidate in goal
+        if any((candidate := _hypothesis_key(value)) and candidate == goal
                for value in (row["hypothesis"], row["action"])):
             return {"hypothesis_id": key[0], "hypothesis": row["hypothesis"],
                     "experiment_id": key[1], "action": row["action"], "verdict": "refutes"}
@@ -625,105 +629,107 @@ def propose_pursuit_hypothesis(business: str, objective_id: int, task_id: int, p
     Une hypothèse invalidée n'est répétable que si OCTOPUS nomme l'hypothèse, explique la
     reconsidération et cite une nouvelle preuve observée explicitement reliée par `reconsiders`.
     """
-    business = _business(business)
-    if not isinstance(proposal, dict):
-        return {"status": "ignored", "reason": "hypothesis doit être un objet"}
-    raw_statement = proposal.get("statement")
-    statement = raw_statement.strip() if isinstance(raw_statement, str) else ""
-    if not statement or len(statement) > 1000:
-        return {"status": "ignored", "reason": "énoncé d'hypothèse absent ou trop long"}
-    key = _hypothesis_key(statement)
-    invalidated = [dict(item) for item in journal.query(
-        "SELECT id, statement FROM strategy_hypotheses WHERE business=? AND status='invalidated' ORDER BY id DESC",
-        (business,)) if _hypothesis_key(item["statement"]) == key]
-    requested_reconsideration = proposal.get("reconsiders_hypothesis_id")
-    if invalidated and not (type(requested_reconsideration) is int
-                            and any(item["id"] == requested_reconsideration for item in invalidated)):
-        return {"status": "blocked_repetition", "hypothesis_id": int(invalidated[0]["id"]),
-                "reason": "hypothèse déjà invalidée, sans preuve observée nouvelle"}
-    expected_value, stop_value = proposal.get("expected_signal"), proposal.get("stop_criterion")
-    if not isinstance(expected_value, str) or not isinstance(stop_value, str):
-        return {"status": "ignored", "reason": "signal attendu et critère d'arrêt doivent être textuels"}
-    expected_signal, stop_criterion = expected_value.strip(), stop_value.strip()
-    if not expected_signal or not stop_criterion:
-        return {"status": "ignored", "reason": "une hypothèse persistée exige signal attendu et critère d'arrêt"}
-    ids = proposal.get("evidence_ids", [])
-    if (not isinstance(ids, list) or not ids or len(ids) > 20
-            or any(type(item) is not int or item <= 0 for item in ids)):
-        return {"status": "ignored", "reason": "références de preuve absentes ou invalides"}
-    evidence_ids = sorted(set(ids))
-    allowed = {int(item) for item in available_evidence_ids if type(item) is int and item > 0}
-    if not set(evidence_ids) <= allowed:
-        return {"status": "ignored", "reason": "preuve citée absente du contexte persistant de ce cycle"}
-    placeholders = ",".join("?" for _ in evidence_ids)
-    evidence = [dict(row) for row in journal.query(
-        f"SELECT * FROM strategy_evidence WHERE business=? AND status='active' AND nature IN ('observed','computed') "
-        f"AND id IN ({placeholders}) ORDER BY id", (business, *evidence_ids))]
-    if len(evidence) != len(evidence_ids):
-        return {"status": "ignored", "reason": "preuve rétractée, non vérifiée ou d'un autre business"}
+    with tasks._tx() as conn:
+        query = lambda sql, params: conn.execute(sql, params).fetchall()
+        business = _business(business)
+        if not isinstance(proposal, dict):
+            return {"status": "ignored", "reason": "hypothesis doit être un objet"}
+        raw_statement = proposal.get("statement")
+        statement = raw_statement.strip() if isinstance(raw_statement, str) else ""
+        if not statement or len(statement) > 1000:
+            return {"status": "ignored", "reason": "énoncé d'hypothèse absent ou trop long"}
+        key = _hypothesis_key(statement)
+        invalidated = [dict(item) for item in query(
+            "SELECT id, statement FROM strategy_hypotheses WHERE business=? AND status='invalidated' ORDER BY id DESC",
+            (business,)) if _hypothesis_key(item["statement"]) == key]
+        requested_reconsideration = proposal.get("reconsiders_hypothesis_id")
+        if invalidated and not (type(requested_reconsideration) is int
+                                and any(item["id"] == requested_reconsideration for item in invalidated)):
+            return {"status": "blocked_repetition", "hypothesis_id": int(invalidated[0]["id"]),
+                    "reason": "hypothèse déjà invalidée, sans preuve observée nouvelle"}
+        expected_value, stop_value = proposal.get("expected_signal"), proposal.get("stop_criterion")
+        if not isinstance(expected_value, str) or not isinstance(stop_value, str):
+            return {"status": "ignored", "reason": "signal attendu et critère d'arrêt doivent être textuels"}
+        expected_signal, stop_criterion = expected_value.strip(), stop_value.strip()
+        if not expected_signal or not stop_criterion:
+            return {"status": "ignored", "reason": "une hypothèse persistée exige signal attendu et critère d'arrêt"}
+        ids = proposal.get("evidence_ids", [])
+        if (not isinstance(ids, list) or not ids or len(ids) > 20
+                or any(type(item) is not int or item <= 0 for item in ids)):
+            return {"status": "ignored", "reason": "références de preuve absentes ou invalides"}
+        evidence_ids = sorted(set(ids))
+        allowed = {int(item) for item in available_evidence_ids if type(item) is int and item > 0}
+        if not set(evidence_ids) <= allowed:
+            return {"status": "ignored", "reason": "preuve citée absente du contexte persistant de ce cycle"}
+        placeholders = ",".join("?" for _ in evidence_ids)
+        evidence = [dict(row) for row in query(
+            f"SELECT * FROM strategy_evidence WHERE business=? AND status='active' AND nature IN ('observed','computed') "
+            f"AND id IN ({placeholders}) ORDER BY id", (business, *evidence_ids))]
+        if len(evidence) != len(evidence_ids):
+            return {"status": "ignored", "reason": "preuve rétractée, non vérifiée ou d'un autre business"}
 
-    reconsiders = proposal.get("reconsiders_hypothesis_id")
-    if reconsiders is not None and (type(reconsiders) is not int or reconsiders <= 0):
-        return {"status": "ignored", "reason": "reconsiders_hypothesis_id invalide"}
-    raw_reconsideration_reason = proposal.get("reconsideration_reason", "")
-    if not isinstance(raw_reconsideration_reason, str):
-        return {"status": "ignored", "reason": "reconsideration_reason doit être textuel"}
-    reconsideration_reason = raw_reconsideration_reason.strip()
-    old = get("hypothesis", reconsiders, business) if reconsiders is not None else None
-    if reconsiders is not None and (not old or old["status"] != "invalidated" or not reconsideration_reason):
-        return {"status": "ignored", "reason": "une reconsidération exige une hypothèse invalidée et une raison explicite"}
-    new_reconsideration_evidence = []
-    if old:
-        for item in evidence:
-            explicit = journal.query(
-                "SELECT 1 FROM strategy_links WHERE business=? AND from_type='evidence' AND from_id=? "
-                "AND to_type='hypothesis' AND to_id=? AND relation='reconsiders' LIMIT 1",
-                (business, item["id"], old["id"]))
-            if (explicit and item["nature"] == "observed" and item["source_ref"]
-                    and item["captured_at"] and old["updated_at"] < item["captured_at"] <= time.time()
-                    and item["created_at"] > old["updated_at"]):
-                new_reconsideration_evidence.append(item)
-        if not new_reconsideration_evidence:
-            return {"status": "ignored", "reason": "aucune preuve observée, nouvelle et explicitement reliée"}
-
-    objective = get("objective", objective_id, business)
-    if not objective or objective["status"] != "active":
-        return {"status": "ignored", "reason": "objectif pursuit absent ou inactif"}
-    if invalidated and not (old and any(item["id"] == old["id"] for item in invalidated)
-                             and new_reconsideration_evidence):
-        return {"status": "blocked_repetition", "hypothesis_id": int(invalidated[0]["id"]),
-                "reason": "hypothèse déjà invalidée, sans preuve observée nouvelle"}
-
-    # Réutiliser une proposition ouverte identique sous le même objectif; ne pas créer de doublons.
-    existing = [item for item in list_items("hypothesis", business, parent_id=objective_id, limit=500)
-                if item["status"] in {"proposed", "testing", "inconclusive"}
-                and _hypothesis_key(item["statement"]) == key]
-    if existing:
-        hypothesis_id = int(existing[0]["id"])
-        status = "reused"
-    else:
-        summary = "Hypothèse proposée par pursuit; interprétation à tester"
+        reconsiders = proposal.get("reconsiders_hypothesis_id")
+        if reconsiders is not None and (type(reconsiders) is not int or reconsiders <= 0):
+            return {"status": "ignored", "reason": "reconsiders_hypothesis_id invalide"}
+        raw_reconsideration_reason = proposal.get("reconsideration_reason", "")
+        if not isinstance(raw_reconsideration_reason, str):
+            return {"status": "ignored", "reason": "reconsideration_reason doit être textuel"}
+        reconsideration_reason = raw_reconsideration_reason.strip()
+        old = get("hypothesis", reconsiders, business, _conn=conn) if reconsiders is not None else None
+        if reconsiders is not None and (not old or old["status"] != "invalidated" or not reconsideration_reason):
+            return {"status": "ignored", "reason": "une reconsidération exige une hypothèse invalidée et une raison explicite"}
+        new_reconsideration_evidence = []
         if old:
-            summary += f"; reconsidère #{old['id']}: {reconsideration_reason[:120]}"
-        # Retry/crash du même travail : réutiliser l'objet déjà créé pour cette tâche.
-        prior = journal.query("SELECT id FROM strategy_hypotheses WHERE business=? AND origin_task_id=? "
-                              "AND statement=? ORDER BY id LIMIT 1", (business, task_id, statement))
-        hypothesis_id = int(prior[0]["id"]) if prior else create(
-            "hypothesis", business, summary[:200], created_by="octopus:pursuit", parent_id=objective_id,
-            origin_task_id=task_id, statement=statement,
-            expected_signal=expected_signal[:500], stop_criterion=stop_criterion[:500],
-            evidence_required="Preuve observée ou résultat économique vérifiable; la sortie LLM seule n'est pas une preuve.")
-        status = "created"
+            for item in evidence:
+                explicit = query(
+                    "SELECT 1 FROM strategy_links WHERE business=? AND from_type='evidence' AND from_id=? "
+                    "AND to_type='hypothesis' AND to_id=? AND relation='reconsiders' LIMIT 1",
+                    (business, item["id"], old["id"]))
+                if (explicit and item["nature"] == "observed" and item["source_ref"]
+                        and item["captured_at"] and old["updated_at"] < item["captured_at"] <= time.time()
+                        and item["created_at"] > old["updated_at"]):
+                    new_reconsideration_evidence.append(item)
+            if not new_reconsideration_evidence:
+                return {"status": "ignored", "reason": "aucune preuve observée, nouvelle et explicitement reliée"}
 
-    for item in evidence:
-        link(business, "hypothesis", hypothesis_id, "evidence", item["id"], "considers")
-        if item.get("experiment_id") is not None:
-            link(business, "hypothesis", hypothesis_id, "experiment", int(item["experiment_id"]), "learns_from")
-    if old:
-        link(business, "hypothesis", hypothesis_id, "hypothesis", int(old["id"]), "reconsiders")
-    return {"status": status, "hypothesis_id": hypothesis_id,
-            "reconsiders_hypothesis_id": int(old["id"]) if old else None,
-            "evidence_ids": evidence_ids}
+        objective = get("objective", objective_id, business, _conn=conn)
+        if not objective or objective["status"] != "active":
+            return {"status": "ignored", "reason": "objectif pursuit absent ou inactif"}
+        if invalidated and not (old and any(item["id"] == old["id"] for item in invalidated)
+                                 and new_reconsideration_evidence):
+            return {"status": "blocked_repetition", "hypothesis_id": int(invalidated[0]["id"]),
+                    "reason": "hypothèse déjà invalidée, sans preuve observée nouvelle"}
+
+        # Réutiliser une proposition ouverte identique sous le même objectif; ne pas créer de doublons.
+        existing = [item for item in list_items("hypothesis", business, parent_id=objective_id, limit=500, _conn=conn)
+                    if item["status"] in {"proposed", "testing", "inconclusive"}
+                    and _hypothesis_key(item["statement"]) == key]
+        if existing:
+            hypothesis_id = int(existing[0]["id"])
+            status = "reused"
+        else:
+            summary = "Hypothèse proposée par pursuit; interprétation à tester"
+            if old:
+                summary += f"; reconsidère #{old['id']}: {reconsideration_reason}"
+            # Retry/crash du même travail : réutiliser l'objet déjà créé pour cette tâche.
+            prior = query("SELECT id FROM strategy_hypotheses WHERE business=? AND origin_task_id=? "
+                                  "AND statement=? ORDER BY id LIMIT 1", (business, task_id, statement))
+            hypothesis_id = int(prior[0]["id"]) if prior else create(
+                "hypothesis", business, summary, _conn=conn, created_by="octopus:pursuit", parent_id=objective_id,
+                origin_task_id=task_id, statement=statement,
+                expected_signal=expected_signal[:500], stop_criterion=stop_criterion[:500],
+                evidence_required="Preuve observée ou résultat économique vérifiable; la sortie LLM seule n'est pas une preuve.")
+            status = "created"
+
+        for item in evidence:
+            link(business, "hypothesis", hypothesis_id, "evidence", item["id"], "considers", _conn=conn)
+            if item.get("experiment_id") is not None:
+                link(business, "hypothesis", hypothesis_id, "experiment", int(item["experiment_id"]), "learns_from", _conn=conn)
+        if old:
+            link(business, "hypothesis", hypothesis_id, "hypothesis", int(old["id"]), "reconsiders", _conn=conn)
+        return {"status": status, "hypothesis_id": hypothesis_id,
+                "reconsiders_hypothesis_id": int(old["id"]) if old else None,
+                "evidence_ids": evidence_ids}
 
 
 # --- lecture pour les tableaux de bord -----------------------------------------------------------

@@ -204,14 +204,12 @@ def _pursuit_mission(ctx, objective):
     learning = strategy.learning_context(
         ctx.business, limit=8, topic=f"{objective['statement']} {ctx.input.get('goal', '')}")
     evidence_context = [item for item in strategy.list_items("evidence", ctx.business, status="active")[:30]
-                        if not strategy._mentions_legacy_business(item.get("summary"), item.get("source_ref"),
+                        if item["id"] in learning["available_evidence_ids"]
+                        and not strategy._mentions_legacy_business(item.get("summary"), item.get("source_ref"),
                                                                    item.get("observation"))][:15]
-    evidence_shown = {int(item["id"]) for item in evidence_context}
-    lesson_evidence_shown = {int(evidence_id) for lesson in learning["lessons"]
-                             for evidence_id in lesson["evidence_ids"]}
-    learning["available_evidence_ids"] = sorted(
-        (set(learning["available_evidence_ids"]) & evidence_shown) | lesson_evidence_shown)
-    tasks.save_step(ctx.id, "pursuit.learning_context", learning, owner=ctx.owner)
+    for item in evidence_context:
+        if item["nature"] == "computed":
+            item["observation"] = "Évaluation calculée; consulter le résultat et les preuves de la leçon associée."
     decision_context = [item for item in strategy.list_items("decision", ctx.business)[:20]
                         if not strategy._mentions_legacy_business(item.get("decision"), item.get("rationale"),
                                                                    item.get("resulting_action"))][:10]
@@ -223,6 +221,49 @@ def _pursuit_mission(ctx, objective):
              "réponse_humaine_sans_extension_de_droits": tasks.answer_for((previous or {}).get("id", 0), "pursuit.permission"),
              "navigateur": agent_browser.availability(), "preuves": evidence_context,
              "décisions": decision_context}
+    # Extraits de contexte uniquement : aucune preuve ni review persistée n'est réécrite.
+    def excerpt(value):
+        if isinstance(value, str):
+            return value[:1200]
+        if isinstance(value, list):
+            return [excerpt(item) for item in value]
+        if isinstance(value, dict):
+            return {key: excerpt(item) for key, item in value.items()}
+        return value
+
+    state = excerpt(state)
+    state["contexte_partiel_journal_complet_conservé"] = True
+    for lesson in state["expériences_antérieures"]:
+        lesson["evidence"] = lesson["evidence"][-8:]
+        lesson["unverified_claims_not_used_as_proof"] = [
+            {"id": item["id"], "nature": item["nature"]}
+            for item in lesson["unverified_claims_not_used_as_proof"][-4:]]
+        technical = lesson["result"].get("technical_completion")
+        if isinstance(technical, dict) and isinstance(technical.get("tasks"), list):
+            technical["tasks"] = technical["tasks"][-8:]
+        lesson["evidence_ids"] = sorted({lesson["evaluation_evidence_id"],
+                                          *(item["id"] for item in lesson["evidence"])})
+    state["identifiants_de_preuves_persistées_disponibles"] = sorted(
+        {item["id"] for item in state["preuves"]}
+        | {eid for lesson in state["expériences_antérieures"] for eid in lesson["evidence_ids"]})
+    # Conserver d'abord les leçons les plus pertinentes; retirer des éléments entiers,
+    # jamais tronquer du JSON ou transformer une absence en zéro. Plafond en caractères.
+    for key in ("preuves", "hypothèses_invalidées_à_ne_pas_répéter_sans_preuve_nouvelle",
+                "expériences_antérieures", "décisions"):
+        while state[key] and len(json.dumps(state, ensure_ascii=False, default=str)) > 64000:
+            state[key].pop()
+            state["identifiants_de_preuves_persistées_disponibles"] = sorted(
+                {item["id"] for item in state["preuves"]}
+                | {eid for lesson in state["expériences_antérieures"] for eid in lesson["evidence_ids"]})
+    evidence_shown = {item["id"] for item in state["preuves"]}
+    lesson_evidence_shown = {evidence_id for lesson in state["expériences_antérieures"]
+                             for evidence_id in lesson["evidence_ids"]}
+    learning["available_evidence_ids"] = sorted(
+        (set(learning["available_evidence_ids"]) & evidence_shown) | lesson_evidence_shown)
+    state["identifiants_de_preuves_persistées_disponibles"] = learning["available_evidence_ids"]
+    learning["lessons"] = state["expériences_antérieures"]
+    learning["invalidated_hypotheses"] = state["hypothèses_invalidées_à_ne_pas_répéter_sans_preuve_nouvelle"]
+    tasks.save_step(ctx.id, "pursuit.learning_context", learning, owner=ctx.owner)
     foundation = (Path(__file__).resolve().parent.parent / "docs" / "FOUNDATION.md").read_text(encoding="utf-8")
     goal = (foundation + "\n\nDétermination bornée. Budget économique externe 0 EUR. "
             "Calcul LLM sous plafond USD séparé, via le profil economical. "

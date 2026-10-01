@@ -539,9 +539,10 @@ def metric_value(business: str, experiment: dict) -> tuple[float | None, str]:
     return (round(sum(r["value"] for r in rows), 6) if rows else None), "computed"
 
 
-def _evaluation_evidence(business: str, experiment_id: int) -> tuple[dict, dict] | None:
+def _evaluation_evidence(business: str, experiment_id: int, *, _conn=None) -> tuple[dict, dict] | None:
     """Retourne une évaluation calculée encore active, sans jamais réécrire la preuve."""
-    rows = journal.query(
+    query = journal.query if _conn is None else lambda sql, params: _conn.execute(sql, params).fetchall()
+    rows = query(
         "SELECT * FROM strategy_evidence WHERE business=? AND experiment_id=? AND status='active' "
         "AND nature='computed' AND source_type='economy.evaluate' AND source_ref=? "
         "AND created_by='policy:evaluate' ORDER BY id", (business, experiment_id, f"experiment#{experiment_id}"))
@@ -557,7 +558,8 @@ def _evaluation_evidence(business: str, experiment_id: int) -> tuple[dict, dict]
     return None
 
 
-def _lesson_content(experiment: dict, evaluated: dict, evidence_id: int, decision_id: int) -> dict:
+def _lesson_content(experiment: dict, evaluated: dict, evidence_id: int, decision_id: int, *, _conn=None) -> dict:
+    query = journal.query if _conn is None else lambda sql, params: _conn.execute(sql, params).fetchall()
     outcomes = evaluated.get("outcomes") if isinstance(evaluated.get("outcomes"), dict) else {}
     contribution = outcomes.get("contribution_by_currency") or {}
     receipts = {currency: values.get("customer_receipts_observed") for currency, values in contribution.items()
@@ -588,7 +590,7 @@ def _lesson_content(experiment: dict, evaluated: dict, evidence_id: int, decisio
     unverified_claims = []
     if raw_ids:
         placeholders = ",".join("?" for _ in raw_ids)
-        evidence_rows = journal.query(
+        evidence_rows = query(
             f"SELECT id, nature, summary, source_type, source_ref, captured_at, observation, metric, value, unit, created_by "
             f"FROM strategy_evidence WHERE business=? AND experiment_id=? AND status='active' "
             f"AND id IN ({placeholders}) ORDER BY id",
@@ -661,98 +663,100 @@ def _lesson_content(experiment: dict, evaluated: dict, evidence_id: int, decisio
 
 def _ensure_experiment_lesson(business: str, experiment_id: int, evaluated: dict) -> dict:
     """Termine de façon rejouable une évaluation, sa chaîne de décisions et sa review."""
-    experiment = strategy.get("experiment", experiment_id, business)
-    if experiment is None:
-        raise StrategyError(f"experiment #{experiment_id} introuvable pour {business!r}")
-    evidence_row, persisted = _evaluation_evidence(business, experiment_id) or (None, None)
-    if evidence_row is not None:
-        # Le premier verdict persisté fait foi : un retry ne remplace jamais sa preuve historique.
-        evaluated = persisted
-        evidence_id = int(evidence_row["id"])
-    else:
-        if experiment["status"] != "running":
-            return {**evaluated, "lesson_recorded": False}
-        evidence_id = strategy.create(
-            "evidence", business, f"Évaluation de l'expérience #{experiment_id} : {evaluated['verdict']}",
-            created_by="policy:evaluate", nature="computed", source_type="economy.evaluate",
-            source_ref=f"experiment#{experiment_id}", observation=json.dumps(evaluated, ensure_ascii=False),
-            experiment_id=experiment_id, metric=evaluated.get("metric"), value=evaluated.get("value"))
-        evidence_row = next(dict(row) for row in journal.query(
-            "SELECT * FROM strategy_evidence WHERE id=? AND business=?", (evidence_id, business)))
+    with tasks._tx() as conn:
+        query = lambda sql, params: conn.execute(sql, params).fetchall()
+        experiment = strategy.get("experiment", experiment_id, business, _conn=conn)
+        if experiment is None:
+            raise StrategyError(f"experiment #{experiment_id} introuvable pour {business!r}")
+        evidence_row, persisted = _evaluation_evidence(business, experiment_id, _conn=conn) or (None, None)
+        if evidence_row is not None:
+            # Le premier verdict persisté fait foi : un retry ne remplace jamais sa preuve historique.
+            evaluated = persisted
+            evidence_id = int(evidence_row["id"])
+        else:
+            if experiment["status"] != "running":
+                return {**evaluated, "lesson_recorded": False}
+            evidence_id = strategy.create(
+                "evidence", business, f"Évaluation de l'expérience #{experiment_id} : {evaluated['verdict']}",
+                _conn=conn, created_by="policy:evaluate", nature="computed", source_type="economy.evaluate",
+                source_ref=f"experiment#{experiment_id}", observation=json.dumps(evaluated, ensure_ascii=False),
+                experiment_id=experiment_id, metric=evaluated.get("metric"), value=evaluated.get("value"))
+            evidence_row = next(dict(row) for row in query(
+                "SELECT * FROM strategy_evidence WHERE id=? AND business=?", (evidence_id, business)))
 
-    experiment = strategy.get("experiment", experiment_id, business)
-    if experiment["status"] == "running":
-        strategy.transition("experiment", experiment_id, business, "completed", actor="policy:evaluate",
-                            outcome=evaluated["verdict"], actual_result=str(evaluated.get("reason") or evaluated["verdict"]),
-                            note=f"evidence#{evidence_id}")
-        experiment = strategy.get("experiment", experiment_id, business)
+        experiment = strategy.get("experiment", experiment_id, business, _conn=conn)
+        if experiment["status"] == "running":
+            strategy.transition("experiment", experiment_id, business, "completed", _conn=conn, actor="policy:evaluate",
+                                outcome=evaluated["verdict"], actual_result=str(evaluated.get("reason") or evaluated["verdict"]),
+                                note=f"evidence#{evidence_id}")
+            experiment = strategy.get("experiment", experiment_id, business, _conn=conn)
 
-    hypothesis = strategy.get("hypothesis", int(experiment["hypothesis_id"]), business)
-    target_status = {"supports": "validated", "refutes": "invalidated", "inconclusive": "inconclusive"}[evaluated["verdict"]]
-    if hypothesis and hypothesis["status"] == "proposed":
-        strategy.transition("hypothesis", int(hypothesis["id"]), business, "testing", actor="policy:evaluate",
-                            note=f"experiment#{experiment_id}")
-        hypothesis = strategy.get("hypothesis", int(hypothesis["id"]), business)
-    if (hypothesis and hypothesis["status"] in {"testing", "inconclusive"}
-            and hypothesis["status"] != target_status):
-        strategy.transition("hypothesis", int(hypothesis["id"]), business, target_status, actor="policy:evaluate",
-                            note=f"experiment#{experiment_id}: verdict limité à la métrique configurée")
+        hypothesis = strategy.get("hypothesis", int(experiment["hypothesis_id"]), business, _conn=conn)
+        target_status = {"supports": "validated", "refutes": "invalidated", "inconclusive": "inconclusive"}[evaluated["verdict"]]
+        if hypothesis and hypothesis["status"] in {"proposed", "inconclusive"} and hypothesis["status"] != target_status:
+            strategy.transition("hypothesis", int(hypothesis["id"]), business, "testing", _conn=conn, actor="policy:evaluate",
+                                note=f"experiment#{experiment_id}")
+            hypothesis = strategy.get("hypothesis", int(hypothesis["id"]), business, _conn=conn)
+        if (hypothesis and hypothesis["status"] in {"testing", "inconclusive"}
+                and hypothesis["status"] != target_status):
+            strategy.transition("hypothesis", int(hypothesis["id"]), business, target_status, _conn=conn, actor="policy:evaluate",
+                                note=f"experiment#{experiment_id}: verdict limité à la métrique configurée")
 
-    # Les liens dirigés gardent toute la provenance visible dans le graphe stratégique.
-    strategy.link(business, "hypothesis", int(experiment["hypothesis_id"]), "experiment", experiment_id, "tests")
-    strategy.link(business, "evidence", evidence_id, "experiment", experiment_id, "evaluates")
-    strategy.link(business, "experiment", experiment_id, "evidence", evidence_id, "produced")
+        # Les liens dirigés gardent toute la provenance visible dans le graphe stratégique.
+        strategy.link(business, "hypothesis", int(experiment["hypothesis_id"]), "experiment", experiment_id, "tests", _conn=conn)
+        strategy.link(business, "evidence", evidence_id, "experiment", experiment_id, "evaluates", _conn=conn)
+        strategy.link(business, "experiment", experiment_id, "evidence", evidence_id, "produced", _conn=conn)
 
-    decision_summary = f"Suite de l'expérience #{experiment_id}"
-    decision_text = {
-        "supports": "Examiner encaissement, résultats client, coûts et temps humain avant de reproduire",
-        "refutes": "Éviter cette voie et réallouer l'effort; reconsidérer seulement avec une nouvelle preuve explicite",
-        "inconclusive": "Relancer avec une mesure plus directe ou abandonner; résultat économique inconnu",
-    }[evaluated["verdict"]]
-    linked_decisions = journal.query(
-        "SELECT d.id FROM strategy_decisions d JOIN strategy_links l ON l.business=d.business "
-        "AND l.from_type='decision' AND l.from_id=d.id AND l.to_type='evidence' AND l.to_id=? "
-        "AND l.relation='considers' WHERE d.business=? ORDER BY d.id LIMIT 1", (evidence_id, business))
-    if linked_decisions:
-        decision_id = int(linked_decisions[0]["id"])
-    else:
-        prior_decisions = journal.query(
-            "SELECT id FROM strategy_decisions WHERE business=? AND created_by='policy:evaluate' AND summary=? "
-            "AND decision=? AND rationale=? ORDER BY id LIMIT 1",
-            (business, decision_summary, decision_text, str(evaluated.get("reason") or evaluated["verdict"])))
-        decision_id = int(prior_decisions[0]["id"]) if prior_decisions else strategy.create(
-            "decision", business, decision_summary, created_by="policy:evaluate", decision=decision_text,
-            rationale=str(evaluated.get("reason") or evaluated["verdict"]))
-    strategy.link(business, "decision", decision_id, "evidence", evidence_id, "considers")
-    strategy.link(business, "evidence", evidence_id, "decision", decision_id, "informs")
+        decision_summary = f"Suite de l'expérience #{experiment_id}"
+        decision_text = {
+            "supports": "Examiner encaissement, résultats client, coûts et temps humain avant de reproduire",
+            "refutes": "Éviter cette voie et réallouer l'effort; reconsidérer seulement avec une nouvelle preuve explicite",
+            "inconclusive": "Relancer avec une mesure plus directe ou abandonner; résultat économique inconnu",
+        }[evaluated["verdict"]]
+        linked_decisions = query(
+            "SELECT d.id FROM strategy_decisions d JOIN strategy_links l ON l.business=d.business "
+            "AND l.from_type='decision' AND l.from_id=d.id AND l.to_type='evidence' AND l.to_id=? "
+            "AND l.relation='considers' WHERE d.business=? AND d.created_by='policy:evaluate' ORDER BY d.id LIMIT 1", (evidence_id, business))
+        if linked_decisions:
+            decision_id = int(linked_decisions[0]["id"])
+        else:
+            prior_decisions = query(
+                "SELECT id FROM strategy_decisions WHERE business=? AND created_by='policy:evaluate' AND summary=? "
+                "AND decision=? AND rationale=? ORDER BY id LIMIT 1",
+                (business, decision_summary, decision_text, str(evaluated.get("reason") or evaluated["verdict"])))
+            decision_id = int(prior_decisions[0]["id"]) if prior_decisions else strategy.create(
+                "decision", business, decision_summary, _conn=conn, created_by="policy:evaluate", decision=decision_text,
+                rationale=str(evaluated.get("reason") or evaluated["verdict"]))
+        strategy.link(business, "decision", decision_id, "evidence", evidence_id, "considers", _conn=conn)
+        strategy.link(business, "evidence", evidence_id, "decision", decision_id, "informs", _conn=conn)
 
-    lesson = _lesson_content(experiment, evaluated, evidence_id, decision_id)
-    review_summary = f"Leçon d'expérience #{experiment_id}"
-    prior_reviews = journal.query(
-        "SELECT * FROM strategy_reviews WHERE business=? AND created_by='policy:evaluate' AND summary=? "
-        "ORDER BY id LIMIT 1", (business, review_summary))
-    if prior_reviews:
-        review_id = int(prior_reviews[0]["id"])
-        review_row = strategy.get("review", review_id, business)
-    else:
-        review_id = strategy.create("review", business, review_summary, created_by="policy:evaluate")
-        review_row = strategy.get("review", review_id, business)
-    if review_row["status"] == "scheduled":
-        strategy.update("review", review_id, business,
-                        evidence_summary=json.dumps(lesson, ensure_ascii=False, sort_keys=True),
-                        next_actions=lesson["next_action"], period_start=experiment["created_at"],
-                        period_end=float(evidence_row["created_at"]))
-        strategy.transition("review", review_id, business, "done", actor="policy:evaluate",
-                            note=f"experiment#{experiment_id}; evidence#{evidence_id}")
-    strategy.link(business, "review", review_id, "experiment", experiment_id, "reviews")
-    strategy.link(business, "review", review_id, "evidence", evidence_id, "based_on")
-    strategy.link(business, "review", review_id, "decision", decision_id, "reviews_decision")
-    strategy.link(business, "decision", decision_id, "review", review_id, "reviewed_in")
-    objective_id = int(hypothesis["objective_id"]) if hypothesis else None
-    if objective_id is not None:
-        strategy.link(business, "review", review_id, "objective", objective_id, "reviews")
-    return {**evaluated, "evidence_id": evidence_id, "decision_id": decision_id,
-            "review_id": review_id, "lesson": lesson, "lesson_recorded": True}
+        lesson = _lesson_content(experiment, evaluated, evidence_id, decision_id, _conn=conn)
+        review_summary = f"Leçon d'expérience #{experiment_id}"
+        prior_reviews = query(
+            "SELECT * FROM strategy_reviews WHERE business=? AND created_by='policy:evaluate' AND summary=? "
+            "ORDER BY id LIMIT 1", (business, review_summary))
+        if prior_reviews:
+            review_id = int(prior_reviews[0]["id"])
+            review_row = strategy.get("review", review_id, business, _conn=conn)
+        else:
+            review_id = strategy.create("review", business, review_summary, _conn=conn, created_by="policy:evaluate")
+            review_row = strategy.get("review", review_id, business, _conn=conn)
+        if review_row["status"] == "scheduled":
+            strategy.update("review", review_id, business, _conn=conn,
+                            evidence_summary=json.dumps(lesson, ensure_ascii=False, sort_keys=True),
+                            next_actions=lesson["next_action"], period_start=experiment["created_at"],
+                            period_end=float(evidence_row["created_at"]))
+            strategy.transition("review", review_id, business, "done", _conn=conn, actor="policy:evaluate",
+                                note=f"experiment#{experiment_id}; evidence#{evidence_id}")
+        strategy.link(business, "review", review_id, "experiment", experiment_id, "reviews", _conn=conn)
+        strategy.link(business, "review", review_id, "evidence", evidence_id, "based_on", _conn=conn)
+        strategy.link(business, "review", review_id, "decision", decision_id, "reviews_decision", _conn=conn)
+        strategy.link(business, "decision", decision_id, "review", review_id, "reviewed_in", _conn=conn)
+        objective_id = int(hypothesis["objective_id"]) if hypothesis else None
+        if objective_id is not None:
+            strategy.link(business, "review", review_id, "objective", objective_id, "reviews", _conn=conn)
+        return {**evaluated, "evidence_id": evidence_id, "decision_id": decision_id,
+                "review_id": review_id, "lesson": lesson, "lesson_recorded": True}
 
 
 def evaluate_experiment(business: str, experiment_id: int, *, apply: bool = True, now: float | None = None) -> dict:
@@ -768,6 +772,10 @@ def evaluate_experiment(business: str, experiment_id: int, *, apply: bool = True
     experiment = strategy.get("experiment", experiment_id, business)
     if experiment is None:
         raise StrategyError(f"experiment #{experiment_id} introuvable pour {business!r}")
+    if apply and experiment["status"] in {"running", "completed"}:
+        existing = _evaluation_evidence(business, experiment_id)
+        if existing:
+            return _ensure_experiment_lesson(business, experiment_id, existing[1])
     value, _ = metric_value(business, experiment) if experiment["metric"] else (None, "computed")
     cash = cash_summary(business, experiment_id=experiment_id)
     llm = llm_cost_usd(business, experiment_id=experiment_id)
