@@ -375,31 +375,34 @@ def execute_pursuit(ctx) -> dict:
         action, reason = "pause", "La décision ne précise aucune prochaine action."
 
     assessment_record = None
-    proposals = separation.normalize_proposals(choice.get("strategies"))
+    model_proposals = separation.normalize_proposals(choice.get("strategies"))
+    proposals = separation.pursuit_proposals(ctx.business, objective_id, choice)
     if proposals:
+        learning = tasks.step_value(ctx.id, "pursuit.learning_context", {})
+        allowed_ids = learning.get("available_evidence_ids", []) if isinstance(learning, dict) else []
+        separation.reconsider_proposals(ctx.business, objective_id, ctx.id, proposals, allowed_ids)
         assessment = separation.assess(
             proposals, pursuit_capability_inventory(),
-            economically_invalidated=separation.invalidated_keys(ctx.business))
+            economically_invalidated=separation.invalidated_keys(ctx.business, objective_id))
         adjusted = separation.apply_pursuit_choice(
             choice, action, str(reason), permission, assessment,
             execution_boundary=bool(budget_permission or execution_permission),
-            rounds_left=int(ctx.input["round"]) < PURSUIT_ROUNDS)
+            rounds_left=int(ctx.input["round"]) < PURSUIT_ROUNDS,
+            continue_reasoning=bool(model_proposals))
         action, reason, permission = adjusted["action"], adjusted["reason"], adjusted["permission"]
         choice = {**choice, "next_goal": adjusted["next_goal"]}
         assessment = {**assessment, "substitution_blocked": adjusted["substitution_blocked"],
                       "model_reason": adjusted["model_reason"]}
-        learning = tasks.step_value(ctx.id, "pursuit.learning_context", {})
-        allowed_ids = learning.get("available_evidence_ids", []) if isinstance(learning, dict) else []
-        assessment_record = ctx.memo(
-            "pursuit.strategy_assessment",
-            lambda assessment=assessment, allowed_ids=list(allowed_ids): separation.persist(
-                ctx.business, objective_id, ctx.id, assessment, allowed_evidence_ids=allowed_ids))
+        # Une annotation économique persistée ne fige pas l'inventaire ou les permissions.
+        assessment_record = separation.persist(ctx.business, objective_id, ctx.id, assessment,
+                                                allowed_evidence_ids=allowed_ids)
+        tasks.save_step(ctx.id, "pursuit.strategy_assessment", assessment_record, owner=ctx.owner)
 
     hypothesis_record = None
     if assessment_record is not None:
         hypothesis_record = {"status": assessment_record.get("status"),
                              "hypothesis_id": assessment_record.get("hypothesis_id"),
-                             "reconsiders_hypothesis_id": None}
+                             "reconsiders_hypothesis_id": assessment_record.get("reconsiders_hypothesis_id")}
     elif action == "continue" and isinstance(choice.get("hypothesis"), dict):
         learning = tasks.step_value(ctx.id, "pursuit.learning_context", {})
         available_ids = learning.get("available_evidence_ids", []) if isinstance(learning, dict) else []
@@ -430,7 +433,8 @@ def execute_pursuit(ctx) -> dict:
     if assessment_record is not None:
         output["strategy_assessment"] = assessment_record
         output["strategy_execution"] = separation.dispatch_if_authorized(
-            assessment_record, pursuit_strategy_effect)
+            assessment_record, pursuit_strategy_effect,
+            execution_boundary=bool(permission or action != "continue"))
         if isinstance(output.get("determination"), dict):
             # La copie de sortie ne conserve pas une déclaration de disponibilité du modèle.
             output["determination"] = {**output["determination"], "strategies": proposals}

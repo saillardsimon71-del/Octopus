@@ -14,8 +14,10 @@ découvre, n'installe et n'autorise aucune capacité.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
+import time
 import unicodedata
 
 from . import strategy, tasks
@@ -37,6 +39,7 @@ _CLAIM_KEYS = frozenset({
     "capability_available", "capabilities_available", "missing_capabilities", "missing",
     "permission", "permissions", "permission_state", "strategic_state", "status",
     "tool_exists", "registry", "inventory", "may_execute", "authorized",
+    "capability_exists", "toolAvailable", "capabilityExists",
 })
 _CRITERIA_ALIASES = {
     "cash_received": "cash_received", "cash": "cash_received", "encaissement": "cash_received",
@@ -66,8 +69,11 @@ STRATEGY_PROPOSAL_CLAUSE = (
     "economic_justification, economic_criteria (parmi cash_received, margin, recurrence, autonomy, "
     "growth), economic_rank (entier utilisé seulement à critère économique égal), "
     "required_capabilities (identifiants, jamais une déclaration de disponibilité), evidence_ids, "
-    "expected_signal, stop_criterion. N'inclus aucun champ available, executable ou de "
-    "disponibilité. Ne classe pas une stratégie plus bas parce qu'une capacité manque, et ne "
+    "expected_signal, stop_criterion. "
+    "Pour reconsidérer une hypothèse réfutée, précise aussi reconsiders_hypothesis_id, "
+    "reconsideration_reason et une preuve observée nouvelle explicitement liée, comme pour hypothesis. "
+    "N'inclus aucun champ available, executable ou de disponibilité. "
+    "Ne classe pas une stratégie plus bas parce qu'une capacité manque, et ne "
     "remplace pas la meilleure stratégie non exécutable par une moins bonne seulement exécutable."
 )
 
@@ -104,8 +110,8 @@ def _ids(values) -> set[str]:
     found = set()
     for value in values or []:
         if isinstance(value, str):
-            token = value.strip().casefold()
-            if _ID_RE.match(token):
+            token = _capability_id(value)
+            if token:
                 found.add(token)
     return found
 
@@ -116,7 +122,7 @@ def _capability_id(value) -> str | None:
         raw = value.get("id", value.get("identifier", value.get("capability")))
     if not isinstance(raw, str):
         return None
-    token = raw.strip().casefold()
+    token = ":".join(re.sub(r"[\s-]+", "_", part.strip().casefold()) for part in raw.strip().split(":"))
     return token if _ID_RE.match(token) else None
 
 
@@ -193,9 +199,12 @@ def normalize_proposals(value) -> list[dict]:
         seen.add(key)
         capabilities = []
         declared = raw.get("required_capabilities")
+        complete = isinstance(declared, list) and len(declared) <= 12 and raw.get("requirements_complete") is not False
         if isinstance(declared, list):
             for item in declared:
                 identifier = _capability_id(item)
+                if not identifier:
+                    complete = False
                 if identifier and identifier not in capabilities:
                     capabilities.append(identifier)
                 if len(capabilities) >= 12:
@@ -207,9 +216,14 @@ def normalize_proposals(value) -> list[dict]:
             "economic_criteria": _criteria(raw.get("economic_criteria")),
             "economic_rank": _rank(raw.get("economic_rank")),
             "required_capabilities": capabilities,
+            "requirements_complete": complete,
             "evidence_ids": _evidence_ids(raw.get("evidence_ids")),
             "expected_signal": _text(raw.get("expected_signal"), 500),
             "stop_criterion": _text(raw.get("stop_criterion"), 500),
+            "reconsiders_hypothesis_id": (raw.get("reconsiders_hypothesis_id")
+                                          if type(raw.get("reconsiders_hypothesis_id")) is int
+                                          and raw["reconsiders_hypothesis_id"] > 0 else None),
+            "reconsideration_reason": _text(raw.get("reconsideration_reason"), 3000),
             "llm_availability_claims_ignored": _claims_ignored(raw) or raw.get("llm_availability_claims_ignored") is True,
         })
     return proposals
@@ -239,9 +253,9 @@ def build_inventory(*, present_tools, allowed_execution, executors=(), temporari
     registered = _ids(executors)
     present = tools | registered
     temporary = _ids(temporarily_unavailable) & present
-    # Un identifiant d'exécuteur n'est jamais exécutable, même s'il figure aussi parmi les outils autorisés.
-    executable = (tools & allowed) - temporary - registered
-    human_required = registered - temporary
+    # L'autorisation vient de la politique du caller, jamais de la seule présence.
+    executable = (present & allowed) - temporary
+    human_required = registered - allowed
     # Hors de l'ensemble autorisé, le refus de permission reste stable : une sonde temporaire ne le masque pas.
     permission_denied = (tools - allowed) - human_required
     return Inventory(
@@ -277,16 +291,16 @@ def _one_capability(identifier: str, inventory: Inventory) -> str:
         return "missing_capability"
     if identifier in inventory.permission_denied:
         return "permission_denied"
-    if identifier in inventory.temporarily_unavailable:
-        return "temporarily_unavailable"
     if identifier in inventory.human_required:
         return "human_required"
+    if identifier in inventory.temporarily_unavailable:
+        return "temporarily_unavailable"
     if identifier in inventory.executable:
         return "executable"
     return "permission_denied"
 
 
-def classify_executability(required: list[str], inventory: Inventory) -> dict:
+def classify_executability(required: list[str], inventory: Inventory, *, requirements_complete=True) -> dict:
     """Annote l'exécutabilité. Ne modifie ni le rang économique ni un statut d'hypothèse."""
     if not required:
         return {"executability": "not_established", "missing_capabilities": [],
@@ -295,14 +309,17 @@ def classify_executability(required: list[str], inventory: Inventory) -> dict:
         "missing_capability", "temporarily_unavailable", "permission_denied", "human_required", "executable")}
     for identifier in required:
         buckets[_one_capability(identifier, inventory)].append(identifier)
-    if buckets["missing_capability"]:
-        state = "missing_capability"
-    elif buckets["temporarily_unavailable"]:
-        state = "temporarily_unavailable"
-    elif buckets["permission_denied"]:
+    # Une panne sur une exigence ne masque pas la frontière d'une autre exigence.
+    if buckets["permission_denied"]:
         state = "permission_denied"
     elif buckets["human_required"]:
         state = "human_required"
+    elif not requirements_complete:
+        state = "not_established"
+    elif buckets["missing_capability"]:
+        state = "missing_capability"
+    elif buckets["temporarily_unavailable"]:
+        state = "temporarily_unavailable"
     else:
         state = "executable"
     permission_state = {"permission_denied": "denied", "human_required": "human_required"}.get(state, "none")
@@ -328,17 +345,71 @@ def _economic_sort_key(item: dict) -> tuple:
         1 if item["economically_invalidated"] else 0,
         _criterion_index(item["economic_criteria"]),
         rank if rank is not None else 10**6,
-        -len(item["evidence_ids"]),
         item["key"],
     )
 
 
-def invalidated_keys(business: str) -> set[str]:
+def _reconsidered_hypothesis(conn, business: str, objective_id: int, key: str):
+    """Relit une reconsidération persistée avec la preuve exigée par strategy.py."""
+    rows = conn.execute(
+        "SELECT h.id, h.statement, old.id AS old_id, old.statement AS old_statement, "
+        "old.updated_at, e.captured_at, e.created_at FROM strategy_hypotheses h "
+        "JOIN strategy_links r ON r.business=h.business AND r.from_type='hypothesis' AND r.from_id=h.id "
+        "AND r.to_type='hypothesis' AND r.relation='reconsiders' "
+        "JOIN strategy_hypotheses old ON old.business=h.business AND old.id=r.to_id AND old.status='invalidated' "
+        "JOIN strategy_links c ON c.business=h.business AND c.from_type='hypothesis' AND c.from_id=h.id "
+        "AND c.to_type='evidence' AND c.relation='considers' "
+        "JOIN strategy_evidence e ON e.business=h.business AND e.id=c.to_id AND e.status='active' "
+        "AND e.nature='observed' AND e.source_ref IS NOT NULL "
+        "JOIN strategy_links p ON p.business=h.business AND p.from_type='evidence' AND p.from_id=e.id "
+        "AND p.to_type='hypothesis' AND p.to_id=old.id AND p.relation='reconsiders' "
+        "WHERE h.business=? AND h.objective_id=? AND h.status IN ('proposed','testing','inconclusive') "
+        "ORDER BY h.id", (business, objective_id)).fetchall()
+    return next((row for row in rows if strategy._hypothesis_key(row['statement']) == key
+                 and strategy._hypothesis_key(row['old_statement']) == key and row['captured_at']
+                 and row['updated_at'] < row['captured_at'] <= time.time()
+                 and row['created_at'] > row['updated_at']), None)
+
+
+def invalidated_keys(business: str, objective_id: int | None = None) -> set[str]:
     from . import journal
     rows = journal.query(
         "SELECT statement FROM strategy_hypotheses WHERE business=? AND status='invalidated'",
         (strategy._business(business),))
-    return {key for row in rows if (key := strategy._hypothesis_key(row["statement"]))}
+    keys = {key for row in rows if (key := strategy._hypothesis_key(row["statement"]))}
+    if objective_id is not None:
+        with tasks._tx() as conn:
+            keys = {key for key in keys if _reconsidered_hypothesis(conn, business, objective_id, key) is None}
+    return keys
+
+
+def pursuit_proposals(business: str, objective_id: int, choice: dict) -> list[dict]:
+    """Conserve le choix antérieur si le modèle omet une stratégie encore pertinente."""
+    current = normalize_proposals(choice.get("strategies"))
+    legacy = choice.get("hypothesis")
+    if isinstance(legacy, dict):
+        for item in current:
+            if item['key'] == strategy._hypothesis_key(legacy.get('statement')):
+                for field in ('reconsiders_hypothesis_id', 'reconsideration_reason',
+                              'evidence_ids', 'expected_signal', 'stop_criterion'):
+                    if not item.get(field) and field in legacy:
+                        item[field] = legacy[field]
+    prior = recorded_strategies(business, objective_id)
+    current_by_key = {item['key']: item for item in current}
+    carried = normalize_proposals(prior)
+    retained_keys = {strategy._hypothesis_key(item.get('statement')) for item in prior
+                     if item.get('strategic_state') == 'retained'}
+    return normalize_proposals(
+        [current_by_key.get(item['key'], item) for item in carried if item['key'] in retained_keys]
+        + current + carried)
+
+
+def reconsider_proposals(business: str, objective_id: int, task_id: int, proposals, allowed_ids) -> None:
+    """La validation et l'écriture de reconsidération restent celles de #115."""
+    for item in proposals:
+        if item.get('reconsiders_hypothesis_id'):
+            strategy.propose_pursuit_hypothesis(business, objective_id, task_id, item,
+                                                available_evidence_ids=allowed_ids)
 
 
 def assess(proposals, inventory: Inventory, *, economically_invalidated: set[str] | None = None) -> dict:
@@ -348,7 +419,8 @@ def assess(proposals, inventory: Inventory, *, economically_invalidated: set[str
     for proposal in normalize_proposals(proposals):
         item = dict(proposal)
         item["economically_invalidated"] = item["key"] in invalidated
-        item.update(classify_executability(item["required_capabilities"], inventory))
+        item.update(classify_executability(item["required_capabilities"], inventory,
+                                          requirements_complete=item["requirements_complete"]))
         if item["economically_invalidated"]:
             item["may_execute"] = False
             item["strategic_state"] = "invalidated"
@@ -383,8 +455,8 @@ def is_substitution(next_goal: str, assessment: dict) -> bool:
     retained_key = retained.get("key") or strategy._hypothesis_key(retained.get("statement", ""))
     if not goal or goal == retained_key:
         return False
-    return any(goal == item.get("key") for item in assessment.get("considered") or []
-               if item.get("strategic_state") != "retained")
+    # Une paraphrase ou une alternative non comparée n'a pas davantage d'autorité.
+    return goal != strategy._hypothesis_key(reasoning_goal(retained))
 
 
 def reasoning_goal(retained: dict) -> str:
@@ -406,7 +478,7 @@ def reasoning_reason(retained: dict) -> str:
 
 
 def apply_pursuit_choice(choice, action, reason, permission, assessment, *,
-                         execution_boundary: bool, rounds_left: bool) -> dict:
+                         execution_boundary: bool, rounds_left: bool, continue_reasoning=True) -> dict:
     """Ajuste la suite de pursuit sans confondre stratégie, capacité et permission.
 
     Une capacité absente ou temporairement indisponible ne devient pas une frontière humaine.
@@ -423,6 +495,18 @@ def apply_pursuit_choice(choice, action, reason, permission, assessment, *,
     new_permission = permission
     new_goal = reasoning_goal(retained) if retained and substitution else next_goal
     non_executable = bool(retained) and retained.get("executability") != "executable"
+    if (non_executable and not execution_boundary
+            and retained.get("executability") in {"missing_capability", "temporarily_unavailable", "not_established"}
+            and re.fullmatch(r"(?:la capacité|l'outil|capacité|outil) [^.;?!\n]{1,120} "
+                             r"(?:n'est pas installée?|est absente?|est indisponible|manque)\.?",
+                             str(new_permission or "").strip(), re.IGNORECASE)):
+        new_permission = None
+    if not retained and assessment.get("considered") and not execution_boundary and not new_permission:
+        new_action, new_goal = "pause", ""
+        new_reason = "Aucune stratégie économiquement admissible ; une preuve nouvelle est requise."
+    if new_permission:
+        return {"action": new_action, "reason": new_reason, "permission": new_permission,
+                "next_goal": new_goal, "substitution_blocked": substitution, "model_reason": model_reason}
     if non_executable and not execution_boundary:
         if new_action == "request_permission":
             new_permission = None
@@ -433,7 +517,7 @@ def apply_pursuit_choice(choice, action, reason, permission, assessment, *,
             else:
                 new_action = "pause"
                 new_reason = "Limite de trois cycles atteinte. " + reasoning_reason(retained)
-        elif new_action == "pause" and rounds_left:
+        elif new_action == "pause" and rounds_left and continue_reasoning:
             new_action = "continue"
             new_reason = reasoning_reason(retained)
             new_goal = new_goal or reasoning_goal(retained)
@@ -470,9 +554,11 @@ def authorize_execution(assessment: dict) -> dict:
             "strategy_key": retained.get("key"), "missing_capabilities": []}
 
 
-def dispatch_if_authorized(assessment: dict, trigger) -> dict:
+def dispatch_if_authorized(assessment: dict, trigger, *, execution_boundary=False) -> dict:
     """Appelle trigger uniquement pour la stratégie retenue et exécutable."""
     decision = authorize_execution(assessment)
+    if execution_boundary:
+        decision = {**decision, "authorized": False, "reason": "pursuit paused or permission required"}
     if not decision["authorized"]:
         return {**decision, "triggered": False, "effect": None}
     effect = trigger(assessment["retained"])
@@ -491,6 +577,11 @@ def _annotation_payload(item: dict, hypothesis_id: int) -> dict:
         "strategic_state": item["strategic_state"],
         "executability": item["executability"],
         "required_capabilities": list(item.get("required_capabilities") or []),
+        "requirements_complete": item.get("requirements_complete", True),
+        "expected_signal": item.get("expected_signal") or "",
+        "stop_criterion": item.get("stop_criterion") or "",
+        "reconsiders_hypothesis_id": item.get("reconsiders_hypothesis_id"),
+        "reconsideration_reason": item.get("reconsideration_reason") or "",
         "missing_capabilities": list(item.get("missing_capabilities") or []),
         "temporarily_unavailable": list(item.get("temporarily_unavailable") or []),
         "permission_state": item.get("permission_state") or "none",
@@ -545,19 +636,22 @@ def _link_cited(conn, business: str, hypothesis_id: int, evidence_ids: list[int]
 
 
 def _write_annotation(conn, business: str, task_id: int, hypothesis_id: int, item: dict) -> int:
-    source_ref = f"strategy.executability#h{hypothesis_id}#t{task_id}"
+    observation = json.dumps(_annotation_payload(item, hypothesis_id), ensure_ascii=False, sort_keys=True)
     existing = conn.execute(
-        "SELECT id FROM strategy_evidence WHERE business=? AND source_type=? AND source_ref=? "
-        "AND status='active' AND created_by=? ORDER BY id LIMIT 1",
-        (business, SOURCE_TYPE, source_ref, ACTOR)).fetchone()
-    if existing:
+        "SELECT e.id, e.observation FROM strategy_evidence e JOIN strategy_links l "
+        "ON l.business=e.business AND l.from_type='hypothesis' AND l.from_id=? "
+        "AND l.to_type='evidence' AND l.to_id=e.id AND l.relation=? "
+        "WHERE e.business=? AND e.source_type=? AND e.status='active' AND e.created_by=? "
+        "ORDER BY e.id DESC LIMIT 1", (hypothesis_id, RELATION, business, SOURCE_TYPE, ACTOR)).fetchone()
+    if existing and existing['observation'] == observation:
         evidence_id = int(existing["id"])
     else:
+        source_ref = f"strategy.executability#h{hypothesis_id}#t{task_id}#{hashlib.sha256(observation.encode()).hexdigest()[:16]}"
         evidence_id = strategy.create(
             "evidence", business, f"Exécutabilité hypothèse #{hypothesis_id} : {item['executability']}",
             _conn=conn, created_by=ACTOR, origin_task_id=task_id, nature="computed",
             source_type=SOURCE_TYPE, source_ref=source_ref,
-            observation=json.dumps(_annotation_payload(item, hypothesis_id), ensure_ascii=False, sort_keys=True))
+            observation=observation)
     strategy.link(business, "hypothesis", hypothesis_id, "evidence", evidence_id, RELATION, _conn=conn)
     item["evidence_annotation_id"] = evidence_id
     return evidence_id
@@ -566,7 +660,8 @@ def _write_annotation(conn, business: str, task_id: int, hypothesis_id: int, ite
 def _persist_item(conn, business: str, objective_id: int, task_id: int, item: dict, allowed: set[int]) -> bool:
     created = False
     invalidated_id = _existing_invalidated(conn, business, item["key"])
-    if item.get("strategic_state") == "invalidated" or item.get("economically_invalidated") or invalidated_id:
+    reconsidered = _reconsidered_hypothesis(conn, business, objective_id, item['key']) if invalidated_id else None
+    if item.get("strategic_state") == "invalidated" or item.get("economically_invalidated") or (invalidated_id and reconsidered is None):
         # Une hypothèse déjà invalidée économiquement n'est pas recréée ni rouverte.
         item["strategic_state"] = "invalidated"
         item["economically_invalidated"] = True
@@ -576,7 +671,11 @@ def _persist_item(conn, business: str, objective_id: int, task_id: int, item: di
             return False
         hypothesis_id = invalidated_id
     else:
-        hypothesis_id, _ = _reuse_hypothesis(conn, business, objective_id, task_id, item["statement"], item["key"])
+        if reconsidered is not None:
+            hypothesis_id = int(reconsidered['id'])
+            item['reconsiders_hypothesis_id'] = int(reconsidered['old_id'])
+        else:
+            hypothesis_id, _ = _reuse_hypothesis(conn, business, objective_id, task_id, item["statement"], item["key"])
         if hypothesis_id is None:
             fields = {"statement": item["statement"],
                       "evidence_required": "Preuve observée ou résultat économique vérifiable; la sortie LLM seule n'est pas une preuve."}
@@ -625,7 +724,7 @@ def persist(business: str, objective_id: int, task_id: int, assessment: dict, *,
                 created_retained = False
         stored["hypothesis_id"] = retained_id
         stored["status"] = "created" if created_retained else ("reused" if retained_id else "no_retained")
-        stored["reconsiders_hypothesis_id"] = None
+        stored["reconsiders_hypothesis_id"] = (stored.get('retained') or {}).get('reconsiders_hypothesis_id') if retained_id else None
     return stored
 
 
@@ -640,6 +739,8 @@ def _payload(row) -> dict | None:
         return None
     payload = dict(payload)
     payload["hypothesis_status"] = row["hypothesis_status"]
+    if row["hypothesis_status"] == 'invalidated':
+        payload['strategic_state'], payload['may_execute'] = 'invalidated', False
     payload["evidence_id"] = int(row["evidence_id"])
     return payload
 

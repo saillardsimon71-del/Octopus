@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -111,14 +112,16 @@ def test_proposal_cap_keeps_twelve_and_drops_the_rest():
     assert len(separation.normalize_proposals(raw)) == 12
 
 
-def test_registered_executor_is_never_marked_executable_by_the_tool_allowlist():
+def test_registered_executor_needs_explicit_system_authorization():
     facts = separation.build_inventory(
         present_tools={"email:send", "search"}, allowed_execution={"email:send", "search"},
         executors={"email:send"})
     assert "email:send" in facts.present
-    assert "email:send" in facts.human_required
-    assert "email:send" not in facts.executable
-    assert separation.classify_executability(["email:send"], facts)["executability"] == "human_required"
+    assert "email:send" not in facts.human_required
+    assert "email:send" in facts.executable
+    assert separation.classify_executability(["email:send"], facts)["executability"] == "executable"
+    denied = separation.build_inventory(present_tools={"search"}, allowed_execution={"search"}, executors={"email:send"})
+    assert separation.classify_executability(["email:send"], denied)["executability"] == "human_required"
     assert "search" in facts.executable
 
 
@@ -524,3 +527,266 @@ def test_determination_prompt_states_the_separation(monkeypatch):
     assert stored["required_capabilities"] == ["phone_call"]
     assert stored["economic_criteria"] == ["cash_received"]
     assert "available" not in stored
+
+
+def test_registered_and_explicitly_authorized_executor_is_executable():
+    facts = separation.build_inventory(present_tools={"search"}, allowed_execution={"email:send"},
+                                       executors={"email:send"})
+    assert separation.classify_executability(["email:send"], facts)["executability"] == "executable"
+
+
+@pytest.mark.parametrize("blocked", ["permission_denied", "human_required"])
+def test_temporary_failure_does_not_mask_another_requirement_boundary(blocked):
+    facts = inventory(present={"search", "email:send"}, temporary={"search"},
+                      denied={"email:send"} if blocked == "permission_denied" else (),
+                      human={"email:send"} if blocked == "human_required" else ())
+    result = separation.classify_executability(["search", "email:send"], facts)
+    assert result["executability"] == blocked
+    assert result["permission_state"] == ("denied" if blocked == "permission_denied" else blocked)
+    assert not result["may_execute"]
+
+
+@pytest.mark.parametrize("name", [" Phone_Call ", "PHONE CALL", "phone-call"])
+def test_capability_name_variants_do_not_disappear_from_requirements(name):
+    result = separation.assess([{"statement": PHONE, "required_capabilities": ["search", name]}],
+                              separation.build_inventory(present_tools={"search"}, allowed_execution={"search"}))
+    assert result["retained"]["missing_capabilities"] == ["phone_call"]
+    assert not result["retained"]["may_execute"]
+
+
+def test_malformed_requirement_cannot_authorize_the_valid_subset():
+    result = separation.assess([{"statement": PHONE, "required_capabilities": ["search", {"available": True}]}],
+                              separation.build_inventory(present_tools={"search"}, allowed_execution={"search"}))
+    assert result["retained"]["executability"] == "not_established"
+    assert not result["retained"]["may_execute"]
+
+
+@pytest.mark.parametrize("field", ["available", "tool_available", "capability_exists", "toolAvailable", "capabilityExists"])
+def test_structured_model_claims_never_authorize_a_missing_capability(field):
+    raw = {"statement": PHONE, field: True,
+           "required_capabilities": [{"id": "invented_capability", field: True}]}
+    assessed = separation.assess([raw], phone_email())
+    assert assessed["retained"]["executability"] == "missing_capability"
+    assert not separation.authorize_execution(assessed)["authorized"]
+    assert field not in assessed["retained"]
+
+
+def test_unverified_evidence_counts_cannot_change_an_economic_tie():
+    a = {"statement": "A hypothèse économique", "economic_criteria": ["cash_received"], "economic_rank": 1}
+    b = {"statement": "B hypothèse économique", "economic_criteria": ["cash_received"], "economic_rank": 1,
+         "evidence_ids": list(range(10000, 10020))}
+    assert separation.assess([a, b], phone_email())["retained"]["statement"] == a["statement"]
+
+
+@pytest.mark.parametrize("capability", ["phone_call", "browser_click", "email:send"])
+def test_model_real_permission_is_not_erased_by_a_blocked_strategy(monkeypatch, capability):
+    monkeypatch.setattr(octopus, "enabled", lambda: True)
+    def offline(*args, **kwargs):
+        result = _pursuit_result("request_permission", permission="Autoriser la publication commerciale ?")
+        result["determination"]["strategies"] = [{"statement": PHONE, "required_capabilities": [capability]}]
+        return result
+    monkeypatch.setattr(runtime, "run_mission", offline)
+    monkeypatch.setattr(separation, "executor_ids", lambda: {"email:send"})
+    oid = supervisor.start_pursuit("Conserver la vraie permission")
+    supervisor.run_pursuit(oid)
+    assert supervisor.work_tasks(BUSINESS, oid)[0]["status"] == "waiting_human"
+    assert "publication" in tasks.pending_human_requests(BUSINESS)[0]["question"]
+
+
+@pytest.mark.parametrize("capability", ["phone_call", "search"])
+def test_uncompared_next_goal_cannot_bypass_the_retained_strategy(monkeypatch, capability):
+    monkeypatch.setattr(octopus, "enabled", lambda: True)
+    def offline(*args, **kwargs):
+        result = _pursuit_result(next_goal="Envoyer plutôt des emails car cet outil est disponible.")
+        result["determination"]["strategies"][0]["required_capabilities"] = [capability]
+        return result
+    monkeypatch.setattr(runtime, "run_mission", offline)
+    oid = supervisor.start_pursuit("Ne pas substituer discrètement")
+    supervisor.run_pursuit(oid)
+    output = supervisor.work_tasks(BUSINESS, oid)[0]["output"]
+    assert PHONE in output["next_goal"]
+    assert "Envoyer plutôt des emails" not in output["next_goal"]
+
+
+def test_missing_winner_is_not_lost_when_model_omits_it_on_the_next_cycle(monkeypatch):
+    monkeypatch.setattr(octopus, "enabled", lambda: True)
+    calls = []
+    def offline(*args, **kwargs):
+        result = _pursuit_result(next_goal=EMAIL)
+        if calls:
+            result["determination"]["strategies"] = result["determination"]["strategies"][1:]
+        calls.append(1)
+        return result
+    monkeypatch.setattr(runtime, "run_mission", offline)
+    oid = supervisor.start_pursuit("Conserver le meilleur choix")
+    supervisor.run_pursuit(oid)
+    assert len(calls) == supervisor.PURSUIT_ROUNDS
+    assert {t["output"]["strategy_assessment"]["retained"]["statement"]
+            for t in supervisor.work_tasks(BUSINESS, oid)} == {PHONE}
+
+
+def test_refuted_strategies_cannot_continue_via_an_uncompared_next_goal(monkeypatch):
+    _refuted(PHONE)
+    monkeypatch.setattr(octopus, "enabled", lambda: True)
+    def offline(*args, **kwargs):
+        result = _pursuit_result(next_goal="Refaire cette campagne sous une autre formulation")
+        result["determination"]["strategies"] = result["determination"]["strategies"][:1]
+        return result
+    monkeypatch.setattr(runtime, "run_mission", offline)
+    oid = supervisor.start_pursuit("Respecter la réfutation")
+    supervisor.run_pursuit(oid)
+    assert supervisor.work_tasks(BUSINESS, oid)[0]["output"]["decision"] == "pause"
+
+
+def test_strategy_list_does_not_disable_new_proof_reconsideration(monkeypatch):
+    old_id = _refuted(PHONE)
+    with tasks._tx() as conn:
+        conn.execute("UPDATE strategy_hypotheses SET updated_at=1 WHERE id=?", (old_id,))
+    proof = strategy.create("evidence", BUSINESS, "Observation nouvelle", created_by="human", nature="observed",
+                            source_type="fixture", source_ref="fixture://new", captured_at=2,
+                            observation="Contexte économique nouveau, à retester.")
+    strategy.link(BUSINESS, "evidence", proof, "hypothesis", old_id, "reconsiders")
+    monkeypatch.setattr(octopus, "enabled", lambda: True)
+    def offline(goal, **kwargs):
+        assert proof in json.loads(goal.rsplit("\n", 1)[-1])["identifiants_de_preuves_persistées_disponibles"]
+        result = _pursuit_result(next_goal=PHONE)
+        proposal = {"statement": PHONE, "evidence_ids": [proof], "expected_signal": "Mesure nouvelle",
+                    "stop_criterion": "Pas de paiement", "reconsiders_hypothesis_id": old_id,
+                    "reconsideration_reason": "Une preuve nouvelle change le contexte."}
+        result["determination"]["hypothesis"] = proposal
+        result["determination"]["strategies"] = [{**proposal, "economic_criteria": ["cash_received"],
+                                                    "required_capabilities": ["phone_call"]}]
+        return result
+    monkeypatch.setattr(runtime, "run_mission", offline)
+    oid = supervisor.start_pursuit("Réexaminer avec preuve")
+    supervisor.run_pursuit(oid)
+    output = supervisor.work_tasks(BUSINESS, oid)[0]["output"]
+    assert output["strategy_assessment"]["retained"]["statement"] == PHONE
+    assert output["hypothesis_id"] != old_id
+    assert output["strategy_hypothesis"]["reconsiders_hypothesis_id"] == old_id
+    assert strategy.get("hypothesis", old_id, BUSINESS)["status"] == "invalidated"
+    assert strategy.get("hypothesis", output["hypothesis_id"], BUSINESS)["status"] == "proposed"
+
+
+@pytest.mark.parametrize("same_task", [False, True])
+def test_resume_rechecks_inventory_and_keeps_old_annotation_immutable(monkeypatch, same_task):
+    monkeypatch.setattr(octopus, "enabled", lambda: True)
+    def offline(*args, **kwargs):
+        result = _pursuit_result(next_goal=PHONE)
+        result["determination"]["strategies"][0]["required_capabilities"] = ["search"]
+        return result
+    monkeypatch.setattr(runtime, "run_mission", offline)
+    triggered = []
+    monkeypatch.setattr(supervisor, "pursuit_strategy_effect", lambda item: triggered.append(item) or {})
+    queue = supervisor._queue_pursuit
+    class Crash(BaseException):
+        pass
+    def crash(*args, **kwargs):
+        if kwargs["round_no"] > 1:
+            if same_task:
+                raise Crash()
+            raise RuntimeError("crash après annotation")
+        return queue(*args, **kwargs)
+    monkeypatch.setattr(supervisor, "_queue_pursuit", crash)
+    oid = supervisor.start_pursuit("Réévaluer à la reprise")
+    if same_task:
+        with tasks._tx() as conn:
+            conn.execute("UPDATE tasks SET max_attempts=2 WHERE id=?", (supervisor.work_tasks(BUSINESS, oid)[0]['id'],))
+        with pytest.raises(Crash):
+            supervisor.run_pursuit(oid)
+    else:
+        supervisor.run_pursuit(oid)
+    work = supervisor.work_tasks(BUSINESS, oid)[0]
+    assert work["status"] == ("running" if same_task else "failed") and len(triggered) == 1
+    old = separation.latest_annotation(BUSINESS, tasks.step_value(work["id"], "pursuit.strategy_assessment")["hypothesis_id"])
+    before = dict(journal.query("SELECT * FROM strategy_evidence WHERE id=?", (old["evidence_id"],))[0])
+    monkeypatch.setattr(supervisor, "pursuit_capability_inventory", lambda: inventory(present={"search"}, denied={"search"}))
+    monkeypatch.setattr(supervisor, "_queue_pursuit", queue)
+    if same_task:
+        tasks.reap(now=time.time() + 120)
+    supervisor.start_pursuit(objective_id=oid)
+    supervisor.run_pursuit(oid)
+    assert len(triggered) == 1
+    saved = tasks.step_value(supervisor.work_tasks(BUSINESS, oid)[-1]['id'], "pursuit.strategy_assessment")
+    assert saved["retained"]["executability"] == "permission_denied"
+    assert dict(journal.query("SELECT * FROM strategy_evidence WHERE id=?", (old["evidence_id"],))[0]) == before
+    current = separation.latest_annotation(BUSINESS, saved['hypothesis_id'])
+    assert current['executability'] == 'permission_denied'
+    assert current['evidence_id'] != old['evidence_id']
+
+
+def test_real_permission_blocks_even_the_noop_production_hook(monkeypatch):
+    monkeypatch.setattr(octopus, "enabled", lambda: True)
+    def offline(*args, **kwargs):
+        result = _pursuit_result("request_permission", permission="Autoriser un envoi ?")
+        result["determination"]["strategies"][0]["required_capabilities"] = ["search"]
+        return result
+    monkeypatch.setattr(runtime, "run_mission", offline)
+    triggered = []
+    monkeypatch.setattr(supervisor, "pursuit_strategy_effect", lambda item: triggered.append(item) or {})
+    oid = supervisor.start_pursuit("Ne pas dispatcher malgré permission")
+    supervisor.run_pursuit(oid)
+    assert triggered == []
+    assert supervisor.work_tasks(BUSINESS, oid)[0]["status"] == "waiting_human"
+
+
+def test_production_hook_is_noop_and_annotation_replays_do_not_duplicate(monkeypatch):
+    monkeypatch.setattr(octopus, "enabled", lambda: True)
+    def offline(*args, **kwargs):
+        result = _pursuit_result(next_goal=PHONE)
+        result['determination']['strategies'][0]['required_capabilities'] = ['search']
+        return result
+    monkeypatch.setattr(runtime, 'run_mission', offline)
+    # Observer l'inventaire ne charge aucun connecteur et le hook n'appelle aucun executor.
+    before_executors = dict(actions._EXECUTORS)
+    blocked = []
+    monkeypatch.setattr(actions, '_load_configured_executors', lambda: blocked.append('connector'))
+    monkeypatch.setattr(actions, 'propose', lambda *a, **k: blocked.append('channel_action'))
+    oid = supervisor.start_pursuit('Vérifier le hook sans effet')
+    supervisor.run_pursuit(oid)
+    work = supervisor.work_tasks(BUSINESS, oid)
+    first = work[0]['output']['strategy_assessment']
+    assert work[0]['output']['strategy_execution']['effect']['dispatched'] is False
+    ids = {t['output']['strategy_assessment']['retained']['evidence_annotation_id'] for t in work}
+    assert len(ids) == 1
+    assert blocked == [] and dict(actions._EXECUTORS) == before_executors
+    assert not journal.query('SELECT id FROM channel_actions')
+    assert not journal.query('SELECT id FROM economic_channels')
+    assert not journal.query('SELECT id FROM spend_requests')
+    annotations = [dict(r) for r in journal.query('SELECT * FROM strategy_evidence')]
+    supervisor.start_pursuit(objective_id=oid)
+    supervisor.run_pursuit(oid)
+    assert [dict(r) for r in journal.query('SELECT * FROM strategy_evidence')] == annotations
+    assert tasks.pending_human_requests(BUSINESS) == []
+
+
+@pytest.mark.parametrize('kind', ['claim', 'computed', 'undated', 'unlinked', 'not_new'])
+def test_contradictory_unverified_or_unlinked_proof_cannot_rescue_a_refuted_strategy(monkeypatch, kind):
+    old_id = _refuted(PHONE)
+    with tasks._tx() as conn:
+        conn.execute('UPDATE strategy_hypotheses SET updated_at=1 WHERE id=?', (old_id,))
+    kwargs = {'nature': 'unverified' if kind == 'claim' else ('computed' if kind == 'computed' else 'observed'), 'source_type': 'fixture',
+              'observation': 'Affirmation contradictoire, sans validation économique.'}
+    kwargs.update(source_ref='fixture://contradiction', captured_at=0.5 if kind == 'not_new' else 2)
+    proof = strategy.create('evidence', BUSINESS, 'Contradiction', created_by='human', **kwargs)
+    if kind == 'undated':
+        with tasks._tx() as conn:
+            conn.execute('UPDATE strategy_evidence SET captured_at=NULL WHERE id=?', (proof,))
+    if kind != 'unlinked':
+        strategy.link(BUSINESS, 'evidence', proof, 'hypothesis', old_id, 'reconsiders')
+    monkeypatch.setattr(octopus, 'enabled', lambda: True)
+    def offline(*args, **kwargs):
+        result = _pursuit_result(next_goal=PHONE)
+        result['determination']['strategies'] = [{**proposals()[0], 'evidence_ids': [proof],
+                                                  'reconsiders_hypothesis_id': old_id,
+                                                  'reconsideration_reason': 'Le modèle dit que cela marche.'}]
+        return result
+    monkeypatch.setattr(runtime, 'run_mission', offline)
+    before = [dict(r) for r in journal.query('SELECT * FROM strategy_reviews')]
+    oid = supervisor.start_pursuit('Ne pas contourner la leçon')
+    supervisor.run_pursuit(oid)
+    first = supervisor.work_tasks(BUSINESS, oid)[0]['output']
+    assert first['decision'] == 'pause'
+    assert first['strategy_assessment']['retained'] is None
+    assert strategy.get('hypothesis', old_id, BUSINESS)['status'] == 'invalidated'
+    assert [dict(r) for r in journal.query('SELECT * FROM strategy_reviews')] == before
