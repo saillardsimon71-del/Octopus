@@ -178,6 +178,12 @@ def load(path: Path | None = None) -> Catalog:
         return cached[1]
     raw = json.loads(p.read_text(encoding="utf-8"))
     raw = _overlay_omniroute(raw)
+    for task in raw.get("tasks", {}).values():
+        candidates = task.setdefault("candidates", {})
+        free = [model_id for model_id in candidates.get("low_cost", candidates.get("zero_cost", []))
+                if raw["models"][model_id]["cost_class"] != "paid"]
+        baseline = task.get("baseline")
+        candidates["economical"] = list(dict.fromkeys(free)) + ([baseline] if baseline else [])
     validate(raw)
     cat = Catalog(raw=raw, path=p)
     _cache[cache_key] = (mtime, cat)

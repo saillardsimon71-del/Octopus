@@ -4,7 +4,8 @@
 > offres et évaluations existants restent disponibles. Les commandes cycle/batch,
 > les outils render_offer/qc et le Studio de génération ont été supprimés.
 
-Les appels LLM normaux passent par OmniRoute en `zero_cost`. La frontière Agnes sera
+Les appels LLM normaux passent par OmniRoute en `zero_cost` ; le premier démarrage autonome
+utilise `economical` via la même passerelle. La frontière Agnes sera
 traitée dans la phase C ; aucune génération vidéo n'est disponible à la fin de la phase B.
 
 ## Roster

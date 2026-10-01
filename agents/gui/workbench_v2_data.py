@@ -40,7 +40,8 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
         return {"objectives": [], "tasks": [], "generations": [], "events": [],
                 "requests": [], "channels": [], "allowances": [], "ledger": [],
                 "businesses": [], "token_cost_usd": 0.0, "agnes_api_cost": None,
-                "agnes_health": "Non sondé", "decisions": [], "evidence": [], "browser": []}
+                "agnes_health": "Non sondé", "decisions": [], "evidence": [], "browser": [],
+                "llm_calls": [], "pursuit_llm": None}
     connection = (journal.readonly_connection(path) if os.environ.get("OCTOPUS_WORKBENCH_READONLY") == "1"
                   else sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10))
     connection.row_factory = sqlite3.Row
@@ -87,8 +88,40 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
         if "llm_calls" in present:
             token_sql = "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls" + clause
             token_cost = round(float(connection.execute(token_sql, args).fetchone()[0]), 6)
+            llm_calls = [dict(row) for row in connection.execute(
+                "SELECT ts, task, provider, model, resolved_provider, resolved_model, cost_class, "
+                "attempt, status, error, cost_usd, provider_cost_usd, justification FROM llm_calls" + clause +
+                " ORDER BY id DESC LIMIT 20", args)]
+            for call in llm_calls:
+                reason = json.loads(call.pop("justification") or "{}")
+                failures = [item["reason"] for item in reason.get("considered", [])
+                            if item.get("reason", "").startswith(("echec", "sortie invalide"))]
+                call["fallback"] = call["status"] == "ok" and bool(failures)
+                call["route_reason"] = reason.get("explanation") or "; ".join(failures) or call["error"]
         else:
             token_cost = 0.0
+            llm_calls = []
+        pursuit = next((task for task in tasks if task["kind"] == "supervisor.objective_work"
+                        and json.loads(task["input"] or "{}").get("pursuit")), None)
+        pursuit_llm = None
+        if pursuit:
+            spent = 0.0
+            cursor = pursuit
+            by_task_id = {task["id"]: task for task in tasks}
+            while cursor:
+                if cursor["run_id"] and "runs" in present and "llm_calls" in present:
+                    root = connection.execute("SELECT root_id FROM runs WHERE id=?", (cursor["run_id"],)).fetchone()
+                    if root:
+                        spent += float(connection.execute(
+                            "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls WHERE root_run_id=?",
+                            (root["root_id"],)).fetchone()[0])
+                task_input = json.loads(cursor["input"] or "{}")
+                if task_input.get("round") == 1:
+                    break
+                cursor = by_task_id.get(task_input.get("previous_id"))
+            cap = json.loads(pursuit["input"] or "{}").get("llm_cap_usd", pursuit["budget_usd"])
+            pursuit_llm = {"spent_usd": round(spent, 6), "budget_usd": cap,
+                           "remaining_usd": round(max(0.0, cap - spent), 6) if cap is not None else None}
     finally:
         connection.close()
 
@@ -140,7 +173,8 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
             "evidence": list(evidence.values()), "browser": browser,
             "businesses": sorted({item["business"] for group in
                                    (objectives, tasks, generations, channels, ledger) for item in group}),
-            "token_cost_usd": token_cost, "agnes_api_cost": None,
+            "token_cost_usd": token_cost, "llm_calls": llm_calls, "pursuit_llm": pursuit_llm,
+            "agnes_api_cost": None,
             "agnes_health": _agnes_health(channels) if check_health else "Non sondé"}
 
 

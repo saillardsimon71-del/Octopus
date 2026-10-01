@@ -711,19 +711,24 @@ def current_run() -> RunContext | None:
 
 @contextmanager
 def run(business: str, kind: str, *, label: str | None = None, budget_usd: float | None = None,
-        profile: str | None = None):
+        profile: str | None = None, resume_run_id: int | None = None):
     """Ouvre un run (imbrique dans le run courant s'il existe). Cede None si OCTOPUS=off."""
     if not enabled():
         yield None
         return
     parent = _current.get()
-    effective_profile = profile or (parent.profile if parent else None)
+    previous = query("SELECT id, root_id, business, kind, profile FROM runs WHERE id=?", (resume_run_id,))[0] if resume_run_id else None
+    if previous and (parent is not None or previous["business"] != business or previous["kind"] != kind):
+        raise ValueError("reprise de run incompatible")
+    effective_profile = profile or (parent.profile if parent else previous["profile"] if previous else None)
+    parent_id = parent.id if parent else previous["id"] if previous else None
+    root_id = parent.root_id if parent else previous["root_id"] if previous else None
     conn = connect()
     try:
         cur = conn.execute(
             "INSERT INTO runs (parent_id, root_id, business, kind, label, profile, budget_usd, status, "
             "started_at, pid) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)",
-            (parent.id if parent else None, parent.root_id if parent else None, business, kind,
+            (parent_id, root_id, business, kind,
              (label or "")[:200], effective_profile, budget_usd, time.time(), os.getpid()),
         )
         run_id = int(cur.lastrowid)
@@ -732,8 +737,15 @@ def run(business: str, kind: str, *, label: str | None = None, budget_usd: float
         conn.commit()
     finally:
         conn.close()
-    budgets = (parent.budgets if parent else ()) + (((run_id, budget_usd),) if budget_usd is not None else ())
-    ctx = RunContext(run_id, parent.root_id if parent else run_id, business, kind, effective_profile,
+    prior_budgets = ()
+    if previous:
+        ancestors = query("WITH RECURSIVE a(id, parent_id, budget_usd) AS ("
+                          "SELECT id, parent_id, budget_usd FROM runs WHERE id=? UNION ALL "
+                          "SELECT r.id, r.parent_id, r.budget_usd FROM runs r JOIN a ON a.parent_id=r.id) "
+                          "SELECT id, budget_usd FROM a WHERE budget_usd IS NOT NULL", (resume_run_id,))
+        prior_budgets = tuple((row["id"], row["budget_usd"]) for row in ancestors)
+    budgets = (parent.budgets if parent else prior_budgets) + (((run_id, budget_usd),) if budget_usd is not None else ())
+    ctx = RunContext(run_id, root_id if root_id else run_id, business, kind, effective_profile,
                      budget_usd, budgets)
     token = _current.set(ctx)
     status, error = "done", None

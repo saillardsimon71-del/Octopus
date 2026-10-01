@@ -295,6 +295,11 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         self._section(body, "Résultats et moyens")
         self._line(body, f"Coût LLM calculé : {state['token_cost_usd']:g} USD. Le résultat économique se consulte dans les comptes, pas dans le nombre de tâches.",
                    COLORS["muted"])
+        if state.get("pursuit_llm"):
+            llm_budget = state["pursuit_llm"]
+            self._line(body, f"Plafond LLM du travail : {llm_budget['spent_usd']:g} / {llm_budget['budget_usd']:g} USD "
+                       f"({llm_budget['remaining_usd']:g} USD restants). Budget économique externe : 0 EUR.",
+                       COLORS["muted"])
         self._line(body, "Exécution : " + self._worker_label() + ". Aucun appel Agnes automatique.", COLORS["muted"], pady=8)
         if state.get("browser"):
             self._secondary(body, "Voir le navigateur Hermes", lambda: self._show_page("Navigateur"))
@@ -446,6 +451,7 @@ class WorkbenchV2(EntrepreneurialWorkbench):
 
     def _activity(self, body) -> None:
         events = self._snapshot["events"]
+        llm_calls = self._snapshot.get("llm_calls", [])
         pending = [r for r in self._snapshot["requests"] if r["status"] == "pending"]
         if pending:
             card = self._card(body, "Votre intervention")
@@ -453,6 +459,22 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             for request in pending:
                 self._line(card, request["question"], padx=18, pady=(0, 8))
             self._secondary(card, "Ouvrir les réponses", lambda: self._show_page("Humain"))
+        if llm_calls:
+            self._section(body, "Routage LLM récent")
+            fallbacks = sum(call["fallback"] for call in llm_calls)
+            self._line(body, f"Replis observés : {fallbacks}", COLORS["muted"], pady=(0, 8))
+            for call in llm_calls[:10]:
+                card = self._card(body)
+                card.pack(fill="x", pady=(0, 6))
+                route = call["resolved_model"] or call["model"]
+                provider = call["resolved_provider"] or call["provider"]
+                cost_kind = "observé" if call["provider_cost_usd"] is not None else "calculé"
+                free_or_paid = "payant" if call["cost_class"] == "paid" else "gratuit"
+                self._line(card, f"{provider} / {route}  |  {free_or_paid}  |  "
+                           f"{call['cost_usd']:g} USD {cost_kind}  |  {call['status']}",
+                           size=13, bold=True, padx=16, pady=(9, 0))
+                if call.get("route_reason"):
+                    self._line(card, str(call["route_reason"])[:250], COLORS["muted"], padx=16, pady=(0, 9))
         if not events:
             self._line(body, "Aucun événement récent pour ce contexte.", COLORS["muted"])
             return

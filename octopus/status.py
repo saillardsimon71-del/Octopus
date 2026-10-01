@@ -53,6 +53,13 @@ def running_runs(limit: int = 10) -> list[dict]:
     for row in rows:
         row["age_s"] = round(now - row["started_at"], 1)
         row["cost_usd"] = round(journal.subtree_cost(row["id"]), 6)
+        budgets = journal.query(
+            "WITH RECURSIVE a(id, parent_id, budget_usd) AS ("
+            "SELECT id, parent_id, budget_usd FROM runs WHERE id=? UNION ALL "
+            "SELECT r.id, r.parent_id, r.budget_usd FROM runs r JOIN a ON a.parent_id=r.id) "
+            "SELECT id, budget_usd FROM a WHERE budget_usd IS NOT NULL", (row["id"],))
+        row["remaining_usd"] = (round(max(0.0, min(item["budget_usd"] - journal.subtree_cost(item["id"])
+                                                 for item in budgets)), 6) if budgets else None)
     return rows
 
 
@@ -118,15 +125,17 @@ def llm_routing(limit: int = 10, window_s: float = 86400.0) -> dict:
     since = time.time() - window_s
     by_status = {row["status"]: row["n"] for row in _rows(
         "SELECT status, COUNT(*) AS n FROM llm_calls WHERE ts >= ? GROUP BY status", (since,))}
-    recent = _rows("SELECT ts, task, provider, model, status, error, cost_usd FROM llm_calls WHERE ts >= ? "
+    recent = _rows("SELECT ts, task, provider, model, resolved_provider, resolved_model, cost_class, "
+                   "attempt, status, error, cost_usd, provider_cost_usd, justification FROM llm_calls WHERE ts >= ? "
                    "ORDER BY id DESC LIMIT ?", (since, limit))
     for row in recent:
         row["error"] = _first_line(row["error"], 160)
-    fallbacks = 0
-    ordered = list(reversed(recent))  # ordre chronologique
-    for previous, current in zip(ordered, ordered[1:]):
-        if previous["status"] != "ok" and current["status"] == "ok" and current["model"] != previous["model"]:
-            fallbacks += 1
+        reason = json.loads(row.pop("justification") or "{}")
+        failures = [item["reason"] for item in reason.get("considered", [])
+                    if item.get("reason", "").startswith(("echec", "sortie invalide"))]
+        row["fallback"] = row["status"] == "ok" and bool(failures)
+        row["route_reason"] = reason.get("explanation") or "; ".join(failures) or row["error"]
+    fallbacks = sum(row["fallback"] for row in recent)
     return {"window_s": window_s, "calls": sum(by_status.values()), "by_status": by_status,
             "deterministic_refusals": by_status.get("request_too_large", 0),
             "fallbacks_observed": fallbacks, "recent": recent}
@@ -192,8 +201,9 @@ def render(state: dict) -> str:
         lines.append(_line("", "aucun"))
     for item in state["running_runs"]:
         parent = f" <- run #{item['parent_id']}" if item["parent_id"] else " (racine)"
+        remaining = (f" | {item['remaining_usd']} USD restants" if item["remaining_usd"] is not None else "")
         lines.append(_line("", f"#{item['id']} {item['business']}/{item['kind']} {item['label'] or ''} "
-                               f"{item['age_s']} s | {item['cost_usd']} USD{parent}"))
+                               f"{item['age_s']} s | {item['cost_usd']} USD{remaining}{parent}"))
 
     lines.append("Dernière progression :")
     if not state["last_progress"]:
@@ -233,8 +243,10 @@ def render(state: dict) -> str:
                            f"replis observés : {routing['fallbacks_observed']}"))
     for item in routing["recent"][:5]:
         lines.append(_line("", f"{time.strftime('%H:%M:%S', time.localtime(item['ts']))} {item['task']} "
-                               f"{item['provider']}/{item['model']} -> {item['status']}"
-                               + (f" : {item['error']}" if item["error"] else "")))
+                               f"{item['resolved_provider'] or item['provider']}/"
+                               f"{item['resolved_model'] or item['model']} {item['cost_class']} "
+                               f"{item['cost_usd']} USD -> {item['status']}"
+                               + (f" : {item['route_reason']}" if item['route_reason'] else "")))
 
     lines.append("Coût cumulé :")
     lines.append(_line("", f"aujourd'hui {state['cost']['today_usd']} USD | runs actifs "

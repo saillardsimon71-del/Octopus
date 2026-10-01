@@ -52,13 +52,18 @@ s'arrêter, adapter sa stratégie ou demander l'autorisation nécessaire.
 
 ## Permissions de ce premier démarrage
 
-- Budget financier : 0 EUR. Profil LLM `zero_cost` imposé ; aucun fallback payant.
+- Budget économique externe : 0 EUR. Budget cognitif LLM séparé : profil `economical`,
+  plafond initial de 0,20 USD pour les trois cycles au plus d'un démarrage ou d'une reprise,
+  configurable avec
+  `OCTOPUS_PURSUIT_LLM_BUDGET_USD` avant le démarrage.
 - Recherche, consultation Web publique gratuite, état des ressources et comptes.
 - Aucun envoi, contact commercial, publication, contrat, achat, paiement,
   génération vidéo ou installation autonome.
 - Un canal déjà autorisé dans les données ne débloque pas d'autre outil ici.
-- Sans route LLM gratuite éligible, arrêt explicite `llm_unavailable`.
-  Désactiver la passerelle bloque également le démarrage, sans appel direct.
+- Deux essais gratuits au plus par appel logique, puis DeepSeek seul sous plafond.
+  Sans route gratuite ni DeepSeek disponible, ou si le plafond LLM est atteint,
+  arrêt explicite `llm_unavailable`. Désactiver la passerelle bloque le démarrage,
+  sans appel direct.
 - Une réponse dans "Humain" ne modifie ni droits, ni budget. Les permissions
   spécialisées restent administrées par leurs mécanismes existants.
 
@@ -85,6 +90,9 @@ dans ce DataRoot. Le code et le catalogue LLM restent ceux de la branche.
 `OCTOPUS_CATALOG`, s'il est défini, sélectionne le catalogue configuré par l'humain.
 Ne pas confondre présence d'une clé et éligibilité d'un modèle gratuit : les règles
 de prix, disponibilité, quotas et preuves de la passerelle continuent de s'appliquer.
+La clé DeepSeek reste locale (`DEEPSEEK_API_KEY` ou variable utilisateur Windows).
+Le routage, le coût et les refus sont visibles dans Activité ; ce budget LLM
+n'accorde aucune allowance économique et n'autorise aucun effet externe.
 
 1. Ouvrir la vue d'ensemble et cliquer sur "Démarrer / reprendre OCTOPUS".
 2. Consulter Missions, Navigateur, Livrables et Activité pour suivre le travail.

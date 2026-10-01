@@ -50,8 +50,9 @@ Le démarrage neutre suit [docs/FIRST_START.md](docs/FIRST_START.md).
 - Aucune dépense implicite : allowance, limites, journal et réconciliation.
 - Compute provisionné via `GuardedComputeManager` ; watchdog indépendant conservé.
 - Une erreur de soumission ambiguë n'autorise pas un retry payant aveugle.
-- LLM **free-first, pas free-at-any-cost** : règles déterministes en code, `zero_cost` par défaut,
-  modèle puissant payant seulement sur politique humaine explicite. Jamais de fallback payant implicite.
+- LLM **free-first, pas free-at-any-cost** : règles déterministes en code, `zero_cost` par défaut
+  hors premier démarrage autonome. Celui-ci utilise `economical` avec DeepSeek comme seul repli
+  payant et un plafond USD explicite. Jamais de fallback payant implicite hors de cette politique.
 - Secrets hors Git et hors environnement du candidat ; pas d'installation autonome privilégiée.
 - Les connaissances apprises ne changent ni autorisations, ni budgets, ni règles de preuve/promotion.
 - Une evidence gate `ACCEPTED` est nécessaire pour un product ticket, jamais suffisante pour

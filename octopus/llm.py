@@ -7,6 +7,7 @@ budgets AVANT l'appel, journalisation de l'usage reel et du cout, justification 
 Profils (config/catalog.json) :
 - legacy        : modele impose par le code existant (comportement historique) ;
 - zero_cost     : local et quotas gratuits uniquement, aucun appel payant ;
+- economical    : au plus deux essais gratuits, puis DeepSeek seul sous plafond ;
 - low_cost      : local et gratuit d'abord, payant si aucune alternative validee ;
 - quality_first : meilleur modele valide d'abord ;
 - bench         : banc d'evaluation (modele impose, sans exigence de preuve).
@@ -109,6 +110,13 @@ def secret(name: str) -> str:
             return (winreg.QueryValueEx(key, name)[0] or "").strip()
     except OSError:
         return ""
+
+
+def _safe_error(exc: Exception, provider: dict) -> str:
+    message = str(exc)
+    key_name = provider.get("api_key_env")
+    api_key = secret(key_name) if key_name else ""
+    return (message.replace(api_key, "[redacted]") if api_key else message)[:160]
 
 
 _health: dict[str, tuple[float, bool, str]] = {}
@@ -442,12 +450,15 @@ def _ineligibility(cat, profile_name: str, profile: dict, task: str, task_def: d
     allowed = profile.get("allowed_cost_classes", list(catalog.COST_CLASSES))
     if model["cost_class"] not in allowed:
         return f"classe de cout {model['cost_class']} interdite par le profil {profile_name}"
+    if (model["cost_class"] == "paid" and profile.get("allowed_paid_providers")
+            and model["provider"] not in profile["allowed_paid_providers"]):
+        return f"fournisseur payant {model['provider']} interdit par le profil {profile_name}"
     if task_def.get("privacy") == "sensitive" and model["cost_class"] != "local" and not profile.get("honor_pins"):
         return "tache sensible : fournisseur local uniquement"
     missing = needs - set(model.get("capabilities", []))
     if missing:
         return "capacites manquantes : " + ", ".join(sorted(missing))
-    if (profile_name in {"zero_cost", "flash_fallback"} and model["provider"] == "omniroute"
+    if (profile_name in {"zero_cost", "flash_fallback", "economical"} and model["provider"] == "omniroute"
             and model.get("zero_cost_attestation") != "free_only"):
         return "pool OmniRoute : attestation free_only absente"
     provider_cooldown = _provider_cooldown_reason(model["provider"])
@@ -463,7 +474,7 @@ def _ineligibility(cat, profile_name: str, profile: dict, task: str, task_def: d
     # OmniRoute auto/free est un routeur virtuel : son éligibilité est déterminée par le
     # health-check du gateway et par son propre pool free. On ne fabrique pas de bench local
     # fictif pour autoriser le premier démarrage.
-    if evidence_required and model["provider"] == "omniroute" and profile_name in {"zero_cost", "low_cost"}:
+    if evidence_required and model["provider"] == "omniroute" and profile_name in {"zero_cost", "low_cost", "economical"}:
         evidence_required = False
     if evidence_required:
         proof = journal.evidence(task, model_id, cat.evidence_rules())
@@ -668,7 +679,7 @@ def _zero_cost_violation(profile_name: str, model: dict, result: TransportResult
     # explicitement "paid" (DeepSeek Flash dans les tâches agents) ; ses routes
     # free_quota doivent rester réellement gratuites.
     enforce_free = profile_name == "zero_cost" or (
-        profile_name == "flash_fallback" and model["cost_class"] != "paid"
+        profile_name in {"flash_fallback", "economical"} and model["cost_class"] != "paid"
     )
     if not enforce_free:
         return None
@@ -702,6 +713,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
     considered: list[dict] = []
     last_error: Exception | None = None
     budget_block: str | None = None
+    free_attempts = 0
     oversized_providers = {
         row["provider"] for row in journal.query(
             "SELECT DISTINCT provider FROM llm_calls WHERE task=? AND business=? AND prompt_sha256=? "
@@ -715,6 +727,22 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
         if model is None:
             considered.append({"model": model_id, "eligible": False, "reason": "absent du catalogue"})
             continue
+        if profile_name == "economical" and ctx is not None:
+            exhausted = next((f"budget du run #{run_id} atteint : {journal.subtree_cost(run_id):.4f} $ "
+                              f"depenses >= {budget:.4f} $"
+                              for run_id, budget in ctx.budgets
+                              if journal.subtree_cost(run_id) >= budget), None)
+            if exhausted:
+                journal.record_llm_call({"ts": time.time(), "run_id": ctx.id, "root_run_id": ctx.root_id,
+                                         "business": business_name, "agent": agent, "task": task,
+                                         "profile": profile_name, "model": model_id,
+                                         "provider": model["provider"], "cost_class": model["cost_class"],
+                                         "attempt": candidate_attempt, "status": "blocked", "error": exhausted})
+                raise BudgetExceeded(exhausted)
+        is_free = model["cost_class"] != "paid"
+        if is_free and free_attempts >= prof.get("max_free_attempts", float("inf")):
+            considered.append({"model": model_id, "eligible": False, "reason": "limite d'essais gratuits atteinte"})
+            continue
         if model["provider"] in oversized_providers:
             considered.append({"model": model_id, "eligible": False,
                                "reason": "HTTP 413 déjà constaté pour ce contenu et ce fournisseur"})
@@ -723,10 +751,19 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
         if reason:
             considered.append({"model": model_id, "eligible": False, "reason": reason})
             continue
-        provider = cat.provider(model["provider"])
+        provider = dict(cat.provider(model["provider"]))
+        if profile_name == "economical":
+            provider["max_retries"] = 0
+            if model["cost_class"] == "paid":
+                provider["timeout_s"] = min(provider.get("timeout_s", 90), prof["paid_timeout_s"])
         methods = _structured_methods(model, json_mode, json_schema, tool_schemas)
+        if profile_name == "economical":
+            methods = methods[:1]
 
         for method_index, structured_method in enumerate(methods):
+            if is_free and free_attempts >= prof.get("max_free_attempts", float("inf")):
+                considered.append({"model": model_id, "eligible": False, "reason": "limite d'essais gratuits atteinte"})
+                break
             now = time.time()
             peak = pricing.is_peak(now, provider.get("peak_utc_weekdays"))
             base = {
@@ -755,12 +792,14 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 structured_method=structured_method,
             )
             started = time.perf_counter()
+            if is_free:
+                free_attempts += 1
             try:
                 result = _transport_result(_transport(provider, request), request["model"], model["provider"])
                 text, usage = result.text, result.usage
             except Exception as exc:
                 method_name = structured_method or "none"
-                failure = f"echec [{method_name}] : {type(exc).__name__}: {str(exc)[:160]}"
+                failure = f"echec [{method_name}] : {type(exc).__name__}: {_safe_error(exc, provider)}"
                 response = getattr(exc, "response", None)
                 too_large = (getattr(exc, "status_code", None) == 413
                              or getattr(response, "status_code", None) == 413)
@@ -783,6 +822,8 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 if (structured_method is not None and method_index + 1 < len(methods)
                         and _structured_method_error(exc)):
                     continue
+                if profile_name == "economical" and model["cost_class"] == "paid":
+                    raise NoEligibleModel(task, profile_name, considered, exc) from exc
                 if prof.get("fallback") and candidate_attempt < len(candidates):
                     break
                 raise
@@ -795,9 +836,9 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
             data, status, error = None, "ok", _zero_cost_violation(profile_name, model, result)
             if error is not None:
                 status = "blocked"
-            elif validate is not None:
+            elif validate is not None or (profile_name == "economical" and json_mode):
                 try:
-                    data = validate(text)
+                    data = (validate or parse_json)(text)
                 except Exception as exc:
                     status, error = "invalid", f"{type(exc).__name__}: {exc}"[:300]
             justification = _justify(profile_name, task, model_id, model,
@@ -821,7 +862,8 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 considered.append({"model": model_id, "eligible": True,
                                    "reason": f"sortie invalide [{method_name}] : {error}"})
                 last_error = InvalidOutput(f"{model_id} [{method_name}] : {error}")
-                if structured_method is not None and method_index + 1 < len(methods):
+                if (profile_name != "economical" and structured_method is not None
+                        and method_index + 1 < len(methods)):
                     continue
                 if prof.get("fallback") and candidate_attempt < len(candidates):
                     break

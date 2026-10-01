@@ -153,6 +153,12 @@
       "description": "Local et gratuit d'abord ; payant seulement si aucune alternative validee, dans le budget.",
       "honor_pins": false, "allowed_cost_classes": ["local", "free_quota", "paid"], "require_evidence": true, "fallback": true
     },
+    "economical": {
+      "description": "Au plus deux essais gratuits, puis DeepSeek seul sous plafond LLM du run.",
+      "honor_pins": false, "allowed_cost_classes": ["local", "free_quota", "paid"],
+      "allowed_paid_providers": ["deepseek"], "max_free_attempts": 2,
+      "paid_timeout_s": 90, "require_evidence": true, "fallback": true
+    },
     "flash_fallback": {
       "description": "Profil experimental : routes gratuites d'abord, puis uniquement DeepSeek-V4.1-Flash payant sous budget de mission.",
       "honor_pins": false, "allowed_cost_classes": ["local", "free_quota", "paid"], "require_evidence": false, "fallback": true

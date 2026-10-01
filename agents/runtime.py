@@ -1475,7 +1475,9 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         else:
             try:
                 r = deepseek.call_json(role, "action", MODEL, context + [
-                    {"role": "user", "content": "Choisis ta prochaine action (JSON)."}])
+                    {"role": "user", "content": "Choisis ta prochaine action (JSON)."}],
+                    validate=(_validate_action_contract if journal.current_run()
+                              and journal.current_run().profile == "economical" else None))
             except llm.GatewayError as exc:
                 error = f"{type(exc).__name__}: {exc}"[:1500]
                 return {"role": role, "steps": steps, "final": "(LLM indisponible)",
@@ -1623,6 +1625,37 @@ def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None
             )
 
 
+def _validate_plan_contract(data: dict) -> dict:
+    proposed = data.get("tasks")
+    if not isinstance(proposed, list) or any(
+            not isinstance(item, dict) or not isinstance(item.get("role"), str)
+            or not isinstance(item.get("task"), str) or not item["task"].strip()
+            for item in proposed):
+        raise ValueError("planification : liste de tâches structurées requise")
+    return data
+
+
+def _validate_synthesis_contract(data: dict, determination: bool) -> dict:
+    if not isinstance(data.get("rapport"), str) or not data["rapport"].strip():
+        raise ValueError("synthèse : rapport absent ou vide")
+    if determination:
+        choice = data.get("determination")
+        if (not isinstance(choice, dict) or choice.get("action") not in {"continue", "pause", "request_permission"}
+                or not all(isinstance(choice.get(key), str) for key in ("reason", "next_goal", "permission"))
+                or not choice["reason"].strip()
+                or (choice["action"] == "request_permission" and not choice["permission"].strip())):
+            raise ValueError("synthèse : détermination structurée invalide")
+    return data
+
+
+def _validate_action_contract(data: dict) -> dict:
+    if isinstance(data.get("final"), str) and data["final"].strip():
+        return data
+    if data.get("tool") in TOOLS and isinstance(data.get("args", {}), dict):
+        return data
+    raise ValueError("action : final ou outil et arguments valides requis")
+
+
 MAX_PLAN_TASKS = 5
 
 # Artefacts suffisamment petits pour circuler entre sous-agents sans recopier toute leur trace.
@@ -1679,6 +1712,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         return _mission_unavailable([], [], "timeout" if cancel.timed_out() else "cancelled",
                                     "Durée maximale atteinte" if cancel.timed_out() else "Arrêt demandé")
     current = journal.current_run()
+    economical = current is not None and current.profile == "economical"
     planner_roles = GENERIC_ROLES if current is not None and current.business != DEFAULT_BUSINESS else ROLES
     role_catalog = "\n".join(f"- {name}: {desc}" for name, desc in planner_roles.items())
     planner_freshness = _freshness_context(current)
@@ -1707,7 +1741,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         plan = deepseek.call_json("ORBIT", "planification", pro,
                                   [{"role": "system", "content": plan_sys},
                                    {"role": "user", "content": goal}],
-                                  reasoning="high")
+                                  reasoning="high", validate=_validate_plan_contract if economical else None)
     except llm.GatewayError as exc:
         return _mission_unavailable([], [], "llm_unavailable", f"{type(exc).__name__}: {exc}")
     proposed = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
@@ -1741,7 +1775,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                                        {"role": "user", "content": goal},
                                        {"role": "assistant", "content": json.dumps(plan, ensure_ascii=False)},
                                        {"role": "user", "content": feedback}],
-                                      reasoning="high")
+                                      reasoning="high", validate=_validate_plan_contract if economical else None)
         except llm.GatewayError as exc:
             return _mission_unavailable(tasks, [], "llm_unavailable", f"{type(exc).__name__}: {exc}")
         proposed = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
@@ -1863,7 +1897,9 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         syn = deepseek.call_json("ORBIT", "synthese", pro,
                                  [{"role": "system", "content": syn_sys},
                                   {"role": "user", "content": json.dumps(synthesis_input, ensure_ascii=False)}],
-                                 reasoning="high", max_tokens=4000)
+                                 reasoning="high", max_tokens=4000,
+                                 validate=(lambda data: _validate_synthesis_contract(data, determination))
+                                 if economical else None)
     except llm.GatewayError as exc:
         # Le travail des sous-agents existe deja. Une panne de serialisation/synthese
         # ne doit pas jeter la mission ni fabriquer une nouvelle conclusion factuelle.

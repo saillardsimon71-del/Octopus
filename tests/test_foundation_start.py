@@ -28,15 +28,60 @@ def test_empty_start_persists_reason_and_never_creates_business_or_video(monkeyp
     supervisor.run_pursuit(oid)
     assert len(calls) == 1
     assert "# OCTOPUS" in calls[0][0] and "0 EUR" in calls[0][0]
-    assert calls[0][1]["profile"] == "zero_cost"
+    assert calls[0][1]["profile"] == "economical"
     assert calls[0][1]["allowed_tools"] == supervisor.PURSUIT_TOOLS
     state = read_snapshot()
-    assert all(t["kind"] == supervisor.WORK_KIND and t["budget_usd"] == 0 for t in state["tasks"])
+    assert all(t["kind"] == supervisor.WORK_KIND and t["budget_usd"] == 0.20 for t in state["tasks"])
+    assert state["allowances"] == [] and state["ledger"] == []
     assert state["generations"] == []
     assert state["objectives"][0]["created_by"] == "octopus"
     assert state["objectives"][0]["status"] == "paused"
     assert state["decisions"][0]["rationale"] == "Aucune expérience actuellement justifiée"
     assert state["tasks"][0]["result"]["economic_result"] is None
+
+
+def test_first_start_llm_cap_is_configurable_without_economic_allowance(monkeypatch):
+    monkeypatch.setenv("OCTOPUS_PURSUIT_LLM_BUDGET_USD", "0.05")
+    objective_id = supervisor.start_pursuit()
+    task = supervisor.work_tasks("octopus", objective_id)[0]
+    assert task["budget_usd"] == 0.05
+    assert task["input"]["profile"] == "economical"
+    assert not journal.query("SELECT id FROM spend_allowances")
+    assert not journal.query("SELECT id FROM spend_requests")
+
+
+def test_first_start_rejects_invalid_llm_cap(monkeypatch):
+    monkeypatch.setenv("OCTOPUS_PURSUIT_LLM_BUDGET_USD", "nan")
+    with pytest.raises(supervisor.SupervisorError, match="positif et fini"):
+        supervisor.start_pursuit()
+
+
+def test_pursuit_cycles_share_one_llm_cap():
+    oid = supervisor.start_pursuit()
+    first = supervisor.work_tasks("octopus", oid)[0]
+    with journal.run("octopus", "task:supervisor.objective_work", budget_usd=0.20) as run:
+        journal.record_llm_call({"ts": 1, "run_id": run.id, "root_run_id": run.root_id,
+                                 "business": "octopus", "task": "agent.plan", "profile": "economical",
+                                 "model": "deepseek/v4-pro", "provider": "deepseek", "cost_class": "paid",
+                                 "status": "ok", "cost_usd": 0.07})
+    with journal.connect() as connection:
+        connection.execute("UPDATE tasks SET run_id=? WHERE id=?", (run.id, first["id"]))
+    second_id = supervisor._queue_pursuit(oid, round_no=2, previous_id=first["id"], next_goal="Suite")
+    second = tasks.get(second_id)
+    assert second["budget_usd"] == pytest.approx(0.13)
+    with journal.run("octopus", "task:supervisor.objective_work", budget_usd=second["budget_usd"]) as run2:
+        journal.record_llm_call({"ts": 2, "run_id": run2.id, "root_run_id": run2.root_id,
+                                 "business": "octopus", "task": "agent.react_step", "profile": "economical",
+                                 "model": "deepseek/flash", "provider": "deepseek", "cost_class": "paid",
+                                 "status": "ok", "cost_usd": 0.05})
+    with journal.connect() as connection:
+        connection.execute("UPDATE tasks SET run_id=? WHERE id=?", (run2.id, second_id))
+    third_id = supervisor._queue_pursuit(oid, round_no=3, previous_id=second_id, next_goal="Suite")
+    assert tasks.get(third_id)["budget_usd"] == pytest.approx(0.08)
+    snapshot = read_snapshot("octopus")
+    assert snapshot["pursuit_llm"] == {"spent_usd": 0.12, "budget_usd": 0.20,
+                                       "remaining_usd": 0.08}
+    assert snapshot["allowances"] == []
 
 
 def test_free_mission_and_bounded_reevaluation_keep_previous_observations(monkeypatch):
@@ -59,16 +104,16 @@ def test_free_mission_and_bounded_reevaluation_keep_previous_observations(monkey
     assert len(goals) == 6
 
 
-def test_missing_free_model_is_an_explicit_obstacle(monkeypatch):
+def test_missing_llm_model_is_an_explicit_obstacle(monkeypatch):
     def unavailable(*args, **kwargs):
-        raise llm.GatewayError("Aucun modèle gratuit éligible")
+        raise llm.GatewayError("Routes gratuites et DeepSeek indisponibles")
     monkeypatch.setattr(deepseek, "call_json", unavailable)
     oid = supervisor.start_pursuit()
     supervisor.run_pursuit(oid)
     work = supervisor.work_tasks("octopus", oid)[0]
     assert work["status"] == "done_degraded"
     assert work["output"]["execution_status"] == "llm_unavailable"
-    assert "gratuit" in work["output"]["reason"]
+    assert "DeepSeek" in work["output"]["reason"]
     assert work["output"]["economic_result"] is None
 
 

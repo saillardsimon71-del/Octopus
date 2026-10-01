@@ -73,7 +73,8 @@ def populated():
     _llm_call(status="request_too_large", error="HTTP 413 Request too large", model="groq/openai/gpt-oss-120b",
               provider="omniroute", ts=now - 30, run_id=1, root_run_id=1)
     _llm_call(status="ok", model="kilo/auto-free", provider="kilo", ts=now - 20, run_id=2, root_run_id=1,
-              cost_usd=0.0)
+              cost_usd=0.0, justification=json.dumps({"considered": [
+                  {"model": "groq/openai/gpt-oss-120b", "reason": "echec : HTTP 413"}]}))
     return {"objective_id": objective_id, "running": running, "waiting": waiting, "failed": failed,
             "queued": queued}
 
@@ -114,6 +115,10 @@ def test_status_snapshot_exposes_every_required_fact(populated):
     assert routing["deterministic_refusals"] == 1
     assert routing["fallbacks_observed"] == 1
     assert routing["recent"][0]["model"] == "kilo/auto-free"
+    assert routing["recent"][0]["provider"] == "kilo"
+    assert routing["recent"][0]["cost_class"] == "free"
+    assert routing["recent"][0]["cost_usd"] == 0.0
+    assert "remaining_usd" in state["running_runs"][0]
 
     assert state["cost"]["today_usd"] == 0.0
     assert state["cost"]["running_runs_usd"] == 0.0

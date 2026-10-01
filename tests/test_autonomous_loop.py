@@ -182,7 +182,7 @@ def test_autonomous_loop_requests_human_boundary_then_resumes_without_repeating_
         assert _wait(lambda: bool(tasks.pending_human_requests(BUSINESS)))
         (request,) = tasks.pending_human_requests(BUSINESS)
         assert request["key"] == supervisor.boundary_key(objective_id)
-        assert "route LLM gratuite" in request["question"]
+        assert "route LLM indisponible" in request["question"]
         assert len(calls) == 1
         # Le tick suivant ne duplique jamais la demande humaine déjà ouverte.
         assert supervisor.tick(businesses=[BUSINESS])["human_boundaries"][0]["action"] == "waiting_human"

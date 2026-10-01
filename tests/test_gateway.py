@@ -705,3 +705,112 @@ def test_explicit_paid_profile_shares_two_dollar_ceiling_without_external_allowa
     assert transport.models.count("deepseek-flash") == 2
     assert not journal.query("SELECT id FROM spend_allowances")
     assert not journal.query("SELECT id FROM spend_requests")
+
+
+def test_economical_uses_eligible_free_route_without_paid_cost(transport, providers_up):
+    prove("agent.react_step", "groq/gpt-oss-120b")
+    transport.handler = by_model({"openai/gpt-oss-120b": '{"final":"ok"}'})
+    result = llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
+                          validate=llm.parse_json)
+    assert result.model == "groq/gpt-oss-120b"
+    assert result.cost_usd == 0
+    assert transport.models == ["openai/gpt-oss-120b"]
+    assert calls()[0]["cost_class"] == "free_quota"
+
+
+def test_economical_bounds_free_attempts_then_uses_deepseek(transport, providers_up):
+    prove("podalux.select_offer", "ollama/qwen3.5-2b")
+    prove("podalux.select_offer", "groq/gpt-oss-120b")
+    prove("podalux.select_offer", "gemini/3.5-flash-lite")
+    transport.handler = by_model({"qwen3.5:2b": "pas du JSON",
+                                  "openai/gpt-oss-120b": TimeoutError("quota"),
+                                  "deepseek-flash": '{"ok":true}'})
+    result = llm.complete("podalux.select_offer", MSG, profile="economical", json_mode=True,
+                          validate=llm.parse_json)
+    assert result.model == "deepseek/flash"
+    assert transport.models == ["qwen3.5:2b", "openai/gpt-oss-120b", "deepseek-flash"]
+    assert [row["status"] for row in calls()] == ["invalid", "error", "ok"]
+    assert "limite d'essais gratuits" in result.justification["explanation"]
+    assert result.justification["paid_reason"] == "fallback_after_failure"
+    assert all(row["cost_usd"] == 0 for row in calls()[:2])
+    assert calls()[-1]["provider"] == "deepseek" and calls()[-1]["cost_usd"] > 0
+
+
+def test_economical_goes_directly_to_deepseek_without_eligible_free_model(transport, providers_up):
+    from octopus import status
+    transport.reply('{"ok":true}')
+    result = llm.complete("agent.plan", MSG, profile="economical", json_mode=True,
+                          validate=llm.parse_json)
+    assert result.model == "deepseek/v4-pro"
+    assert transport.models == ["deepseek-v4-pro"]
+    assert result.justification["paid_reason"] == "alternatives_ineligible"
+    assert status.llm_routing()["fallbacks_observed"] == 0
+
+
+def test_economical_invalid_free_json_falls_back_once_to_deepseek(transport, providers_up):
+    prove("agent.react_step", "groq/gpt-oss-120b")
+    transport.handler = by_model({"openai/gpt-oss-120b": "invalide",
+                                  "deepseek-flash": '{"final":"ok"}'})
+    result = llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
+                          validate=llm.parse_json)
+    assert result.model == "deepseek/flash"
+    assert transport.models == ["openai/gpt-oss-120b", "deepseek-flash"]
+    assert [row["status"] for row in calls()] == ["invalid", "ok"]
+
+
+def test_economical_invalid_plan_contract_falls_back_to_deepseek(transport, providers_up):
+    from agents import runtime
+    prove("agent.plan", "groq/gpt-oss-120b")
+    transport.handler = by_model({"openai/gpt-oss-120b": '{"tasks":"invalid"}',
+                                  "deepseek-v4-pro": '{"tasks":[]}'})
+    result = llm.complete("agent.plan", MSG, profile="economical", json_mode=True,
+                          validate=lambda text: runtime._validate_plan_contract(llm.parse_json(text)))
+    assert result.model == "deepseek/v4-pro"
+    assert [row["status"] for row in calls()] == ["invalid", "ok"]
+
+
+def test_economical_deepseek_failure_stops_without_another_paid_route(transport, providers_up):
+    transport.handler = by_model({"deepseek-v4-pro": TimeoutError("indisponible")})
+    with pytest.raises(llm.NoEligibleModel, match="agent.plan") as error:
+        llm.complete("agent.plan", MSG, profile="economical", json_mode=True,
+                     validate=llm.parse_json)
+    assert isinstance(error.value.last_error, TimeoutError)
+    assert transport.models == ["deepseek-v4-pro"]
+    assert calls()[-1]["status"] == "error"
+
+
+def test_economical_never_journals_a_key_echoed_by_provider(transport, providers_up):
+    transport.handler = by_model({"deepseek-v4-pro": RuntimeError("test-key rejected")})
+    with pytest.raises(llm.NoEligibleModel):
+        llm.complete("agent.plan", MSG, profile="economical")
+    assert "test-key" not in calls()[-1]["error"]
+    assert "[redacted]" in calls()[-1]["error"]
+
+
+def test_economical_stops_all_calls_when_run_budget_consumed(transport, providers_up):
+    prove("agent.react_step", "groq/gpt-oss-120b")
+    transport.reply('{"ok":true}')
+    with journal.run("octopus", "mission", budget_usd=0.01, profile="economical") as ctx:
+        journal.record_llm_call({"ts": time.time(), "run_id": ctx.id, "root_run_id": ctx.root_id,
+                                 "business": "octopus", "task": "agent.plan", "model": "deepseek/v4-pro",
+                                 "provider": "deepseek", "profile": "economical", "cost_class": "paid",
+                                 "status": "ok", "cost_usd": 0.01})
+        with pytest.raises(llm.BudgetExceeded, match="budget du run"):
+            llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
+                         validate=llm.parse_json)
+    assert transport.calls == []
+
+
+def test_resumed_run_keeps_llm_spend_for_budget_gate(transport, providers_up):
+    transport.reply('{"ok":true}', prompt_tokens=10, completion_tokens=1000)
+    with journal.run("octopus", "task:mission", budget_usd=0.0012, profile="economical") as first:
+        llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
+                     validate=llm.parse_json)
+    with journal.run("octopus", "task:mission", budget_usd=0.0012,
+                     resume_run_id=first.id) as resumed:
+        assert resumed.root_id == first.root_id
+        assert journal.subtree_cost(first.id) > 0
+        with pytest.raises(llm.BudgetExceeded):
+            llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
+                         validate=llm.parse_json)
+    assert transport.models == ["deepseek-flash"]
