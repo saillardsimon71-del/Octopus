@@ -434,7 +434,8 @@ def execute_pursuit(ctx) -> dict:
         output["strategy_assessment"] = assessment_record
         output["strategy_execution"] = separation.dispatch_if_authorized(
             assessment_record, pursuit_strategy_effect,
-            execution_boundary=bool(permission or action != "continue"))
+            execution_boundary=bool(permission or action != "continue"
+                                    or assessment_record.get("status") == "ignored" or ctx.cancelled()))
         if isinstance(output.get("determination"), dict):
             # La copie de sortie ne conserve pas une déclaration de disponibilité du modèle.
             output["determination"] = {**output["determination"], "strategies": proposals}

@@ -730,6 +730,40 @@ def test_real_permission_blocks_even_the_noop_production_hook(monkeypatch):
     assert supervisor.work_tasks(BUSINESS, oid)[0]["status"] == "waiting_human"
 
 
+@pytest.mark.parametrize('stop', ['pause', 'cancel'])
+def test_stop_during_mission_never_authorizes_the_hook(monkeypatch, stop):
+    monkeypatch.setattr(octopus, 'enabled', lambda: True)
+    def offline(*args, **kwargs):
+        work = next(t for t in tasks.list_tasks(business=BUSINESS) if t['status'] == 'running')
+        if stop == 'pause':
+            strategy.transition('objective', work['input']['objective_id'], BUSINESS, 'paused', actor='human')
+        result = _pursuit_result(next_goal=PHONE)
+        result['determination']['strategies'][0]['required_capabilities'] = ['search']
+        return result
+    monkeypatch.setattr(runtime, 'run_mission', offline)
+    real_inventory = supervisor.pursuit_capability_inventory
+    def inventory_before_hook():
+        # Annulation tardive après retour de la mission, avant la gate de production.
+        if stop == 'cancel':
+            work = next(t for t in tasks.list_tasks(business=BUSINESS) if t['status'] == 'running')
+            tasks.cancel(work['id'])
+        return real_inventory()
+    monkeypatch.setattr(supervisor, 'pursuit_capability_inventory', inventory_before_hook)
+    triggered = []
+    monkeypatch.setattr(supervisor, 'pursuit_strategy_effect', lambda item: triggered.append(item) or {})
+    oid = supervisor.start_pursuit('Arrêter pendant la mission')
+    supervisor.run_pursuit(oid)
+    assert triggered == []
+    work = supervisor.work_tasks(BUSINESS, oid)[0]
+    if stop == 'pause':
+        assert work['output']['strategy_assessment']['status'] == 'ignored'
+        assert work['output']['strategy_execution']['authorized'] is False
+        assert strategy.get('objective', oid, BUSINESS)['status'] == 'paused'
+    else:
+        assert work['status'] == 'cancelled'
+    assert not journal.query('SELECT id FROM channel_actions')
+
+
 def test_production_hook_is_noop_and_annotation_replays_do_not_duplicate(monkeypatch):
     monkeypatch.setattr(octopus, "enabled", lambda: True)
     def offline(*args, **kwargs):
