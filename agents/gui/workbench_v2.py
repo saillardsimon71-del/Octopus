@@ -25,6 +25,14 @@ META = {
     "Activité": ("Activité", "Les événements récents du travail supervisé."),
     "Paramètres": ("Paramètres", "Services, permissions et outils avancés."),
 }
+PAGE_DATA_KEYS = {
+    "Vue d'ensemble": ("requests", "tasks", "objectives", "token_cost_usd", "pursuit_llm", "browser"),
+    "Missions": ("objectives",),
+    "Livrables": ("tasks", "decisions", "evidence", "generations"),
+    "Navigateur": ("browser",),
+    "Activité": ("requests", "llm_calls", "events"),
+    "Paramètres": ("channels", "allowances", "agnes_health", "tasks"),
+}
 
 
 def _date(value) -> str:
@@ -192,6 +200,17 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             if self._readonly:
                 self._disable_advanced_actions(self.page_host)
             return
+        previous_page = self.current_page
+        previous_children = self.page_host.winfo_children()
+        old_body = (self._body if previous_page == page and hasattr(self, "_body") and
+                    self._body.winfo_exists() else None)
+        scroll = old_body._parent_canvas.yview()[0] if old_body else 0.0
+        draft = None
+        restore_focus = False
+        if page == "Missions" and old_body and self.mission_prompt.winfo_exists():
+            draft = self.mission_prompt.get("1.0", "end-1c")
+            cursor = self.mission_prompt.index("insert")
+            restore_focus = self.focus_lastfor() == self.mission_prompt._textbox
         self.current_page = page
         for name, button in self.nav_buttons.items():
             active = name == page
@@ -201,21 +220,33 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         self.page_title.configure(text=title)
         self.page_subtitle.configure(text=subtitle)
         self.context_chip.configure(text=self._business_label())
-        for child in self.page_host.winfo_children():
-            child.destroy()
         body = ctk.CTkScrollableFrame(self.page_host, fg_color="transparent")
-        body.grid(row=0, column=0, sticky="nsew")
         self._body = body
         if self._snapshot_error:
             self._line(body, f"Lecture impossible : {self._snapshot_error}", COLORS["bad"])
             self._secondary(body, "Réessayer", self._load_snapshot)
-            return
-        if self._snapshot is None:
+        elif self._snapshot is None:
             self._line(body, "Chargement des données locales...", COLORS["muted"])
-            return
-        {"Vue d'ensemble": self._overview, "Missions": self._missions,
-         "Livrables": self._deliverables, "Activité": self._activity,
-         "Paramètres": self._settings, "Navigateur": self._browser}[page](body)
+        else:
+            {"Vue d'ensemble": self._overview, "Missions": self._missions,
+             "Livrables": self._deliverables, "Activité": self._activity,
+             "Paramètres": self._settings, "Navigateur": self._browser}[page](body)
+        if draft is not None and self._snapshot is not None and not self._snapshot_error:
+            self.mission_prompt.insert("1.0", draft)
+            self.mission_prompt.mark_set("insert", cursor)
+        body.grid(row=0, column=0, sticky="nsew")
+        if previous_children:
+            body._parent_frame.lower()
+            self.update_idletasks()
+            body._parent_canvas.yview_moveto(scroll)
+            body._parent_frame.lift()
+        if old_body:
+            old_body.destroy()
+        for child in previous_children:
+            if child.winfo_exists():
+                child.destroy()
+        if restore_focus:
+            self.mission_prompt._textbox.focus_set()
         body._parent_canvas.bind("<Configure>", lambda _event, frame=body: self._fit_scrollbar(frame), add="+")
         self.after(80, lambda frame=body: self._fit_scrollbar(frame))
 
@@ -300,7 +331,8 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             self._line(body, f"Plafond LLM du travail : {llm_budget['spent_usd']:g} / {llm_budget['budget_usd']:g} USD "
                        f"({llm_budget['remaining_usd']:g} USD restants). Budget économique externe : 0 EUR.",
                        COLORS["muted"])
-        self._line(body, "Exécution : " + self._worker_label() + ". Aucun appel Agnes automatique.", COLORS["muted"], pady=8)
+        self.overview_worker = self._line(body, "Exécution : " + self._worker_label() +
+                                          ". Aucun appel Agnes automatique.", COLORS["muted"], pady=8)
         if state.get("browser"):
             self._secondary(body, "Voir le navigateur Hermes", lambda: self._show_page("Navigateur"))
         for task in state["tasks"]:
@@ -573,6 +605,10 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             if kind == "v2_snapshot":
                 self._snapshot_busy = False
                 if result[1] == self.selected_business_id:
+                    changed = (self._snapshot is None or self._snapshot_error is not None or
+                               (self.current_page in PRIMARY and any(
+                                   result[2].get(key) != self._snapshot.get(key)
+                                   for key in PAGE_DATA_KEYS[self.current_page])))
                     self._snapshot = result[2]
                     self._visible_business_ids.update(self._snapshot["businesses"])
                     for business_id in self._snapshot["businesses"]:
@@ -581,12 +617,8 @@ class WorkbenchV2(EntrepreneurialWorkbench):
                     self._sync_business_menu()
                     self._snapshot_error = None
                     self._snapshot_at = time.monotonic()
-                    if self.current_page in PRIMARY:
-                        editing = (self.current_page == "Missions" and hasattr(self, "mission_prompt") and
-                                   self.mission_prompt.winfo_exists() and
-                                   self.mission_prompt.get("1.0", "end").strip())
-                        if not editing:
-                            self._show_page(self.current_page)
+                    if changed and self.current_page in PRIMARY:
+                        self._show_page(self.current_page)
                 if self._reload_after_create:
                     self._reload_after_create = False
                     self._load_snapshot()
@@ -605,13 +637,17 @@ class WorkbenchV2(EntrepreneurialWorkbench):
                 self._snapshot_error = result[1]
                 self._snapshot_at = time.monotonic()
                 self._set_status(result[1][:110], COLORS["bad"])
-                if self.current_page in PRIMARY:
+                if self._snapshot is None and self.current_page in PRIMARY:
                     self._show_page(self.current_page)
             else:
                 self._background_results.put(result)
                 super()._drain_background_results()
                 break
         self.side_worker.configure(text="Exécution : " + self._worker_label())
+        if (self.current_page == "Vue d'ensemble" and hasattr(self, "overview_worker") and
+                self.overview_worker.winfo_exists()):
+            self.overview_worker.configure(text="Exécution : " + self._worker_label() +
+                                           ". Aucun appel Agnes automatique.")
         if not self._snapshot_busy and time.monotonic() - self._snapshot_at > 5:
             self._load_snapshot()
         self.after(1500, self._refresh)
