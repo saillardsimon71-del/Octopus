@@ -1,4 +1,18 @@
-# État actuel OCTOPUS - 2026-09-30
+# État actuel OCTOPUS - 2026-10-01
+
+## Réalignement Foundation et démarrage neutre
+
+La référence normative est désormais [FOUNDATION.md](FOUNDATION.md), texte
+minimal intégral fourni par l'opérateur. L'identité "atelier supervisé" est
+historique. Le nouveau parcours est [FIRST_START.md](FIRST_START.md) : démarrer
+sans entreprise ni mission imposée, ou confier un objectif libre au même runtime.
+Il réutilise stratégie, tâches, worker, Hermes et journal avec un budget nul et
+trois cycles bornés. La GUI expose objectifs, décisions, rapports et navigateur.
+
+Ce chantier est proposé dans la PR #114 en brouillon, sans fusion. Les validations
+techniques et captures utilisent des données isolées ; elles ne prouvent aucune
+performance économique. Les phases ci-dessous restent des checkpoints historiques,
+avec leur périmètre et leurs limites propres.
 
 ## Phase G — runtime autonome supervisé
 

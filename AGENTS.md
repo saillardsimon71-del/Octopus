@@ -2,20 +2,18 @@
 
 ## Identité et décision
 
-OCTOPUS est un **atelier de travail économique supervisé**, pas une entreprise autonome prouvée.
-Il aide un humain à tester un besoin réel, effectuer le travail, livrer, constater le paiement et
-le résultat client, puis décider quoi améliorer. Un monolithe modulaire, maintenable par une personne.
+La référence normative est [docs/FOUNDATION.md](docs/FOUNDATION.md), texte intégral fourni
+par l'opérateur pour le réalignement du 2026-09-30. Elle remplace les identités antérieures
+"atelier supervisé" et "moteur d'entreprises". Ne pas reconstruire la Foundation historique.
 
-**MARKET FIRST. AUTOMATION SECOND. GENERALIZATION LAST.**
+OCTOPUS est une intelligence économique autonome. L'humain définit les permissions,
+limites et budgets ; OCTOPUS détermine sa stratégie à l'intérieur de ces limites.
+Aucune entreprise, offre, activité ou mission spécialisée préalable n'est exigée.
+Aucune capacité existante ne possède de priorité économique implicite.
 
-```text
-ONE REAL WORKFLOW → ONE OBSERVED BOTTLENECK → ONE TARGETED IMPROVEMENT
-NO ECONOMIC SIGNAL → NO NEW GENERIC INFRASTRUCTURE
-```
-
-Un signal négatif ou une absence de réponse correctement observée peut justifier l'arrêt.
-Un incident opérationnel peut justifier une correction avant tout revenu. Ni l'un ni l'autre
-ne justifie de généraliser. Le marché choisit le travail ; l'humain gouverne les permissions.
+Les règles d'implémentation ci-dessous protègent les frontières et la maintenance du code.
+Elles ne définissent pas l'identité d'OCTOPUS ni une stratégie économique obligatoire.
+Le parcours initial est documenté dans [docs/FIRST_START.md](docs/FIRST_START.md).
 
 ## Mesures qui comptent
 
@@ -39,7 +37,8 @@ Une échéance sans mesure est `inconclusive`, pas un résultat client négatif 
 
 Le travail initial peut être manuel et tracé par des preuves. Ne pas lancer ORBIT, un worker,
 un navigateur ou un LLM pour simplement tenir les comptes d'un pilote.
-Le protocole exécutable unique est [docs/HANDOFF_WORK.md](docs/HANDOFF_WORK.md).
+Le démarrage neutre suit [docs/FIRST_START.md](docs/FIRST_START.md).
+[docs/HANDOFF_WORK.md](docs/HANDOFF_WORK.md) conserve le protocole de travail économique explicite.
 
 ## Frontières non négociables
 

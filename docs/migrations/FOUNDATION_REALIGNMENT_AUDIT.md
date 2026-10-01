@@ -1,6 +1,13 @@
 # Audit descriptif du réalignement OCTOPUS - 2026-09-30
 
-## Statut et source manquante
+## Suite du chantier
+
+Le blocage normatif décrit ci-dessous a été levé par le texte intégral fourni ensuite
+par l'opérateur : [Foundation](../FOUNDATION.md). Cette nouvelle référence est utilisée
+sans prétendre reconstituer le document historique. L'audit ci-dessous reste daté.
+La réalisation et ses vérifications figurent dans [Premier démarrage](../FIRST_START.md).
+
+## Statut et source manquante lors de l'audit
 
 Audit seulement. Aucun changement du moteur, de la GUI, des permissions ou de la
 Foundation. Aucune architecture de remplacement n'est choisie.

@@ -1560,8 +1560,9 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         context.append({"role": "user", "content": f"Résultat de {tool} : {result_str}"})
         # Le résultat structuré reste intact ; result n'est qu'une vue de prompt bornée.
         step_record = {"step": i + 1, "tool": tool, "result": result_str}
-        if tool in {"search", "browse"}:
-            step_record["args"] = dict(args)
+        if tool in {"search", "browse"} or str(tool).startswith("browser_"):
+            if tool in {"search", "browse"}:
+                step_record["args"] = dict(args)
             if result is not None:
                 if tool == "browse" and isinstance(result, dict) and isinstance(result.get("page"), dict):
                     step_record["result_data"] = {
@@ -1571,6 +1572,8 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
                     }
                 else:
                     step_record["result_data"] = result
+        if refusal is not None:
+            step_record["result_data"] = result
         if tool == "search":
             step_record["result_urls"] = _search_result_urls(result)
         elif tool == "browse" and result is not None:
@@ -1590,7 +1593,8 @@ def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None
                 search_browse_lockstep: bool = False,
                 search_browse_selector: str = "first",
                 business_signal_focus: bool = False,
-                business_signal_target: int = 3, max_duration_s: float = 900) -> dict:
+                business_signal_target: int = 3, max_duration_s: float = 900,
+                determination: bool = False) -> dict:
     """ORBIT planifie puis délègue aux rôles (multi-agents via le runtime).
 
     Le profil explicite est hérité par les runs agents imbriqués via le journal.
@@ -1615,6 +1619,7 @@ def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None
                 search_browse_selector=search_browse_selector,
                 business_signal_focus=business_signal_focus,
                 business_signal_target=max(1, int(business_signal_target)),
+                determination=determination,
             )
 
 
@@ -1667,7 +1672,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                  search_browse_lockstep: bool = False,
                  search_browse_selector: str = "first",
                  business_signal_focus: bool = False,
-                 business_signal_target: int = 3) -> dict:
+                 business_signal_target: int = 3, determination: bool = False) -> dict:
     from .search import SEARCH_PURPOSE_BUSINESS, SEARCH_PURPOSE_GENERAL
     pro = deepseek.config.MODEL_PRO
     if cancel.requested():
@@ -1841,6 +1846,15 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         + signal_schema
         + (" Réponds en JSON : {\"rapport\":\"...\"}" if not business_signal_focus else "")
     )
+    if determination:
+        syn_sys += (
+            '\nAjoute "determination":{"action":"continue|pause|request_permission",'
+            '"reason":"raison liée aux observations", "next_goal":"prochaine recherche précise ou vide",'
+            '"permission":"permission manquante ou vide"}. '
+            "Décide de la suite à partir des résultats réellement acquis. Pause si rien n'est justifié. "
+            "Demande une permission si une action nécessaire dépasse les limites. "
+            "Un rapport n'est pas une preuve et une décision n'accorde aucune permission."
+        )
     synthesis_input = {
         "objectif_original": goal,
         "resultats_sous_taches": _mission_prompt_results(results),
@@ -1918,6 +1932,16 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     output = {"plan": tasks, "results": results, "rapport": rapport, "synthesis_status": "validated",
               "execution_status": ("completed" if all(r.get("execution_status") == "completed"
                                                        for r in results) else "incomplete")}
+    if determination:
+        choice = syn.get("determination")
+        if (not isinstance(choice, dict) or choice.get("action") not in {"continue", "pause", "request_permission"}
+                or not all(isinstance(choice.get(k), str) for k in ("reason", "next_goal", "permission"))
+                or not choice["reason"].strip()
+                or (choice["action"] == "request_permission" and not choice["permission"].strip())):
+            choice = {"action": "pause", "reason": "Décision structurée absente ou invalide.",
+                      "next_goal": "", "permission": ""}
+        output["determination"] = {k: v[:3000] for k, v in choice.items()
+                                   if k in {"action", "reason", "next_goal", "permission"}}
     if business_signal_focus:
         output["business_signals"] = business_signals
         output["business_signal_rejections"] = rejected_signals

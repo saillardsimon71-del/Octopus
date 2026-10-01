@@ -1,7 +1,6 @@
 """OCTOPUS Workbench V2: mission-first desktop interface."""
 from __future__ import annotations
 
-import json
 import os
 import queue
 import threading
@@ -10,19 +9,19 @@ from pathlib import Path
 
 import customtkinter as ctk
 
-from . import agnes_missions
 from .intelligence import EntrepreneurialWorkbench
 from .workbench import COLORS, DEFAULT_BUSINESS_ID, _open_path
 from .workbench_v2_data import mission_state, read_snapshot
 from .workspaces import Business
 
-PRIMARY = ("Vue d'ensemble", "Missions", "Livrables", "Activité", "Paramètres")
-ADVANCED = ("Business", "Agents", "Intelligence", "Navigateur", "Production", "Humain", "Système")
+PRIMARY = ("Vue d'ensemble", "Missions", "Livrables", "Navigateur", "Activité", "Paramètres")
+ADVANCED = ("Business", "Agents", "Intelligence", "Agnes", "Production", "Humain", "Système")
 SYSTEM_BUSINESS = "octopus"
 META = {
-    "Vue d'ensemble": ("Vue d'ensemble", "OCTOPUS suit les objectifs autorisés jusqu'aux livrables vérifiés."),
-    "Missions": ("Missions", "Créez un objectif et suivez sa preuve jusqu'à la clôture."),
-    "Livrables": ("Livrables", "Vidéos présentes, décodables et reliées à une preuve active."),
+    "Vue d'ensemble": ("Vue d'ensemble", "Intelligence économique autonome. Performance réelle, limites humaines explicites."),
+    "Missions": ("Missions", "Objectifs confiés par l'humain et recherches déterminées par OCTOPUS."),
+    "Livrables": ("Livrables", "Rapports, observations, décisions et fichiers. Leur portée reste explicite."),
+    "Navigateur": ("Navigateur Hermes", "Observations de la session utilisée par OCTOPUS."),
     "Activité": ("Activité", "Les événements récents du travail supervisé."),
     "Paramètres": ("Paramètres", "Services, permissions et outils avancés."),
 }
@@ -77,6 +76,7 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         self._snapshot_at = 0.0
         self._snapshot_error = None
         self._creating = False
+        self._pursuit_processes = []
         self._reload_after_create = False
         self._readonly = os.environ.get("OCTOPUS_WORKBENCH_READONLY") == "1"
         super().__init__()
@@ -93,7 +93,7 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         ctk.CTkLabel(self.sidebar, text="OCTOPUS", anchor="w", text_color=COLORS["text"],
                      font=("Segoe UI", 25, "bold")).pack(fill="x", padx=22, pady=(24, 2))
-        ctk.CTkLabel(self.sidebar, text="Atelier supervisé", anchor="w", text_color=COLORS["muted"],
+        ctk.CTkLabel(self.sidebar, text="Intelligence économique autonome", anchor="w", text_color=COLORS["muted"],
                      font=("Segoe UI", 11)).pack(fill="x", padx=22, pady=(0, 26))
         ctk.CTkLabel(self.sidebar, text="Consulter", anchor="w", text_color=COLORS["muted"],
                      font=("Segoe UI", 10)).pack(fill="x", padx=20, pady=(0, 6))
@@ -161,14 +161,6 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         known.discard(SYSTEM_BUSINESS)
         return [item for item in self.registry.all() if item.id in known]
 
-    def _eligible_businesses(self) -> list[Business]:
-        channels = (self._snapshot or {}).get("channels", [])
-        allowed = {channel["business"] for channel in channels
-                   if channel["business"] != SYSTEM_BUSINESS and channel["kind"] == "agnes_video"
-                   and channel["status"] == "active" and channel["access"] == "act"
-                   and channel["locator"] and "agnes_submit" in json.loads(channel["capabilities"])}
-        return [item for item in self.registry.all() if item.id in allowed]
-
     def _business_label(self) -> str:
         if self.selected_business_id == DEFAULT_BUSINESS_ID:
             return "Toutes les activités"
@@ -223,7 +215,7 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             return
         {"Vue d'ensemble": self._overview, "Missions": self._missions,
          "Livrables": self._deliverables, "Activité": self._activity,
-         "Paramètres": self._settings}[page](body)
+         "Paramètres": self._settings, "Navigateur": self._browser}[page](body)
         body._parent_canvas.bind("<Configure>", lambda _event, frame=body: self._fit_scrollbar(frame), add="+")
         self.after(80, lambda frame=body: self._fit_scrollbar(frame))
 
@@ -269,209 +261,152 @@ class WorkbenchV2(EntrepreneurialWorkbench):
 
     def _overview(self, body) -> None:
         state = self._snapshot
-        objectives = [item for item in state["objectives"] if item["business"] != SYSTEM_BUSINESS]
-        verified = [g for g in state["generations"] if g["verified"] and
-                    g["business"] != SYSTEM_BUSINESS and g["objective_id"]]
-        technical = [g for g in state["generations"] if g["verified"] and g not in verified]
         pending = [r for r in state["requests"] if r["status"] == "pending"]
-        active = [o for o in objectives if o["status"] == "active"]
+        running = [t for t in state["tasks"] if t["status"] == "running" and
+                   (t.get("lease_until") or 0) > time.time()]
         hero = self._card(body)
         hero.pack(fill="x", pady=(0, 12))
+        label = "Votre intervention est attendue" if pending else "En activité" if running else "Prêt à démarrer ou reprendre"
+        self._line(hero, label, size=22, bold=True, padx=20, pady=(19, 6))
+        self._line(hero, "Finalité : obtenir, maintenir et améliorer une performance économique réelle.",
+                   padx=20, pady=(0, 8))
+        self._line(hero, "Premier démarrage : 0 EUR. Consultation et analyse. Trois cycles bornés, délai cible de deux minutes chacun.",
+                   COLORS["muted"], padx=20, pady=(0, 8))
+        button = self._secondary(hero, "Démarrer / reprendre OCTOPUS", self._start_pursuit)
+        if self._readonly or self._creating:
+            button.configure(state="disabled")
+        self._secondary(hero, "Confier une mission", lambda: self._show_page("Missions"))
         if pending:
-            headline = f"{len(pending)} réponse(s) attendue(s)"
-            detail = pending[0]["question"]
-        elif active:
-            headline = f"{len(active)} objectif(s) en cours"
-            detail = mission_state(active[0])[1]
-        else:
-            headline = "Aucune mission économique en cours"
-            detail = ("Choisissez une activité réelle et autorisez son canal Agnes avant de créer une mission."
-                      if not self._eligible_businesses() else
-                      "Créez un objectif vidéo autorisé pour lancer un travail supervisé.")
-        self._line(hero, headline, size=22, bold=True, padx=20, pady=(19, 3))
-        self._line(hero, detail, COLORS["muted"], padx=20, pady=(0, 10))
-        ctk.CTkButton(hero, text="Nouvelle mission", command=lambda: self._show_page("Missions"),
-                      height=38, width=170).pack(anchor="w", padx=20, pady=(0, 18))
-
-        stats = ctk.CTkFrame(body, fg_color="transparent")
-        stats.pack(fill="x")
-        for col in range(3):
-            stats.grid_columnconfigure(col, weight=1)
-        for col, (title, value, detail) in enumerate((
-            ("Objectifs actifs", str(len(active)), "Clôture après preuve"),
-            ("Livrables MP4 vérifiés", str(len(verified)), "Fichier, décodage et SHA"),
-            ("Worker", self._worker_label(), "Agnes : " + state["agnes_health"]))):
-            card = self._card(stats)
-            card.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 5, 0))
-            self._line(card, title, COLORS["muted"], padx=16, pady=(13, 1))
-            self._line(card, value, size=19, bold=True, padx=16)
-            self._line(card, detail, COLORS["muted"], padx=16, pady=(0, 14))
-
-        self._section(body, "Coûts et résultats")
-        economics = self._card(body)
-        economics.pack(fill="x")
-        ledger = [r for r in state["ledger"] if r["nature"] == "observed" and r["direction"] == "out"]
-        amounts = {}
-        for row in ledger:
-            amounts[row["currency"]] = amounts.get(row["currency"], 0) + row["amount"]
-        observed = ", ".join(f"{amount:g} {currency}" for currency, amount in amounts.items()) or "Aucune"
-        for index, (label, value, color) in enumerate((
-            ("Dépenses observées", observed, COLORS["text"]),
-            ("Coût tokens calculé", f"{state['token_cost_usd']:.6f} USD", COLORS["text"]),
-            ("Coût API Agnes", "Inconnu" if state["agnes_api_cost"] is None else
-             f"{state['agnes_api_cost']} USD", COLORS["warn"]))):
-            economics.grid_columnconfigure(index, weight=1)
-            cell = ctk.CTkFrame(economics, fg_color="transparent")
-            cell.grid(row=0, column=index, sticky="ew", padx=16, pady=(10, 12))
-            self._line(cell, label, COLORS["muted"])
-            self._line(cell, value, color, size=14, bold=True)
-        if verified:
-            latest = verified[0]
-            self._section(body, "Dernier livrable")
-            card = self._card(body)
-            card.pack(fill="x")
-            self._line(card, f"Vidéo Agnes #{latest['id']} - {latest['business']}",
-                       size=14, bold=True, padx=18, pady=(14, 2))
-            self._line(card, f"{_date(latest['created_at'])} - MP4 vérifié", COLORS["muted"], padx=18)
-            self._secondary(card, "Ouvrir le MP4", lambda p=latest["output_path"]: _open_path(p))
-        else:
-            self._line(body, "Aucun livrable économique vérifié pour ce contexte.", COLORS["muted"], pady=(14, 0))
-        if technical:
-            self._line(body, f"{len(technical)} validation(s) technique(s) MP4 dans Livrables.",
-                       COLORS["muted"], pady=(10, 0))
+            self._line(hero, pending[0]["question"], COLORS["warn"], padx=20, pady=8)
+            self._secondary(hero, "Répondre", lambda: self._show_page("Humain"))
+        self._section(body, "Travail actuel")
+        objectives = [o for o in state["objectives"] if o.get("success_criteria") == "bounded_determination"]
+        if not objectives:
+            self._line(body, "Aucune trajectoire encore déterminée. Aucun marché ni outil spécialisé imposé.", COLORS["muted"])
+        for objective in objectives[:3]:
+            card = self._card(body, objective["summary"])
+            card.pack(fill="x", pady=(0, 8))
+            self._line(card, mission_state(objective)[0], padx=18)
+            latest = objective["work_tasks"][-1] if objective["work_tasks"] else {}
+            result = latest.get("result") or {}
+            self._line(card, result.get("reason") or mission_state(objective)[1], COLORS["muted"], padx=18, pady=8)
+            if result.get("next_goal"):
+                self._line(card, "Prochaine recherche proposée : " + result["next_goal"], padx=18, pady=8)
+        self._section(body, "Résultats et moyens")
+        self._line(body, f"Coût LLM calculé : {state['token_cost_usd']:g} USD. Le résultat économique se consulte dans les comptes, pas dans le nombre de tâches.",
+                   COLORS["muted"])
+        self._line(body, "Exécution : " + self._worker_label() + ". Aucun appel Agnes automatique.", COLORS["muted"], pady=8)
+        if state.get("browser"):
+            self._secondary(body, "Voir le navigateur Hermes", lambda: self._show_page("Navigateur"))
+        for task in state["tasks"]:
+            result = task.get("result") or {}
+            if result.get("rapport"):
+                self._line(body, "Dernier rapport (analyse) : " + str(result["rapport"])[:650], pady=8)
+                break
 
     def _missions(self, body) -> None:
-        compose = self._card(body, "Nouvelle mission")
-        compose.pack(fill="x", pady=(0, 8))
-        businesses = self._eligible_businesses()
-        values = [b.label() for b in businesses]
-        self._line(compose, "Business", COLORS["muted"], padx=18)
-        self.mission_business = ctk.CTkOptionMenu(compose, values=values or ["Aucune activité autorisée"],
-                                                  dynamic_resizing=False,
-                                                  command=lambda _value: self._update_create_state())
-        self.mission_business.pack(fill="x", padx=18, pady=(2, 9))
-        if not businesses:
-            self._line(compose, "Le canal OCTOPUS sert aux tests du système. Autorisez un canal pour une activité réelle.",
-                       COLORS["warn"], padx=18, pady=(0, 8))
-        selected = self.registry.get(self.selected_business_id)
-        if selected and selected in businesses:
-            self.mission_business.set(selected.label())
-        self._line(compose, "Type : Vidéo avec Agnes", padx=18, pady=(0, 5))
-        self.mission_prompt = ctk.CTkTextbox(compose, height=95, wrap="word", fg_color=COLORS["surface2"],
-                                             border_color=COLORS["border"], border_width=1)
+        compose = self._card(body, "Confier un objectif libre")
+        compose.pack(fill="x", pady=(0, 12))
+        self._line(compose, "Décrivez le résultat recherché. OCTOPUS choisit les moyens dans les limites de consultation à 0 EUR.",
+                   COLORS["muted"], padx=18, pady=(0, 8))
+        self.mission_prompt = ctk.CTkTextbox(compose, height=85, wrap="word", fg_color=COLORS["surface2"])
         self.mission_prompt.pack(fill="x", padx=18, pady=(0, 8))
-        self.mission_consent = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(compose, text="J'autorise cette génération. Le coût API Agnes peut être facturé et reste inconnu.",
-                        variable=self.mission_consent).pack(anchor="w", padx=18, pady=(0, 10))
-        self.mission_button = ctk.CTkButton(compose, text="Créer la mission", command=self._create_mission, height=38)
-        self.mission_button.pack(anchor="w", padx=18, pady=(0, 4))
-        self.mission_info = self._line(compose, "", COLORS["muted"], padx=18, pady=(0, 12))
-        self._update_create_state()
-
-        self._section(body, "Suivi des objectifs")
-        objectives = [item for item in self._snapshot["objectives"] if item["business"] != SYSTEM_BUSINESS]
-        if not objectives:
-            self._line(body, "Aucun objectif dans ce contexte. Créez une mission ci-dessus.", COLORS["muted"])
-        for objective in objectives:
-            stage, detail = mission_state(objective)
-            card = self._card(body)
-            card.pack(fill="x", pady=(0, 8))
-            self._line(card, f"#{objective['id']}  {objective['summary']}", size=14, bold=True,
-                       padx=18, pady=(13, 1))
-            self._line(card, f"{objective['business']}  |  {stage}  |  {_date(objective['created_at'])}",
-                       COLORS["warn"] if "attend" in stage.lower() or stage == "À examiner" else COLORS["muted"],
-                       padx=18)
-            self._line(card, detail, COLORS["muted"], padx=18, pady=(4, 6))
-            if objective["authorized"] or objective["success_criteria"] == "kept_video_files>=1":
-                steps = (("Demande", True), ("Autorisation", objective["authorized"]),
-                         ("Planification", bool(objective["work_tasks"])),
-                         ("Worker", any(t["status"] in ("running", "done") for t in objective["work_tasks"])),
-                         ("MP4", any(g["verified"] for g in objective["generations"])),
-                         ("Objectif", objective["status"] == "achieved"))
-                done = [label.lower() for label, complete in steps if complete]
-                next_step = next((label.lower() for label, complete in steps if not complete), None)
-                self._line(card, "Étapes faites : " + ", ".join(done), COLORS["good"], padx=18, pady=(2, 0))
-                if next_step:
-                    self._line(card, "Étape suivante : " + next_step, COLORS["muted"], padx=18)
-            if objective["work_tasks"]:
-                task = objective["work_tasks"][-1]
-                self._line(card, f"Tâche #{task['id']} : {task['status']} - {task['kind']}",
-                           COLORS["muted"], padx=18)
-            if objective["generations"]:
-                generation = objective["generations"][0]
-                self._line(card, f"Vidéo #{generation['id']} : " +
-                           ("MP4 vérifié" if generation["verified"] else generation["status"]),
-                           COLORS["good"] if generation["verified"] else COLORS["muted"],
-                           padx=18, pady=(2, 0))
-            self._secondary(card, "Détails de la mission",
-                            lambda item=objective, parent=card: self._toggle_mission_details(item, parent))
-
-    def _toggle_mission_details(self, objective: dict, card) -> None:
-        existing = getattr(card, "_details", None)
-        if existing and existing.winfo_exists():
-            existing.destroy()
-            self.after(80, lambda: self._fit_scrollbar(self._body))
-            return
-        details = ctk.CTkFrame(card, fg_color=COLORS["surface2"], corner_radius=8)
-        details.pack(fill="x", padx=18, pady=(0, 15))
-        card._details = details
-        self._line(details, "Tâches liées", size=12, bold=True, padx=12, pady=(11, 2))
-        if not objective["work_tasks"]:
-            self._line(details, "Aucune tâche planifiée.", COLORS["muted"], padx=12)
-        for task in objective["work_tasks"]:
-            self._line(details, f"#{task['id']}  {task['kind']}  |  {task['status']}", padx=12)
-            if task.get("error"):
-                self._line(details, task["error"], COLORS["warn"], padx=12)
-        self._line(details, "Preuves vidéo", size=12, bold=True, padx=12, pady=(10, 2))
-        if not objective["generations"]:
-            self._line(details, "Aucune génération reliée à cet objectif.", COLORS["muted"], padx=12)
-        for generation in objective["generations"]:
-            self._line(details, f"Vidéo #{generation['id']}  |  " +
-                       ("vérifiée" if generation["verified"] else "non vérifiée") +
-                       f"  |  preuve #{generation['evidence_id'] or 'absente'}", padx=12)
-            if generation.get("sha256"):
-                self._line(details, "SHA-256 : " + generation["sha256"], COLORS["muted"], padx=12)
-        self._secondary(details, "Voir l'activité", lambda: self._show_page("Activité"))
-        self.after(80, lambda: self._fit_scrollbar(self._body))
-
-    def _update_create_state(self) -> None:
+        self.mission_button = self._secondary(compose, "Confier la mission", self._create_mission)
         if self._readonly:
             self.mission_button.configure(state="disabled")
-            self.mission_info.configure(text="Mode consultation : création désactivée.", text_color=COLORS["warn"])
-            return
-        selected = next((b for b in self._eligible_businesses() if b.label() == self.mission_business.get()), None)
-        self.mission_button.configure(state="normal" if selected else "disabled")
-        self.mission_info.configure(text="Canal Agnes autorisé." if selected else
-                                    "Canal Agnes actif avec accès act requis pour ce business.",
-                                    text_color=COLORS["muted"] if selected else COLORS["warn"])
+        self._section(body, "Objectifs et décisions")
+        for objective in self._snapshot["objectives"]:
+            card = self._card(body, objective["summary"])
+            card.pack(fill="x", pady=(0, 8))
+            origin = "Déterminé par OCTOPUS" if objective["created_by"] == "octopus" else "Confié par " + objective["created_by"]
+            self._line(card, origin + " | " + mission_state(objective)[0], COLORS["muted"], padx=18)
+            self._line(card, objective["statement"], padx=18, pady=8)
+            for task in objective["work_tasks"][-2:]:
+                result = task.get("result") or {}
+                self._line(card, result.get("reason") or task.get("error") or "Travail " + task["status"], padx=18, pady=4)
+            if objective.get("success_criteria") == "bounded_determination":
+                for label, callback in (("Reprendre", lambda oid=objective["id"]: self._start_pursuit(objective_id=oid)),
+                                        ("Mettre en pause", lambda oid=objective["id"]: self._pause_pursuit(oid))):
+                    button = self._secondary(card, label, callback)
+                    if self._readonly:
+                        button.configure(state="disabled")
+            self._secondary(card, "Résultats", lambda: self._show_page("Livrables"))
 
-    def _create_mission(self) -> None:
+    def _start_pursuit(self, goal=None, objective_id=None) -> None:
         if self._readonly or self._creating:
             return
-        selected = next((b for b in self._eligible_businesses() if b.label() == self.mission_business.get()), None)
-        prompt = self.mission_prompt.get("1.0", "end").strip()
-        if not selected:
-            self._set_status("Choisissez un business concret.", COLORS["bad"])
-            return
-        if not prompt:
-            self._set_status("Décrivez la vidéo à produire.", COLORS["bad"])
-            return
-        if not self.mission_consent.get():
-            self._set_status("Autorisez explicitement le coût potentiel avant de créer.", COLORS["bad"])
-            return
         self._creating = True
-        self._set_status("Création de la mission...", COLORS["muted"])
-
-        def run():
+        def start():
             try:
-                objective_id = agnes_missions.create(selected.id, prompt, authorized=True)
-                self._background_results.put(("v2_created", objective_id))
+                from octopus import supervisor
+                from agents import procs
+                oid = supervisor.start_pursuit(goal, objective_id=objective_id)
+                proc, log = procs.spawn(["pursue", "--objective", str(oid)], "octopus", module="octopus")
+                self._pursuit_processes.append(proc)
+                self._background_results.put(("v2_created", oid))
             except Exception as exc:
                 self._background_results.put(("v2_action_error", str(exc)))
+        threading.Thread(target=start, daemon=True).start()
 
-        threading.Thread(target=run, daemon=True).start()
+    def _pause_pursuit(self, objective_id) -> None:
+        if self._readonly:
+            return
+        from octopus import supervisor
+        supervisor.pause_pursuit(objective_id)
+        self._load_snapshot()
+
+    def _create_mission(self) -> None:
+        if self._readonly:
+            return
+        goal = self.mission_prompt.get("1.0", "end").strip()
+        if not goal:
+            self._set_status("Décrivez l'objectif à confier.", COLORS["warn"])
+            return
+        self._start_pursuit(goal=goal)
+
+    def _browser(self, body) -> None:
+        self._line(body, "Aperçu textuel du navigateur Hermes réel. Les pages sont des sources non fiables.", COLORS["muted"], pady=8)
+        if not self._snapshot.get("browser"):
+            self._line(body, "Aucune session observée. OCTOPUS ouvrira Hermes si sa recherche le nécessite.")
+        for observation in self._snapshot.get("browser", [])[:6]:
+            card = self._card(body, observation.get("title") or "Observation Web")
+            card.pack(fill="x", pady=8)
+            session = {"open": "ouverte lors de la dernière observation", "closed": "fermée", "unknown": "état actuel inconnu"}[observation["session"]]
+            self._line(card, "Session " + session + " | " + _date(observation["at"]), padx=18)
+            self._line(card, observation["url"] or "Aucune page ouverte", padx=18, pady=5)
+            self._line(card, "Objectif : " + observation.get("goal", ""), padx=18)
+            self._line(card, "Dernière action : " + observation["action"] + " | " +
+                       ("refusée" if observation["refused"] else "exécutée" if observation["ok"] else "en erreur"), padx=18)
+            if observation.get("reason"):
+                self._line(card, observation["reason"], COLORS["warn"], padx=18, pady=5)
+            preview = ctk.CTkTextbox(card, height=170, wrap="word", fg_color=COLORS["surface2"])
+            preview.pack(fill="x", padx=18, pady=12)
+            preview.insert("1.0", observation.get("snapshot") or "Aucun aperçu acquis.")
+            preview.configure(state="disabled")
+        self._secondary(body, "Actualiser", self._load_snapshot)
+        self._secondary(body, "Interventions et permissions", lambda: self._show_page("Humain"))
 
     def _deliverables(self, body) -> None:
+        self._section(body, "Rapports et analyses")
+        reports = [t for t in self._snapshot["tasks"] if (t.get("result") or {}).get("rapport")]
+        if not reports:
+            self._line(body, "Aucun rapport conservé.", COLORS["muted"])
+        for task in reports[:12]:
+            card = self._card(body, f"Travail #{task['id']} | {task['status']}")
+            card.pack(fill="x", pady=8)
+            text = ctk.CTkTextbox(card, height=180, wrap="word")
+            text.pack(fill="x", padx=18, pady=12)
+            text.insert("1.0", str(task["result"]["rapport"]))
+            text.configure(state="disabled")
+            self._line(card, "Analyse du modèle. Les affirmations demandent leurs sources ; aucun revenu déduit.",
+                       COLORS["muted"], padx=18, pady=8)
+        self._section(body, "Décisions conservées")
+        for decision in self._snapshot.get("decisions", [])[:12]:
+            self._line(body, decision["decision"] + " : " + decision["rationale"], pady=5)
+        self._section(body, "Preuves enregistrées")
+        for evidence in self._snapshot.get("evidence", [])[:12]:
+            self._line(body, f"{evidence['nature']} | {evidence['status']} | {evidence['summary']} | {evidence['source_ref']}", pady=5)
+        self._section(body, "Vidéos et fichiers vérifiés")
         generations = self._snapshot["generations"]
         if not generations:
             self._line(body, "Aucune génération Agnes enregistrée pour ce contexte.", COLORS["muted"])
@@ -539,17 +474,11 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         self._section(body, "Services et permissions")
         card = self._card(body)
         card.pack(fill="x")
-        self._line(card, f"Worker : {self._worker_label()}", padx=18, pady=(13, 1))
+        self._line(card, f"Exécution : {self._worker_label()}", padx=18, pady=(13, 1))
         self._line(card, "Agnes : " + state["agnes_health"] + ". La création exige un canal actif avec accès act.",
                    COLORS["muted"], padx=18, pady=(0, 8))
-        owned_worker = self.worker_proc is not None and self.worker_proc.poll() is None
-        external_worker = self._worker_label() == "Activité détectée" and not owned_worker
-        button = self._secondary(card, "Arrêter le Worker" if owned_worker else "Démarrer le Worker", self._toggle_worker)
-        if self._readonly or external_worker:
-            button.configure(state="disabled")
-        if external_worker:
-            self._line(card, "Un Worker extérieur à cette fenêtre est actif. Gérez-le depuis sa session.",
-                       COLORS["muted"], padx=18, pady=(0, 12))
+        self._line(card, "Démarrez depuis la vue d'ensemble. Mettez chaque objectif en pause depuis Missions.",
+                   COLORS["muted"], padx=18, pady=(0, 12))
         channels = state["channels"]
         if not channels:
             self._line(body, "Aucun canal économique déclaré.", COLORS["muted"], pady=(11, 0))
@@ -576,6 +505,8 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             grid.grid_columnconfigure(index, weight=1)
 
     def _worker_label(self) -> str:
+        if any(p.poll() is None for p in self._pursuit_processes):
+            return "OCTOPUS en cours"
         if self.worker_proc and self.worker_proc.poll() is None:
             return "Actif dans cette fenêtre"
         tasks = (self._snapshot or {}).get("tasks", [])
@@ -599,10 +530,11 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             return
         self._snapshot_busy = True
         business = self.selected_business_id
+        check_health = not self._readonly and self.current_page == "Paramètres"
 
         def run():
             try:
-                snapshot = read_snapshot(business, check_health=True)
+                snapshot = read_snapshot(business, check_health=check_health)
                 self._background_results.put(("v2_snapshot", business, snapshot))
             except Exception as exc:
                 self._background_results.put(("v2_error", f"{type(exc).__name__}: {exc}"))
@@ -630,7 +562,7 @@ class WorkbenchV2(EntrepreneurialWorkbench):
                     if self.current_page in PRIMARY:
                         editing = (self.current_page == "Missions" and hasattr(self, "mission_prompt") and
                                    self.mission_prompt.winfo_exists() and
-                                   (self.mission_prompt.get("1.0", "end").strip() or self.mission_consent.get()))
+                                   self.mission_prompt.get("1.0", "end").strip())
                         if not editing:
                             self._show_page(self.current_page)
                 if self._reload_after_create:
@@ -638,7 +570,7 @@ class WorkbenchV2(EntrepreneurialWorkbench):
                     self._load_snapshot()
             elif kind == "v2_created":
                 self._creating = False
-                self._set_status(f"Mission #{result[1]} créée. Worker à démarrer si nécessaire.", COLORS["good"])
+                self._set_status(f"Mission #{result[1]} enregistrée. Consultez son état et ses résultats.", COLORS["good"])
                 if self._snapshot_busy:
                     self._reload_after_create = True
                 else:
@@ -657,8 +589,8 @@ class WorkbenchV2(EntrepreneurialWorkbench):
                 self._background_results.put(result)
                 super()._drain_background_results()
                 break
-        self.side_worker.configure(text="Worker : " + self._worker_label())
-        if not self._snapshot_busy and time.monotonic() - self._snapshot_at > 30:
+        self.side_worker.configure(text="Exécution : " + self._worker_label())
+        if not self._snapshot_busy and time.monotonic() - self._snapshot_at > 5:
             self._load_snapshot()
         self.after(1500, self._refresh)
 

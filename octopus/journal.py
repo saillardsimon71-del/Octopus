@@ -8,11 +8,14 @@ from __future__ import annotations
 import contextvars
 import functools
 import os
+import shutil
 import sqlite3
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import enabled, paths
 
@@ -586,12 +589,49 @@ def _migrate_v9(conn: sqlite3.Connection) -> None:
         raise
 
 
+def readonly_connection(path) -> sqlite3.Connection:
+    # SQLite mode=ro peut créer/modifier -shm/-wal. Copier les fichiers sans
+    # connexion à la source, puis inclure les transactions WAL dans une vue mémoire.
+    path = Path(path)
+    sources = (path, Path(str(path) + "-wal"))
+
+    def signature():
+        return [(p.stat().st_size, p.stat().st_mtime_ns) if p.exists() else None for p in sources]
+
+    for _ in range(3):
+        with tempfile.TemporaryDirectory(prefix="octopus-readonly-") as directory:
+            before = signature()
+            if before[0] is None:
+                raise sqlite3.OperationalError("Base absente en consultation")
+            target = Path(directory) / "snapshot.db"
+            try:
+                for source, stamp, suffix in zip(sources, before, ("", "-wal")):
+                    if stamp is not None:
+                        shutil.copyfile(source, str(target) + suffix)
+            except FileNotFoundError:
+                continue
+            if signature() != before:
+                continue
+            copied = sqlite3.connect(str(target), timeout=10)
+            memory = sqlite3.connect(":memory:")
+            try:
+                copied.backup(memory)
+                memory.execute("PRAGMA query_only=ON")
+                return memory
+            except BaseException:
+                memory.close()
+                raise
+            finally:
+                copied.close()
+    raise sqlite3.OperationalError("Base en modification pendant la copie ; réessayer la consultation")
+
+
 def connect() -> sqlite3.Connection:
     path = paths.journal_path()
     readonly = os.environ.get("OCTOPUS_WORKBENCH_READONLY") == "1"
     if not readonly:
         path.parent.mkdir(parents=True, exist_ok=True)
-    conn = (sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
+    conn = (readonly_connection(path)
             if readonly else sqlite3.connect(str(path), timeout=10))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=10000")

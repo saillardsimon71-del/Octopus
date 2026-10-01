@@ -173,6 +173,8 @@ class Workspace:
         self.scope = scope
         self.state = state
         self.lab = lab_origins()
+        task = tasks.get(scope.task_id) if scope.task_id else None
+        self.public_only = bool((task or {}).get("input", {}).get("browser_public_only"))
         self.account_mode = False
         self.anonymous_domains: set[str] = set()
         self._session_factory = session_factory or agent_browser.Session
@@ -209,7 +211,8 @@ class Workspace:
         inbox.mkdir(parents=True, exist_ok=True)
         self._inbox = inbox
         profile = (agents_config.DATA_DIR / "browser_profile") if self.account_mode else None
-        headed = self.account_mode and __import__("os").environ.get("OCTOPUS_BROWSER_HEADLESS") != "1"
+        setting = __import__("os").environ.get("OCTOPUS_BROWSER_HEADLESS")
+        headed = setting == "0" or (self.account_mode and setting != "1")
         try:
             self._session = self._session_factory(f"oct-{self.scope.key}", proxy_url=self._proxy.url,
                                                   profile_dir=profile, headed=headed, download_dir=inbox)
@@ -221,6 +224,7 @@ class Workspace:
         self._reconcile()
 
     def close(self) -> None:
+        had_session = self._session is not None
         if self._session is not None:
             try:
                 self._session.close()
@@ -229,6 +233,23 @@ class Workspace:
         if self._proxy is not None:
             self._proxy.stop()
             self._proxy = None
+        if had_session:
+            self.observe("close", {"ok": True, "session": "closed"})
+
+    def observe(self, method: str, result: dict) -> None:
+        if not self.scope.task_id:
+            return
+        previous = tasks.step_value(self.scope.task_id, "browser.observation", {})
+        observation = {"session": "open" if self._session else "closed", "at": time.time(),
+                       "url": agent_browser.redact(self._url), "action": method,
+                       "ok": result.get("ok"), "refused": bool(result.get("refused")),
+                       "reason": agent_browser.redact(str(result.get("reason") or result.get("error") or ""))[:1000],
+                       "snapshot": result.get("snapshot", previous.get("snapshot", "")),
+                       "title": result.get("title", previous.get("title", ""))}
+        if method == "close" and previous:
+            observation = {**previous, "session": "closed", "closed_at": time.time()}
+        tasks.save_step(self.scope.task_id, "browser.observation", observation)
+        tasks.emit(self.scope.business, self.scope.task_id, "browser.observation", observation)
 
     def _reconcile(self) -> None:
         """Reprise : une action restée `proposed` a pu agir sans confirmation -> `ambiguous`."""
@@ -542,7 +563,7 @@ class Workspace:
             if kind == web_guard.ACCOUNT and not self.account_mode:
                 from agents import browser
                 host = (urlsplit(url).hostname or "").lower()
-                if browser.profile_has_cookies(url):
+                if not self.public_only and browser.profile_has_cookies(url):
                     self.close()
                     self.account_mode = True
                     self._start()
@@ -921,6 +942,10 @@ def smoke() -> dict:
 
 def call_on(space: Workspace, method: str, **kwargs) -> dict:
     try:
-        return getattr(space, method)(**kwargs)
+        result = getattr(space, method)(**kwargs)
     except Refused as exc:
-        return {"ok": False, "refused": True, "reason": str(exc)}
+        result = {"ok": False, "refused": True, "reason": str(exc)}
+    except (agent_browser.BackendUnavailable, RuntimeError) as exc:
+        result = {"ok": False, "error": agent_browser.redact(str(exc))[:500]}
+    space.observe(method, result)
+    return result

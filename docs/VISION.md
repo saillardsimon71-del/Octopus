@@ -1,15 +1,19 @@
 # Vision OCTOPUS
 
-## Choix fondamental
+## Référence normative
 
-OCTOPUS doit devenir un **atelier économique supervisé qui apprend du travail acheté ou utilisé**.
-Il ne doit pas devenir plus autonome avant de savoir quoi exécuter et pourquoi un client le veut.
+[FOUNDATION.md](FOUNDATION.md) contient le texte exact fourni par l'opérateur le
+2026-09-30. OCTOPUS est une intelligence économique autonome. Son identité ne dépend
+pas d'une preuve commerciale préalable ; ses affirmations de résultats en dépendent.
+Il détermine sa trajectoire dans les permissions humaines, y compris depuis un état vide.
 
-**MARKET FIRST. AUTOMATION SECOND. GENERALIZATION LAST.**
+Le premier parcours borné réutilise strategy, tasks, worker, le runtime de mission et Hermes.
+Voir [FIRST_START.md](FIRST_START.md) pour ses limites effectives et son lancement.
 
-La formulation « moteur d'entreprises autonomes » était une ambition, pas une capacité commerciale
-démontrée. Le dépôt fournit déjà de bonnes protections et une persistance réutilisable. Il n'établit
-pas l'existence d'un marché, d'un paiement commercial ni d'un client satisfait.
+## Cadre historique de l'atelier supervisé
+
+Le reste de ce document décrit l'ancienne orientation, conservée pour la traçabilité.
+Ce cadre ne prescrit plus la stratégie ni le démarrage d'OCTOPUS.
 
 ## Boucle centrale
 

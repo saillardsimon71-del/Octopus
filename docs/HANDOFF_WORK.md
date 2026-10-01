@@ -2,6 +2,10 @@
 
 ## Démarrage neutre (phase F)
 
+Ce parcours de phase F est conservé pour les missions supervisées explicites.
+Le démarrage sans entreprise ni objectif imposé suit désormais
+[FIRST_START.md](FIRST_START.md), sous la référence [FOUNDATION.md](FOUNDATION.md).
+
 Ce protocole décrit une méthode ; le pilote CSV ci-dessous est un **exemple historique**,
 pas une hypothèse active ni la prochaine mission. E5 est terminée, ne pas la reprendre.
 L'objectif vient de l'humain et des preuves acquises pendant la nouvelle mission.

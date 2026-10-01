@@ -59,9 +59,9 @@ def _project_root() -> Path:
 # Répertoires
 PROJECT_ROOT = _project_root()
 AGENTS_DIR = PROJECT_ROOT / "agents"
-DATA_DIR = AGENTS_DIR / "data"
+DATA_DIR = Path(os.environ["OCTOPUS_HOME"]) / "agents" / "data" if os.environ.get("OCTOPUS_HOME") else AGENTS_DIR / "data"
 DB_PATH = DATA_DIR / "podalux.db"
-JOBS_DIR = PROJECT_ROOT / "jobs"
+JOBS_DIR = Path(os.environ.get("OCTOPUS_HOME") or PROJECT_ROOT) / "jobs"
 
 # Les 6 agents
 AGENTS = ["ORBIT", "GROWTH", "LEDGER", "FORGE", "CONVERT", "SOUT"]

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import time
+import hashlib
+import sqlite3
 
 import pytest
 
@@ -16,6 +18,31 @@ def test_journal_enables_foreign_keys_on_every_connection():
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("wal", [False, True])
+def test_readonly_snapshot_includes_wal_without_touching_source(tmp_path, wal):
+    source = tmp_path / "source.db"
+    writer = sqlite3.connect(source)
+    if wal:
+        writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("CREATE TABLE facts(value TEXT)")
+    writer.execute("INSERT INTO facts VALUES('observation conservée')")
+    writer.commit()
+    if not wal:
+        writer.close()
+    def hashes():
+        return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in tmp_path.glob("source.db*")}
+    before = hashes()
+    view = journal.readonly_connection(source)
+    try:
+        assert view.execute("SELECT value FROM facts").fetchone()[0] == "observation conservée"
+        with pytest.raises(sqlite3.OperationalError):
+            view.execute("DELETE FROM facts")
+    finally:
+        view.close()
+    assert hashes() == before
+    writer.close()
 
 
 def runs() -> list[dict]:
