@@ -732,7 +732,7 @@ def run(business: str, kind: str, *, label: str | None = None, budget_usd: float
              (label or "")[:200], effective_profile, budget_usd, time.time(), os.getpid()),
         )
         run_id = int(cur.lastrowid)
-        if parent is None:
+        if parent is None and previous is None:
             conn.execute("UPDATE runs SET root_id=? WHERE id=?", (run_id, run_id))
         conn.commit()
     finally:

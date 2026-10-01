@@ -21,7 +21,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 from octopus import browser_workspace, journal, llm
 
 from . import cancel, config, db, deepseek, web_guard
-from .tool_registry import ToolRegistry
+from .tool_registry import ToolRegistry, technical_refusal
 
 _ROLE: contextvars.ContextVar[str] = contextvars.ContextVar("podalux_role", default="RUNTIME")
 _SEARCHES: contextvars.ContextVar[dict | None] = contextvars.ContextVar("podalux_searches", default=None)
@@ -1424,7 +1424,8 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
               conversational: bool = False, *, business: str | None = None,
               allowed_tools: set[str] | None = None,
               search_browse_lockstep: bool = False,
-              search_browse_selector: str = "first") -> dict:
+              search_browse_selector: str = "first", resume_steps: list | None = None,
+              checkpoint=None) -> dict:
     """Un agent (rôle) poursuit un objectif librement via la boucle ReAct.
 
     `conversational=True` → l'agent répond à un message humain (pas un objectif).
@@ -1442,6 +1443,7 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
                     role, goal, max_steps, conversational, allowed_tools,
                     search_browse_lockstep=search_browse_lockstep,
                     search_browse_selector=search_browse_selector,
+                    resume_steps=resume_steps, checkpoint=checkpoint,
                 )
         finally:
             _ROLE.reset(token)
@@ -1463,16 +1465,22 @@ def _react_prompt_context(context: list[dict], steps: list[dict]) -> list[dict]:
 def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
                allowed_tools: set[str] | None = None, *,
                search_browse_lockstep: bool = False,
-               search_browse_selector: str = "first") -> dict:
+               search_browse_selector: str = "first", resume_steps: list | None = None,
+               checkpoint=None) -> dict:
     system, first_user, done_label = build_prompts(role, goal, conversational, allowed_tools)
     context = [{"role": "system", "content": system},
                {"role": "user", "content": first_user}]
-    steps = []
+    steps = list(resume_steps or [])
+    for step in steps:
+        context.append({"role": "assistant", "content": json.dumps(
+            {"tool": step.get("tool"), "args": step.get("args") or {}}, ensure_ascii=False)[:600]})
+        context.append({"role": "user", "content": "Observation déjà acquise, ne pas répéter : " +
+                        str(step.get("result") or "")})
     last_sig = None
     repeat = 0
     lockstep_url = None
     lockstep_selection = None
-    for i in range(max_steps):
+    for i in range(len(steps), max_steps):
         if cancel.requested():
             status = "timeout" if cancel.timed_out() else "cancelled"
             db.post(role, "durée maximale atteinte" if status == "timeout" else "arrêt demandé par l'humain")
@@ -1513,6 +1521,8 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         if tool not in TOOLS:
             context.append({"role": "user", "content": f"outil inconnu : {tool}. Disponibles : {list(TOOLS)}"})
             steps.append({"step": i + 1, "tool": tool, "result": "inconnu"})
+            if checkpoint:
+                checkpoint(steps)
             continue
 
         refusal, result = None, None
@@ -1581,9 +1591,11 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         context.append({"role": "user", "content": f"Résultat de {tool} : {result_str}"})
         # Le résultat structuré reste intact ; result n'est qu'une vue de prompt bornée.
         step_record = {"step": i + 1, "tool": tool, "result": result_str}
+        if checkpoint:
+            step_record["args"] = args
         if tool in {"search", "browse"} or str(tool).startswith("browser_"):
             if tool in {"search", "browse"}:
-                step_record["args"] = dict(args)
+                step_record["args"] = dict(args) if isinstance(args, dict) else args
             if result is not None:
                 if tool == "browse" and isinstance(result, dict) and isinstance(result.get("page"), dict):
                     step_record["result_data"] = {
@@ -1595,6 +1607,11 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
                     step_record["result_data"] = result
         if refusal is not None:
             step_record["result_data"] = result
+        if isinstance(result, dict) and result.get("refused") and technical_refusal(str(result.get("reason") or "")):
+            step_record["failure_class"] = "technical"
+            context.append({"role": "user", "content":
+                            "Erreur technique ou source invalide. Corrige les arguments ou abandonne cette source "
+                            "et utilise une autre source publique. Cela n'exige aucune permission humaine."})
         if tool == "search":
             step_record["result_urls"] = _search_result_urls(result)
         elif tool == "browse" and result is not None:
@@ -1606,6 +1623,8 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
             if isinstance(forced_selection, dict):
                 step_record["lockstep_selection"] = dict(forced_selection)
         steps.append(step_record)
+        if checkpoint:
+            checkpoint(steps)
     return {"role": role, "steps": steps, "final": "(max steps atteint)", "execution_status": "step_limit"}
 
 
@@ -1615,7 +1634,7 @@ def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None
                 search_browse_selector: str = "first",
                 business_signal_focus: bool = False,
                 business_signal_target: int = 3, max_duration_s: float = 900,
-                determination: bool = False) -> dict:
+                determination: bool = False, resume: dict | None = None, checkpoint=None) -> dict:
     """ORBIT planifie puis délègue aux rôles (multi-agents via le runtime).
 
     Le profil explicite est hérité par les runs agents imbriqués via le journal.
@@ -1641,6 +1660,7 @@ def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None
                 business_signal_focus=business_signal_focus,
                 business_signal_target=max(1, int(business_signal_target)),
                 determination=determination,
+                resume=resume, checkpoint=checkpoint,
             )
 
 
@@ -1725,7 +1745,8 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                  search_browse_lockstep: bool = False,
                  search_browse_selector: str = "first",
                  business_signal_focus: bool = False,
-                 business_signal_target: int = 3, determination: bool = False) -> dict:
+                 business_signal_target: int = 3, determination: bool = False,
+                 resume: dict | None = None, checkpoint=None) -> dict:
     from .search import SEARCH_PURPOSE_BUSINESS, SEARCH_PURPOSE_GENERAL
     pro = deepseek.config.MODEL_PRO
     if cancel.requested():
@@ -1757,14 +1778,17 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         "Réponds en JSON : "
         '{"tasks":[{"role":"...","task":"..."}]}'
     )
-    try:
-        plan = deepseek.call_json("ORBIT", "planification", pro,
+    if resume and resume.get("plan"):
+        plan = _validate_plan_contract({"tasks": resume["plan"]})
+    else:
+        try:
+            plan = deepseek.call_json("ORBIT", "planification", pro,
                                   [{"role": "system", "content": plan_sys},
                                    {"role": "user", "content": goal}],
                                   reasoning="high", max_tokens=700 if economical else 2000,
                                   validate=_validate_plan_contract if economical else None)
-    except llm.GatewayError as exc:
-        return _mission_unavailable([], [], "llm_unavailable", f"{type(exc).__name__}: {exc}")
+        except llm.GatewayError as exc:
+            return _mission_unavailable([], [], "llm_unavailable", f"{type(exc).__name__}: {exc}")
     proposed = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
     # Garde-fou budgétaire, pas une consigne du prompt : au-delà de 5, chaque
     # sous-tâche coûte une boucle ReAct complète de plus.
@@ -1779,7 +1803,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     # Le feedback ne porte que sur la faisabilité du plan par rapport au budget ; il ne
     # prescrit aucun rôle, aucune source, aucune requête ni aucune stratégie. Le second
     # plan est accepté tel quel : pas de boucle de retry, pas de minimum de sous-tâches.
-    if business_signal_focus and business_signal_target > 1 and len(tasks) == 1:
+    if not resume and business_signal_focus and business_signal_target > 1 and len(tasks) == 1:
         db.post("ORBIT", "mission multi-signaux concentrée en une seule sous-tâche : replan unique")
         feedback = (
             f"Le plan précédent concentre une mission visant plusieurs signaux dans une seule boucle "
@@ -1806,8 +1830,16 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             db.post("ORBIT", f"plan tronqué : {len(proposed)} sous-tâches proposées, {len(tasks)} gardées")
     db.post("ORBIT", f"mission : {goal[:70]} → {len(tasks)} sous-tâches")
 
-    results = []
-    for t in tasks:
+    results = list((resume or {}).get("results") or [])
+    partial_steps = list((resume or {}).get("agent_steps") or [])
+
+    def save_progress(agent_steps=None):
+        if checkpoint:
+            checkpoint({"plan": tasks, "results": results, "agent_steps": agent_steps or [],
+                        "collect_complete": len(results) == len(tasks)})
+
+    save_progress(partial_steps)
+    for t in tasks[len(results):]:
         if cancel.requested():
             status = "timeout" if cancel.timed_out() else "cancelled"
             db.post("ORBIT", "mission interrompue : " + status)
@@ -1840,6 +1872,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         # politique de providers et isole le cache. Pas de nouveau paramètre d'outil.
         purpose = (SEARCH_PURPOSE_BUSINESS if business_signal_focus else SEARCH_PURPOSE_GENERAL)
         with search_purpose(purpose):
+            recovery = {"resume_steps": partial_steps, "checkpoint": save_progress} if checkpoint else {}
             r = run_agent(
                 role,
                 task,
@@ -1847,14 +1880,19 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                 allowed_tools=allowed_tools,
                 search_browse_lockstep=search_browse_lockstep,
                 search_browse_selector=effective_selector,
+                **recovery,
             )
-        results.append({"role": role, "task": original,
-                        "final": r.get("final"), "steps": r.get("steps"),
-                        "execution_status": r.get("execution_status", "unknown"),
-                        "execution_error": r.get("execution_error")})
+        subresult = {"role": role, "task": original,
+                     "final": r.get("final"), "steps": r.get("steps"),
+                     "execution_status": r.get("execution_status", "unknown"),
+                     "execution_error": r.get("execution_error")}
         if r.get("execution_status") in {"cancelled", "timeout", "budget_exceeded", "llm_unavailable"}:
-            return _mission_unavailable(tasks, results, r["execution_status"],
+            save_progress(r.get("steps"))
+            return _mission_unavailable(tasks, results + [subresult], r["execution_status"],
                                         r.get("execution_error") or r.get("final"))
+        results.append(subresult)
+        partial_steps = []
+        save_progress()
 
     if not results or all(not r.get("steps") and r.get("execution_status") != "completed"
                           for r in results):

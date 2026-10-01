@@ -292,17 +292,21 @@ class WorkbenchV2(EntrepreneurialWorkbench):
 
     def _overview(self, body) -> None:
         state = self._snapshot
-        pending = [r for r in state["requests"] if r["status"] == "pending"]
+        pending = [r for r in state["requests"] if r["status"] == "pending" and not r.get("technical_obsolete")]
+        obsolete = [r for r in state["requests"] if r.get("technical_obsolete")]
         running = [t for t in state["tasks"] if t["status"] == "running" and
                    (t.get("lease_until") or 0) > time.time()]
         hero = self._card(body)
         hero.pack(fill="x", pady=(0, 12))
-        label = "Votre intervention est attendue" if pending else "En activité" if running else "Prêt à démarrer ou reprendre"
+        label = "Votre intervention est attendue" if pending else "En activité" if running else "Reprise technique disponible" if obsolete else "Prêt à démarrer ou reprendre"
         self._line(hero, label, size=22, bold=True, padx=20, pady=(19, 6))
         self._line(hero, "Finalité : obtenir, maintenir et améliorer une performance économique réelle.",
                    padx=20, pady=(0, 8))
         self._line(hero, "Premier démarrage : 0 EUR. Consultation et analyse. Trois cycles bornés, délai cible de deux minutes chacun.",
                    COLORS["muted"], padx=20, pady=(0, 8))
+        if obsolete:
+            self._line(hero, "Une ancienne erreur de source sera réconciliée au clic sur Reprendre. Aucune permission supplémentaire requise.",
+                       COLORS["muted"], padx=20, pady=(0, 8))
         button = self._secondary(hero, "Démarrer / reprendre OCTOPUS", self._start_pursuit)
         if self._readonly or self._creating:
             button.configure(state="disabled")
@@ -484,7 +488,13 @@ class WorkbenchV2(EntrepreneurialWorkbench):
     def _activity(self, body) -> None:
         events = self._snapshot["events"]
         llm_calls = self._snapshot.get("llm_calls", [])
-        pending = [r for r in self._snapshot["requests"] if r["status"] == "pending"]
+        pending = [r for r in self._snapshot["requests"] if r["status"] == "pending" and not r.get("technical_obsolete")]
+        obsolete = [r for r in self._snapshot["requests"] if r.get("technical_obsolete")]
+        if obsolete:
+            card = self._card(body, "Ancienne erreur technique — reprise disponible")
+            card.pack(fill="x", pady=(0, 12))
+            for request in obsolete:
+                self._line(card, request["question"].split(" Une réponse seule")[0], padx=18, pady=(0, 8))
         if pending:
             card = self._card(body, "Votre intervention")
             card.pack(fill="x", pady=(0, 12))

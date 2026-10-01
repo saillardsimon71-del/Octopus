@@ -65,6 +65,18 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
         generations = rows("agnes_video_generations")
         events = rows("events", limit=100)
         requests = rows("human_requests")
+        from octopus.supervisor import technical_pursuit_request
+        by_task = {task["id"]: task for task in tasks}
+        for request in requests:
+            work = by_task.get(request["task_id"])
+            request["technical_obsolete"] = False
+            if not work or "task_steps" not in present or request["status"] != "pending":
+                continue
+            memo = connection.execute("SELECT value FROM task_steps WHERE task_id=? AND key='determination'",
+                                      (work["id"],)).fetchone()
+            request["technical_obsolete"] = technical_pursuit_request(
+                {**work, "input": json.loads(work["input"] or "{}")}, request,
+                json.loads(memo["value"]) if memo else {})
         channels = rows("economic_channels")
         allowances = rows("spend_allowances")
         ledger = rows("ledger_entries")
@@ -141,6 +153,8 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
     by_id = {task["id"]: task for task in tasks}
     for task in tasks:
         task["result"] = json.loads(task.get("output") or "{}") or {}
+        task["technical_obsolete"] = any(r["task_id"] == task["id"] and r["technical_obsolete"] for r in requests) \
+            and not any(r["task_id"] == task["id"] and r["status"] == "pending" and not r["technical_obsolete"] for r in requests)
     for objective in objectives:
         linked = [by_id[link["to_id"]] for link in links if link["business"] == objective["business"]
                   and link["from_id"] == objective["id"] and link["to_id"] in by_id
@@ -185,7 +199,8 @@ def mission_state(objective: dict) -> tuple[str, str]:
             return "À examiner", "Objectif historiquement atteint, mais le MP4 n'est plus vérifiable."
         return "Objectif atteint", "Le Supervisor a clos l'objectif après vérification de la preuve."
     if objective["status"] == "paused":
-        return "En pause", "Une intervention ou une nouvelle décision est nécessaire."
+        latest = (objective.get("work_tasks") or [{}])[-1]
+        return "En pause", (latest.get("result") or {}).get("reason") or latest.get("error") or "Reprendre pour réexaminer l'état dans les limites existantes."
     tasks = objective["work_tasks"]
     if not tasks:
         return "Planification", "L'objectif est autorisé. Le travail n'est pas encore planifié."
@@ -197,6 +212,8 @@ def mission_state(objective: dict) -> tuple[str, str]:
             return "Vérification", "La tâche est terminée. La preuve MP4 reste à confirmer."
         return "Travail terminé", "Résultats disponibles. Aucun résultat économique n'est déduit du statut de la tâche."
     if latest["status"] == "waiting_human":
+        if latest.get("technical_obsolete"):
+            return "Reprise technique disponible", "Ancienne source invalide. Cliquer sur Reprendre réconciliera la demande sans accorder de droits."
         return "Votre réponse attendue", latest.get("error") or "Une autorisation ou une réponse est requise."
     if latest["status"] in ("failed", "cancelled"):
         return "À examiner", latest.get("error") or "La tâche s'est interrompue."
