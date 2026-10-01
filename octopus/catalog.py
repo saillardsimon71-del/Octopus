@@ -183,7 +183,9 @@ def load(path: Path | None = None) -> Catalog:
         free = [model_id for model_id in candidates.get("low_cost", candidates.get("zero_cost", []))
                 if raw["models"][model_id]["cost_class"] != "paid"]
         baseline = task.get("baseline")
-        candidates["economical"] = list(dict.fromkeys(free)) + ([baseline] if baseline else [])
+        eligible_baseline = (baseline and (task.get("privacy") != "sensitive"
+                                           or raw["models"][baseline]["cost_class"] == "local"))
+        candidates["economical"] = list(dict.fromkeys(free)) + ([baseline] if eligible_baseline else [])
     validate(raw)
     cat = Catalog(raw=raw, path=p)
     _cache[cache_key] = (mtime, cat)
