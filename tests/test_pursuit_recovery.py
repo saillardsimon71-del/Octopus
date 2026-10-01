@@ -3,12 +3,17 @@ from __future__ import annotations
 
 import json
 import time
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from agents import browser, deepseek, runtime, web_guard
 from agents.gui.workbench_v2_data import mission_state, read_snapshot
 from octopus import browser_workspace, journal, llm, strategy, supervisor, tasks, worker
+from octopus.pricing import Usage
 
 
 BUSINESS = "octopus"
@@ -162,6 +167,33 @@ def test_workbench_preserves_human_label_for_mixed_request():
     assert mission_state(snapshot["objectives"][0])[0] == "Votre réponse attendue"
 
 
+@pytest.mark.parametrize("real_permission", [False, True])
+def test_windows_smoke_script_simulates_resume_on_copy_and_preserves_real_source(monkeypatch, isolated, real_permission):
+    from scripts.check_pursuit_resume import check_resume, fingerprints
+    monkeypatch.setenv("OCTOPUS_DB", str(isolated / "data" / "octopus.db"))
+    options = {"permission": "Publier une offre exige une autorisation."} if real_permission else {}
+    oid, tid, rid, _ = old_waiting_request(**options)
+    strategy.create("evidence", BUSINESS, "Preuve antérieure", created_by="human", nature="observed",
+                    source_type="url", source_ref="https://public.example", captured_at=time.time(),
+                    observation="Observation antérieure")
+    before = fingerprints(isolated / "data" / "octopus.db")
+    report = check_resume(isolated)
+    assert report["source_read_only"] and report["source_hashes_unchanged"]
+    assert report["evidence_preserved"] and report["llm_cost_preserved"]
+    assert report["existing_objective_reused"] and report["objective_id"] == oid
+    assert report["real_work_executed"] is False
+    assert report["cancelled_technical_request_ids"] == ([] if real_permission else [rid])
+    assert fingerprints(isolated / "data" / "octopus.db") == before
+    assert tasks.get(tid)["status"] == "waiting_human"
+    assert [r["id"] for r in tasks.pending_human_requests(BUSINESS)] == [rid]
+    script = Path(__file__).resolve().parents[1] / "scripts" / "check_pursuit_resume.py"
+    result = subprocess.run([sys.executable, str(script), "--data-root", str(isolated)],
+                            env=dict(os.environ), text=True, capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["source_hashes_unchanged"] is True
+    assert "test-key" not in result.stdout
+
+
 def test_technical_model_permission_retries_bounded_but_real_permission_survives(monkeypatch):
     calls = []
 
@@ -193,7 +225,8 @@ def test_explicit_llm_budget_exhaustion_remains_human_boundary(monkeypatch):
     assert supervisor.work_tasks(BUSINESS, oid)[0]["status"] == "waiting_human"
 
 
-def test_resumed_task_keeps_root_and_costs_for_next_cycle():
+@pytest.mark.parametrize("old_metadata", [False, True])
+def test_resumed_task_keeps_root_and_costs_for_next_cycle(old_metadata):
     oid = supervisor.start_pursuit()
     work = supervisor.work_tasks(BUSINESS, oid)[0]
     with journal.run(BUSINESS, "task:supervisor.objective_work", budget_usd=0.20) as first:
@@ -209,7 +242,12 @@ def test_resumed_task_keeps_root_and_costs_for_next_cycle():
         assert resumed.root_id == first.root_id
         assert journal.query("SELECT root_id FROM runs WHERE id=?", (resumed.id,))[0]["root_id"] == first.root_id
     with tasks._tx() as conn:
+        if old_metadata:
+            conn.execute("UPDATE runs SET root_id=id WHERE id=?", (resumed.id,))
+            conn.execute("UPDATE llm_calls SET root_run_id=? WHERE run_id=?", (resumed.id, resumed.id))
         conn.execute("UPDATE tasks SET run_id=? WHERE id=?", (resumed.id, work["id"]))
+    with journal.run(BUSINESS, "task:supervisor.objective_work", resume_run_id=resumed.id) as third:
+        assert third.root_id == first.id
     next_id = supervisor._queue_pursuit(oid, round_no=2, previous_id=work["id"], next_goal="Suite")
     assert tasks.get(next_id)["budget_usd"] == pytest.approx(0.11)
     assert read_snapshot()["pursuit_llm"]["spent_usd"] == pytest.approx(0.09)
@@ -242,6 +280,40 @@ def test_synthesis_retry_reuses_raw_collection_and_only_repeats_synthesis(monkey
     assert calls.count("planification") == 1 and len(sources) == 1
     assert calls.count("determination") == 2
     assert works[0]["output"]["results"] == works[1]["output"]["results"]
+    assert tasks.pending_human_requests(BUSINESS) == []
+
+
+def test_generic_supervisor_synthesis_retry_also_reuses_collection(monkeypatch):
+    calls, sources = [], []
+
+    def model(agent, stage, model, messages, **kwargs):
+        calls.append(stage)
+        if stage == "planification":
+            return {"tasks": [{"role": "SOUT", "task": "Observer une source publique"}]}
+        if stage == "action":
+            return {"tool": "search", "args": {"query": "source publique"}} if not sources else {"final": "Collecte terminée"}
+        if calls.count("synthese") == 1:
+            raise llm.InvalidOutput("JSON invalide")
+        return {"rapport": "Observation publique conservée, résultat économique inconnu"}
+
+    def search(args):
+        sources.append(args)
+        return {"ok": True, "text": "Observation publique conservée"}
+
+    monkeypatch.setattr(deepseek, "call_json", model)
+    monkeypatch.setitem(runtime.TOOLS["search"], "fn", search)
+    worker.load_handlers(["octopus.builtin_handlers"])
+    oid = strategy.create("objective", BUSINESS, "Étude publique", created_by="human", statement="Étudier une piste")
+    strategy.transition("objective", oid, BUSINESS, "active", actor="human")
+    first_id = supervisor.plan_work(BUSINESS, strategy.get("objective", oid, BUSINESS), profile="economical")
+    assert worker.run_one(task_id=first_id, log=lambda _: None)["status"] == "done_degraded"
+    decision = supervisor.decide(BUSINESS, strategy.get("objective", oid, BUSINESS), tasks.get(first_id),
+                                 retry_delay_s=0, max_attempts=2)
+    second = worker.run_one(task_id=decision["next_work_task_id"], log=lambda _: None)
+    assert second["status"] == "done"
+    assert calls.count("planification") == 1 and calls.count("synthese") == 2
+    assert len(sources) == 1
+    assert second["output"]["results"] == tasks.get(first_id)["output"]["results"]
     assert tasks.pending_human_requests(BUSINESS) == []
 
 
@@ -293,3 +365,57 @@ def test_persistent_technical_llm_failures_pause_after_three_cycles_without_huma
     assert tasks.pending_human_requests(BUSINESS) == []
     assert all(w["status"] == "done_degraded" for w in supervisor.work_tasks(BUSINESS, oid))
     assert read_snapshot()["pursuit_llm"]["spent_usd"] == 0
+
+
+@pytest.mark.parametrize("failure", ["structured_400", "invalid_json", "429", "provider_down"])
+def test_real_gateway_supervisor_path_recovers_without_live_provider(monkeypatch, transport, providers_up, failure):
+    """Real routing/contracts, fake HTTP transport, real durable worker and supervisor."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    failed = False
+    searches = []
+
+    class UnsupportedFormat(Exception):
+        status_code = 400
+        body = {"error": {"message": "response_format json_object is not supported"}}
+
+    class RateLimit(Exception):
+        status_code = 429
+        response = type("Response", (), {"status_code": 429, "headers": {"retry-after": "60"}})()
+
+    def respond(provider, request):
+        nonlocal failed
+        if not failed:
+            failed = True
+            if failure == "structured_400":
+                return UnsupportedFormat("400")
+            if failure == "429":
+                return RateLimit("429")
+            if failure == "provider_down":
+                return ConnectionError("provider indisponible")
+            text = '{"tasks":'
+        elif request["max_tokens"] == 700:
+            text = json.dumps({"tasks": [{"role": "SOUT", "task": "Observer une source publique"}]})
+        elif request["max_tokens"] == 500:
+            text = json.dumps({"final": "Observation publique acquise"} if searches else {
+                "tool": "search", "args": {"query": "demande publique"}})
+        else:
+            text = json.dumps(determination())
+        return llm.TransportResult(text=text, usage=Usage(prompt_tokens=10, completion_tokens=5),
+                                   requested_model=request["model"], resolved_model=request["model"],
+                                   resolved_provider="OfflineFake", provider_cost_usd=0.0)
+
+    def search(args):
+        searches.append(args)
+        return {"ok": True, "text": "Une demande publique observée", "url": "https://public.example"}
+
+    transport.handler = respond
+    monkeypatch.setitem(runtime.TOOLS["search"], "fn", search)
+    oid = supervisor.start_pursuit()
+    supervisor.run_pursuit(oid)
+    assert supervisor.work_tasks(BUSINESS, oid)[-1]["status"] == "done"
+    assert len(searches) == 1
+    assert tasks.pending_human_requests(BUSINESS) == []
+    assert len(transport.calls) < 15
+    assert read_snapshot()["token_cost_usd"] == 0
+    assert all(request["model"].endswith(":free") or provider["base_url"].startswith("https://api.deepseek")
+               for provider, request in transport.calls)

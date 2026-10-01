@@ -1518,7 +1518,7 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         # L'action choisie entre dans l'historique : sans elle, le modèle ne voyait que les résultats
         # et relançait les mêmes requêtes (audit M2).
         context.append({"role": "assistant", "content": json.dumps(r, ensure_ascii=False)[:600]})
-        if tool not in TOOLS:
+        if not isinstance(tool, str) or tool not in TOOLS:
             context.append({"role": "user", "content": f"outil inconnu : {tool}. Disponibles : {list(TOOLS)}"})
             steps.append({"step": i + 1, "tool": tool, "result": "inconnu"})
             if checkpoint:

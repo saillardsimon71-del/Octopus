@@ -118,15 +118,21 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
         pursuit_llm = None
         if pursuit:
             spent = 0.0
+            cost_roots = set()
             cursor = pursuit
             by_task_id = {task["id"]: task for task in tasks}
             while cursor:
                 if cursor["run_id"] and "runs" in present and "llm_calls" in present:
-                    root = connection.execute("SELECT root_id FROM runs WHERE id=?", (cursor["run_id"],)).fetchone()
-                    if root:
+                    root = connection.execute(
+                        "WITH RECURSIVE a(id, parent_id) AS (SELECT id, parent_id FROM runs WHERE id=? "
+                        "UNION ALL SELECT r.id, r.parent_id FROM runs r JOIN a ON r.id=a.parent_id) "
+                        "SELECT id FROM a WHERE parent_id IS NULL", (cursor["run_id"],)).fetchone()
+                    if root and root["id"] not in cost_roots:
                         spent += float(connection.execute(
-                            "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls WHERE root_run_id=?",
-                            (root["root_id"],)).fetchone()[0])
+                            "WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL SELECT r.id FROM runs r JOIN sub ON r.parent_id=sub.id) "
+                            "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls WHERE run_id IN (SELECT id FROM sub)",
+                            (root["id"],)).fetchone()[0])
+                        cost_roots.add(root["id"])
                 task_input = json.loads(cursor["input"] or "{}")
                 if task_input.get("round") == 1:
                     break

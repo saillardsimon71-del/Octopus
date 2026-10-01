@@ -124,11 +124,14 @@ def _queue_pursuit(objective_id: int, *, round_no: int, previous_id: int | None,
     cap = (previous["input"].get("llm_cap_usd") or pursuit_llm_budget_usd()
            if previous else pursuit_llm_budget_usd())
     spent = 0.0
+    cost_roots = set()
     cursor = previous
     while cursor:
         if cursor["run_id"]:
-            root = journal.query("SELECT root_id FROM runs WHERE id=?", (cursor["run_id"],))[0]["root_id"]
-            spent += journal.subtree_cost(root)
+            root = journal.root_run_id(cursor["run_id"])
+            if root not in cost_roots:
+                spent += journal.subtree_cost(root)
+                cost_roots.add(root)
         if cursor["input"].get("round") == 1:
             break
         cursor = tasks.get(cursor["input"].get("previous_id"))
@@ -248,7 +251,7 @@ def execute_pursuit(ctx) -> dict:
                 technical_reasons.append(refusal)
             if refused and not technical:
                 permission = refusal or "Action refusée par le navigateur"
-            if step.get("tool") in TOOLS and step["tool"] not in PURSUIT_TOOLS:
+            if isinstance(step.get("tool"), str) and step["tool"] in TOOLS and step["tool"] not in PURSUIT_TOOLS:
                 permission = f"L'outil {step['tool']} dépasse les outils autorisés pour ce démarrage."
     if result.get("execution_status") not in ("completed", "incomplete"):
         action = "pause"
@@ -304,11 +307,15 @@ def technical_pursuit_request(work: dict, request: dict, result: dict) -> bool:
     from agents.runtime import TOOLS
     from agents.tool_registry import technical_refusal
     suffix = " Une réponse seule n'accorde aucun droit. Adaptez l'objectif ou configurez une autorisation explicite."
+    if not isinstance(result, dict) or not isinstance(work.get("input"), dict):
+        return False
     if work.get("kind") != WORK_KIND or not work.get("input", {}).get("pursuit") \
             or work.get("status") != "waiting_human" or request.get("status") != "pending" \
             or request.get("key") != "pursuit.permission" or request.get("task_id") != work.get("id"):
         return False
     choice = result.get("determination") or {}
+    if not isinstance(choice, dict) or not isinstance(result.get("results", []), list):
+        return False
     if choice.get("action") == "request_permission" and not technical_refusal(str(choice.get("permission") or "")):
         return False
     if not result or result.get("execution_status") == "budget_exceeded" \
@@ -316,8 +323,14 @@ def technical_pursuit_request(work: dict, request: dict, result: dict) -> bool:
         return False
     refusals = []
     for subtask in result.get("results") or []:
+        if not isinstance(subtask, dict) or not isinstance(subtask.get("steps", []), list):
+            return False
         for step in subtask.get("steps") or []:
+            if not isinstance(step, dict):
+                return False
             tool, data = step.get("tool"), step.get("result_data") or {}
+            if not isinstance(tool, str):
+                return False
             if tool in TOOLS and tool not in PURSUIT_TOOLS:
                 return False
             if isinstance(data, dict) and data.get("refused"):
@@ -348,15 +361,17 @@ def reconcile_pursuit_requests(objective_id: int) -> list[int]:
             continue
         now = time.time()
         with tasks._tx() as conn:
+            task_reconciled = False
             for request in requests:
                 changed = conn.execute("UPDATE human_requests SET status='cancelled' WHERE id=? AND status='pending' "
                                        "AND EXISTS (SELECT 1 FROM tasks WHERE id=? AND status='waiting_human')",
                                        (request["id"], work["id"])).rowcount
                 if changed:
+                    task_reconciled = True
                     tasks._emit(conn, DEFAULT_BUSINESS, work["id"], "human.technical_reconciled",
                                 {"request_id": request["id"], "reason": request["question"], "objective_id": objective_id})
                     reconciled.append(request["id"])
-            if not conn.execute("SELECT 1 FROM human_requests WHERE task_id=? AND status='pending'", (work["id"],)).fetchone():
+            if task_reconciled and not conn.execute("SELECT 1 FROM human_requests WHERE task_id=? AND status='pending'", (work["id"],)).fetchone():
                 conn.execute("UPDATE tasks SET status='queued', not_before=?, updated_at=? WHERE id=? AND status='waiting_human'",
                              (now, now, work["id"]))
                 conn.execute("DELETE FROM task_steps WHERE task_id=? AND key='pursuit.decision'", (work["id"],))
@@ -683,6 +698,14 @@ def _run_mission(ctx, objective: dict, criterion: dict | None) -> dict:
     """
     from agents import task_handlers
     from agents.runtime import run_mission
+    progress = tasks.step_value(ctx.id, "mission.progress", {})
+    previous = next((work for work in reversed(work_tasks(ctx.business, int(objective["id"])))
+                     if work["id"] < ctx.id), None)
+    if not progress and previous and previous["status"] in {"failed", "cancelled", "done_degraded"}:
+        progress = tasks.step_value(previous["id"], "mission.progress", {})
+        raw = tasks.step_value(previous["id"], "mission", previous.get("output") or {})
+        if not progress and raw.get("execution_status") == "synthesis_unavailable":
+            progress = {"plan": raw.get("plan") or [], "results": raw.get("results") or []}
     return task_handlers._run(ctx, lambda: run_mission(
         goal_text(objective),
         max_steps_per_agent=int(ctx.input.get("max_steps", DEFAULT_MAX_STEPS)),
@@ -691,6 +714,7 @@ def _run_mission(ctx, objective: dict, criterion: dict | None) -> dict:
         profile=ctx.input.get("profile"),
         business_signal_focus=bool(ctx.input.get("business_signal_focus", False)),
         max_duration_s=float(ctx.input.get("max_duration_s", DEFAULT_MAX_DURATION_S)),
+        resume=progress, checkpoint=lambda value: tasks.save_step(ctx.id, "mission.progress", value, owner=ctx.owner),
     ))
 
 
@@ -818,6 +842,7 @@ def work_output(business: str, objective: dict, criterion: dict | None, result: 
         "business": business,
         "execution_status": execution_status,
         "synthesis_status": result.get("synthesis_status"),
+        "synthesis_error": result.get("synthesis_error"),
         "rapport": result.get("rapport"),
         "plan": result.get("plan") or [],
         "results": results,

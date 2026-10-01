@@ -643,16 +643,41 @@ def connect() -> sqlite3.Connection:
         conn.close()
         raise RuntimeError("Journal trop ancien pour la consultation ; ouvrir une copie migrée")
     if version < SCHEMA_VERSION:
-        conn.execute("PRAGMA journal_mode=WAL")
-        for target, script in _MIGRATIONS:
-            if version < target:
-                if target == 9:
-                    _migrate_v9(conn)
-                else:
-                    conn.executescript(script)
+        try:
+            # Le changement de mode peut retourner BUSY sans respecter busy_timeout
+            # lorsque deux processus ouvrent un journal neuf en même temps.
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.05)
+            conn.execute("BEGIN IMMEDIATE")
+            # Relire sous le verrou : un autre ouvreur peut avoir déjà migré.
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            for target, script in _MIGRATIONS:
+                if version < target < 9:
+                    statement = ""
+                    for line in script.splitlines(keepends=True):
+                        statement += line
+                        if sqlite3.complete_statement(statement):
+                            conn.execute(statement)
+                            statement = ""
+                    if statement.strip():
+                        conn.execute(statement)
                     conn.execute(f"PRAGMA user_version={target}")
-                    conn.commit()
-                version = target
+                    version = target
+            # executescript ferait un COMMIT implicite et libérerait le verrou.
+            conn.commit()
+            if version < 9:
+                _migrate_v9(conn)
+        except BaseException:
+            conn.rollback()
+            conn.close()
+            raise
     return conn
 
 
@@ -722,7 +747,7 @@ def run(business: str, kind: str, *, label: str | None = None, budget_usd: float
         raise ValueError("reprise de run incompatible")
     effective_profile = profile or (parent.profile if parent else previous["profile"] if previous else None)
     parent_id = parent.id if parent else previous["id"] if previous else None
-    root_id = parent.root_id if parent else previous["root_id"] if previous else None
+    root_id = parent.root_id if parent else root_run_id(previous["id"]) if previous else None
     conn = connect()
     try:
         cur = conn.execute(
@@ -787,6 +812,16 @@ def with_run(business: str, kind: str, *, budget_usd: float | None = None, profi
                 return fn(*args, **kwargs)
         return wrapper
     return decorator
+
+
+def root_run_id(run_id: int) -> int:
+    """Structural root, including historical resumptions with stale root_id metadata."""
+    rows = query("WITH RECURSIVE a(id, parent_id) AS (SELECT id, parent_id FROM runs WHERE id=? "
+                 "UNION ALL SELECT r.id, r.parent_id FROM runs r JOIN a ON r.id=a.parent_id) "
+                 "SELECT id FROM a WHERE parent_id IS NULL", (run_id,))
+    if not rows:
+        raise ValueError(f"racine du run #{run_id} introuvable")
+    return int(rows[0]["id"])
 
 
 def subtree_cost(run_id: int) -> float:

@@ -23,6 +23,8 @@ def technical_refusal(reason: str) -> bool:
         "direction : up, down, left ou right", "text requis :", "touche invalide",
         "HTTP 404", "HTTP 403", "timeout réseau", "source Web inaccessible",
         "JSON invalide", "JSONDecodeError:", "InvalidOutput:",
+        "sortie structurée invalide", "HTTP 429", "429", "cooldown",
+        "TimeoutError:", "ConnectionError:",
         "provider temporairement indisponible", "navigateur indisponible :",
     )) or (reason.startswith("argument ") and " : type attendu " in reason)
 
