@@ -13,16 +13,17 @@ from octopus import economy, journal, strategy, supervisor, tasks
 BUSINESS = "octopus"
 
 
-def _experience(*, outcome="supports", technical_done=True, llm_cost=0.031, unverified_claim=False):
+def _experience(*, outcome="supports", technical_done=True, llm_cost=0.031, unverified_claim=False,
+                theme="paiements clients"):
     objective_id = strategy.create(
-        "objective", BUSINESS, "Mesurer des paiements clients", created_by="human",
-        statement="Vérifier un paiement client et les coûts associés")
+        "objective", BUSINESS, f"Mesurer {theme}", created_by="human",
+        statement=f"Vérifier {theme} et les coûts associés")
     hypothesis_id = strategy.create(
-        "hypothesis", BUSINESS, "Une offre utile est payée", created_by="human", parent_id=objective_id,
-        statement="Des clients paient pour une offre utile", expected_signal="Paiement client observé")
+        "hypothesis", BUSINESS, "Offre testable", created_by="human", parent_id=objective_id,
+        statement=f"Des offres liées à {theme} peuvent être payées", expected_signal="Paiement client observé")
     experiment_id = strategy.create(
-        "experiment", BUSINESS, "Test de paiement", created_by="human", parent_id=hypothesis_id,
-        action="Présenter une offre testable à des clients", metric="cash_net:EUR",
+        "experiment", BUSINESS, "Test économique", created_by="human", parent_id=hypothesis_id,
+        action=f"Présenter une offre testable liée à {theme}", metric="cash_net:EUR",
         target_value=30 if outcome == "supports" else 1, stop_value=0,
         deadline_at=(time.time() + 86400) if outcome == "supports" else 1)
     strategy.transition("experiment", experiment_id, BUSINESS, "running", actor="human")
@@ -162,6 +163,28 @@ def test_evaluated_economic_experience_persists_lesson_links_costs_and_reuses_it
     assert strategy.get("evidence", evaluation_id, BUSINESS)["observation"] == raw_evaluation
     assert len(journal.query("SELECT id FROM strategy_reviews WHERE business=? AND summary=?",
                              (BUSINESS, f"Leçon d'expérience #{exp_id}"))) == 1
+
+
+def test_learning_context_surfaces_an_older_topically_relevant_experience(monkeypatch):
+    older_relevant = _experience(theme="paiements clients récurrents")
+    for index in range(8):
+        _experience(theme=f"production de vidéos verticales {index}", llm_cost=0)
+
+    context = strategy.learning_context(BUSINESS, limit=3, topic="paiements clients récurrents")
+    assert context["lessons"][0]["experiment"]["id"] == older_relevant["experiment_id"]
+    assert context["lessons"][0]["hypothesis"]["statement"] == \
+        strategy.get("hypothesis", older_relevant["hypothesis_id"], BUSINESS)["statement"]
+    received = []
+
+    def offline_pursuit(goal, **kwargs):
+        received.append(_state_from_goal(goal))
+        return _runtime_result()
+
+    monkeypatch.setattr(octopus, "enabled", lambda: True)
+    monkeypatch.setattr(runtime, "run_mission", offline_pursuit)
+    objective_id = supervisor.start_pursuit("Étudier les paiements clients récurrents")
+    supervisor.run_pursuit(objective_id)
+    assert received[0]["expériences_antérieures"][0]["experiment"]["id"] == older_relevant["experiment_id"]
 
 
 def test_prior_experiment_costs_are_attributed_once_across_nested_runs():

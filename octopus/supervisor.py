@@ -201,7 +201,8 @@ def _pursuit_mission(ctx, objective):
                               if not strategy._mentions_legacy_business(step.get("result"))][-12:]}
     if strategy._mentions_legacy_business(prior.get("rapport")):
         prior["rapport"] = "Référence historique exclue de l'analyse stratégique."
-    learning = strategy.learning_context(ctx.business, limit=8)
+    learning = strategy.learning_context(
+        ctx.business, limit=8, topic=f"{objective['statement']} {ctx.input.get('goal', '')}")
     evidence_context = [item for item in strategy.list_items("evidence", ctx.business, status="active")[:30]
                         if not strategy._mentions_legacy_business(item.get("summary"), item.get("source_ref"),
                                                                    item.get("observation"))][:15]

@@ -350,17 +350,30 @@ def _mentions_legacy_business(*values: str | None) -> bool:
     return "sitequivend" in text or "sitekivend" in text or "site qui vend" in text
 
 
-def learning_context(business: str, *, limit: int = 8) -> dict:
+_LEARNING_STOP_WORDS = frozenset({"avec", "dans", "pour", "sans", "sous", "cette", "cela", "leur", "leurs",
+                                  "plus", "tous", "tout", "mais", "donc", "elle", "elles", "nous", "vous",
+                                  "they", "them", "this", "that", "from", "with", "have", "will", "were"})
+
+
+def _learning_terms(text: str) -> set[str]:
+    return {word for word in re.findall(r"[^\W_]{4,}", str(text or "").casefold())
+            if word not in _LEARNING_STOP_WORDS}
+
+
+def learning_context(business: str, *, limit: int = 8, topic: str | None = None) -> dict:
     """Leçons d'expériences évaluées, lues depuis les objets stratégiques persistés.
 
     Seules les évaluations calculées par `economy.evaluate_experiment`, encore actives et
     liées à une expérience terminée sont candidates. Une review rédigée librement ou une
     sortie de modèle ne peut donc pas devenir une leçon probante à elle seule. Les anciennes
     évaluations sans review sont exposées comme historique calculé, sans mutation du journal.
+    `topic` sert uniquement à classer lexicalement la fenêtre bornée des leçons; l'absence
+    de correspondance laisse les résultats les plus récents en premier.
     """
     business = _business(business)
     if type(limit) is not int or limit < 1 or limit > 50:
         raise StrategyError("limit doit être un entier entre 1 et 50")
+    topic_terms = _learning_terms(topic or "")
     rows = journal.query(
         "SELECT x.*, ev.id AS evaluation_evidence_id, ev.observation AS evaluation_observation, "
         "ev.status AS evaluation_status FROM strategy_experiments x JOIN strategy_evidence ev "
@@ -499,7 +512,7 @@ def learning_context(business: str, *, limit: int = 8) -> dict:
                        "contribution_by_currency": evaluated.get("outcomes", {}).get("contribution_by_currency")},
             "costs": {"llm_usd_at_evaluation": evaluated.get("llm_cost_usd"),
                       "historical_cash_by_currency": evaluated.get("cash"),
-                      "sunk_costs_are_not_a_reason_to_continue": True},
+                      "sunk_costs_are_not_a_decision_input": True},
             "evidence_ids": sorted(lesson_ids),
             "evidence": expected_lesson["supporting_evidence"],
             "unverified_claims_not_used_as_proof": expected_lesson["unverified_claims_not_used_as_proof"],
@@ -509,8 +522,18 @@ def learning_context(business: str, *, limit: int = 8) -> dict:
             "lesson": expected_lesson["lesson"],
             "next_action": expected_lesson["next_action"],
         })
-        if len(lessons) >= limit:
-            break
+
+    def relevance(lesson: dict) -> int:
+        if not topic_terms:
+            return 0
+        text = " ".join((lesson["objective"]["statement"], lesson["hypothesis"]["statement"],
+                         lesson["experiment"]["action"], str(lesson["experiment"].get("metric") or "")))
+        return len(topic_terms & _learning_terms(text))
+
+    # La fenêtre envoyée au modèle est bornée; les expériences plus anciennes restent
+    # candidates si leurs objectifs/hypothèses/actions recoupent le sujet courant.
+    lessons.sort(key=relevance, reverse=True)
+    selected_lessons = lessons[:limit]
 
     # N'injecter que les preuves exploitables (observed/computed) rattachées à une expérience,
     # ainsi que les preuves de leçons valides. Aucune sortie de modèle libre ne devient preuve.
@@ -547,7 +570,10 @@ def learning_context(business: str, *, limit: int = 8) -> dict:
          "evidence_ids": item["evidence_ids"], "verdict": item["result"]["verdict"], "lesson": item["lesson"]}
         for item in lessons if item["hypothesis"]["status"] == "invalidated"
         and item["result"]["verdict"] == "refutes"]
-    return {"business": business, "lessons": lessons, "invalidated_hypotheses": invalidated,
+    if topic_terms:
+        invalidated.sort(key=lambda item: len(topic_terms & _learning_terms(
+            f"{item['hypothesis']} {item['action']}")), reverse=True)
+    return {"business": business, "lessons": selected_lessons, "invalidated_hypotheses": invalidated[:30],
             "available_evidence_ids": sorted(all_evidence_ids)}
 
 
