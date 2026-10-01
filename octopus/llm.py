@@ -665,7 +665,7 @@ def _build_request(model: dict, messages: list[dict], max_tokens: int, json_mode
         request["reasoning_effort"] = reasoning
     for key, value in copy.deepcopy(model.get("params", {})).items():
         request.setdefault(key, value)
-    if model["provider"] == "openrouter":
+    if model.get("provider") == "openrouter":
         request.setdefault("extra_body", {}).setdefault("provider", {})["max_price"] = {
             "prompt": 0, "completion": 0,
         }
