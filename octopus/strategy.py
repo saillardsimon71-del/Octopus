@@ -14,7 +14,9 @@ Règles :
 """
 from __future__ import annotations
 
+import json
 import math
+import re
 import time
 
 from . import connectors, journal, tasks
@@ -336,6 +338,366 @@ def links(business: str, kind: str, item_id: int) -> list[dict]:
         "SELECT * FROM strategy_links WHERE business=? AND ((from_type=? AND from_id=?) OR (to_type=? AND to_id=?)) "
         "ORDER BY id", (_business(business), kind, item_id, kind, item_id))
     return [dict(r) for r in rows]
+
+
+def _hypothesis_key(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\w]+", " ", str(value or "").casefold(), flags=re.UNICODE)).strip()
+
+
+def _mentions_legacy_business(*values: str | None) -> bool:
+    """SiteQuiVend n'est pas une preuve ou un point de départ pour pursuit."""
+    text = " ".join(str(value or "") for value in values).casefold()
+    return "sitequivend" in text or "sitekivend" in text or "site qui vend" in text
+
+
+def learning_context(business: str, *, limit: int = 8) -> dict:
+    """Leçons d'expériences évaluées, lues depuis les objets stratégiques persistés.
+
+    Seules les évaluations calculées par `economy.evaluate_experiment`, encore actives et
+    liées à une expérience terminée sont candidates. Une review rédigée librement ou une
+    sortie de modèle ne peut donc pas devenir une leçon probante à elle seule. Les anciennes
+    évaluations sans review sont exposées comme historique calculé, sans mutation du journal.
+    """
+    business = _business(business)
+    if type(limit) is not int or limit < 1 or limit > 50:
+        raise StrategyError("limit doit être un entier entre 1 et 50")
+    rows = journal.query(
+        "SELECT x.*, ev.id AS evaluation_evidence_id, ev.observation AS evaluation_observation, "
+        "ev.status AS evaluation_status FROM strategy_experiments x JOIN strategy_evidence ev "
+        "ON ev.business=x.business AND ev.experiment_id=x.id AND ev.nature='computed' "
+        "AND ev.source_type='economy.evaluate' AND ev.source_ref=('experiment#' || x.id) "
+        "AND ev.created_by='policy:evaluate' WHERE x.business=? AND x.status='completed' "
+        "AND ev.status='active' ORDER BY x.updated_at DESC, ev.id", (business,))
+    lessons: list[dict] = []
+    seen_experiments: set[int] = set()
+    all_evidence_ids: set[int] = set()
+    for row in rows:
+        experiment_id = int(row["id"])
+        if experiment_id in seen_experiments:
+            continue
+        seen_experiments.add(experiment_id)
+        try:
+            evaluated = json.loads(row["evaluation_observation"])
+        except (TypeError, ValueError):
+            continue
+        if (not isinstance(evaluated, dict) or evaluated.get("experiment_id") != experiment_id
+                or evaluated.get("verdict") not in OUTCOMES
+                or evaluated.get("verdict_scope") != "configured_metric_only"
+                or evaluated.get("nature") != "computed"):
+            continue
+        if row["outcome"] != evaluated["verdict"]:
+            continue
+        hypothesis = get("hypothesis", int(row["hypothesis_id"]), business)
+        objective = get("objective", hypothesis["objective_id"], business) if hypothesis else None
+        if not hypothesis or not objective or _mentions_legacy_business(
+                objective["statement"], hypothesis["statement"], row["action"], row["summary"]):
+            continue
+
+        # Une conclusion calculée dépend des preuves actives qui ont servi à l'évaluation.
+        source_ids = evaluated.get("outcomes", {}).get("evidence_ids", [])
+        if not isinstance(source_ids, list) or any(type(item) is not int or item <= 0 for item in source_ids):
+            continue
+        source_rows = []
+        if source_ids:
+            placeholders = ",".join("?" for _ in source_ids)
+            source_rows = [dict(item) for item in journal.query(
+                f"SELECT id, business, status, nature, source_type, source_ref, captured_at, observation, metric, value, "
+                f"experiment_id, created_by FROM strategy_evidence WHERE business=? AND id IN ({placeholders}) ORDER BY id",
+                (business, *source_ids))]
+            # Une preuve retracted ou déplacée invalide la conclusion historique. Les éléments
+            # unverified/inferred restent distincts et ne sont jamais admis comme preuve.
+            if (len(source_rows) != len(set(source_ids))
+                    or any(item["status"] != "active" or item["experiment_id"] != experiment_id
+                           for item in source_rows)):
+                continue
+        sources = [item for item in source_rows
+                   if (item["nature"] == "observed" and item["source_ref"] and item["captured_at"])
+                   or (item["nature"] == "computed" and item["source_ref"]
+                       and item["source_type"] == "economy.evaluate" and item["created_by"] == "policy:evaluate")]
+        if _mentions_legacy_business(*(item.get("observation") for item in source_rows),
+                                     *(item.get("source_ref") for item in source_rows)):
+            continue
+
+        # Reviews sont le support persistant des leçons récentes; les évaluations v5 antérieures
+        # restent récupérables sans fabriquer ni modifier de ligne à la lecture.
+        review_rows = journal.query(
+            "SELECT r.* FROM strategy_reviews r JOIN strategy_links l ON l.business=r.business "
+            "AND l.from_type='review' AND l.from_id=r.id AND l.to_type='experiment' AND l.to_id=? "
+            "AND l.relation='reviews' WHERE r.business=? AND r.status='done' "
+            "AND r.created_by='policy:evaluate' ORDER BY r.id DESC",
+            (experiment_id, business))
+        review = None
+        for candidate in review_rows:
+            try:
+                content = json.loads(candidate["evidence_summary"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            links_to_evidence = journal.query(
+                "SELECT 1 FROM strategy_links WHERE business=? AND from_type='review' AND from_id=? "
+                "AND to_type='evidence' AND to_id=? AND relation='based_on' LIMIT 1",
+                (business, candidate["id"], row["evaluation_evidence_id"]))
+            if (links_to_evidence and isinstance(content, dict)
+                    and content.get("schema") == "octopus.experiment_learning.v1"
+                    and content.get("experiment_id") == experiment_id
+                    and content.get("evaluation_evidence_id") == row["evaluation_evidence_id"]):
+                review = dict(candidate)
+                break
+        if _mentions_legacy_business(*(item.get("observation") for item in sources),
+                                     *(item.get("source_ref") for item in sources)):
+            continue
+        # Le payload calculé est la source canonique. Le champ lesson de la review n'est
+        # accepté que comme texte d'interprétation associé à ces références vérifiées.
+        lesson_payload = json.loads(review["evidence_summary"]) if review else None
+        lesson_ids = {int(row["evaluation_evidence_id"]), *(int(item["id"]) for item in sources)}
+        all_evidence_ids.update(lesson_ids)
+        decision_rows = journal.query(
+            "SELECT d.* FROM strategy_decisions d JOIN strategy_links l ON l.business=d.business "
+            "AND l.from_type='decision' AND l.from_id=d.id AND l.to_type='evidence' AND l.to_id=? "
+            "AND l.relation='considers' WHERE d.business=? ORDER BY d.id DESC LIMIT 1",
+            (row["evaluation_evidence_id"], business))
+        if not decision_rows:
+            continue
+        decision = dict(decision_rows[0])
+        # Vérifier la review contre le même résultat calculé et les liens réels, plutôt que
+        # croire son texte libre, même si le champ created_by prétend être une politique.
+        from . import economy
+        expected_lesson = economy._lesson_content(
+            dict(row), evaluated, int(row["evaluation_evidence_id"]), int(decision["id"]))
+        trusted_review = bool(review and lesson_payload == expected_lesson)
+        if not trusted_review:
+            # Une review libre homonyme ne doit pas masquer une review policy réellement dérivée.
+            for candidate in review_rows:
+                try:
+                    content = json.loads(candidate["evidence_summary"] or "{}")
+                except (TypeError, ValueError):
+                    continue
+                based_on = journal.query(
+                    "SELECT 1 FROM strategy_links WHERE business=? AND from_type='review' AND from_id=? "
+                    "AND to_type='evidence' AND to_id=? AND relation='based_on' LIMIT 1",
+                    (business, candidate["id"], row["evaluation_evidence_id"]))
+                if based_on and content == expected_lesson:
+                    review, lesson_payload, trusted_review = dict(candidate), content, True
+                    break
+        review_id = int(review["id"]) if trusted_review else None
+        lessons.append({
+            "review_id": review_id,
+            "lesson_status": "persisted" if trusted_review else "legacy_evaluation",
+            "objective": {"id": int(objective["id"]), "statement": objective["statement"]},
+            "hypothesis": {"id": int(hypothesis["id"]), "status": hypothesis["status"],
+                           "statement": hypothesis["statement"], "expected_signal": hypothesis["expected_signal"],
+                           "stop_criterion": hypothesis["stop_criterion"]},
+            "experiment": {"id": experiment_id, "action": row["action"], "metric": row["metric"],
+                           "status": row["status"], "outcome": row["outcome"]},
+            "result": {"verdict": evaluated["verdict"], "scope": "configured_metric_only",
+                       "metric": evaluated.get("metric"), "value": evaluated.get("value"),
+                       "reason": evaluated.get("reason"),
+                       "technical_completion": evaluated.get("outcomes", {}).get("technical_completion"),
+                       "delivery": evaluated.get("outcomes", {}).get("delivery"),
+                       "customer_acceptance": evaluated.get("outcomes", {}).get("customer_acceptance"),
+                       "customer_use": evaluated.get("outcomes", {}).get("customer_use"),
+                       "cash_by_currency": evaluated.get("outcomes", {}).get("cash_by_currency"),
+                       "contribution_by_currency": evaluated.get("outcomes", {}).get("contribution_by_currency")},
+            "costs": {"llm_usd_at_evaluation": evaluated.get("llm_cost_usd"),
+                      "historical_cash_by_currency": evaluated.get("cash"),
+                      "sunk_costs_are_not_a_reason_to_continue": True},
+            "evidence_ids": sorted(lesson_ids),
+            "evidence": expected_lesson["supporting_evidence"],
+            "unverified_claims_not_used_as_proof": expected_lesson["unverified_claims_not_used_as_proof"],
+            "evaluation_evidence_id": int(row["evaluation_evidence_id"]),
+            "decision": {"id": int(decision["id"]), "decision": decision["decision"],
+                         "rationale": decision["rationale"], "resulting_action": decision["resulting_action"]},
+            "lesson": expected_lesson["lesson"],
+            "next_action": expected_lesson["next_action"],
+        })
+        if len(lessons) >= limit:
+            break
+
+    # N'injecter que les preuves exploitables (observed/computed) rattachées à une expérience,
+    # ainsi que les preuves de leçons valides. Aucune sortie de modèle libre ne devient preuve.
+    evidence_rows = journal.query(
+        "SELECT ev.id, ev.source_ref, ev.observation, x.action, x.summary AS experiment_summary, "
+        "h.statement AS hypothesis_statement, o.statement AS objective_statement "
+        "FROM strategy_evidence ev JOIN strategy_experiments x ON x.id=ev.experiment_id AND x.business=ev.business "
+        "JOIN strategy_hypotheses h ON h.id=x.hypothesis_id AND h.business=x.business "
+        "JOIN strategy_objectives o ON o.id=h.objective_id AND o.business=h.business "
+        "WHERE ev.business=? AND ev.status='active' AND ev.experiment_id IS NOT NULL AND "
+        "((ev.nature='observed' AND ev.source_ref IS NOT NULL AND ev.captured_at IS NOT NULL) OR "
+        "(ev.nature='computed' AND ev.source_type='economy.evaluate' AND ev.created_by='policy:evaluate' "
+        "AND ev.source_ref IS NOT NULL)) ORDER BY ev.created_at DESC, ev.id DESC LIMIT 100", (business,))
+    all_evidence_ids.update(int(item["id"]) for item in evidence_rows
+                            if not _mentions_legacy_business(item["source_ref"], item["observation"], item["action"],
+                                                             item["experiment_summary"], item["hypothesis_statement"],
+                                                             item["objective_statement"]))
+    reconsideration_rows = journal.query(
+        "SELECT ev.id, ev.source_ref, ev.observation, h.statement AS hypothesis_statement, "
+        "o.statement AS objective_statement FROM strategy_evidence ev JOIN strategy_links l "
+        "ON l.business=ev.business AND l.from_type='evidence' AND l.from_id=ev.id "
+        "AND l.to_type='hypothesis' AND l.relation='reconsiders' "
+        "JOIN strategy_hypotheses h ON h.id=l.to_id AND h.business=l.business "
+        "JOIN strategy_objectives o ON o.id=h.objective_id AND o.business=h.business "
+        "WHERE ev.business=? AND ev.status='active' AND ev.nature='observed' "
+        "AND ev.source_ref IS NOT NULL AND ev.captured_at IS NOT NULL ORDER BY ev.created_at DESC, ev.id DESC LIMIT 100",
+        (business,))
+    all_evidence_ids.update(int(item["id"]) for item in reconsideration_rows
+                            if not _mentions_legacy_business(item["source_ref"], item["observation"],
+                                                             item["hypothesis_statement"], item["objective_statement"]))
+    invalidated = [
+        {"hypothesis_id": item["hypothesis"]["id"], "hypothesis": item["hypothesis"]["statement"],
+         "experiment_id": item["experiment"]["id"], "action": item["experiment"]["action"],
+         "evidence_ids": item["evidence_ids"], "verdict": item["result"]["verdict"], "lesson": item["lesson"]}
+        for item in lessons if item["hypothesis"]["status"] == "invalidated"
+        and item["result"]["verdict"] == "refutes"]
+    return {"business": business, "lessons": lessons, "invalidated_hypotheses": invalidated,
+            "available_evidence_ids": sorted(all_evidence_ids)}
+
+
+def repeated_invalidated_strategy(business: str, proposed_goal: str) -> dict | None:
+    """Détecte une répétition textuelle directe parmi toutes les hypothèses invalidées.
+
+    L'anti-répétition ne dépend pas de la fenêtre de leçons injectée au modèle (qui reste bornée).
+    Pas de rapprochement sémantique LLM : seule une reprise textuelle explicite est bloquée ici.
+    """
+    business = _business(business)
+    goal = _hypothesis_key(proposed_goal)
+    if len(goal) < 12:
+        return None
+    rows = journal.query(
+        "SELECT h.id AS hypothesis_id, h.statement AS hypothesis, x.id AS experiment_id, x.action, "
+        "ev.observation FROM strategy_hypotheses h JOIN strategy_experiments x "
+        "ON x.business=h.business AND x.hypothesis_id=h.id JOIN strategy_evidence ev "
+        "ON ev.business=x.business AND ev.experiment_id=x.id AND ev.status='active' "
+        "AND ev.nature='computed' AND ev.source_type='economy.evaluate' "
+        "AND ev.source_ref=('experiment#' || x.id) AND ev.created_by='policy:evaluate' "
+        "WHERE h.business=? AND h.status='invalidated' AND x.status='completed' AND x.outcome='refutes' "
+        "ORDER BY h.id DESC, ev.id", (business,))
+    checked: set[tuple[int, int]] = set()
+    for row in rows:
+        key = (int(row["hypothesis_id"]), int(row["experiment_id"]))
+        if key in checked or _mentions_legacy_business(row["hypothesis"], row["action"]):
+            continue
+        checked.add(key)
+        try:
+            evaluated = json.loads(row["observation"])
+        except (TypeError, ValueError):
+            continue
+        if (not isinstance(evaluated, dict) or evaluated.get("experiment_id") != key[1]
+                or evaluated.get("verdict") != "refutes"
+                or evaluated.get("verdict_scope") != "configured_metric_only"):
+            continue
+        if any((candidate := _hypothesis_key(value)) and len(candidate) >= 12 and candidate in goal
+               for value in (row["hypothesis"], row["action"])):
+            return {"hypothesis_id": key[0], "hypothesis": row["hypothesis"],
+                    "experiment_id": key[1], "action": row["action"], "verdict": "refutes"}
+    return None
+
+
+def propose_pursuit_hypothesis(business: str, objective_id: int, task_id: int, proposal: dict,
+                               *, available_evidence_ids: list[int]) -> dict:
+    """Persiste une hypothèse LLM comme proposition, jamais comme fait.
+
+    Les références doivent déjà être visibles parmi les preuves actives rattachées aux expériences.
+    Une hypothèse invalidée n'est répétable que si OCTOPUS nomme l'hypothèse, explique la
+    reconsidération et cite une nouvelle preuve observée explicitement reliée par `reconsiders`.
+    """
+    business = _business(business)
+    if not isinstance(proposal, dict):
+        return {"status": "ignored", "reason": "hypothesis doit être un objet"}
+    raw_statement = proposal.get("statement")
+    statement = raw_statement.strip() if isinstance(raw_statement, str) else ""
+    if not statement or len(statement) > 1000:
+        return {"status": "ignored", "reason": "énoncé d'hypothèse absent ou trop long"}
+    key = _hypothesis_key(statement)
+    invalidated = [dict(item) for item in journal.query(
+        "SELECT id, statement FROM strategy_hypotheses WHERE business=? AND status='invalidated' ORDER BY id DESC",
+        (business,)) if _hypothesis_key(item["statement"]) == key]
+    requested_reconsideration = proposal.get("reconsiders_hypothesis_id")
+    if invalidated and not (type(requested_reconsideration) is int
+                            and any(item["id"] == requested_reconsideration for item in invalidated)):
+        return {"status": "blocked_repetition", "hypothesis_id": int(invalidated[0]["id"]),
+                "reason": "hypothèse déjà invalidée, sans preuve observée nouvelle"}
+    expected_value, stop_value = proposal.get("expected_signal"), proposal.get("stop_criterion")
+    if not isinstance(expected_value, str) or not isinstance(stop_value, str):
+        return {"status": "ignored", "reason": "signal attendu et critère d'arrêt doivent être textuels"}
+    expected_signal, stop_criterion = expected_value.strip(), stop_value.strip()
+    if not expected_signal or not stop_criterion:
+        return {"status": "ignored", "reason": "une hypothèse persistée exige signal attendu et critère d'arrêt"}
+    ids = proposal.get("evidence_ids", [])
+    if (not isinstance(ids, list) or not ids or len(ids) > 20
+            or any(type(item) is not int or item <= 0 for item in ids)):
+        return {"status": "ignored", "reason": "références de preuve absentes ou invalides"}
+    evidence_ids = sorted(set(ids))
+    allowed = {int(item) for item in available_evidence_ids if type(item) is int and item > 0}
+    if not set(evidence_ids) <= allowed:
+        return {"status": "ignored", "reason": "preuve citée absente du contexte persistant de ce cycle"}
+    placeholders = ",".join("?" for _ in evidence_ids)
+    evidence = [dict(row) for row in journal.query(
+        f"SELECT * FROM strategy_evidence WHERE business=? AND status='active' AND nature IN ('observed','computed') "
+        f"AND id IN ({placeholders}) ORDER BY id", (business, *evidence_ids))]
+    if len(evidence) != len(evidence_ids):
+        return {"status": "ignored", "reason": "preuve rétractée, non vérifiée ou d'un autre business"}
+
+    reconsiders = proposal.get("reconsiders_hypothesis_id")
+    if reconsiders is not None and (type(reconsiders) is not int or reconsiders <= 0):
+        return {"status": "ignored", "reason": "reconsiders_hypothesis_id invalide"}
+    raw_reconsideration_reason = proposal.get("reconsideration_reason", "")
+    if not isinstance(raw_reconsideration_reason, str):
+        return {"status": "ignored", "reason": "reconsideration_reason doit être textuel"}
+    reconsideration_reason = raw_reconsideration_reason.strip()
+    old = get("hypothesis", reconsiders, business) if reconsiders is not None else None
+    if reconsiders is not None and (not old or old["status"] != "invalidated" or not reconsideration_reason):
+        return {"status": "ignored", "reason": "une reconsidération exige une hypothèse invalidée et une raison explicite"}
+    new_reconsideration_evidence = []
+    if old:
+        for item in evidence:
+            explicit = journal.query(
+                "SELECT 1 FROM strategy_links WHERE business=? AND from_type='evidence' AND from_id=? "
+                "AND to_type='hypothesis' AND to_id=? AND relation='reconsiders' LIMIT 1",
+                (business, item["id"], old["id"]))
+            if (explicit and item["nature"] == "observed" and item["source_ref"]
+                    and item["captured_at"] and old["updated_at"] < item["captured_at"] <= time.time()
+                    and item["created_at"] > old["updated_at"]):
+                new_reconsideration_evidence.append(item)
+        if not new_reconsideration_evidence:
+            return {"status": "ignored", "reason": "aucune preuve observée, nouvelle et explicitement reliée"}
+
+    objective = get("objective", objective_id, business)
+    if not objective or objective["status"] != "active":
+        return {"status": "ignored", "reason": "objectif pursuit absent ou inactif"}
+    if invalidated and not (old and any(item["id"] == old["id"] for item in invalidated)
+                             and new_reconsideration_evidence):
+        return {"status": "blocked_repetition", "hypothesis_id": int(invalidated[0]["id"]),
+                "reason": "hypothèse déjà invalidée, sans preuve observée nouvelle"}
+
+    # Réutiliser une proposition ouverte identique sous le même objectif; ne pas créer de doublons.
+    existing = [item for item in list_items("hypothesis", business, parent_id=objective_id, limit=500)
+                if item["status"] in {"proposed", "testing", "inconclusive"}
+                and _hypothesis_key(item["statement"]) == key]
+    if existing:
+        hypothesis_id = int(existing[0]["id"])
+        status = "reused"
+    else:
+        summary = "Hypothèse proposée par pursuit; interprétation à tester"
+        if old:
+            summary += f"; reconsidère #{old['id']}: {reconsideration_reason[:120]}"
+        # Retry/crash du même travail : réutiliser l'objet déjà créé pour cette tâche.
+        prior = journal.query("SELECT id FROM strategy_hypotheses WHERE business=? AND origin_task_id=? "
+                              "AND statement=? ORDER BY id LIMIT 1", (business, task_id, statement))
+        hypothesis_id = int(prior[0]["id"]) if prior else create(
+            "hypothesis", business, summary[:200], created_by="octopus:pursuit", parent_id=objective_id,
+            origin_task_id=task_id, statement=statement,
+            expected_signal=expected_signal[:500], stop_criterion=stop_criterion[:500],
+            evidence_required="Preuve observée ou résultat économique vérifiable; la sortie LLM seule n'est pas une preuve.")
+        status = "created"
+
+    for item in evidence:
+        link(business, "hypothesis", hypothesis_id, "evidence", item["id"], "considers")
+        if item.get("experiment_id") is not None:
+            link(business, "hypothesis", hypothesis_id, "experiment", int(item["experiment_id"]), "learns_from")
+    if old:
+        link(business, "hypothesis", hypothesis_id, "hypothesis", int(old["id"]), "reconsiders")
+    return {"status": status, "hypothesis_id": hypothesis_id,
+            "reconsiders_hypothesis_id": int(old["id"]) if old else None,
+            "evidence_ids": evidence_ids}
 
 
 # --- lecture pour les tableaux de bord -----------------------------------------------------------

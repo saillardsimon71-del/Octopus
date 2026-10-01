@@ -1,6 +1,7 @@
 """Boucle économique : canaux génériques, grand livre, dépenses autorisées, verdict d'expérience, réinvestissement."""
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -213,15 +214,20 @@ def test_observed_metric_refutes_at_deadline_and_unverified_values_do_not_count(
     assert result["verdict"] == "refutes" and result["value"] == 1
 
 
-def test_missing_measure_is_inconclusive_but_observed_budget_exhaustion_stops():
+def test_missing_measure_and_budget_exhaustion_remain_inconclusive_not_sunk_cost_refutation():
     silent = _experiment(metric="inscrits", target_value=10, deadline_at=time.time() - 1)
-    # Une absence de mesure ne réfute pas une hypothèse : ancien comportement retiré.
+    # Une absence de mesure ne réfute pas une hypothèse.
     assert economy.evaluate_experiment(B, silent)["verdict"] == "inconclusive"
     costly = _experiment(metric="cash_net:EUR", target_value=100, budget_limit=10, budget_currency="EUR")
     economy.record_cash(B, "out", 10, "EUR", "pub", nature="observed", created_by="human", source_ref="f",
                         experiment_id=costly)
     result = economy.evaluate_experiment(B, costly)
-    assert result["verdict"] == "refutes" and "budget" in result["reason"]
+    assert result["verdict"] == "inconclusive" and "plafond budgétaire atteint" in result["reason"]
+    assert "ne réfute pas l'hypothèse" in result["reason"]
+    assert strategy.get("hypothesis", strategy.get("experiment", costly, B)["hypothesis_id"], B)["status"] == "inconclusive"
+    lesson = strategy.get("review", result["review_id"], B)
+    assert lesson["status"] == "done"
+    assert json.loads(lesson["evidence_summary"])["historical_costs"]["sunk_costs_are_not_a_decision_input"] is True
 
 
 def test_llm_cost_is_attributed_to_the_experiment_through_its_tasks():

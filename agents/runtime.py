@@ -1684,6 +1684,32 @@ def _validate_synthesis_contract(data: dict, determination: bool) -> dict:
                 or not choice["reason"].strip()
                 or (choice["action"] == "request_permission" and not choice["permission"].strip())):
             raise ValueError("synthèse : détermination structurée invalide")
+        # Une hypothèse est facultative, et reste une proposition. Une référence mal formée
+        # n'invalide pas le rapport, mais est écartée avant toute persistance.
+        proposed = choice.get("hypothesis")
+        if proposed is not None:
+            valid = isinstance(proposed, dict)
+            statement = proposed.get("statement") if valid else None
+            evidence_ids = proposed.get("evidence_ids") if valid else None
+            reconsidered = proposed.get("reconsiders_hypothesis_id") if valid else None
+            reason = proposed.get("reconsideration_reason", "") if valid else None
+            valid = (valid and isinstance(statement, str) and 0 < len(statement.strip()) <= 1000
+                     and isinstance(evidence_ids, list) and 0 < len(evidence_ids) <= 20
+                     and all(type(item) is int and item > 0 for item in evidence_ids)
+                     and len(set(evidence_ids)) == len(evidence_ids)
+                     and (reconsidered is None or (type(reconsidered) is int and reconsidered > 0))
+                     and isinstance(reason, str)
+                     and all(isinstance(proposed.get(key, ""), str) for key in ("expected_signal", "stop_criterion")))
+            if valid:
+                choice["hypothesis"] = {
+                    "statement": statement.strip(), "evidence_ids": evidence_ids,
+                    "expected_signal": proposed.get("expected_signal", "")[:500],
+                    "stop_criterion": proposed.get("stop_criterion", "")[:500],
+                    "reconsiders_hypothesis_id": reconsidered,
+                    "reconsideration_reason": reason[:600],
+                }
+            else:
+                choice.pop("hypothesis", None)
     return data
 
 
@@ -1947,7 +1973,13 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             '"permission":"permission manquante ou vide"}. '
             "Décide de la suite à partir des résultats réellement acquis. Pause si rien n'est justifié. "
             "Demande une permission si une action nécessaire dépasse les limites. "
-            "Un rapport n'est pas une preuve et une décision n'accorde aucune permission."
+            "Un rapport n'est pas une preuve et une décision n'accorde aucune permission. "
+            "Tu peux ajouter facultativement hypothesis sous la forme {statement, expected_signal, stop_criterion, "
+            "evidence_ids, reconsiders_hypothesis_id, reconsideration_reason}. C'est une proposition, jamais un fait; "
+            "cite seulement "
+            "des identifiants de preuves persistées et visibles dans le contexte. Ne répète pas une hypothèse invalidée "
+            "sans nouvelle preuve observée explicitement liée à elle; dans ce cas, indique son identifiant et la raison. "
+            "N'invente ni observation, ni résultat, ni encaissement."
         )
     synthesis_input = {
         "objectif_original": goal,
@@ -2038,6 +2070,8 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                       "next_goal": "", "permission": ""}
         output["determination"] = {k: v[:3000] for k, v in choice.items()
                                    if k in {"action", "reason", "next_goal", "permission"}}
+        if isinstance(choice.get("hypothesis"), dict):
+            output["determination"]["hypothesis"] = dict(choice["hypothesis"])
     if business_signal_focus:
         output["business_signals"] = business_signals
         output["business_signal_rejections"] = rejected_signals
