@@ -41,6 +41,9 @@ class EvalItem:
     needs: tuple = ()
     repeats: int = 1
     baseline: Callable[[], str] | None = None  # sortie produite par du code, si elle existe
+    json_schema: dict | None = None
+    tool_schemas: list[dict] | None = None
+    require_tool_call: bool = False
 
 
 @dataclass
@@ -99,6 +102,7 @@ def run_bench(suite: str, models: list[str], *, tasks: list[str] | None = None, 
     rows: list[dict] = []
     with journal.run("octopus", "bench", label=suite, budget_usd=max_cost_usd, profile="bench") as ctx:
         budget_hit = False
+        last_openrouter = 0.0
         for task in selected:
             for item in task.items:
                 for model_id in runnable:
@@ -108,6 +112,9 @@ def run_bench(suite: str, models: list[str], *, tasks: list[str] | None = None, 
                     if budget_hit and is_paid:
                         continue
                     for rep in range(repeats or item.repeats):
+                        if model_id != CODE and cat.model(model_id)["provider"] == "openrouter":
+                            time.sleep(max(0.0, 3.1 - (time.monotonic() - last_openrouter)))
+                            last_openrouter = time.monotonic()
                         row = _run_one(suite, task, item, model_id, rep, ctx.id, log)
                         rows.append(row)
                         if row["error"] and row["error"].startswith("budget"):
@@ -123,25 +130,39 @@ def run_bench(suite: str, models: list[str], *, tasks: list[str] | None = None, 
 def _run_one(suite: str, task: EvalTask, item: EvalItem, model_id: str, rep: int, bench_run_id: int,
              log: Callable[[str], None]) -> dict:
     started = time.perf_counter()
+    first_call_id = journal.query("SELECT COALESCE(MAX(id), 0) AS id FROM llm_calls")[0]["id"]
     text, cost, call_id, error = "", 0.0, None, None
+    completion = None
     if model_id == CODE:
         text = item.baseline()
     else:
         try:
             completion = llm.complete(task.name, item.messages, agent="BENCH", business="octopus",
                                       max_tokens=item.max_tokens, json_mode=item.json_mode,
+                                      json_schema=item.json_schema, tool_schemas=item.tool_schemas,
                                       needs=tuple(item.needs), pin_model=model_id, profile="bench")
             text, cost, call_id = completion.text, completion.cost_usd, completion.call_id
         except llm.BudgetExceeded as exc:
             error = f"budget : {exc}"
         except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"[:300]
+            model = catalog.load().model(model_id)
+            provider = catalog.load().provider(model["provider"]) if model else {}
+            error = f"{type(exc).__name__}: {llm._safe_error(exc, provider)}"[:300]
     latency_ms = int((time.perf_counter() - started) * 1000)
+    attempts = journal.query("SELECT cost_usd FROM llm_calls WHERE id>? AND task=? AND model=?",
+                             (first_call_id, task.name, model_id)) if model_id != CODE else []
+    cost = sum(row["cost_usd"] for row in attempts)
     if error:
         result = CheckResult(False, 0.0, {"appel": False}, error)
     else:
         try:
             result = item.check(text)
+            if item.require_tool_call:
+                method_ok = (completion is not None and
+                             completion.justification.get("structured_method") == "tool_call")
+                result.checks["tool_call"] = bool(method_ok and result.passed)
+                if not method_ok:
+                    result = CheckResult(False, 0.0, result.checks, "appel d'outil structuré absent")
         except Exception as exc:  # un verificateur ne doit jamais faire tomber le banc
             result = CheckResult(False, 0.0, {"verificateur": False}, f"erreur du verificateur : {exc}")
     row = {
@@ -150,8 +171,22 @@ def _run_one(suite: str, task: EvalTask, item: EvalItem, model_id: str, rep: int
         "score": round(result.score, 4), "value": result.value, "checks": json.dumps(result.checks, ensure_ascii=False),
         "latency_ms": latency_ms, "cost_usd": cost, "llm_call_id": call_id, "error": error,
         "output_preview": text[:300],
+        "json_valid": result.checks.get("json", False),
+        "tool_valid": result.checks.get("tool_call", False),
+        "prompt_tokens": completion.usage.prompt_tokens if completion else 0,
+        "completion_tokens": completion.usage.completion_tokens if completion else 0,
+        "cache_hit_tokens": completion.usage.cache_hit_tokens if completion else None,
+        "cache_miss_tokens": completion.usage.cache_miss_tokens if completion else None,
+        "provider_cost_usd": completion.provider_cost_usd if completion else None,
+        "calculated_cost_usd": (pricing.call_cost(catalog.load().model(model_id).get("price"),
+                                                  completion.usage, False) if completion else None),
+        "rate_limited": "429" in (error or ""),
+        "timeout": "timeout" in (error or "").lower(),
+        "server_error": any(code in (error or "") for code in ("500", "502", "503", "504")),
+        "retries": max(0, len(attempts) - 1),
+        "fallbacks": 0,
     }
-    journal.record_bench_result(row)
+    journal.record_bench_result({key: row[key] for key in journal._BENCH_COLUMNS if key in row})
     log(f"  {task.name:22} {item.id:30} {model_id:22} {'OK' if result.passed else 'KO'} "
         f"score {result.score:.2f} {latency_ms} ms {cost:.5f} $ {result.notes[:70]}")
     return row
@@ -179,7 +214,12 @@ def summarize(rows: list[dict], tasks: list[EvalTask], cat: catalog.Catalog) -> 
                 "n": len(group), "pass_rate": sum(r["passed"] for r in group) / len(group),
                 "mean_score": statistics.mean(r["score"] for r in group),
                 "p50_latency_ms": int(statistics.median(r["latency_ms"] for r in group)),
+                "p95_latency_ms": sorted(r["latency_ms"] for r in group)[max(0, int(len(group) * .95 + .95) - 1)],
                 "mean_cost_usd": statistics.mean(r["cost_usd"] or 0.0 for r in group),
+                "prompt_tokens": sum(r.get("prompt_tokens", 0) for r in group),
+                "completion_tokens": sum(r.get("completion_tokens", 0) for r in group),
+                "json_valid": sum(bool(r.get("json_valid")) for r in group),
+                "tool_valid": sum(bool(r.get("tool_valid")) for r in group),
                 "errors": sum(1 for r in group if r["error"]),
                 "max_spread": max(spreads) if spreads else None,
             })
@@ -194,7 +234,7 @@ def _decide(task: EvalTask, rows: list[dict]) -> str:
     code = next((r for r in rows if r["model"] == CODE), None)
     if code and code["pass_rate"] == 1.0:
         return "REMPLACER PAR DU CODE (100 % de conformite, 0 $)"
-    qualified = [r for r in rows if r["model"] != CODE and r["pass_rate"] >= task.min_pass_rate and r["n"] >= 3]
+    qualified = [r for r in rows if r["model"] != CODE and r["pass_rate"] >= task.min_pass_rate and r["n"] >= 2]
     if not qualified:
         return f"AUCUN MODELE AU NIVEAU ({task.min_pass_rate:.0%} requis) : garder l'existant et ameliorer le prompt"
     best = min(qualified, key=lambda r: (_CLASS_RANK[r["cost_class"]], r["mean_cost_usd"], r["p50_latency_ms"]))
@@ -215,11 +255,13 @@ def write_outputs(matrix: list[dict], rows: list[dict], out_dir: Path) -> list[s
 
 
 def format_matrix(matrix: list[dict]) -> str:
-    lines = ["| Tache | Modele | Classe | N | Reussite | Score | Latence p50 | Cout/appel | Ecart max | Decision |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+    lines = ["| Tache | Modele | N | Reussite | Score | JSON | Tool | p50/p95 ms | Tokens in/out | Cout/appel | Erreurs | Decision |",
+             "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
     for r in matrix:
         spread = "-" if r["max_spread"] is None else f"{r['max_spread']:g}"
-        lines.append(f"| {r['task']} | {r['model']} | {r['cost_class']} | {r['n']} | {r['pass_rate']:.0%} | "
-                     f"{r['mean_score']:.2f} | {r['p50_latency_ms']} ms | {r['mean_cost_usd']:.5f} $ | {spread} | "
+        lines.append(f"| {r['task']} | {r['model']} | {r['n']} | {r['pass_rate']:.0%} | "
+                     f"{r['mean_score']:.2f} | {r['json_valid']} | {r['tool_valid']} | "
+                     f"{r['p50_latency_ms']}/{r['p95_latency_ms']} | "
+                     f"{r['prompt_tokens']}/{r['completion_tokens']} | {r['mean_cost_usd']:.5f} $ | {r['errors']} | "
                      f"{r['decision']} |")
     return "\n".join(lines) + "\n"

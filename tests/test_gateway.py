@@ -741,8 +741,8 @@ def test_economical_goes_directly_to_deepseek_without_eligible_free_model(transp
     transport.reply('{"ok":true}')
     result = llm.complete("agent.plan", MSG, profile="economical", json_mode=True,
                           validate=llm.parse_json)
-    assert result.model == "deepseek/v4-pro"
-    assert transport.models == ["deepseek-v4-pro"]
+    assert result.model == "deepseek/flash"
+    assert transport.models == ["deepseek-flash"]
     assert result.justification["paid_reason"] == "alternatives_ineligible"
     assert status.llm_routing()["fallbacks_observed"] == 0
 
@@ -762,25 +762,25 @@ def test_economical_invalid_plan_contract_falls_back_to_deepseek(transport, prov
     from agents import runtime
     prove("agent.plan", "groq/gpt-oss-120b")
     transport.handler = by_model({"openai/gpt-oss-120b": '{"tasks":"invalid"}',
-                                  "deepseek-v4-pro": '{"tasks":[]}'})
+                                  "deepseek-flash": '{"tasks":[]}'})
     result = llm.complete("agent.plan", MSG, profile="economical", json_mode=True,
                           validate=lambda text: runtime._validate_plan_contract(llm.parse_json(text)))
-    assert result.model == "deepseek/v4-pro"
+    assert result.model == "deepseek/flash"
     assert [row["status"] for row in calls()] == ["invalid", "ok"]
 
 
 def test_economical_deepseek_failure_stops_without_another_paid_route(transport, providers_up):
-    transport.handler = by_model({"deepseek-v4-pro": TimeoutError("indisponible")})
+    transport.handler = by_model({"deepseek-flash": TimeoutError("indisponible")})
     with pytest.raises(llm.NoEligibleModel, match="agent.plan") as error:
         llm.complete("agent.plan", MSG, profile="economical", json_mode=True,
                      validate=llm.parse_json)
     assert isinstance(error.value.last_error, TimeoutError)
-    assert transport.models == ["deepseek-v4-pro"]
+    assert transport.models == ["deepseek-flash"]
     assert calls()[-1]["status"] == "error"
 
 
 def test_economical_never_journals_a_key_echoed_by_provider(transport, providers_up):
-    transport.handler = by_model({"deepseek-v4-pro": RuntimeError("test-key rejected")})
+    transport.handler = by_model({"deepseek-flash": RuntimeError("test-key rejected")})
     with pytest.raises(llm.NoEligibleModel):
         llm.complete("agent.plan", MSG, profile="economical")
     assert "test-key" not in calls()[-1]["error"]

@@ -134,7 +134,8 @@ def llm_routing(limit: int = 10, window_s: float = 86400.0) -> dict:
         failures = [item["reason"] for item in reason.get("considered", [])
                     if item.get("reason", "").startswith(("echec", "sortie invalide"))]
         row["fallback"] = row["status"] == "ok" and bool(failures)
-        row["route_reason"] = reason.get("explanation") or "; ".join(failures) or row["error"]
+        row["route_reason"] = (reason.get("explanation") or "; ".join(failures)
+                               or row["error"] or reason.get("selection_reason"))
     fallbacks = sum(row["fallback"] for row in recent)
     return {"window_s": window_s, "calls": sum(by_status.values()), "by_status": by_status,
             "deterministic_refusals": by_status.get("request_too_large", 0),

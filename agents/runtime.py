@@ -418,6 +418,9 @@ def _search_view(result, max_chars: int | None = None) -> str | None:
 
 def _mission_prompt_results(results: list[dict]) -> list[dict]:
     """Projection bornée pour la synthèse : jamais les payloads structurés complets."""
+    run = journal.current_run()
+    if run is not None and run.profile == "economical":
+        return [_handoff_payload(result) for result in results or []]
     projected = []
     for subtask in results or []:
         steps = []
@@ -1444,6 +1447,19 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
             _ROLE.reset(token)
 
 
+def _react_prompt_context(context: list[dict], steps: list[dict]) -> list[dict]:
+    if len(context) <= 10:
+        return context
+    older = []
+    for step in steps[:-2]:
+        if step.get("tool") in {"search", "browse", "record_observation", "browser_navigate", "browser_snapshot"}:
+            older.append({"tool": step.get("tool"), "result": str(step.get("result") or "")[:200],
+                          "urls": (step.get("result_urls") or [])[:3]})
+    summary = [{"role": "user", "content": "Observations antérieures : " +
+                json.dumps(older[-8:], ensure_ascii=False)}] if older else []
+    return context[:2] + summary + context[-4:]
+
+
 def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
                allowed_tools: set[str] | None = None, *,
                search_browse_lockstep: bool = False,
@@ -1474,8 +1490,11 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
             lockstep_selection = None
         else:
             try:
-                r = deepseek.call_json(role, "action", MODEL, context + [
-                    {"role": "user", "content": "Choisis ta prochaine action (JSON)."}],
+                economical = journal.current_run() and journal.current_run().profile == "economical"
+                prompt_context = _react_prompt_context(context, steps) if economical else context + [
+                    {"role": "user", "content": "Choisis ta prochaine action (JSON)."}]
+                r = deepseek.call_json(role, "action", MODEL, prompt_context,
+                    max_tokens=500 if economical else 2000,
                     validate=(_validate_action_contract if journal.current_run()
                               and journal.current_run().profile == "economical" else None))
             except llm.GatewayError as exc:
@@ -1687,7 +1706,8 @@ def _handoff_payload(result: dict) -> dict:
         "role": str(result.get("role") or ""),
         "task": str(result.get("task") or ""),
         "final": str(result.get("final") or ""),
-        "artifacts": artifacts,
+        "artifacts": artifacts[-8:],
+        "error": str(result.get("execution_error") or "")[:300],
     }
 
 
@@ -1741,7 +1761,8 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         plan = deepseek.call_json("ORBIT", "planification", pro,
                                   [{"role": "system", "content": plan_sys},
                                    {"role": "user", "content": goal}],
-                                  reasoning="high", validate=_validate_plan_contract if economical else None)
+                                  reasoning="high", max_tokens=700 if economical else 2000,
+                                  validate=_validate_plan_contract if economical else None)
     except llm.GatewayError as exc:
         return _mission_unavailable([], [], "llm_unavailable", f"{type(exc).__name__}: {exc}")
     proposed = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
@@ -1775,7 +1796,8 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                                        {"role": "user", "content": goal},
                                        {"role": "assistant", "content": json.dumps(plan, ensure_ascii=False)},
                                        {"role": "user", "content": feedback}],
-                                      reasoning="high", validate=_validate_plan_contract if economical else None)
+                                      reasoning="high", max_tokens=700 if economical else 2000,
+                                      validate=_validate_plan_contract if economical else None)
         except llm.GatewayError as exc:
             return _mission_unavailable(tasks, [], "llm_unavailable", f"{type(exc).__name__}: {exc}")
         proposed = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
@@ -1894,10 +1916,10 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         "resultats_sous_taches": _mission_prompt_results(results),
     }
     try:
-        syn = deepseek.call_json("ORBIT", "synthese", pro,
+        syn = deepseek.call_json("ORBIT", "determination" if determination else "synthese", pro,
                                  [{"role": "system", "content": syn_sys},
                                   {"role": "user", "content": json.dumps(synthesis_input, ensure_ascii=False)}],
-                                 reasoning="high", max_tokens=4000,
+                                 reasoning="high", max_tokens=1600 if economical else 4000,
                                  validate=(lambda data: _validate_synthesis_contract(data, determination))
                                  if economical else None)
     except llm.GatewayError as exc:
