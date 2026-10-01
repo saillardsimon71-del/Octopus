@@ -54,6 +54,11 @@ def executors() -> list[tuple[str, str]]:
     return sorted(_EXECUTORS)
 
 
+def registered_executors() -> list[tuple[str, str]]:
+    """Exécuteurs déjà enregistrés. Ne charge ni n'enregistre aucun connecteur."""
+    return sorted(_EXECUTORS)
+
+
 def _set(conn, action_id: int, business: str, status: str, **fields) -> None:
     fields.update(status=status, updated_at=time.time())
     conn.execute(f"UPDATE channel_actions SET {', '.join(f'{k}=?' for k in fields)} WHERE id=?",

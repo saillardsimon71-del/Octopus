@@ -1710,6 +1710,8 @@ def _validate_synthesis_contract(data: dict, determination: bool) -> dict:
                 }
             else:
                 choice.pop("hypothesis", None)
+        from octopus.strategy_separation import attach_strategies
+        attach_strategies(choice)
     return data
 
 
@@ -1967,6 +1969,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         + (" Réponds en JSON : {\"rapport\":\"...\"}" if not business_signal_focus else "")
     )
     if determination:
+        from octopus.strategy_separation import STRATEGY_PROPOSAL_CLAUSE, STRATEGY_SEPARATION_CLAUSE
         syn_sys += (
             '\nAjoute "determination":{"action":"continue|pause|request_permission",'
             '"reason":"raison liée aux observations", "next_goal":"prochaine recherche précise ou vide",'
@@ -1979,7 +1982,8 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             "cite seulement "
             "des identifiants de preuves persistées et visibles dans le contexte. Ne répète pas une hypothèse invalidée "
             "sans nouvelle preuve observée explicitement liée à elle; dans ce cas, indique son identifiant et la raison. "
-            "N'invente ni observation, ni résultat, ni encaissement."
+            "N'invente ni observation, ni résultat, ni encaissement. "
+            + STRATEGY_SEPARATION_CLAUSE + " " + STRATEGY_PROPOSAL_CLAUSE
         )
     synthesis_input = {
         "objectif_original": goal,
@@ -2068,10 +2072,15 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                 or (choice["action"] == "request_permission" and not choice["permission"].strip())):
             choice = {"action": "pause", "reason": "Décision structurée absente ou invalide.",
                       "next_goal": "", "permission": ""}
+        from octopus.strategy_separation import attach_strategies
+        if isinstance(choice, dict):
+            attach_strategies(choice)
         output["determination"] = {k: v[:3000] for k, v in choice.items()
                                    if k in {"action", "reason", "next_goal", "permission"}}
         if isinstance(choice.get("hypothesis"), dict):
             output["determination"]["hypothesis"] = dict(choice["hypothesis"])
+        if isinstance(choice.get("strategies"), list) and choice["strategies"]:
+            output["determination"]["strategies"] = list(choice["strategies"])
     if business_signal_focus:
         output["business_signals"] = business_signals
         output["business_signal_rejections"] = rejected_signals
