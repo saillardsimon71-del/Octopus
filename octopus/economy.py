@@ -592,10 +592,12 @@ def _lesson_content(experiment: dict, evaluated: dict, evidence_id: int, decisio
         placeholders = ",".join("?" for _ in raw_ids)
         evidence_rows = query(
             f"SELECT id, nature, summary, source_type, source_ref, captured_at, observation, metric, value, unit, created_by "
-            f"FROM strategy_evidence WHERE business=? AND experiment_id=? AND status='active' "
+            f"FROM strategy_evidence WHERE business=? AND experiment_id=? "
             f"AND id IN ({placeholders}) ORDER BY id",
             (experiment["business"], experiment["id"], *raw_ids))
         for row in evidence_rows:
+            # Contenu historique immuable, même après retrait. learning_context vérifie
+            # séparément les statuts actifs avant de réutiliser cette conclusion.
             item = dict(row)
             if ((item["nature"] == "observed" and item["source_ref"] and item["captured_at"])
                     or (item["nature"] == "computed" and item["source_ref"]
@@ -734,13 +736,22 @@ def _ensure_experiment_lesson(business: str, experiment_id: int, evaluated: dict
         review_summary = f"Leçon d'expérience #{experiment_id}"
         prior_reviews = query(
             "SELECT * FROM strategy_reviews WHERE business=? AND created_by='policy:evaluate' AND summary=? "
-            "ORDER BY id LIMIT 1", (business, review_summary))
-        if prior_reviews:
-            review_id = int(prior_reviews[0]["id"])
-            review_row = strategy.get("review", review_id, business, _conn=conn)
-        else:
+            "ORDER BY id", (business, review_summary))
+        review_row = None
+        for candidate in prior_reviews:
+            try:
+                content = json.loads(candidate["evidence_summary"] or "null")
+            except (TypeError, ValueError):
+                continue
+            if ((candidate["status"] == "scheduled" and not candidate["evidence_summary"])
+                    or (candidate["status"] in {"scheduled", "done"} and content == lesson)):
+                review_row = dict(candidate)
+                break
+        if review_row is None:
             review_id = strategy.create("review", business, review_summary, _conn=conn, created_by="policy:evaluate")
             review_row = strategy.get("review", review_id, business, _conn=conn)
+        else:
+            review_id = int(review_row["id"])
         if review_row["status"] == "scheduled":
             strategy.update("review", review_id, business, _conn=conn,
                             evidence_summary=json.dumps(lesson, ensure_ascii=False, sort_keys=True),

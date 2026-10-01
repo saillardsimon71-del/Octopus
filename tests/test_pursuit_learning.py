@@ -496,6 +496,21 @@ def test_learning_context_uses_the_evaluation_decision_not_a_later_free_claim():
     assert lesson["decision"]["id"] == history["result"]["decision_id"]
 
 
+def test_an_existing_untrusted_homonymous_review_cannot_capture_the_lesson():
+    bogus = strategy.create("review", BUSINESS, "Leçon d'expérience #1", created_by="policy:evaluate",
+                            evidence_summary=json.dumps({"schema": "octopus.experiment_learning.v1",
+                                                         "lesson": "CLAIM_WITHOUT_EVALUATION"}))
+    strategy.transition("review", bogus, BUSINESS, "done", actor="policy:evaluate")
+    before = strategy.get("review", bogus, BUSINESS)
+    history = _experience()
+    result = history["result"]
+    assert result["review_id"] != bogus
+    assert json.loads(strategy.get("review", result["review_id"], BUSINESS)["evidence_summary"]) == result["lesson"]
+    assert strategy.get("review", bogus, BUSINESS) == before
+    assert strategy.learning_context(BUSINESS)["lessons"][0]["lesson_status"] == "persisted"
+    assert economy.evaluate_experiment(BUSINESS, history["experiment_id"])["review_id"] == result["review_id"]
+
+
 def test_pursuit_context_is_bounded_with_large_historical_observations(monkeypatch):
     history = _experience()
     strategy.create("evidence", BUSINESS, "Observation longue", created_by="human", nature="observed",
@@ -650,3 +665,5 @@ def test_retracted_source_excludes_a_lesson_without_mutating_the_snapshot():
     strategy.transition("evidence", source, BUSINESS, "retracted", actor="human")
     assert all(item["experiment"]["id"] != exp for item in strategy.learning_context(BUSINESS)["lessons"])
     assert strategy.get("evidence", proof["id"], BUSINESS) == proof
+    assert economy.evaluate_experiment(BUSINESS, exp)["review_id"] == result["review_id"]
+    assert economy.evaluate_experiment(BUSINESS, exp)["lesson"] == result["lesson"]
