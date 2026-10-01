@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -16,6 +17,8 @@ def git(repo, *args):
 
 
 def run_fake_harness(tmp_path, terminal="STABLE", relays=2, tokens=300000, total_tokens=1000000, unsafe=False, step_failure=False, large_context=False, proofs="full", resume=False, powershell_cache=False):
+    if not shutil.which("powershell"):
+        pytest.skip("constructeur Windows : powershell absent")
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init", "-b", "prep/astra-local-orchestration")
