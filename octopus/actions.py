@@ -1,7 +1,7 @@
 """Actions réelles sur des canaux économiques (publier, vendre, écrire, annoncer...), de façon générique.
 
 Une action est proposée par un agent ; elle s'exécute seulement si :
-1. le canal appartient au business, est actif et l'humain lui a accordé l'accès `act` ;
+1. le canal appartient au business, est actif et possède un accès humain `act` ou un mandat actif couvrant l'effet ;
 2. un exécuteur est enregistré pour (type de canal, action) ; le noyau fournit uniquement un executor web borné (`browser_form:submit`) ;
 3. son coût éventuel est couvert par une enveloppe (`economy.authorize_spend`).
 Sinon elle reste tracée avec la raison du blocage. Le résultat d'une exécution devient une preuve
@@ -13,7 +13,7 @@ import json
 import time
 from typing import Callable
 
-from . import economy, journal, strategy, tasks
+from . import economy, journal, strategy, tasks, mandates
 from .strategy import StrategyError
 
 # executor(channel: dict, payload: dict) -> {"observation": str, "source_ref": str, "metric"?, "value"?, "unit"?}
@@ -79,9 +79,11 @@ def propose(business: str, channel_id: int, action: str, payload: dict | None = 
 
     with tasks._tx() as conn:
         if idempotency_key:
-            existing = conn.execute("SELECT id, status, reason FROM channel_actions WHERE idempotency_key=?",
+            existing = conn.execute("SELECT id, business, status, reason FROM channel_actions WHERE idempotency_key=?",
                                     (idempotency_key,)).fetchone()
             if existing:
+                if existing["business"] != business:
+                    raise StrategyError("idempotency_key appartient à une autre activité")
                 if existing["status"] == "failed":
                     reason_lc = (existing["reason"] or "").lower()
                     is_rate_limited = "rate limited" in reason_lc or "429" in reason_lc or "rate_limited" in reason_lc
@@ -157,14 +159,19 @@ def propose(business: str, channel_id: int, action: str, payload: dict | None = 
             (business, channel_id, experiment_id, action, json.dumps(payload or {}, ensure_ascii=False),
              strategy._text(requested_by, "requested_by"), idempotency_key, now, now)).lastrowid)
         channel = dict(channel)
+        effect = {'send': 'contact', 'submit': 'contact', 'publish': 'publish', 'edit': 'edit'}.get(action)
+        authority = mandates.authorize(channel, effect, description=action,
+                                       financial=bool(spend_amount) and channel['access'] != 'act')
         reason = None
+        if authority.get("mandate_id"):
+            tasks._emit(conn, business, None, "action.mandate", {"action_id": action_id, "mandate_id": authority["mandate_id"]})
         if channel["status"] != "active":
             reason = f"canal {channel['status']} (activation requise)"
-        elif channel["access"] != "act":
-            reason = "accès 'act' non accordé par l'humain sur ce canal"
+        elif not authority["allowed"]:
+            reason = authority.get("reason") or "aucun mandat actif ni accès 'act' humain pour cette action"
         elif (channel["kind"], action) not in _EXECUTORS:
             reason = f"aucun exécuteur pour {channel['kind']}:{action} (intégration à construire)"
-        elif _EXECUTORS[(channel["kind"], action)][2] and not idempotency_key:
+        elif (authority.get("mandate_id") or _EXECUTORS[(channel["kind"], action)][2]) and not idempotency_key:
             reason = "idempotency_key requis pour cet exécuteur"
         elif _EXECUTORS[(channel["kind"], action)][1] == "paid" and not spend_amount:
             reason = "exécuteur de cost class paid sans coût déclaré"
@@ -186,6 +193,11 @@ def propose(business: str, channel_id: int, action: str, payload: dict | None = 
             conn.execute("UPDATE channel_actions SET spend_request_id=? WHERE id=?",
                          (spend_request_id, action_id))
     try:
+        # Re-read live authority immediately before dispatch (revocation/session expiry).
+        live = journal.query('SELECT * FROM economic_channels WHERE id=? AND business=?', (channel_id, business))
+        if not live or not mandates.authorize(dict(live[0]), effect, description=action,
+                                              financial=bool(spend_amount) and channel['access'] != 'act')['allowed']:
+            raise StrategyError('autorité révoquée avant exécution')
         result = _EXECUTORS[(channel["kind"], action)][0](channel, payload or {})
         source = str(result.get("source_ref") or "").strip()
         if not source:

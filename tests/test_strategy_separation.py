@@ -240,7 +240,8 @@ def test_registry_remains_the_authority_and_permissions_are_not_expanded():
     assert facts.executable.isdisjoint(facts.human_required)
     assert "phone_call" not in facts.present
     assert "browser_click" not in facts.executable
-    assert "act_on_channel" not in facts.executable
+    assert "act_on_channel" in facts.executable
+    assert not journal.query("SELECT * FROM operational_mandates")
     assert "email:send" not in facts.executable
     source = Path("octopus/strategy_separation.py").read_text(encoding="utf-8")
     assert "web_guard" not in source and "authorize_spend" not in source

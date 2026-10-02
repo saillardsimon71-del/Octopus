@@ -129,7 +129,7 @@ def test_restart_reconciles_only_proven_old_technical_request_without_recollecti
 @pytest.mark.parametrize("options", [
     {"reason": "modifier cette page exige un canal actif avec accès 'act' accordé par l'humain"},
     {"permission": "Envoyer une proposition commerciale exige une autorisation."},
-    {"forbidden_tool": "browser_click"},
+    {"forbidden_tool": "request_spend"},
     {"reason": "action #1 au résultat inconnu (interruption) : ne pas la répéter."},
     {"reason": "Refus inconnu, à examiner"},
 ])

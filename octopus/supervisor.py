@@ -73,7 +73,10 @@ FINALITY = "Obtenir, maintenir et améliorer une performance économique réelle
 # Borne l'exécution de ce démarrage. Ne borne pas les stratégies que pursuit peut envisager :
 # la pertinence économique est annotée à part par strategy_separation.
 PURSUIT_TOOLS = frozenset({"search", "browse", "resources_status", "economy_status",
-                           "browser_navigate", "browser_snapshot", "browser_scroll", "browser_back"})
+                           "browser_navigate", "browser_snapshot", "browser_scroll", "browser_back",
+                           "account_task", "request_account", "create_artifact", "register_channel", "act_on_channel",
+                           "browser_click", "browser_type", "browser_select", "browser_check", "browser_press",
+                           "browser_verify", "browser_upload"})
 PURSUIT_ROUNDS = 3
 PURSUIT_SIGNAL_TARGET = 0  # Compatibilité uniquement ; aucun seuil de découverte.
 
@@ -338,6 +341,13 @@ def _pursuit_mission(ctx, objective):
              # Étude d'acquisition persistée : contexte seulement, jamais une preuve de disponibilité.
              "écarts_de_capacités": [acquisition.study_context(item) for item in
                                      acquisition.recorded(ctx.business, int(objective["id"]))[:6]]}
+    from . import mandates, resources
+    state['mandats_actifs'] = mandates.list_mandates(ctx.business, active=True)
+    state['comptes_utilisables'] = [
+        {'key': r['key'], 'label': r['label'], 'session': r['web_account'].get('session_status'),
+         'ownership': r['web_account'].get('ownership'), 'capabilities': r['capabilities']}
+        for r in resources.list_resources() if r['web_account']
+        and ctx.business in r['web_account'].get('businesses', [])]
     declared = businesses.get(ctx.business) if ctx.business != DEFAULT_BUSINESS else None
     if declared:
         state["activité_déclarée"] = {"id": declared.id, "nom": declared.name, "description": declared.description}

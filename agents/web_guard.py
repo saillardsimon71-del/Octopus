@@ -41,6 +41,8 @@ class BrowseRefused(PermissionError):
 class BrowseState:
     account_read: bool = False
     visited: list[str] = field(default_factory=list)
+    account_domains: tuple[str, ...] = ()
+    public_pages: dict[str, str] = field(default_factory=dict)
 
 
 _state: contextvars.ContextVar[BrowseState | None] = contextvars.ContextVar("podalux_browse", default=None)
@@ -52,6 +54,16 @@ def session():
     if _state.get() is not None:
         yield _state.get()
         return
+    token = _state.set(BrowseState())
+    try:
+        yield _state.get()
+    finally:
+        _state.reset(token)
+
+
+@contextmanager
+def isolated_session():
+    """A new network lifetime for an authenticated subtask; restore the public caller afterwards."""
     token = _state.set(BrowseState())
     try:
         yield _state.get()
@@ -121,6 +133,8 @@ def classify(url: str) -> str:
 def check(url: str, state: BrowseState) -> str:
     """Autorise ou refuse une navigation. Renvoie le type de contexte à utiliser."""
     kind = classify(url)
+    if _host_matches((urlsplit(url).hostname or "").lower(), state.account_domains):
+        kind = ACCOUNT
     if state.account_read:
         if kind == PUBLIC:
             raise BrowseRefused("page hors comptes refusée : cette exécution a déjà lu un compte connecté "

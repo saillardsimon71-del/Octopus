@@ -8,7 +8,7 @@ qu'aucun prompt ne peut garantir :
 
 - permissions : lire (naviguer, observer, suivre un lien, télécharger) est libre dans le garde
   web ; modifier une page (saisir, choisir, cocher, cliquer un bouton, valider) exige un canal
-  économique `active` dont l'humain a accordé l'accès `act` pour ce site (`browser_workspace`) ;
+  économique `active` avec accès `act` explicite ou mandat humain actif couvrant cet effet ;
 - anti-exfiltration : tout le trafic Chromium passe par `web_guard.GuardProxy` (taint des comptes,
   réseaux privés refusés), aucun secret n'est saisi ni renvoyé au modèle, pas de champ de mot de
   passe/paiement ;
@@ -39,7 +39,7 @@ from urllib.parse import urlsplit
 from agents import agent_browser, web_guard
 from agents import config as agents_config
 
-from . import actions, journal, strategy, tasks
+from . import actions, journal, strategy, tasks, mandates, resources
 
 CAPABILITY = "browser_workspace"
 CHECKPOINT_KEY = "browser.workspace"
@@ -58,7 +58,7 @@ _PARTIAL_SUFFIXES = (".crdownload", ".tmp", ".part", ".partial")
 UNRESOLVED = ("proposed", "ambiguous", "executed")
 
 READ_SAFE_KEYS = frozenset({"Tab", "Shift+Tab", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
-                            "PageUp", "PageDown", "Home", "End", "Space"})
+                            "PageUp", "PageDown", "Home", "End"})
 _REF_RE = re.compile(r"^@?(e\d+)$")
 # Un lien est une navigation (lecture) sauf si son libellé annonce un effet.
 _RISKY_LINK_RE = re.compile(
@@ -93,8 +93,7 @@ def current_scope() -> Scope:
         return Scope("local", "octopus", None)
     task_id = None
     try:
-        rows = journal.query("SELECT id FROM tasks WHERE run_id=? ORDER BY id DESC LIMIT 1", (run.root_id,))
-        task_id = int(rows[0]["id"]) if rows else None
+        task_id = tasks.current_task_id()
     except Exception:
         task_id = None
     return Scope(f"t{task_id}" if task_id else f"r{run.root_id}", run.business, task_id)
@@ -166,6 +165,14 @@ def _safe_filename(name: str) -> str:
     return name[:120]
 
 
+def _account_text(text):
+    text = re.sub(r'(?im)^.*(?:password|mot de passe|passcode|\botp\b|\b2fa\b|cookie|secret|api.?key|'
+                  r'verification code|code de sécurité|code de vérification|security code|access token).*$',
+                  '[contenu de sécurité masqué]', agent_browser.redact(text))
+    # A conservative tradeoff for account observations: typical OTPs never reach the model/journal.
+    return re.sub(r'(?<![\w.])\d{4,8}(?![\w.])', '[nombre protégé]', text)
+
+
 class Workspace:
     """Session navigateur persistante d'une tâche, pilotée par l'IA via les outils browser_*."""
 
@@ -175,7 +182,13 @@ class Workspace:
         self.lab = lab_origins()
         task = tasks.get(scope.task_id) if scope.task_id else None
         self.public_only = bool((task or {}).get("input", {}).get("browser_public_only"))
-        self.account_mode = False
+        self.resource_key = (task or {}).get('input', {}).get('browser_resource_key')
+        self.account_resource = resources.get(self.resource_key) if self.resource_key else None
+        self.account_mode = bool(self.resource_key)
+        if self.resource_key:
+            if not mandates.account_authority(scope.business, self.resource_key, 'read'):
+                raise Refused('lecture compte non mandatée ou session indisponible')
+            self.state.account_domains = tuple(self.account_resource['web_account']['domains'])
         self.anonymous_domains: set[str] = set()
         self._session_factory = session_factory or agent_browser.Session
         self._session = None
@@ -193,6 +206,12 @@ class Workspace:
         return bool(self.lab) and _origin(url) in self.lab
 
     def _guard(self, url: str) -> bool:
+        if self.resource_key:
+            account = (resources.get(self.resource_key) or {}).get('web_account') or {}
+            if not mandates.account_authority(self.scope.business, self.resource_key, 'read'):
+                return False
+            if (urlsplit(url).hostname or '').lower() not in account.get('domains', []):
+                return False
         if self.lab:
             # Laboratoire hermétique : seules les origines déclarées sortent, quel que soit
             # l'émetteur (page, sous-ressource, script, ou Chrome lui-même).
@@ -210,7 +229,8 @@ class Workspace:
         inbox = task_inbox(self.scope.business, self.scope.key)
         inbox.mkdir(parents=True, exist_ok=True)
         self._inbox = inbox
-        profile = (agents_config.DATA_DIR / "browser_profile") if self.account_mode else None
+        profile = (resources.account_profile(self.resource_key) if self.resource_key else
+                   (agents_config.DATA_DIR / "browser_profile") if self.account_mode else None)
         setting = __import__("os").environ.get("OCTOPUS_BROWSER_HEADLESS")
         headed = setting == "0" or (self.account_mode and setting != "1")
         try:
@@ -241,7 +261,7 @@ class Workspace:
             return
         previous = tasks.step_value(self.scope.task_id, "browser.observation", {})
         observation = {"session": "open" if self._session else "closed", "at": time.time(),
-                       "url": agent_browser.redact(self._url), "action": method,
+                       "url": self._safe_url(self._url), "action": method,
                        "ok": result.get("ok"), "refused": bool(result.get("refused")),
                        "reason": agent_browser.redact(str(result.get("reason") or result.get("error") or ""))[:1000],
                        "snapshot": result.get("snapshot", previous.get("snapshot", "")),
@@ -265,6 +285,8 @@ class Workspace:
             "SELECT id, action, payload FROM channel_actions WHERE business=? AND status='ambiguous' "
             "AND idempotency_key LIKE 'browser:%' ORDER BY id", (self.scope.business,))
         checkpoint = tasks.step_value(self.scope.task_id, CHECKPOINT_KEY, None) if self.scope.task_id else None
+        if checkpoint and isinstance(checkpoint.get("form_digests"), dict):
+            self._typed = checkpoint["form_digests"]
         if checkpoint or ambiguous:
             self._resume = {
                 "checkpoint_url": (checkpoint or {}).get("url"),
@@ -285,13 +307,28 @@ class Workspace:
             raise RuntimeError(agent_browser.redact(str(result.get("error") or "commande échouée"))[:500])
         return result.get("data") or {}
 
+    def _check_account(self):
+        if not self.resource_key:
+            return
+        if mandates.SENSITIVE.search(self._url):
+            raise Refused('surface sensible du compte réservée à l’humain ; contenu non lu')
+        if not mandates.account_authority(self.scope.business, self.resource_key, 'read'):
+            raise Refused('mandat lecture révoqué ou session indisponible')
+        account = resources.get(self.resource_key)['web_account']
+        if not resources.verify_account_page(self._session, account):
+            resources.set_account_session(self.resource_key, 'expired', detail='Page authentifiée non constatée')
+            raise Refused('session expirée : connexion humaine requise ; aucun contenu de login lu')
+
     def _page_text(self) -> str:
+        self._check_account()
         try:
-            return str(self._read("get", ["text", "body"]).get("text") or "")[:PAGE_TEXT_CHARS]
+            text = agent_browser.redact(str(self._read("get", ["text", "body"]).get("text") or ""))
+            return _account_text(text)[:PAGE_TEXT_CHARS] if self.resource_key else text[:PAGE_TEXT_CHARS]
         except RuntimeError:
             return ""
 
     def _observe(self, *, full: bool = False) -> dict:
+        self._check_account()
         data = self._read("snapshot")
         self._refs = {k: v for k, v in (data.get("refs") or {}).items() if isinstance(v, dict)}
         url = str(data.get("origin") or "")
@@ -306,22 +343,35 @@ class Workspace:
         snapshot = agent_browser.truncate_snapshot(agent_browser.redact(agent_browser.prune_snapshot(
             str(data.get("snapshot") or ""))),
                                                    FULL_SNAPSHOT_CHARS if full else SNAPSHOT_CHARS)
+        if self.resource_key:
+            # Do not expose security surfaces or one-time codes even as ordinary text.
+            snapshot = _account_text(snapshot)
+        else:
+            self.state.public_pages[url] = snapshot
         self._checkpoint()
         blocked = self._proxy.blocked[-5:] if self._proxy else []
-        view = {"ok": True, "url": agent_browser.redact(url), "title": agent_browser.redact(title),
+        view = {"ok": True, "url": self._safe_url(url), "title": agent_browser.redact(title),
                 "snapshot": snapshot, "refs": len(self._refs), "source": web_guard.UNTRUSTED_NOTE}
         if blocked:
-            view["blocked_requests"] = [agent_browser.redact(u) for u in blocked]
+            view["blocked_requests"] = [self._safe_url(u) for u in blocked]
             self._proxy.blocked.clear()
         if self._resume and not self._resume_reported:
             view["reprise"] = self._resume
             self._resume_reported = True
+        self._qualify_page(view)
         return view
+
+    def _safe_url(self, url):
+        if self.resource_key:
+            parts = urlsplit(url)
+            return agent_browser.redact(f"{parts.scheme}://{parts.hostname}{':' + str(parts.port) if parts.port else ''}{parts.path}")
+        return agent_browser.redact(url)
 
     def _checkpoint(self) -> None:
         if self.scope.task_id and self._url:
             tasks.save_step(self.scope.task_id, CHECKPOINT_KEY,
-                            {"url": self._url, "account_mode": self.account_mode, "at": time.time()})
+                            {"url": self._safe_url(self._url), "account_mode": self.account_mode,
+                             "form_digests": self._typed, "at": time.time()})
 
     def _ensure_page(self) -> None:
         """Premier appel autre qu'une navigation : rouvrir la dernière page de la tâche."""
@@ -355,9 +405,9 @@ class Workspace:
         return "@" + key, self._refs[key]
 
     # -- permissions -------------------------------------------------------------------------
-    def _channel(self, channel_id) -> dict:
+    def _channel(self, channel_id, effect=None) -> dict:
         page = self._url
-        rows = journal.query("SELECT * FROM economic_channels WHERE business=? AND status='active' AND access='act'",
+        rows = journal.query("SELECT * FROM economic_channels WHERE business=? AND status='active'",
                              (self.scope.business,))
         candidates = []
         for row in rows:
@@ -374,7 +424,12 @@ class Workspace:
             if _origin(locator) != _origin(page) or not (urlsplit(page).path or "/").startswith(
                     urlsplit(locator).path or "/"):
                 continue
-            candidates.append(channel)
+            if effect is None:
+                allowed = any(mandates.authorize(channel, e)['allowed'] for e in ('contact', 'publish', 'edit'))
+            else:
+                allowed = mandates.authorize(channel, effect, description=page)['allowed']
+            if allowed:
+                candidates.append(channel)
         if channel_id not in (None, ""):
             chosen = next((c for c in candidates if int(c["id"]) == int(channel_id)), None)
             if chosen is None:
@@ -403,13 +458,33 @@ class Workspace:
             (self.scope.business, f"browser:{fingerprint}:%"))]
 
     def _effect(self, kind: str, target_sig: str, command: str, args: list[str], *, expect: str | None,
-                channel_id) -> dict:
+                channel_id, delegated_effect=None, preserve_form=False) -> dict:
         from agents import cancel
-        channel = self._channel(channel_id)
+        if mandates.SENSITIVE.search(target_sig + ' ' + self._url):
+            raise Refused('action sensible réservée à l’humain')
+        if re.search(r'publ|post|share|partag', target_sig, re.I):
+            effect = 'publish'
+        elif re.search(r'save|enregistr|modifier|update|edit', target_sig, re.I):
+            effect = 'edit'
+        elif re.search(r'envoy|send|reply|répond|repond|soumet|submit', target_sig, re.I):
+            effect = 'contact'
+        else:
+            effect = 'unknown'  # only a legacy explicit channel can authorize an unknown control
+        if delegated_effect is not None:
+            effect = delegated_effect
+        channel = self._channel(channel_id, effect)
         self._effect_budget()
         expect = str(expect or "").strip() or None
         if expect and (len(expect) > 200 or agent_browser.contains_secret(expect)):
             raise Refused("expect : court texte visible attendu après l'action, sans secret")
+        if self.resource_key and kind in ('click', 'press'):
+            pending = journal.query("SELECT id,payload FROM channel_actions WHERE business=? AND channel_id=? "
+                                    "AND status IN ('proposed','ambiguous','executed') "
+                                    "AND action IN ('browser.click','browser.press')", (self.scope.business, channel['id']))
+            for row in pending:
+                prior = json.loads(row['payload'])
+                if prior.get('page') == _page_key(self._url):
+                    raise Refused(f"action terminale #{row['id']} non vérifiée sur cette page ; réconcilie avant tout nouvel envoi")
         fingerprint, form = self._fingerprint(int(channel["id"]), kind, target_sig)
         key = f"browser:{fingerprint}:{self.scope.key}"
         mine = next((r for r in self._ledger(fingerprint) if r["idempotency_key"] == key), None)
@@ -438,7 +513,8 @@ class Workspace:
         if expect and expect.casefold() in pre_text.casefold():
             raise Refused(f"expect={expect!r} est déjà visible avant l'action : il ne prouverait rien. "
                           "Choisis un texte qui n'apparaîtra qu'après (confirmation, référence...).")
-        payload = {"scope": self.scope.key, "task_id": self.scope.task_id, "kind": kind, "target": target_sig,
+        authority = mandates.authorize(channel, effect)
+        payload = {"mandate_id": authority.get("mandate_id"), "scope": self.scope.key, "task_id": self.scope.task_id, "kind": kind, "target": target_sig,
                    "page": _page_key(self._url), "form_digest": form, "expect": expect,
                    "pre_text": pre_text[:8000]}
         now = time.time()
@@ -457,6 +533,7 @@ class Workspace:
                 actions._set(conn, action_id, self.scope.business, "proposed", reason=None)
         self._effects += 1
         try:
+            self._channel(channel_id, effect)  # live revocation check before the command
             result = self._cmd(command, args)
         except Refused:
             self._settle(action_id, "failed", "refusée avant exécution (plafond)")
@@ -484,7 +561,8 @@ class Workspace:
         self._settle(action_id, status, None if status == "verified" else
                      ("attendu non observé après l'action" if expect else "exécutée, effet non vérifié"),
                      result={"url": self._current_url(), "expect": expect}, evidence_id=evidence)
-        self._typed.pop(_page_key(payload["page"]), None)
+        if not preserve_form:
+            self._typed.pop(_page_key(payload["page"]), None)
         view = self._observe()
         view["effect"] = {"action_id": action_id, "status": status,
                           "verified": status == "verified",
@@ -494,9 +572,9 @@ class Workspace:
 
     def _current_url(self) -> str:
         try:
-            return str(self._read("get", ["url"]).get("url") or self._url)
+            return self._safe_url(str(self._read("get", ["url"]).get("url") or self._url))
         except RuntimeError:
-            return self._url
+            return self._safe_url(self._url)
 
     def _wait_for(self, text: str) -> bool:
         deadline = time.monotonic() + VERIFY_WAIT_S
@@ -530,18 +608,38 @@ class Workspace:
 
     def _edit(self, kind: str, ref: str, value_for_digest, command: str, args: list[str], channel_id) -> dict:
         """Modification locale d'un formulaire : autorisée par le canal, enregistrée dans l'empreinte
-        de la page ; l'envoi effectif reste l'action (clic, touche) qui suit."""
+        de la page ; sur un compte une éventuelle autosauvegarde est aussi journalisée."""
         target, info = self._target(ref)
         name = str(info.get("name") or "")
-        if _HUMAN_ONLY_FIELD_RE.search(name):
+        if _HUMAN_ONLY_FIELD_RE.search(name) or mandates.SENSITIVE.search(name + " " + self._url):
             raise Refused(f"champ « {name} » réservé à l'humain (identifiants, second facteur, paiement)")
-        self._channel(channel_id)
+        if self.resource_key:
+            # Account edits may autosave. Treat typing/select/check as real journaled effects.
+            if kind == 'check' and re.search(r'accept|agree|terms|conditions', name, re.I):
+                raise Refused('acceptation de conditions réservée à l’humain')
+            effect = self._form_effect(name)
+            self._typed.setdefault(_page_key(self._url), {})[f"{info.get('role')}:{name}"] = _digest([kind, value_for_digest])
+            result = self._effect(kind, f"{info.get('role')}:{name}", command, [target, *args],
+                                  expect=None, channel_id=channel_id, delegated_effect=effect, preserve_form=True)
+            self._typed.setdefault(_page_key(self._url), {})[f"{info.get('role')}:{name}"] = _digest([kind, value_for_digest])
+            return result
+        self._channel(channel_id, 'contact')
         result = self._cmd(command, [target, *args])
         if not result.get("success"):
             return {"ok": False, "error": agent_browser.redact(str(result.get("error") or ""))[:300]}
         sig = f"{info.get('role')}:{name}"
         self._typed.setdefault(_page_key(self._url), {})[sig] = _digest([kind, value_for_digest])
         return self._observe()
+
+    def _form_effect(self, name):
+        if re.search(r'profil|bio\b|headline|nom\b|name\b|website|site web', name + ' ' + self._url, re.I):
+            return 'edit'
+        labels = ' '.join(str(v.get('name') or '') for v in self._refs.values() if v.get('role') == 'button')
+        if re.search(r'publi|post|share', labels, re.I):
+            return 'publish'
+        if re.search(r'envoy|send|reply|répond|repond', labels, re.I):
+            return 'contact'
+        return 'unknown'  # do not infer arbitrary autosave authority from another mandate
 
     # -- outils exposés au runtime -----------------------------------------------------------
     def navigate(self, url: str) -> dict:
@@ -551,6 +649,10 @@ class Workspace:
         if self.lab and not self._is_lab(url):
             raise Refused(f"laboratoire hermétique ({LAB_ORIGINS_ENV}) : seules les origines déclarées sont "
                           "joignables, aucune autre sortie")
+        if self.resource_key:
+            account = resources.get(self.resource_key)['web_account']
+            if (urlsplit(url).hostname or '').lower() not in account['domains']:
+                raise Refused('sortie hors de la ressource compte isolée refusée')
         self._start()
         if self._is_lab(url):
             if self.state.account_read:
@@ -570,7 +672,30 @@ class Workspace:
                 else:
                     self.anonymous_domains.add(host)
         self._open(url)
-        return self._observe()
+        view = self._observe()
+        self._qualify_page(view)
+        return view
+
+    def _qualify_page(self, view):
+        page = self._safe_url(self._url)
+        if self.resource_key:
+            useful = True
+        else:
+            useful = (mandates.covering(self.scope.business, 'public_business', 'contact')
+                      and mandates.BUSINESS_SIGNALS.search(view.get('snapshot', ''))
+                      and mandates.CONTACT_SIGNALS.search(view.get('snapshot', '')))
+        if not useful or not self.resource_key and not any(v.get('role') in ('textbox', 'button') for v in self._refs.values()):
+            return
+        from . import economy
+        existing = journal.query('SELECT id FROM economic_channels WHERE business=? AND locator=?',
+                                 (self.scope.business, page))
+        cid = int(existing[0]['id']) if existing else economy.add_channel(
+            self.scope.business, 'website', view.get('title') or page, created_by='policy:browser', locator=page,
+            capabilities=[CAPABILITY], nature='observed', source_ref=page)
+        if self.resource_key:
+            mandates.bind_account(cid, self.scope.business, self.resource_key)
+        else:
+            mandates.qualify_public(cid, self.scope.business, source_url=page, observed_text=view.get('snapshot', ''))
 
     def snapshot(self, full: bool = False) -> dict:
         self._ensure_page()
@@ -737,7 +862,7 @@ class Workspace:
     def upload(self, ref: str, filename: str, channel_id=None) -> dict:
         self._ensure_page()
         path = outbox_dir(self.scope.business) / _safe_filename(filename)
-        if not path.is_file():
+        if not _within(path, outbox_dir(self.scope.business)) or not path.is_file():
             raise Refused(f"fichier absent de {outbox_dir(self.scope.business)} (seuls les fichiers préparés "
                           "pour l'envoi sont téléversables)")
         if path.stat().st_size > UPLOAD_MAX_BYTES:
@@ -782,10 +907,10 @@ _DETACHED: dict[str, Workspace] = {}
 
 
 @contextmanager
-def mission_scope():
+def mission_scope(*, isolated=False):
     """Portée d'une exécution (mission ou agent) : les sessions navigateur y sont partagées par les
     sous-agents puis fermées à la sortie de la portée la plus externe."""
-    if _ACTIVE.get() is not None:
+    if _ACTIVE.get() is not None and not isolated:
         yield
         return
     token = _ACTIVE.set({})

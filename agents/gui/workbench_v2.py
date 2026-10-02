@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 import queue
 import threading
 import time
@@ -31,7 +32,7 @@ PAGE_DATA_KEYS = {
     "Livrables": ("tasks", "decisions", "evidence", "generations"),
     "Navigateur": ("browser",),
     "Activité": ("requests", "llm_calls", "events"),
-    "Paramètres": ("channels", "allowances", "agnes_health", "tasks"),
+    "Paramètres": ("channels", "allowances", "agnes_health", "tasks", "accounts", "mandates", "requests"),
 }
 
 
@@ -638,6 +639,7 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         state = self._snapshot
         self._line(body, "Moteur, outils installés et configuration LLM : partagés. Canaux et enveloppes ci-dessous : contexte sélectionné.",
                    COLORS["muted"], pady=(0, 8))
+        self._resource_hub(body)
         self._section(body, "Services et permissions")
         card = self._card(body)
         card.pack(fill="x")
@@ -670,6 +672,231 @@ class WorkbenchV2(EntrepreneurialWorkbench):
                               row=index // 4, column=index % 4, sticky="ew", padx=3, pady=3)
         for index in range(4):
             grid.grid_columnconfigure(index, weight=1)
+
+    def _resource_hub(self, body):
+        self._section(body, "Comptes et ressources connectés")
+        self._line(body, "Une connexion rend la ressource disponible. Les mandats définissent les actions autorisées pour chaque activité.", COLORS['muted'])
+        if not self._readonly:
+            self._secondary(body, "Ajouter un compte", self._account_form)
+        labels = {'absent': 'Absent', 'connection_required': 'Connexion humaine requise',
+                  'connected': 'Connecté', 'expired': 'Session expirée', 'unavailable': 'Indisponible'}
+        for row in self._snapshot.get('accounts', []):
+            account = row.get('web_account') or {}
+            card = self._card(body)
+            card.pack(fill='x', pady=4)
+            self._line(card, row['label'] + ' · ' + account.get('provider', row['kind']), padx=18, pady=(10, 2), bold=True)
+            self._line(card, labels.get(account.get('session_status', 'absent'), 'Absent') +
+                       (' · Désactivé' if account and not account.get('enabled') else '') +
+                       ' · ' + account.get('ownership', 'À définir') +
+                       (' · Dédié à OCTOPUS' if account.get('dedicated') else ''), padx=18, pady=2)
+            self._line(card, 'Activités autorisées : ' + (', '.join(account.get('businesses', [])) or 'Aucune') +
+                       '\nCapacités constatées : ' + (', '.join(row.get('capabilities', [])) or 'Non constatées') +
+                       '\nDernière vérification : ' + _date(row.get('last_check_at')), COLORS['muted'], padx=18, pady=2)
+            related = [m for m in self._snapshot.get('mandates', []) if m['status'] == 'active'
+                       and m['target'] == 'owned_account' and m['business'] in account.get('businesses', [])
+                       and (row['key'] in json.loads(m['resource_keys']) or '*' in json.loads(m['resource_keys']))]
+            self._line(card, 'Mandats : ' + (' ; '.join(m['label'] for m in related) or 'Aucun dans ce contexte'),
+                       COLORS['muted'], padx=18, pady=2)
+            if not self._readonly:
+                self._secondary(card, 'Configurer / modifier', lambda key=row['key']: self._account_form(key))
+                if account and account.get('enabled'):
+                    self._secondary(card, 'Ouvrir la connexion', lambda key=row['key']: self._open_account(key))
+                    self._secondary(card, 'J’ai terminé — vérifier', lambda key=row['key']: self._verify_account(key))
+                    self._secondary(card, 'Désactiver', lambda key=row['key']: self._disable_account(key))
+        self._section(body, 'Demandes de ressources')
+        found = False
+        for request in self._snapshot.get('requests', []):
+            context = json.loads(request.get('context') or '{}')
+            info = context.get('web_request')
+            if request['status'] != 'pending' or not info:
+                continue
+            found = True
+            card = self._card(body)
+            card.pack(fill='x', pady=4)
+            self._line(card, info['platform'] + ' · ' + request['business'], padx=18, pady=(10, 2), bold=True)
+            self._line(card, info['reason'] + '\nCapacités souhaitées : ' + ', '.join(info.get('capabilities', [])) +
+                       '\nActions envisagées : ' + ', '.join(info.get('desired_actions', [])), padx=18, pady=2)
+            if not self._readonly:
+                self._secondary(card, 'Accepter / connecter', lambda c=context, b=request['business']: self._account_form(c['key'], c, b))
+                self._secondary(card, 'Refuser', lambda rid=request['id']: self._decline_resource(rid))
+                self._secondary(card, 'Reporter', lambda: self._set_status('Demande conservée en attente.'))
+        if not found:
+            self._line(body, 'Aucune demande de compte en attente.', COLORS['muted'])
+        self._section(body, 'Mandats accordés à cette activité')
+        for mandate in self._snapshot.get('mandates', []):
+            self._line(body, f"#{mandate['id']} {mandate['label']} · {mandate['business']} · {mandate['status']} · " +
+                       ', '.join(json.loads(mandate['effects'])), pady=(6, 1))
+            if mandate['status'] == 'active' and not self._readonly:
+                self._secondary(body, 'Révoquer ce mandat', lambda m=mandate: self._revoke_mandate(m))
+                self._secondary(body, 'Modifier ce mandat', lambda m=mandate: self._mandate_form(m))
+        if not self._readonly and self.selected_business_id != DEFAULT_BUSINESS_ID:
+            self._secondary(body, 'Accorder un mandat', self._mandate_form)
+
+    def _hub_error(self, error):
+        self._set_status(str(error)[:200], COLORS['warn'])
+
+    def _account_form(self, key=None, request=None, business=None):
+        if self._readonly:
+            return
+        from octopus import resources
+        row = resources.get(key) if key else None
+        a = (row or {}).get('web_account') or {}
+        request = (request or {}).get('web_request') or {}
+        url = a.get('verify_url') or request.get('url') or (row or {}).get('locator') or ''
+        from urllib.parse import urlsplit
+        current_business = business or self.selected_business_id
+        window = ctk.CTkToplevel(self)
+        window.title('Configurer une ressource — aucun mot de passe')
+        window.geometry('680x700')
+        panel = ctk.CTkScrollableFrame(window)
+        panel.pack(fill='both', expand=True, padx=16, pady=16)
+        self._line(panel, 'Définissez les domaines nécessaires (connexion, site et dépendances). Seuls ces domaines seront accessibles. Choisissez un texte visible uniquement après connexion, par exemple « Déconnexion » sur votre tableau de bord.', COLORS['muted'])
+        values = [
+            ('key', 'Identifiant unique', key or ''),
+            ('provider', 'Plateforme', a.get('provider') or request.get('platform') or ''),
+            ('label', 'Nom lisible', (row or {}).get('label') or ''),
+            ('url', 'URL de connexion HTTPS', (row or {}).get('locator') or request.get('url') or ''),
+            ('domains', 'Domaines autorisés, séparés par virgules', ','.join(a.get('domains', []) or [urlsplit(url).hostname or ''])),
+            ('businesses', 'Identifiants des activités autorisées, séparés par virgules', ','.join(a.get('businesses', []) or ([current_business] if current_business != DEFAULT_BUSINESS_ID else []))),
+            ('verify_url', 'URL de la page après connexion', url),
+            ('authenticated_text', 'Texte visible uniquement après connexion', a.get('authenticated_text', ''))]
+        fields = {}
+        for name, label, value in values:
+            self._line(panel, label, pady=(7, 2))
+            field = ctk.CTkEntry(panel, height=30)
+            field.insert(0, value)
+            field.pack(fill='x')
+            fields[name] = field
+        self._line(panel, 'Propriétaire', pady=(7, 2))
+        owner = ctk.CTkOptionMenu(panel, values=['operator', 'business', 'other'])
+        owner.set(a.get('ownership', 'operator'))
+        owner.pack(anchor='w')
+        dedicated = ctk.BooleanVar(value=a.get('dedicated', False))
+        ctk.CTkCheckBox(panel, text='Compte dédié aux activités OCTOPUS', variable=dedicated).pack(anchor='w', pady=8)
+        def save():
+            try:
+                data = {name: f.get().strip() for name, f in fields.items()}
+                resource_key = data.pop('key')
+                if key and resource_key != key:
+                    raise ValueError('La clé d’une ressource existante ne peut pas changer')
+                data['domains'] = [d.strip() for d in data['domains'].split(',') if d.strip()]
+                data['businesses'] = [b.strip() for b in data['businesses'].split(',') if b.strip()]
+                resources.configure_account(resource_key, actor='human', ownership=owner.get(), dedicated=dedicated.get(), **data)
+                window.destroy()
+                self._load_snapshot()
+                self._open_account(resource_key)
+            except Exception as exc:
+                self._hub_error(exc)
+        self._secondary(panel, 'Enregistrer et ouvrir la connexion', save)
+
+    def _mandate_form(self, previous=None):
+        if self._readonly or self.selected_business_id == DEFAULT_BUSINESS_ID:
+            return
+        from octopus import mandates
+        business = previous['business'] if previous else self.selected_business_id
+        window = ctk.CTkToplevel(self)
+        window.title('Mandat · ' + business)
+        window.geometry('630x530')
+        panel = ctk.CTkFrame(window)
+        panel.pack(fill='both', expand=True, padx=16, pady=16)
+        self._line(panel, 'Les dépenses, secrets, sécurité, suppressions et engagements sensibles exigent une autorisation distincte.', COLORS['muted'])
+        self._line(panel, 'Nom du mandat', pady=(10, 2))
+        label = ctk.CTkEntry(panel)
+        label.pack(fill='x')
+        label.insert(0, previous['label'] if previous else 'Opérations commerciales')
+        self._line(panel, 'Périmètre', pady=(10, 2))
+        target = ctk.CTkOptionMenu(panel, values=['public_business', 'owned_account'])
+        target.set(previous['target'] if previous else 'public_business')
+        target.pack(anchor='w')
+        self._line(panel, 'public_business : contact professionnel public sans dépense.\nowned_account : comptes connectés explicitement ouverts à cette activité.', COLORS['muted'])
+        selected = set(json.loads(previous['effects'])) if previous else {'contact'}
+        checks = {}
+        for effect, title in [('read', 'Lire les comptes'), ('contact', 'Contacter / répondre'), ('publish', 'Publier'), ('edit', 'Modifier profils / contenus')]:
+            checks[effect] = ctk.BooleanVar(value=effect in selected)
+            ctk.CTkCheckBox(panel, text=title, variable=checks[effect]).pack(anchor='w', pady=4)
+        self._line(panel, 'Comptes : identifiants séparés par virgules ; * = comptes ouverts à cette activité', COLORS['muted'])
+        keys = ctk.CTkEntry(panel)
+        keys.insert(0, ','.join(json.loads(previous['resource_keys'])) if previous else '*')
+        keys.pack(fill='x')
+        def save():
+            try:
+                mandates.replace(business, previous['id'] if previous else None, label.get(), target.get(),
+                                 [e for e,v in checks.items() if v.get()], actor='human',
+                                 resource_keys=[k.strip() for k in keys.get().split(',') if k.strip()])
+                window.destroy()
+                self._load_snapshot()
+            except Exception as exc:
+                self._hub_error(exc)
+        self._secondary(panel, 'Accorder jusqu’à révocation', save)
+
+    def _open_account(self, key):
+        if self._readonly:
+            return
+        from octopus import resources
+        if not hasattr(self, '_human_connections'):
+            self._human_connections = {}
+        def work():
+            previous = self._human_connections.pop(key, None)
+            if previous:
+                previous.close()
+            self._human_connections[key] = resources.HumanConnection(key, actor='human')
+            return 'Navigateur ouvert. Terminez la connexion puis cliquez sur « J’ai terminé — vérifier ».'
+        self._hub_background(work)
+
+    def _verify_account(self, key):
+        if self._readonly:
+            return
+        def work():
+            connection = getattr(self, '_human_connections', {}).pop(key, None)
+            if not connection:
+                return 'Ouvrez la connexion avant de vérifier.'
+            try:
+                ok = connection.verify()
+            finally:
+                connection.close()
+            return 'Compte connecté. Accordez un mandat puis reprenez l’activité.' if ok else 'Session non constatée : reconnectez-vous.'
+        self._hub_background(work)
+
+    def _hub_background(self, work):
+        def run():
+            try:
+                message = work()
+                self._background_results.put(('v2_hub_done', message))
+            except Exception as exc:
+                self._background_results.put(('v2_hub_error', str(exc)))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _revoke_mandate(self, mandate):
+        if self._readonly:
+            return
+        from octopus import mandates
+        mandates.revoke(mandate['business'], mandate['id'], actor='human')
+        self._load_snapshot()
+
+    def _disable_account(self, key):
+        if self._readonly:
+            return
+        from octopus import resources
+        resources.disable_account(key, actor='human')
+        connection = getattr(self, '_human_connections', {}).pop(key, None)
+        if connection:
+            self._hub_background(lambda: (connection.close(), 'Compte désactivé.')[1])
+        self._load_snapshot()
+
+    def _decline_resource(self, request_id):
+        if self._readonly:
+            return
+        from octopus import tasks
+        tasks.answer(request_id, 'declined')
+        self._load_snapshot()
+
+    def destroy(self):
+        for connection in list(getattr(self, '_human_connections', {}).values()):
+            try:
+                connection.close()
+            except Exception:
+                pass
+        super().destroy()
 
     def _worker_label(self) -> str:
         if any(p.poll() is None and self.selected_business_id in (DEFAULT_BUSINESS_ID, business)
@@ -743,6 +970,14 @@ class WorkbenchV2(EntrepreneurialWorkbench):
                     self._reload_after_create = True
                 else:
                     self._load_snapshot()
+            elif kind == 'v2_hub_done':
+                self._set_status(result[1], COLORS['good'])
+                if self._snapshot_busy:
+                    self._reload_after_create = True
+                else:
+                    self._load_snapshot()
+            elif kind == 'v2_hub_error':
+                self._hub_error(result[1])
             elif kind == "v2_action_error":
                 self._creating = False
                 self._set_status(result[1][:110], COLORS["bad"])
