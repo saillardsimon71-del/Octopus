@@ -480,6 +480,10 @@ class WorkbenchV2(EntrepreneurialWorkbench):
                 from octopus import supervisor
                 from agents import procs
                 oid = supervisor.start_pursuit(goal, objective_id=objective_id, business=business)
+                if any(t["status"] == "waiting_human" for t in supervisor.work_tasks(business, oid)):
+                    self._background_results.put(("v2_action_error",
+                        "Reprise suspendue : une réponse est attendue dans Humain. Aucune permission supplémentaire accordée."))
+                    return
                 proc, log = procs.spawn(["pursue", "--business", business, "--objective", str(oid)], "octopus", module="octopus")
                 self._pursuit_processes.append((business, proc))
                 self._background_results.put(("v2_created", oid))
