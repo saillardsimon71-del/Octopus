@@ -1,5 +1,27 @@
 # État actuel OCTOPUS - 2026-10-01
 
+## Écarts de capacité et acquisition bornée
+
+Une stratégie économiquement retenue qui exige une capacité absente ne s'arrête plus et n'est plus
+remplacée par une stratégie moins pertinente déjà exécutable. `octopus/capability_acquisition.py`
+recalcule l'inventaire depuis les registres réels (`agents.runtime.TOOLS`,
+`actions.registered_executors`, `octopus.resources` et ses sondes, politique du caller), produit les
+écarts, des options d'acquisition déterministes, leur coût/risque/valeur et une décision
+(`acquire`, `defer`, `reject`, `human_required`), puis persiste l'étude comme preuve calculée liée à
+l'hypothèse. Aucune nouvelle table, aucune migration, aucun second registre ; `capabilities.py`
+reste gelé et `strategy_separation.py` (#116) inchangé.
+
+CAPABLE ≠ AUTORISÉ : une capacité confirmée hors de l'ensemble autorisé reste non exécutable, et ce
+module n'élargit aucune permission, ne dépense rien et n'exécute aucun effet externe. L'étude lancée
+par `pursuit` n'ouvre aucune demande humaine et ne met rien en file ; une acquisition est un acte
+explicite (`python -m octopus capability acquire …`) exécuté par la tâche durable
+`capability.acquire`, rejouable après crash, et une capacité n'est confirmée que par une source
+déterministe — jamais par une déclaration de modèle ni de constructeur.
+
+Aucun connecteur réel n'est construit : `phone_call`, `sms_send`, `payment_receive` et les autres
+restent absents, avec leurs exigences, leurs coûts estimés et leur frontière humaine nommés.
+Détail, tests et limites : [CAPABILITY_ACQUISITION_2026-10-01.md](CAPABILITY_ACQUISITION_2026-10-01.md).
+
 ## Réalignement Foundation et démarrage neutre
 
 La référence normative est désormais [FOUNDATION.md](FOUNDATION.md), texte

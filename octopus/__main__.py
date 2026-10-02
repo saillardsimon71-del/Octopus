@@ -15,6 +15,7 @@
   python -m octopus schedule octopus octopus.cost_report --every 86400 [--disable]
   python -m octopus events [--since ID]
   python -m octopus strategy add|list|show|move|link|mission|review|snapshot ...
+  python -m octopus capability state|gaps|validate|acquire ...   # écarts de capacité et acquisition
 """
 from __future__ import annotations
 
@@ -371,6 +372,58 @@ def cmd_resources(args) -> int:
     return 0
 
 
+def cmd_capability(args) -> int:
+    """Écarts de capacité et acquisition bornée : ce qui manque, ce que cela exigerait, ce que cela vaut.
+
+    Lecture seule par défaut : `state`, `gaps` et `validate` recalculent l'inventaire depuis les
+    registres réels. `acquire` met en file une acquisition déjà décidée par une étude persistée ;
+    il n'élargit aucune permission, ne dépense rien et n'exécute aucun effet externe.
+    """
+    from . import capability_acquisition as acquisition, supervisor
+    action = args.capability_cmd or "state"
+    if action == "acquire" and os.environ.get("OCTOPUS_WORKBENCH_READONLY") == "1":
+        raise PermissionError("Mode consultation : acquisition désactivée")
+    allowed = ({item.strip() for item in args.allowed.split(",") if item.strip()} if args.allowed is not None
+               else set(supervisor.PURSUIT_TOOLS))
+    if action == "state":
+        names = args.capability or sorted(acquisition.CAPABILITY_TARGETS)
+        snapshot = acquisition.snapshot(names, allowed_execution=allowed, business=args.business)
+        if args.json:
+            print(json.dumps(snapshot, ensure_ascii=False, indent=1, default=str))
+            return 0
+        for item in snapshot["capabilities"]:
+            print(f"{item['capability']:22} {item['effective_state']:28} capable {str(item['capable']):5} "
+                  f"autorisé {str(item['authorized']):5} acquisition {item['acquisition_state']}"
+                  + (" ; acquisition périmée" if item["stale_acquisition"] else ""))
+        print(f"autorité : {snapshot['authority']} ; inventaire recalculé, jamais mémorisé")
+        return 0
+    if action == "gaps":
+        records = acquisition.recorded(args.business, args.objective)
+        if not records:
+            print("aucune étude d'acquisition persistée pour cet objectif")
+            return 0
+        for record in records:
+            print(acquisition.render(record))
+        return 0
+    if action == "validate":
+        result = acquisition.validate(args.capability, probe=args.probe)
+        print(json.dumps(result, ensure_ascii=False, indent=1, default=str))
+        return 0 if result["capable"] else 2
+    if action == "acquire":
+        record = acquisition.latest_for_capability(args.business, args.capability,
+                                                   objective_id=args.objective)
+        if record is None:
+            print(f"aucune étude persistée pour {args.capability} : aucune acquisition inventée")
+            return 2
+        started = acquisition.start_acquisition(args.business, args.capability, record, requested_by=args.by,
+                                                objective_id=args.objective, hypothesis_id=args.hypothesis)
+        print(json.dumps(started, ensure_ascii=False, indent=1))
+        if started["status"] == "queued":
+            print(f"tâche #{started['task_id']} en file : lancer un worker, puis « octopus capability validate »")
+        return 0 if started["status"] == "queued" else 2
+    return 2
+
+
 def cmd_browser(args) -> int:
     """Espace de travail navigateur (backend Hermes agent-browser) : diagnostic et tranche humaine."""
     from . import browser_workspace
@@ -499,6 +552,28 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("businesses", help="tableau de bord par activite")
     p.add_argument("--days", type=int, default=7)
+    p = sub.add_parser("capability", help="écarts de capacité, options d'acquisition et validation")
+    csub = p.add_subparsers(dest="capability_cmd", required=True)
+    st = csub.add_parser("state", help="inventaire recalculé : capable, autorisé, acquisition")
+    st.add_argument("capability", nargs="*", default=None, help="identifiants (défaut : capacités connues)")
+    st.add_argument("--business", default=None, help="relit aussi l'état d'acquisition persisté")
+    st.add_argument("--allowed", default=None,
+                    help="ensemble autorisé séparé par des virgules (défaut : outils de pursuit)")
+    st.add_argument("--json", action="store_true")
+    gp = csub.add_parser("gaps", help="études d'acquisition persistées d'un objectif")
+    gp.add_argument("business")
+    gp.add_argument("--objective", type=int, required=True)
+    va = csub.add_parser("validate", help="validation déterministe d'une capacité (exit 2 si absente)")
+    va.add_argument("capability")
+    va.add_argument("--probe", action="store_true", help="passe aussi les sondes des ressources déclarées")
+    ac = csub.add_parser("acquire", help="met en file une acquisition déjà décidée (idempotent)")
+    ac.add_argument("business")
+    ac.add_argument("capability")
+    ac.add_argument("--objective", type=int, default=None)
+    ac.add_argument("--hypothesis", type=int, default=None)
+    ac.add_argument("--by", default="human")
+    p.set_defaults(capability=None, business=None, allowed=None, json=False, probe=False, objective=None,
+                   hypothesis=None, by="human")
     p = sub.add_parser("browser", help="espace de travail navigateur (backend Hermes agent-browser)")
     bsub = p.add_subparsers(dest="browser_cmd", required=True)
     x = bsub.add_parser("doctor", help="backend installé ? (--smoke : ouvre une vraie page locale)")
@@ -531,7 +606,7 @@ def main(argv: list[str] | None = None) -> int:
                 "ask": cmd_ask, "answer": cmd_answer, "schedule": cmd_schedule, "events": cmd_events,
                 "businesses": cmd_businesses, "strategy": strategy_cli.run,
                 "economy": strategy_cli.run_economy, "resources": cmd_resources,
-                "browser": cmd_browser}
+                "capability": cmd_capability, "browser": cmd_browser}
     return commands[args.cmd](args)
 
 
