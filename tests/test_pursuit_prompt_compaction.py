@@ -43,19 +43,17 @@ def test_cold_prompt_projection_and_unchanged_execution_limits():
         "browser_navigate", "browser_snapshot", "browser_scroll", "browser_back"})
     calls = {call["task"]: call["messages"] for call in captured["calls"]}
     planner = calls["planification"][0]["content"]
-    assert "à exécuter maintenant" in planner
-    assert "pas les marchés, offres ou stratégies" in planner
-    assert "quoi observer ou analyser et pourquoi économiquement" in planner
-    assert "sans preuve commerciale préalable" in planner
+    assert "au plus 6 étapes" in planner
+    assert "pas les stratégies envisageables" in planner
     assert calls["action"][1]["content"].startswith("Objectif : " + TASK)
-    assert "MODE BUSINESS SIGNAL" in calls["action"][1]["content"]
-    assert goal not in calls["action"][1]["content"]  # No new context propagation.
+    assert "Pistes économiques facultatives" in calls["action"][1]["content"]
+    assert goal not in calls["action"][1]["content"]
     synthesis = calls["determination"][0]["content"]
-    assert "Continue si une observation gratuite permise" in synthesis
-    assert "Pause si aucune exploration admissible et économiquement utile" in synthesis
-    assert "Une proposition stratégique n'est pas une action externe" in synthesis
-    for field in ("hypothesis", "strategies", "required_capabilities", "next_goal", "request_permission"):
+    assert "Choisis de poursuivre ou de faire une pause" in synthesis
+    assert "Une proposition stratégique peut nécessiter des moyens absents" in synthesis
+    for field in ("strategies", "required_capabilities", "next_goal", "request_permission"):
         assert field in synthesis
+    assert "cash_received" not in synthesis and "buyer_evidence" not in synthesis
     assert captured["result"]["determination"]["action"] == "continue"
     assert metrics(captured)["provider_calls"] == 0
 

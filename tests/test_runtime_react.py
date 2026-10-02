@@ -344,7 +344,7 @@ def test_business_signal_focus_upgrades_evidence_selector_for_subagents(monkeypa
     )
 
     assert result["synthesis_status"] == "validated"
-    assert seen == ["business_signal_relevance"]
+    assert seen == ["evidence_relevance"]
 
 def test_lockstep_can_force_later_relevant_result(monkeypatch):
     seen_browse = []
@@ -615,65 +615,25 @@ def test_mission_planner_receives_generic_role_contracts(monkeypatch):
     system = planner_messages[0]["content"]
     for role, description in runtime.GENERIC_ROLES.items():
         assert f"- {role}: {description}" in system
-    assert "workers interchangeables" in system
-    assert "Un même rôle peut recevoir plusieurs sous-tâches distinctes" in system
     assert "au plus 5 étapes" in system
-    assert "artefacts utiles des étapes amont" in system
-    assert "transmis automatiquement" in system
+    assert "résultats utiles seront transmis" in system
     assert "DATE ACTUELLE : 2026-09-24" in system
     assert "privilégie" not in system
     assert runtime.ROLES["FORGE"] not in system
 
 
 
-def test_business_signal_contract_states_objectives_not_search_procedure():
-    """Le contrat dit QUOI chercher, jamais COMMENT formuler une requête.
-
-    Ces assertions protègent la frontière : un prompt qui réapprend à chercher au LLM
-    (nombre de termes, année, `site:`, guillemets, séquence de reformulation) est une
-    régression d'architecture, pas une amélioration.
-    """
+def test_candidate_contract_is_provenance_not_a_business_theory():
     contract = runtime._business_signal_contract(3)
-
-    # Critères de résultat conservés.
-    assert "acteur économique/segment identifiable" in contract
-    assert "utilisateur et payeur peuvent différer" in contract
-    assert "signal monétaire ou d'urgence" in contract
-    assert "canal réaliste" in contract
-    assert "prochain test faisable rapidement" in contract
-    assert "extraits littéraux de 8 à 600 caractères" in contract
-    assert "revue humaine nécessaire" in contract
-    assert "Distingue ce que tu observes de ce que tu infères" in contract
-    assert "Seuil minimal visé : 3 signaux qualifiés" in contract
-
-    # Micro-management cognitif interdit.
-    for prescription in (
-        "2 à 5 termes",           # longueur de requête
-        "budget",                 # mot imposé / interdit
-        "année courante",         # année ajoutée ou retirée
-        "deuxième intention",     # quand utiliser site:
-        "guillemets",             # ponctuation de requête
-        "retire site",            # séquence conditionnelle de reformulation
-        "change d'angle",         # séquence conditionnelle de reformulation
-        "SEARCH découvre",        # séquence cognitive figée
-        "commence par une requête",
-        "élargis immédiatement",
-        "concentre la découverte web chez SOUT",
-    ):
-        assert prescription not in contract, f"prescription de recherche reintroduite : {prescription}"
+    assert contract == runtime._business_signal_contract(999)
+    for phrase in ("inférences et hypothèses", "réellement acquise", "extrait fourni doit être littéral", "plusieurs sources"):
+        assert phrase in contract
+    for phrase in ("buyer", "pain", "money_signal", "Seuil", "À REJETER", "site:", "signaux qualifiés"):
+        assert phrase not in contract
 
 
-def test_business_signal_task_context_separates_discovery_from_downstream_analysis():
-    sout = runtime._business_signal_task_context(3, "SOUT")
-    convert = runtime._business_signal_task_context(3, "CONVERT")
-
-    assert "TON RÔLE ICI : découverte" in sout
-    assert "TON RÔLE ICI (CONVERT) : exploitation des preuves amont" in convert
-    # Le rappel porte sur la réutilisation des artefacts, pas sur une méthode de recherche.
-    assert "Réutilise d'abord" in convert
-    assert "ne recherche que ce qui manque réellement" in convert
-    for prescription in ("2 à 5 termes", "année", "site:", "guillemets"):
-        assert prescription not in sout + convert
+def test_task_contract_does_not_impose_collection_roles():
+    assert runtime._business_signal_task_context(3, "SOUT") == runtime._business_signal_task_context(3, "CONVERT")
 
 
 def _acquired_signal_step(requested, final, text):
@@ -724,11 +684,10 @@ def test_business_signal_gate_rejects_generic_and_unopened_candidates():
         results,
     )
 
-    assert accepted == [{**strong, "action_fields_nature": "inferred",
-                         "evidence_acquisition": {"final_url": opened,
-                                                  "fetched_at": "2026-09-24T00:00:00+00:00"}}]
+    assert len(accepted) == 2
+    assert all(item["nature"] == "inferred" for item in accepted)
     reasons = [reason for item in rejected for reason in item["reasons"]]
-    assert "unsupported_signal_type" in reasons
+    assert "unsupported_signal_type" not in reasons
     assert "evidence_url_not_opened" in reasons
 
 
@@ -850,18 +809,18 @@ def test_business_signal_focus_reaches_planner_agent_and_synthesis(monkeypatch):
     assert result["business_signal_rejections"] == []
 
     planner = next(messages for _, task, messages in calls if task == "planification")
-    assert "MODE BUSINESS SIGNAL" in planner[0]["content"]
-    assert "À REJETER" in planner[0]["content"]
+    assert "Pistes économiques facultatives" in planner[0]["content"]
+    assert "À REJETER" not in planner[0]["content"]
 
     action_messages = next(messages for _, task, messages in calls if task == "action")
-    assert "MODE BUSINESS SIGNAL" in action_messages[1]["content"]
-    assert "acteur économique/segment identifiable" in action_messages[1]["content"]
+    assert "Pistes économiques facultatives" in action_messages[1]["content"]
+    assert "réellement acquise" in action_messages[1]["content"]
 
     synthesis = next(messages for _, task, messages in calls if task == "synthese")
     assert "business_signals" in synthesis[0]["content"]
     # La synthèse reçoit le contrat lui-même (source unique), pas une recopie de ses critères.
-    assert "acteur économique/segment identifiable" in synthesis[0]["content"]
-    assert "À REJETER" in synthesis[0]["content"]
+    assert "réellement acquise" in synthesis[0]["content"]
+    assert "aucun type ni nombre" in synthesis[0]["content"]
 
 
 def test_mission_handoff_keeps_upstream_artifacts_when_agent_hits_max_steps(monkeypatch):
@@ -1200,7 +1159,7 @@ def test_mission_synthesis_receives_original_goal_constraints(monkeypatch):
     payload = json.loads(synthesis_messages[1]["content"])
     assert payload["objectif_original"] == goal
     assert payload["resultats_sous_taches"][0]["final"] == "aucune preuve suffisante"
-    assert "Respecte aussi toutes les contraintes de l'objectif original" in synthesis_messages[0]["content"]
+    assert "Réponds à l’objectif fourni" in synthesis_messages[0]["content"]
 
 
 def test_mission_keeps_subagent_results_when_synthesis_gateway_fails(monkeypatch):

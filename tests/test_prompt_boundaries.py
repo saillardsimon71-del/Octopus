@@ -197,23 +197,11 @@ def test_business_system_prompt_has_no_search_prescription(monkeypatch, prescrip
     assert prescription not in system, f"prescription de recherche reintroduite : {prescription}"
 
 
-def test_business_prompt_keeps_the_objective_and_result_criteria():
-    """Supprimer le micro-management ne supprime pas l'objectif économique."""
-    task = runtime._business_signal_task_context(3, "SOUT")
-
-    for criterion in (
-        "acteur économique/segment identifiable",
-        "besoin, une activité, une obligation ou demande concrète",
-        "source réellement ouverte pendant cette mission",
-        "signal monétaire ou d'urgence",
-        "canal réaliste",
-        "offre minimale et un prochain test",
-    ):
-        assert criterion in task
-    # La liberté de recherche est explicite.
-    assert "Cherche librement" in task
-    assert "adapte ton approche aux résultats" in task
-    assert "n'invente aucune preuve" in task
+def test_business_prompt_keeps_truth_without_prescribing_opportunity_dimensions():
+    contract = runtime._business_signal_contract(3)
+    assert "réellement acquise" in contract and "inférences et hypothèses" in contract
+    for required in ("buyer", "pain", "money_signal", "Seuil", "À REJETER"):
+        assert required not in contract
 
 
 def test_business_prompt_stays_small():
@@ -308,7 +296,7 @@ def test_evidence_gate_still_fails_closed():
     ]}]
     split = signal(summary_evidence="Autre page totalement différente")
     accepted, rejected = runtime._qualify_business_signals([split], other)
-    assert accepted == [] and "quotes_not_in_same_acquisition" in rejected[0]["reasons"]
+    assert accepted == [] and "quote_not_in_source" in rejected[0]["reasons"]
 
     # Provenance calculée depuis l'outil, jamais depuis un champ proposé par le LLM.
     accepted, _ = runtime._qualify_business_signals([signal()], results)

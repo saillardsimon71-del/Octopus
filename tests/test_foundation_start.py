@@ -94,7 +94,8 @@ def test_free_mission_and_bounded_reevaluation_keep_previous_observations(monkey
     oid = supervisor.start_pursuit("Étudie une possibilité économique sans utiliser de génération vidéo.")
     supervisor.run_pursuit(oid)
     assert len(goals) == 3
-    assert "Hypothèse à vérifier" in goals[1]
+    assert "Comparer les observations" in goals[1]
+    assert supervisor.work_tasks("octopus", oid)[0]["output"]["rapport"].startswith("Hypothèse à vérifier")
     assert "Vérifier une autre source" in goals[1]
     assert strategy.get("objective", oid, "octopus")["created_by"] == "human"
     assert strategy.get("objective", oid, "octopus")["status"] == "paused"

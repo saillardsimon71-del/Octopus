@@ -385,7 +385,9 @@ def orbit_mission(ctx):
         "execution_status": result.get("execution_status", "unknown"),
         "opportunity_status": (
             "source_supported" if signal_focus and synthesis_status == "validated"
-            and result.get("business_signals") else "inconclusive" if signal_focus else "not_evaluated"
+            and any(item.get("sources") for item in result.get("business_signals") or [])
+            else "hypotheses_only" if signal_focus and result.get("business_signals")
+            else "inconclusive" if signal_focus else "not_evaluated"
         ),
     }
     objective_result = _mission_objective_result(
@@ -398,40 +400,20 @@ def orbit_mission(ctx):
         # Keep the acquired text behind the citations in the durable task output,
         # including successful runs; the compact trace is only a diagnostic view.
         output["results"] = result.get("results") or []
-        target = max(1, int(ctx.input.get("business_signal_target", 3)))
         signals = result.get("business_signals") or []
         rejected = result.get("business_signal_rejections") or []
         output["business_signals"] = signals
         output["business_signal_rejections"] = rejected
         output["business_signal_result"] = {
-            "metric": "qualified_business_signal_count",
-            "observed": len(signals),
-            "minimum_target": target,
-            "success": len(signals) >= target,
-            "rejected": len(rejected),
-            "scope": "acquired_text_gate",
+            "metric": "source_linked_candidate_count",
+            "observed": sum(bool(item.get("sources")) for item in signals),
+            "rejected": len(rejected), "scope": "provenance_only",
             "evaluation_status": "evaluated" if synthesis_status == "validated" else "unavailable",
-            "note": (
-                "success signifie uniquement que le seuil de signaux structurellement soutenus par une acquisition "
-                "et des citations présentes dans son texte est atteint. La présence littérale ne valide pas "
-                "l'interprétation de buyer/pain/money_signal/evidence_summary : revue humaine nécessaire. "
-                "Ce n'est pas une preuve de demande, de conversion ni de revenu. "
-                "test_channel/test_offer/next_test restent des inférences. rejected compte les propositions "
-                "refusées, pas les pages examinées ; zéro peut signifier aucune proposition. "
-                "synthesis_status=validated conserve son sens technique, pas une validation des faits."
-            ),
+            "note": "Comptage de provenance uniquement, sans seuil ni qualification économique. "
+                    "Les analyses restent des inférences, les idées sans sources des hypothèses ; "
+                    "aucune demande, actionnabilité ni recette n'est prouvée.",
         }
-        # Couche de MESURE après #94, exposée séparément : le gate structurel ci-dessus
-        # conserve exactement qualified_business_signal_count. business_signal_reviews
-        # rapporte, pour chaque signal structurellement valide, la lecture indépendante
-        # de son actionnabilité ; actionable_business_signal_count ne compte que les
-        # revues classées actionable_now. Si la revue est dégradée, la classification
-        # reste nulle : rien n'est inventé pour préserver le comptage.
-        output["business_signal_reviews"] = result.get("business_signal_reviews") or []
-        output["actionable_business_signal_count"] = int(
-            result.get("actionable_business_signal_count") or 0)
-        output["business_signal_review_status"] = result.get(
-            "business_signal_review_status", "unavailable")
+        output["business_signal_review_status"] = "not_requested"
     flags = {}
     if ctx.input.get("search_browse_lockstep"):
         flags.update({
@@ -441,7 +423,6 @@ def orbit_mission(ctx):
     if ctx.input.get("business_signal_focus"):
         flags.update({
             "business_signal_focus": True,
-            "business_signal_target": max(1, int(ctx.input.get("business_signal_target", 3))),
         })
     if flags:
         output["experiment_flags"] = flags

@@ -191,7 +191,7 @@ def normalize_proposals(value) -> list[dict]:
             continue
         statement = _text(raw.get("statement"), 1000)
         justification = _text(raw.get("economic_justification"), 900)
-        if not statement or strategy._mentions_legacy_business(statement, justification):
+        if not statement:
             continue
         key = strategy._hypothesis_key(statement)
         if not key or key in seen:
@@ -416,7 +416,8 @@ def reconsider_proposals(business: str, objective_id: int, task_id: int, proposa
                                                 available_evidence_ids=allowed_ids)
 
 
-def assess(proposals, inventory: Inventory, *, economically_invalidated: set[str] | None = None) -> dict:
+def assess(proposals, inventory: Inventory, *, economically_invalidated: set[str] | None = None,
+           observation_only: bool = False) -> dict:
     """Classe par valeur économique, puis annote l'exécutabilité sans réordonner."""
     invalidated = set(economically_invalidated or ())
     considered = []
@@ -429,7 +430,11 @@ def assess(proposals, inventory: Inventory, *, economically_invalidated: set[str
             item["may_execute"] = False
             item["strategic_state"] = "invalidated"
         considered.append(item)
-    considered.sort(key=_economic_sort_key)
+    if observation_only:
+        # Observer n'est pas engager : ordre du modèle, jamais priorité de critères codée.
+        considered.sort(key=lambda item: item["economic_rank"] if item["economic_rank"] is not None else 10**6)
+    else:
+        considered.sort(key=_economic_sort_key)
     retained = next((item for item in considered if not item["economically_invalidated"]), None)
     for item in considered:
         if item["economically_invalidated"]:
@@ -508,8 +513,7 @@ def apply_pursuit_choice(choice, action, reason, permission, assessment, *,
                              r"(?:n'est pas installée?|est absente?|est indisponible|manque)\.?",
                              str(new_permission or "").strip(), re.IGNORECASE)):
         new_permission = None
-    if (not retained and assessment.get("considered") and not execution_boundary and not new_permission
-            and (not observation_only or normalize_proposals((choice or {}).get("strategies")))):
+    if (not observation_only and not retained and assessment.get("considered") and not execution_boundary and not new_permission):
         # Une proposition actuelle réfutée reste bloquée ; l'historique seul ne ferme
         # pas toute recherche indépendante encore sans proposition.
         new_action, new_goal = "pause", ""
@@ -751,8 +755,6 @@ def _payload(row) -> dict | None:
     except (TypeError, ValueError):
         return None
     if not isinstance(payload, dict) or payload.get("schema") != SCHEMA:
-        return None
-    if strategy._mentions_legacy_business(payload.get("statement"), payload.get("economic_justification")):
         return None
     payload = dict(payload)
     payload["hypothesis_status"] = row["hypothesis_status"]

@@ -320,7 +320,7 @@ def test_invalidated_hypothesis_is_blocked_but_new_explicit_proof_allows_reconsi
     def repeated(goal, **kwargs):
         state = _state_from_goal(goal)
         calls.append(state)
-        assert state["hypothèses_invalidées_à_ne_pas_répéter_sans_preuve_nouvelle"][0]["hypothesis_id"] == old_id
+        assert state["hypothèses_invalidées"][0]["hypothesis_id"] == old_id
         return _runtime_result(
             "continue", next_goal=old["statement"],
             hypothesis={"statement": old["statement"], "evidence_ids": [evaluation_id]})
@@ -329,9 +329,9 @@ def test_invalidated_hypothesis_is_blocked_but_new_explicit_proof_allows_reconsi
     pursuit_id = supervisor.start_pursuit("Comparer une autre hypothèse")
     supervisor.run_pursuit(pursuit_id)
     first = supervisor.work_tasks(BUSINESS, pursuit_id)[0]
-    assert first["output"]["decision"] == "pause"
+    assert first["output"]["decision"] == "continue"
     assert first["output"]["strategy_hypothesis"]["status"] == "blocked_repetition"
-    assert "déjà invalidée" in first["output"]["reason"]
+    assert strategy.get("hypothesis", old_id, BUSINESS)["status"] == "invalidated"
     assert not strategy.list_items("hypothesis", BUSINESS, parent_id=pursuit_id)
 
     # Nouvelle preuve réellement datée et explicitement reliée à l'hypothèse invalidée.

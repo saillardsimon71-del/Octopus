@@ -249,14 +249,9 @@ def test_registry_remains_the_authority_and_permissions_are_not_expanded():
     assert "STRATÉGIE ET CAPACITÉS SONT DISTINCTES" not in foundation
 
 
-def test_sitequivend_cannot_enter_as_a_strategy():
-    assessed = separation.assess(
-        [{"statement": "Repartir de SiteQuiVend pour encaisser.", "economic_criteria": ["cash_received"],
-          "economic_rank": 1, "required_capabilities": ["search"]},
-         {"statement": PHONE, "economic_criteria": ["margin"], "required_capabilities": ["phone_call"]}],
-        phone_email())
-    assert assessed["retained"]["statement"] == PHONE
-    assert all("sitequivend" not in item["statement"].casefold() for item in assessed["considered"])
+def test_a_name_cannot_veto_a_new_strategy():
+    assessed = separation.assess([{"statement": "Repartir de SiteQuiVend pour encaisser.", "required_capabilities": ["search"]}], phone_email())
+    assert assessed["retained"]["statement"].startswith("Repartir de SiteQuiVend")
 
 
 def test_malformed_strategies_do_not_invalidate_the_determination():
@@ -355,7 +350,7 @@ def _pursuit_result(action="continue", *, next_goal=EMAIL, permission=""):
             "execution_status": "completed", "synthesis_status": "validated",
             "determination": {"action": action, "reason": "Le téléphone est meilleur, mais comme l'outil manque j'envoie un email.",
                               "next_goal": next_goal, "permission": permission,
-                              "strategies": proposals(email_capability="search")}}
+                              "strategies": proposals(phone_rank=1, email_rank=2, email_capability="search"), "intent": "validation"}}
 
 
 def test_pursuit_keeps_the_better_missing_strategy_and_does_not_substitute(monkeypatch):
@@ -522,8 +517,8 @@ def test_determination_prompt_states_the_separation(monkeypatch):
     monkeypatch.setattr(runtime.deepseek, "call_json", call_json)
     result = runtime._run_mission("objectif", 2, determination=True)
     synthesis = next(text for task, text in prompts if task == "determination")
-    assert "Une proposition stratégique n'est pas une action externe" in synthesis
-    assert "indépendamment des outils disponibles" in synthesis
+    assert "Une proposition stratégique peut nécessiter des moyens absents" in synthesis
+    assert "sans affirmer leur disponibilité" in synthesis
     assert "required_capabilities" in synthesis
     stored = result["determination"]["strategies"][0]
     assert stored["required_capabilities"] == ["phone_call"]
@@ -631,7 +626,7 @@ def test_missing_winner_is_not_lost_when_model_omits_it_on_the_next_cycle(monkey
 
 
 def test_refuted_strategies_cannot_continue_via_an_uncompared_next_goal(monkeypatch):
-    _refuted(PHONE)
+    old_id = _refuted(PHONE)
     monkeypatch.setattr(octopus, "enabled", lambda: True)
     def offline(*args, **kwargs):
         result = _pursuit_result(next_goal="Refaire cette campagne sous une autre formulation")
@@ -640,7 +635,11 @@ def test_refuted_strategies_cannot_continue_via_an_uncompared_next_goal(monkeypa
     monkeypatch.setattr(runtime, "run_mission", offline)
     oid = supervisor.start_pursuit("Respecter la réfutation")
     supervisor.run_pursuit(oid)
-    assert supervisor.work_tasks(BUSINESS, oid)[0]["output"]["decision"] == "pause"
+    work = supervisor.work_tasks(BUSINESS, oid)
+    assert work[0]["output"]["decision"] == "continue"
+    assert work[0]["output"]["strategy_assessment"]["retained"] is None
+    assert work[0]["output"]["strategy_execution"]["triggered"] is False
+    assert strategy.get("hypothesis", old_id, BUSINESS)["status"] == "invalidated"
 
 
 def test_strategy_list_does_not_disable_new_proof_reconsideration(monkeypatch):
@@ -826,7 +825,7 @@ def test_contradictory_unverified_or_unlinked_proof_cannot_rescue_a_refuted_stra
     oid = supervisor.start_pursuit('Ne pas contourner la leçon')
     supervisor.run_pursuit(oid)
     first = supervisor.work_tasks(BUSINESS, oid)[0]['output']
-    assert first['decision'] == 'pause'
+    assert first['decision'] == 'continue'
     assert first['strategy_assessment']['retained'] is None
     assert strategy.get('hypothesis', old_id, BUSINESS)['status'] == 'invalidated'
     assert [dict(r) for r in journal.query('SELECT * FROM strategy_reviews')] == before

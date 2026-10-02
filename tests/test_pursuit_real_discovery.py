@@ -121,7 +121,7 @@ class Script:
                     answer["determination"]["strategies"] = proposals()
             if self.cycle and self.mission == 1:
                 answer["determination"] = {**determination("continue", "Observer une preuve d'achat sur la piste sélectionnée"),
-                                           "strategies": proposals()}
+                                           "strategies": proposals(), "intent": "validation"}
             if self.cycle and self.mission == 2:
                 answer["determination"] = determination(reason="Fenêtre locale épuisée ; information marginale faible")
         elif limit == 1000:
@@ -161,21 +161,19 @@ def seed_anchor(monkeypatch):
     return oid, supervisor.work_tasks("octopus", oid)[0]
 
 
-def test_1_cold_discovery_uses_multiple_real_lanes_and_one_replan(monkeypatch, transport, providers_up):
-    script = Script(monkeypatch, transport, single_plan=True)
+def test_1_cold_discovery_executes_the_model_plan_without_forced_replan(monkeypatch, transport, providers_up):
+    script = Script(monkeypatch, transport)
     oid = supervisor.start_pursuit()
     supervisor.run_pursuit(oid)
     output = supervisor.work_tasks("octopus", oid)[0]["output"]
     assert script.acquisitions == ["service", "audience"]
-    assert sum(r["max_tokens"] == 700 for r in script.calls) == 2
+    assert sum(r["max_tokens"] == 700 for r in script.calls) == 1
+    assert not any(r["max_tokens"] == 1000 for r in script.calls)
+    # Only acquired references are accepted; the fixture proposes two freely.
     assert len(output["business_signals"]) == 2
-    assert len(output["business_signal_reviews"]) == 2
     assert len(output["strategy_assessment"]["considered"]) == 2
     assert all(purpose == search.SEARCH_PURPOSE_BUSINESS for _, purpose in script.searches)
-    synthesis = next(r for r in script.calls if r["max_tokens"] == 1600)
-    assert 'Ajoute business_signals' in synthesis["messages"][0]["content"]
-    assert 'exactement la forme' not in synthesis["messages"][0]["content"]
-    assert read_snapshot()["token_cost_usd"] == pytest.approx(.011)
+    assert read_snapshot()["token_cost_usd"] == pytest.approx(.008)
     assert all(work["status"] == "done" for work in supervisor.work_tasks("octopus", oid))
     no_effects()
 
@@ -186,8 +184,8 @@ def test_2_niche_history_projection_is_compact_and_attributed(tmp_path):
                             check=True, capture_output=True, text=True)
     metrics = json.loads(result.stdout)
     assert metrics["goal_chars"] < 3500 and metrics["niche_mentions"] <= 10
-    assert metrics["niche_field_chars"] / metrics["goal_chars"] < .3
-    assert metrics["business_signal_focus"] is True and metrics["business_signal_target"] == 2
+    assert metrics["niche_field_chars"] < 800  # Absolute context bound, not a prompt-padding ratio.
+    assert metrics["business_signal_focus"] is True and metrics["business_signal_target"] is None
     captured = json.loads((tmp_path/"capture/capture.json").read_text())
     assert "conclusion_modèle_non_preuve" in captured["goal"]
     assert metrics["provider_calls"] == 0 and metrics["quality_benchmark"] is False
@@ -245,7 +243,7 @@ def test_8_useful_a_continues_after_round_bound_without_forced_discovery(monkeyp
     def useful(goal, **kwargs):
         calls.append((json.loads(goal.rsplit("\n", 1)[-1]), kwargs))
         return {"rapport": "Observation ciblée informative", "execution_status": "completed", "results": [],
-                "determination": determination("continue", "Observer la nouvelle demande acheteur sur A", "Une observation utile reste disponible")}
+                "determination": {**determination("continue", "Observer la nouvelle demande acheteur sur A", "Une observation utile reste disponible"), "intent": "validation"}}
     monkeypatch.setattr(runtime, "run_mission", useful)
     oid = supervisor.start_pursuit()
     supervisor.run_pursuit(oid)
@@ -258,19 +256,15 @@ def test_8_useful_a_continues_after_round_bound_without_forced_discovery(monkeyp
     no_effects()
 
 
-def test_9_local_validation_pause_returns_discovery_within_same_budget(monkeypatch, transport, providers_up):
+def test_9_local_validation_pause_does_not_force_a_new_discovery_cycle(monkeypatch, transport, providers_up):
     script = Script(monkeypatch, transport, cycle=True)
     oid = supervisor.start_pursuit()
     supervisor.run_pursuit(oid)
     work = supervisor.work_tasks("octopus", oid)
-    assert [s["intention"] for s in script.states] == ["discovery", "validation", "discovery"]
-    assert len(script.states[1]["travail_précédent"]["business_signals"]) == 2
-    assert work[1]["output"]["determination"]["action"] == "pause"
-    assert work[1]["output"]["decision"] == "continue"
-    assert work[1]["output"]["next_pursuit_intent"] == "discovery"
-    assert "local" in script.states[2]["travail_précédent"]["conclusion_modèle_non_preuve"]
+    assert [state["intention"] for state in script.states] == ["discovery", "validation"]
+    assert len(work[1]["output"]["results"]) == 1
+    assert work[1]["output"]["decision"] == "pause" and len(work) == 2
     assert all(w["input"]["llm_cap_usd"] == .20 for w in work)
-    assert work[-1]["output"]["decision"] == "pause" and len(work) == 3
     assert read_snapshot()["token_cost_usd"] < .20
     no_effects()
 
@@ -319,7 +313,7 @@ def test_discovery_recovery_after_all_sources_does_not_recollect(monkeypatch, tr
     supervisor.start_pursuit(objective_id=oid)
     supervisor.run_pursuit(oid)
     assert script.acquisitions == sources == ["service", "audience"]
-    assert [r["max_tokens"] for r in script.calls[requests:]] == [1600, 1000, 1000]
+    assert [r["max_tokens"] for r in script.calls[requests:]] == [1600]
     latest = supervisor.work_tasks("octopus", oid)[-1]
     assert latest["output"]["results"] == checkpoint["results"]
     assert latest["output"]["resumed_collection"] is True

@@ -347,12 +347,6 @@ def _hypothesis_key(value: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[\W_]+", " ", str(value or "").casefold(), flags=re.UNICODE)).strip()
 
 
-def _mentions_legacy_business(*values: str | None) -> bool:
-    """SiteQuiVend n'est pas une preuve ou un point de départ pour pursuit."""
-    text = " ".join(str(value or "") for value in values).casefold()
-    return "sitequivend" in text or "sitekivend" in text or "site qui vend" in text
-
-
 _LEARNING_STOP_WORDS = frozenset({"avec", "dans", "pour", "sans", "sous", "cette", "cela", "leur", "leurs",
                                   "plus", "tous", "tout", "mais", "donc", "elle", "elles", "nous", "vous",
                                   "they", "them", "this", "that", "from", "with", "have", "will", "were"})
@@ -405,8 +399,7 @@ def learning_context(business: str, *, limit: int = 8, topic: str | None = None)
             continue
         hypothesis = get("hypothesis", int(row["hypothesis_id"]), business)
         objective = get("objective", hypothesis["objective_id"], business) if hypothesis else None
-        if not hypothesis or not objective or _mentions_legacy_business(
-                objective["statement"], hypothesis["statement"], row["action"], row["summary"]):
+        if not hypothesis or not objective:
             continue
 
         # Une conclusion calculée dépend des preuves actives qui ont servi à l'évaluation.
@@ -430,9 +423,6 @@ def learning_context(business: str, *, limit: int = 8, topic: str | None = None)
                    if (item["nature"] == "observed" and item["source_ref"] and item["captured_at"])
                    or (item["nature"] == "computed" and item["source_ref"]
                        and item["source_type"] == "economy.evaluate" and item["created_by"] == "policy:evaluate")]
-        if _mentions_legacy_business(*(item.get("observation") for item in source_rows),
-                                     *(item.get("source_ref") for item in source_rows)):
-            continue
 
         # Reviews sont le support persistant des leçons récentes; les évaluations v5 antérieures
         # restent récupérables sans fabriquer ni modifier de ligne à la lecture.
@@ -458,9 +448,6 @@ def learning_context(business: str, *, limit: int = 8, topic: str | None = None)
                     and content.get("evaluation_evidence_id") == row["evaluation_evidence_id"]):
                 review = dict(candidate)
                 break
-        if _mentions_legacy_business(*(item.get("observation") for item in sources),
-                                     *(item.get("source_ref") for item in sources)):
-            continue
         # Le payload calculé est la source canonique. Le champ lesson de la review n'est
         # accepté que comme texte d'interprétation associé à ces références vérifiées.
         lesson_payload = json.loads(review["evidence_summary"]) if review else None
@@ -551,10 +538,7 @@ def learning_context(business: str, *, limit: int = 8, topic: str | None = None)
         "((ev.nature='observed' AND ev.source_ref IS NOT NULL AND ev.captured_at IS NOT NULL) OR "
         "(ev.nature='computed' AND ev.source_type='economy.evaluate' AND ev.created_by='policy:evaluate' "
         "AND ev.source_ref IS NOT NULL)) ORDER BY ev.created_at DESC, ev.id DESC LIMIT 100", (business,))
-    all_evidence_ids.update(int(item["id"]) for item in evidence_rows
-                            if not _mentions_legacy_business(item["source_ref"], item["observation"], item["action"],
-                                                             item["experiment_summary"], item["hypothesis_statement"],
-                                                             item["objective_statement"]))
+    all_evidence_ids.update(int(item["id"]) for item in evidence_rows)
     reconsideration_rows = journal.query(
         "SELECT ev.id, ev.source_ref, ev.observation, h.statement AS hypothesis_statement, "
         "o.statement AS objective_statement FROM strategy_evidence ev JOIN strategy_links l "
@@ -565,9 +549,7 @@ def learning_context(business: str, *, limit: int = 8, topic: str | None = None)
         "WHERE ev.business=? AND ev.status='active' AND ev.nature='observed' "
         "AND ev.source_ref IS NOT NULL AND ev.captured_at IS NOT NULL ORDER BY ev.created_at DESC, ev.id DESC LIMIT 100",
         (business,))
-    all_evidence_ids.update(int(item["id"]) for item in reconsideration_rows
-                            if not _mentions_legacy_business(item["source_ref"], item["observation"],
-                                                             item["hypothesis_statement"], item["objective_statement"]))
+    all_evidence_ids.update(int(item["id"]) for item in reconsideration_rows)
     invalidated = [
         {"hypothesis_id": item["hypothesis"]["id"], "hypothesis": item["hypothesis"]["statement"],
          "experiment_id": item["experiment"]["id"], "action": item["experiment"]["action"],
@@ -603,7 +585,7 @@ def repeated_invalidated_strategy(business: str, proposed_goal: str) -> dict | N
     checked: set[tuple[int, int]] = set()
     for row in rows:
         key = (int(row["hypothesis_id"]), int(row["experiment_id"]))
-        if key in checked or _mentions_legacy_business(row["hypothesis"], row["action"]):
+        if key in checked:
             continue
         checked.add(key)
         try:
