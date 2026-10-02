@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import time
 import os
 import subprocess
@@ -419,3 +420,99 @@ def test_real_gateway_supervisor_path_recovers_without_live_provider(monkeypatch
     assert read_snapshot()["token_cost_usd"] == 0
     assert all(request["model"].endswith(":free") or provider["base_url"].startswith("https://api.deepseek")
                for provider, request in transport.calls)
+
+
+@pytest.mark.parametrize("checkpoint_present", [True, False], ids=["checkpoint", "raw-output-only"])
+def test_paused_degraded_pursuit_resumes_only_synthesis_with_real_gateway_and_fake_transport(
+        monkeypatch, transport, providers_up, checkpoint_present):
+    """Same isolated DataRoot, real gateway/worker, simulated Web and provider only."""
+    from agents import agent_browser
+
+    sources = ["https://www.reddit.com/r/automation/", "https://www.indiehackers.com/"]
+    navigations, stages = [], []
+    resumed = False
+    malformed = '{"rapport":"Observations conservées." "determination":{"action":"pause",'
+    malformed += '"reason":"Revenu inconnu","next_goal":"","permission":""}}'
+    assert llm._repair_json_control_chars(malformed) is None
+
+    def respond(provider, request):
+        assert request["model"] == "deepseek-flash"
+        if request["max_tokens"] == 700:
+            stages.append("plan")
+            assert not resumed, "La reprise ne doit pas replanifier la collecte terminée"
+            text = json.dumps({"tasks": [{"role": "SOUT", "task": "Observer deux sources publiques de demandes"}]})
+        elif request["max_tokens"] == 500:
+            stages.append("agent")
+            assert not resumed, "La reprise ne doit pas relancer le sous-agent terminé"
+            answer = ({"tool": "browser_navigate", "args": {"url": sources[len(navigations)]}}
+                      if len(navigations) < len(sources) else {"final": "Deux observations publiques conservées"})
+            text = json.dumps(answer)
+        else:
+            stages.append("synthesis")
+            assert request["max_tokens"] == 1600
+            content = json.dumps(request["messages"], ensure_ascii=False)
+            assert "Observation Web fixture" in content and all(url in content for url in sources)
+            text = json.dumps(determination()) if resumed and "response_format" not in request else malformed
+        return llm.TransportResult(text, Usage(prompt_tokens=10, completion_tokens=5),
+                                   request["model"], resolved_model=request["model"],
+                                   resolved_provider="OfflineFake", provider_cost_usd=.001)
+
+    def navigate(method, **kwargs):
+        assert not resumed, "Une navigation terminée ne doit jamais être rejouée"
+        assert method == "navigate"
+        navigations.append(kwargs["url"])
+        return {"ok": True, "url": kwargs["url"], "snapshot": "Observation Web fixture sourcée"}
+
+    transport.handler = respond
+    monkeypatch.setattr(browser_workspace, "call", navigate)
+    monkeypatch.setattr(agent_browser, "availability", lambda: {"ready": True, "agent_browser": "fixture"})
+    oid = supervisor.start_pursuit()
+    supervisor.run_pursuit(oid)
+    works = supervisor.work_tasks(BUSINESS, oid)
+    assert len(works) == supervisor.PURSUIT_ROUNDS == 3
+    assert all(work["status"] == "done_degraded" for work in works)
+    assert all(work["output"]["execution_status"] == "synthesis_unavailable" for work in works)
+    assert strategy.get("objective", oid, BUSINESS)["status"] == "paused"
+    assert stages.count("plan") == 1 and stages.count("agent") == 3 and stages.count("synthesis") == 6
+    assert navigations == sources
+    last = works[-1]
+    observations = copy.deepcopy(last["output"]["results"])
+    assert tasks.step_value(last["id"], "pursuit.progress")["collect_complete"] is True
+    before_calls = [dict(row) for row in journal.query("SELECT * FROM llm_calls ORDER BY id")]
+    before_cost = read_snapshot(BUSINESS)["token_cost_usd"]
+    assert before_cost == pytest.approx(.010)
+    assert [row["status"] for row in before_calls][-6:] == ["invalid"] * 6
+    assert all("JSONDecodeError" in row["error"] for row in before_calls[-6:])
+    if not checkpoint_present:
+        # Historical degraded output also contains plan/results; production already knows this recovery path.
+        with tasks._tx() as connection:
+            connection.execute("DELETE FROM task_steps WHERE task_id=? AND key='pursuit.progress'", (last["id"],))
+
+    resumed = True
+    request_count = len(transport.calls)
+    assert supervisor.start_pursuit(objective_id=oid) == oid
+    supervisor.run_pursuit(oid)
+    current = supervisor.work_tasks(BUSINESS, oid)[-1]
+    assert current["input"]["previous_id"] == last["id"]
+    assert current["status"] == "done" and current["output"]["synthesis_status"] == "validated"
+    assert current["output"]["results"] == observations
+    assert tasks.get(last["id"])["output"]["results"] == observations
+    assert navigations == sources and stages.count("plan") == 1 and stages.count("agent") == 3
+    assert len(transport.calls) == request_count + 2
+    retry_requests = [request for _, request in transport.calls[request_count:]]
+    assert all(request["max_tokens"] == 1600 for request in retry_requests)
+    assert retry_requests[0]["response_format"] == {"type": "json_object"}
+    assert "response_format" not in retry_requests[1]
+    after_calls = [dict(row) for row in journal.query("SELECT * FROM llm_calls ORDER BY id")]
+    assert after_calls[:len(before_calls)] == before_calls
+    assert [row["status"] for row in after_calls[-2:]] == ["invalid", "ok"]
+    assert read_snapshot(BUSINESS)["token_cost_usd"] == pytest.approx(before_cost + .002)
+    assert sum(call["fallback"] for call in read_snapshot(BUSINESS)["llm_calls"]) == 1
+    assert strategy.get("objective", oid, BUSINESS)["status"] == "paused"
+    assert tasks.pending_human_requests(BUSINESS) == []
+    assert not journal.query("SELECT id FROM channel_actions")
+    assert not journal.query("SELECT id FROM tasks WHERE kind='capability.acquire'")
+    assert not journal.query("SELECT id FROM spend_requests")
+    assert supervisor.PURSUIT_LLM_BUDGET_USD == .20
+    assert all(work["input"]["allowed_tools"] == sorted(supervisor.PURSUIT_TOOLS)
+               for work in supervisor.work_tasks(BUSINESS, oid))
