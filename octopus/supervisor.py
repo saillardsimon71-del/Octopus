@@ -178,6 +178,24 @@ def start_pursuit(goal: str | None = None, *, objective_id: int | None = None,
     if any(t["status"] in tasks.ACTIVE for t in work):
         return objective_id
     previous = work[-1] if work else None
+    if (previous and previous["kind"] == WORK_KIND and previous["input"].get("pursuit")
+            and previous["status"] == "failed" and not previous.get("cancel_requested")):
+        memo = tasks.step_value(previous["id"], "determination", {})
+        decided = tasks.step_value(previous["id"], "pursuit.decision", None)
+        if (isinstance(memo, dict) and memo.get("synthesis_status") == "validated"
+                and memo.get("execution_status") == "completed" and type(decided) is int):
+            # Reprise explicite après crash post-décision : conserver le même memo,
+            # la même identité et le même budget cumulé, sans refaire la synthèse.
+            now = time.time()
+            with tasks._tx() as conn:
+                changed = conn.execute(
+                    "UPDATE tasks SET status='queued', attempts=MAX(0, attempts-1), not_before=?, "
+                    "finished_at=NULL, error=NULL, updated_at=? WHERE id=? AND business=? "
+                    "AND status='failed' AND cancel_requested=0",
+                    (now, now, previous["id"], business)).rowcount
+                if changed:
+                    tasks._emit(conn, business, previous["id"], "pursuit.resume_decision", {"objective_id": objective_id})
+                    return objective_id
     _queue_pursuit(objective_id, round_no=1, previous_id=previous["id"] if previous else None,
                    next_goal="Réexaminer l'état et déterminer la prochaine action admissible.", business=business)
     return objective_id

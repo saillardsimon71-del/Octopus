@@ -980,8 +980,9 @@ def acquire_public_page(url: str, guard=None) -> PublicPageRecord:
     if is_public_text_acquisition(http_record):
         return http_record
 
-    b = new_browser(headless=True, account=False, guard=guard)
+    b = None
     try:
+        b = new_browser(headless=True, account=False, guard=guard)
         b.goto(url)
         b.wait_for_public_render()
         final_url = b.url()
@@ -1008,7 +1009,9 @@ def acquire_public_page(url: str, guard=None) -> PublicPageRecord:
             error=None if text else (http_record.error or "contenu vide après rendu"),
         )
     except Exception as exc:
-        guard_refused = bool(guard is not None and b.blocked)
+        guard_refused = bool(guard is not None and (
+            http_record.error == "navigation refusée par le garde-fou"
+            or (b is not None and b.blocked)))
         return _page_record(
             requested_url=str(url),
             final_url=http_record.final_url or str(url),
@@ -1016,7 +1019,7 @@ def acquire_public_page(url: str, guard=None) -> PublicPageRecord:
             content_type=http_record.content_type,
             title=http_record.title,
             method="playwright",
-            rendered=True,
+            rendered=b is not None,
             blocked=guard_refused or http_record.blocked,
             text=http_record.main_text,
             raw_chars=http_record.raw_chars,
@@ -1024,7 +1027,8 @@ def acquire_public_page(url: str, guard=None) -> PublicPageRecord:
                    else f"{type(exc).__name__}: {str(exc)[:300]}"),
         )
     finally:
-        b.stop()
+        if b is not None:
+            b.stop()
 
 
 def new_browser(headless: bool = False, account: bool = False, guard=None) -> BrowserTool:
