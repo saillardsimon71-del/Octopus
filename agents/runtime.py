@@ -1258,6 +1258,9 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
     group = _group()
     legacy_search = run is None or run.business == DEFAULT_BUSINESS
     tool_text = tools_desc(allowed_tools, legacy_search=legacy_search)
+    if allowed_tools is not None and "browse" in allowed_tools:
+        tool_text = tool_text.replace(TOOLS["browse"]["desc"],
+                                      "consulte une page Web et renvoie le contenu réellement acquis")
     if run is not None and run.business == "octopus":
         tool_text = tool_text.replace(", ex. bpifrance.fr", "")
     freshness_context = _freshness_context(run)

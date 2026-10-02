@@ -84,6 +84,27 @@ def test_c_create_does_not_run_or_grant_anything(transport):
     no_effects()
 
 
+def test_public_pursuit_prompt_does_not_claim_authenticated_accounts(monkeypatch, transport, providers_up):
+    monkeypatch.setattr(supervisor, "PURSUIT_ROUNDS", 1)
+    item = activity("Produits digitaux & automatisation IA B2B", "Créer des offres numériques B2B ; moyens libres.")
+    Script(monkeypatch, transport, single_plan=True)
+    oid = supervisor.start_pursuit(business=item.id)
+    supervisor.run_pursuit(oid, business=item.id)
+    work = supervisor.work_tasks(item.id, oid)
+    assert work[0]["input"]["browser_public_only"] is True
+    prompts = [request["messages"][0]["content"] for _, request in transport.calls
+               if request["max_tokens"] == 500]
+    assert prompts
+    for prompt in prompts:
+        assert "browse(url) : consulte une page Web et renvoie le contenu réellement acquis" in prompt
+        assert "comptes Stripe/Reddit/X/Fiverr/YouTube connectés" not in prompt
+        assert "TON Chrome réel" not in prompt
+    with journal.run("podalux", "legacy"):
+        legacy = runtime.build_prompts("SOUT", "Observer une source")[0]
+    assert runtime.TOOLS["browse"]["desc"] in legacy
+    no_effects()
+
+
 def test_d_start_is_scoped_reusable_and_budget_unchanged():
     a, b = activity("A"), activity("B")
     aid = supervisor.start_pursuit(business=a.id)
