@@ -480,8 +480,10 @@ def test_resume_preserves_separate_strategy_and_executability_states(monkeypatch
     supervisor.run_pursuit(objective_id)
     assert len(calls) == 2
     state = json.loads(calls[1].rsplit("\n", 1)[-1])
-    assert state["stratégies_enregistrées"][0]["strategic_state"] == "retained"
-    assert state["stratégies_enregistrées"][0]["executability"] == "missing_capability"
+    assert state["stratégies_enregistrées"][0]["hypothesis_id"] == hypothesis_id
+    assert state["stratégies_enregistrées"][0]["hypothesis_status"] == "proposed"
+    assert separation.latest_annotation(BUSINESS, hypothesis_id)["strategic_state"] == "retained"
+    assert separation.latest_annotation(BUSINESS, hypothesis_id)["executability"] == "missing_capability"
     assert strategy.get("hypothesis", hypothesis_id, BUSINESS)["status"] == "proposed"
     assert separation.latest_annotation(BUSINESS, hypothesis_id)["evidence_id"] == annotation["evidence_id"]
     assert not journal.query("SELECT id FROM channel_actions")

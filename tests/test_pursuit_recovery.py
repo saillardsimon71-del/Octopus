@@ -255,6 +255,8 @@ def test_resumed_task_keeps_root_and_costs_for_next_cycle(old_metadata):
 
 
 def test_synthesis_retry_reuses_raw_collection_and_only_repeats_synthesis(monkeypatch):
+    # Collecte historique mono-voie ; le scénario multi-signaux est couvert séparément.
+    monkeypatch.setattr(supervisor, "PURSUIT_SIGNAL_TARGET", 1)
     calls, sources = [], []
 
     def model(agent, stage, model, messages, **kwargs):
@@ -319,6 +321,7 @@ def test_generic_supervisor_synthesis_retry_also_reuses_collection(monkeypatch):
 
 
 def test_crash_after_observation_resumes_partial_step_without_duplicate_collection(monkeypatch):
+    monkeypatch.setattr(supervisor, "PURSUIT_SIGNAL_TARGET", 1)
     calls, sources = [], []
 
     class Crash(BaseException):
@@ -426,6 +429,7 @@ def test_real_gateway_supervisor_path_recovers_without_live_provider(monkeypatch
 def test_paused_degraded_pursuit_resumes_only_synthesis_with_real_gateway_and_fake_transport(
         monkeypatch, transport, providers_up, checkpoint_present):
     """Same isolated DataRoot, real gateway/worker, simulated Web and provider only."""
+    monkeypatch.setattr(supervisor, "PURSUIT_SIGNAL_TARGET", 1)
     from agents import agent_browser
 
     sources = ["https://www.reddit.com/r/automation/", "https://www.indiehackers.com/"]

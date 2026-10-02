@@ -39,7 +39,7 @@ def test_cold_prompt_projection_and_unchanged_execution_limits():
     assert captured["kwargs"]["profile"] == "economical"
     assert supervisor.PURSUIT_ROUNDS == 3
     assert supervisor.PURSUIT_LLM_BUDGET_USD == .20
-    assert supervisor.PURSUIT_TOOLS == frozenset({"search", "resources_status", "economy_status",
+    assert supervisor.PURSUIT_TOOLS == frozenset({"search", "browse", "resources_status", "economy_status",
         "browser_navigate", "browser_snapshot", "browser_scroll", "browser_back"})
     calls = {call["task"]: call["messages"] for call in captured["calls"]}
     planner = calls["planification"][0]["content"]
@@ -47,7 +47,8 @@ def test_cold_prompt_projection_and_unchanged_execution_limits():
     assert "pas les marchés, offres ou stratégies" in planner
     assert "quoi observer ou analyser et pourquoi économiquement" in planner
     assert "sans preuve commerciale préalable" in planner
-    assert calls["action"][1]["content"] == "Objectif : " + TASK
+    assert calls["action"][1]["content"].startswith("Objectif : " + TASK)
+    assert "MODE BUSINESS SIGNAL" in calls["action"][1]["content"]
     assert goal not in calls["action"][1]["content"]  # No new context propagation.
     synthesis = calls["determination"][0]["content"]
     assert "Continue si une observation gratuite permise" in synthesis

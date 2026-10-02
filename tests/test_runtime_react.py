@@ -636,7 +636,8 @@ def test_business_signal_contract_states_objectives_not_search_procedure():
     contract = runtime._business_signal_contract(3)
 
     # Critères de résultat conservés.
-    assert "acheteur/segment identifiable" in contract
+    assert "acteur économique/segment identifiable" in contract
+    assert "utilisateur et payeur peuvent différer" in contract
     assert "signal monétaire ou d'urgence" in contract
     assert "canal réaliste" in contract
     assert "prochain test faisable rapidement" in contract
@@ -854,12 +855,12 @@ def test_business_signal_focus_reaches_planner_agent_and_synthesis(monkeypatch):
 
     action_messages = next(messages for _, task, messages in calls if task == "action")
     assert "MODE BUSINESS SIGNAL" in action_messages[1]["content"]
-    assert "acheteur/segment identifiable" in action_messages[1]["content"]
+    assert "acteur économique/segment identifiable" in action_messages[1]["content"]
 
     synthesis = next(messages for _, task, messages in calls if task == "synthese")
     assert "business_signals" in synthesis[0]["content"]
     # La synthèse reçoit le contrat lui-même (source unique), pas une recopie de ses critères.
-    assert "acheteur/segment identifiable" in synthesis[0]["content"]
+    assert "acteur économique/segment identifiable" in synthesis[0]["content"]
     assert "À REJETER" in synthesis[0]["content"]
 
 

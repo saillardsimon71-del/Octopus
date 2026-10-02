@@ -853,8 +853,10 @@ def test_pursuit_resume_reuses_the_persisted_study(monkeypatch):
     supervisor.run_pursuit(objective_id)
     assert len(calls) == 2
     state = json.loads(calls[1].rsplit("\n", 1)[-1])
-    assert state["écarts_de_capacités"][0]["acquisition"]["phone_call"]["décision"] == "human_required"
-    assert state["écarts_de_capacités"][0]["aucune_exécution"] is True
+    assert state["écarts_de_capacités"] == []  # Pas d'étude détaillée dans une discovery.
+    persisted = acquisition.study_context(acquisition.recorded(BUSINESS, objective_id)[0])
+    assert persisted["acquisition"]["phone_call"]["décision"] == "human_required"
+    assert persisted["aucune_exécution"] is True
     rows = journal.query("SELECT id FROM strategy_evidence WHERE source_type=? AND created_by=?",
                          (acquisition.SOURCE_TYPE, acquisition.ACTOR))
     assert [row["id"] for row in rows] == [annotation_id]

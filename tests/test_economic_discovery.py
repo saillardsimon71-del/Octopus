@@ -35,7 +35,7 @@ def scripted(monkeypatch, outputs):
     def run(goal, **kwargs):
         inputs.append((goal, kwargs))
         assert kwargs["allowed_tools"] == supervisor.PURSUIT_TOOLS
-        return next(scripts)
+        return next(scripts, copy.deepcopy(outputs[-1]))
 
     monkeypatch.setattr(runtime, "run_mission", run)
     monkeypatch.setattr(supervisor, "pursuit_strategy_effect", lambda *_: pytest.fail("Commit en découverte"))
