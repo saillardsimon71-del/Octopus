@@ -1041,6 +1041,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                     else pricing.call_cost(model.get("price"), usage, peak))
             data, status, error = None, "ok", _zero_cost_violation(profile_name, model, result)
             repaired = repair_attempted_here = False
+            json_syntax_error = False
             if error is not None:
                 status = "blocked"
             elif structured_error is not None:
@@ -1050,6 +1051,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                     data = (validate or parse_json)(text)
                 except Exception as exc:
                     status, error = "invalid", f"{type(exc).__name__}: {exc}"[:300]
+                    json_syntax_error = isinstance(exc, json.JSONDecodeError)
                     if profile_name == "economical" and not json_repair_attempted and isinstance(exc, json.JSONDecodeError):
                         fixed = _repair_json_control_chars(text)
                         if fixed is not None:
@@ -1059,6 +1061,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                                 data = (validate or parse_json)(fixed)
                             except Exception as repair_exc:
                                 error = f"{type(repair_exc).__name__}: {repair_exc}"[:300]
+                                json_syntax_error = isinstance(repair_exc, json.JSONDecodeError)
                             else:
                                 text, status, error, repaired = fixed, "ok", None, True
             justification = _justify(profile_name, task, model_id, model,
@@ -1095,7 +1098,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                                    "reason": f"sortie invalide [{method_name}] : {error}"})
                 last_error = InvalidOutput(f"{model_id} [{method_name}] : {error}")
                 if (structured_method is not None and method_index + 1 < len(methods)
-                        and (profile_name != "economical" or structured_error is not None)):
+                        and (profile_name != "economical" or structured_error is not None or json_syntax_error)):
                     continue
                 if prof.get("fallback") and candidate_attempt < len(candidates):
                     break

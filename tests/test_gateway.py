@@ -792,11 +792,172 @@ def test_economical_failed_single_repair_falls_back_without_second_repair(transp
         llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
                      validate=llm.parse_json)
 
-    assert transport.models == ["openai/gpt-oss-120b", "deepseek-flash"]
+    assert transport.models == ["openai/gpt-oss-120b"] * 2 + ["deepseek-flash"] * 2
     rows = calls()
-    assert [row["status"] for row in rows] == ["invalid", "invalid"]
+    assert [row["status"] for row in rows] == ["invalid"] * 4
     assert json.loads(rows[0]["justification"])["json_repair_attempted"] is True
-    assert "json_repair_attempted" not in json.loads(rows[1]["justification"])
+    assert all("json_repair_attempted" not in json.loads(row["justification"]) for row in rows[1:])
+    assert [json.loads(row["justification"])["structured_method"] for row in rows] == [
+        "json_object", "text", "json_object", "text"]
+    assert all(row["cost_usd"] == 0 for row in rows[:2])
+    assert all(row["cost_usd"] > 0 for row in rows[2:])
+
+
+@pytest.mark.parametrize("malformed", [
+    '{"rapport":"Observation conservée." "determination":{"action":"pause",'
+    '"reason":"Revenu inconnu","next_goal":"","permission":""}}',
+    '{\n  "rapport": "Observation conservée."\n  "determination": {"action":"pause",'
+    '"reason":"Revenu inconnu","next_goal":"","permission":""}\n}',
+])
+def test_economical_missing_comma_uses_one_method_alternative_and_counts_both_costs(
+        transport, providers_up, malformed):
+    from agents import runtime
+    from agents.gui.workbench_v2_data import read_snapshot
+    from octopus import status
+
+    with pytest.raises(json.JSONDecodeError, match="Expecting ',' delimiter"):
+        llm.parse_json(malformed)
+    assert llm._repair_json_control_chars(malformed) is None
+    valid = '{"rapport":"Observation conservée.","determination":{"action":"pause",'
+    valid += '"reason":"Revenu inconnu","next_goal":"","permission":""}}'
+    responses = iter([(malformed, .00594607), (valid, .0060291)])
+
+    def respond(provider, request):
+        text, cost = next(responses)
+        return llm.TransportResult(text, Usage(prompt_tokens=100, completion_tokens=50),
+                                   request["model"], resolved_model=request["model"],
+                                   resolved_provider="deepseek", provider_cost_usd=cost)
+
+    transport.handler = respond
+    with journal.run("octopus", "task:mission", budget_usd=.20, profile="economical") as run:
+        result = llm.complete("agent.decision", MSG, json_mode=True, max_tokens=50,
+                              validate=lambda text: runtime._validate_synthesis_contract(llm.parse_json(text), True))
+        assert journal.subtree_cost(run.id) == pytest.approx(.00594607 + .0060291)
+    assert result.data["determination"]["action"] == "pause"
+    assert transport.models == ["deepseek-flash"] * 2
+    first, second = [request for _, request in transport.calls]
+    assert first["response_format"] == {"type": "json_object"}
+    assert "response_format" not in second
+    assert first["messages"] == second["messages"] == MSG
+    assert first["max_tokens"] == second["max_tokens"] == 50
+    assert transport.calls[0][0] == transport.calls[1][0]
+    rows = calls()
+    assert [row["status"] for row in rows] == ["invalid", "ok"]
+    assert "JSONDecodeError" in rows[0]["error"] and "Expecting ',' delimiter" in rows[0]["error"]
+    assert [row["cost_usd"] for row in rows] == pytest.approx([.00594607, .0060291])
+    assert [json.loads(row["justification"])["structured_method"] for row in rows] == ["json_object", "text"]
+    assert "sortie invalide [json_object]" in json.dumps(result.justification, ensure_ascii=False)
+    snapshot = read_snapshot("octopus")
+    assert snapshot["token_cost_usd"] == pytest.approx(.011975)
+    assert sum(call["fallback"] for call in snapshot["llm_calls"]) == 1
+    assert status.llm_routing()["fallbacks_observed"] == 1
+    assert not journal.query("SELECT id FROM spend_allowances")
+    assert not journal.query("SELECT id FROM spend_requests")
+
+
+@pytest.mark.parametrize("budget", [.006, .00594607])
+def test_economical_syntax_alternative_checks_remaining_budget_before_call(
+        transport, providers_up, monkeypatch, budget):
+    from octopus import pricing
+    monkeypatch.setattr(pricing, "estimate_max_cost", lambda *args: .001)
+    transport.handler = lambda provider, request: llm.TransportResult(
+        '{"rapport":"Observation" "other":1}', Usage(prompt_tokens=100, completion_tokens=50),
+        request["model"], provider_cost_usd=.00594607)
+    with journal.run("octopus", "task:mission", budget_usd=budget, profile="economical") as run:
+        with pytest.raises(llm.BudgetExceeded, match="budget du run"):
+            llm.complete("agent.decision", MSG, json_mode=True, validate=llm.parse_json)
+        assert journal.subtree_cost(run.id) == pytest.approx(.00594607)
+    assert transport.models == ["deepseek-flash"]
+    assert [row["status"] for row in calls()] == ["invalid", "blocked"]
+    assert calls()[1]["cost_usd"] == 0
+
+
+@pytest.mark.parametrize("text", ['{"rapport":123}', '{"rapport":"ligne\nbreak"}'])
+def test_economical_semantic_failure_does_not_retry_even_after_safe_repair(
+        transport, providers_up, text):
+    from agents import runtime
+    transport.reply(text)
+    with pytest.raises(llm.InvalidOutput, match="ValueError"):
+        llm.complete("agent.decision", MSG, profile="economical", json_mode=True,
+                     validate=lambda raw: runtime._validate_synthesis_contract(llm.parse_json(raw), True))
+    assert transport.models == ["deepseek-flash"]
+    assert calls()[0]["status"] == "invalid"
+    if "\n" in text:
+        assert json.loads(calls()[0]["justification"])["json_repair_attempted"] is True
+
+
+@pytest.mark.parametrize("reason", ["permission refusée", "finance refusée", "contenu refusé", "résultat insuffisant"])
+def test_economical_arbitrary_validator_value_error_never_triggers_syntax_retry(
+        transport, providers_up, reason):
+    transport.reply('{"ok":true}')
+
+    def refuse(text):
+        llm.parse_json(text)
+        raise ValueError(reason)
+
+    with pytest.raises(llm.InvalidOutput, match=reason):
+        llm.complete("agent.decision", MSG, profile="economical", json_mode=True, validate=refuse)
+    assert transport.models == ["deepseek-flash"]
+    assert calls()[0]["status"] == "invalid"
+
+
+@pytest.mark.parametrize("declared,expected_calls", [
+    (["json_object"], 1), (["json_object", "text", "json_object"], 2),
+])
+def test_economical_syntax_retry_uses_only_one_existing_method_and_stops(
+        transport, providers_up, monkeypatch, declared, expected_calls):
+    cat = copy.deepcopy(catalog.load())
+    cat.raw["models"]["deepseek/flash"]["structured_methods"] = declared
+    monkeypatch.setattr(catalog, "load", lambda: cat)
+    transport.reply('{"rapport":"Observation" "other":1}')
+    with pytest.raises(llm.InvalidOutput, match="JSONDecodeError"):
+        llm.complete("agent.decision", MSG, profile="economical", json_mode=True, validate=llm.parse_json)
+    assert transport.models == ["deepseek-flash"] * expected_calls
+    assert [row["status"] for row in calls()] == ["invalid"] * expected_calls
+    assert all(row["cost_usd"] > 0 for row in calls())
+
+
+def test_economical_unstructured_validator_json_error_does_not_retry(transport, providers_up):
+    transport.reply('{"rapport":"Observation" "other":1}')
+    with pytest.raises(llm.InvalidOutput, match="JSONDecodeError"):
+        llm.complete("agent.decision", MSG, profile="economical", validate=llm.parse_json)
+    assert transport.models == ["deepseek-flash"]
+    assert json.loads(calls()[0]["justification"])["structured_method"] is None
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("timeout"), ConnectionError("network"),
+                                     ValueError("business transport failure")])
+def test_economical_transport_error_does_not_trigger_syntax_retry(transport, providers_up, failure):
+    transport.handler = lambda provider, request: failure
+    with pytest.raises(llm.NoEligibleModel):
+        llm.complete("agent.decision", MSG, profile="economical", json_mode=True, validate=llm.parse_json)
+    assert transport.models == ["deepseek-flash"]
+    assert calls()[0]["status"] == "error"
+
+
+@pytest.mark.parametrize("status_code", [401, 429])
+def test_economical_auth_and_quota_errors_do_not_trigger_syntax_retry(transport, providers_up, status_code):
+    class Failure(Exception):
+        pass
+    error = Failure("request rejected")
+    error.status_code = status_code
+    transport.handler = lambda provider, request: error
+    with pytest.raises(llm.NoEligibleModel):
+        llm.complete("agent.decision", MSG, profile="economical", json_mode=True, validate=llm.parse_json)
+    assert transport.models == ["deepseek-flash"]
+    assert calls()[0]["status"] == "error"
+    if status_code == 429:
+        assert "deepseek/flash" in llm._rate_limit_cooldowns
+
+
+def test_legacy_syntax_method_fallback_remains_unchanged(transport, providers_up):
+    responses = iter(['{"ok":true "other":1}', '{"ok":true}'])
+    transport.handler = lambda provider, request: (next(responses), Usage(prompt_tokens=50, completion_tokens=10))
+    result = llm.complete("agent.decision", MSG, pin_model="deepseek/flash", profile="legacy",
+                          json_mode=True, validate=llm.parse_json)
+    assert result.data == {"ok": True}
+    assert transport.models == ["deepseek-flash"] * 2
+    assert [row["status"] for row in calls()] == ["invalid", "ok"]
 
 
 @pytest.mark.parametrize("arguments", ["", "[]", '{"query":"prix","extra":1}', '{"query":42}', "{}"])
