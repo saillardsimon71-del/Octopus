@@ -573,6 +573,8 @@ def _ineligibility(cat, profile_name: str, profile: dict, task: str, task_def: d
 
 
 def _budget_block(ctx, cat: catalog.Catalog, business: str, estimate: float) -> str | None:
+    if ctx is not None and ctx.llm_cost_observation_only:
+        return None
     if estimate <= 0:
         return None
     if ctx is not None:

@@ -33,6 +33,10 @@ Après trois cycles au plus, une reprise humaine est nécessaire. Le délai de
 120 secondes par cycle est coopératif : un appel déjà engagé peut dépasser ce
 délai jusqu'à son timeout. Chaque rôle a au plus six étapes.
 
+La borne de cycles suspend l'exécution, pas la décision économique : une décision
+`continue`, son prochain but et son intention sont conservés. Reprendre le même
+objectif poursuit ce travail ; aucune piste n'est déclarée épuisée par cette borne.
+
 La reprise réutilise l'objectif et les tâches existants. Une demande humaine
 conserve le résultat avant de suspendre le travail ; sa réponse ne rejoue pas
 la mission et n'accorde aucune permission. Après un arrêt brutal, les baux du
@@ -56,10 +60,10 @@ s'arrêter, adapter sa stratégie ou demander l'autorisation nécessaire.
 
 ## Permissions de ce premier démarrage
 
-- Budget économique externe : 0 EUR. Budget cognitif LLM séparé : profil `economical`,
-  plafond initial de 0,20 USD pour les trois cycles au plus d'un démarrage ou d'une reprise,
-  configurable avec
-  `OCTOPUS_PURSUIT_LLM_BUDGET_USD` avant le démarrage.
+- Budget économique externe : 0 EUR. Coût LLM séparé : profil `economical`, coûts
+  mesurés et cumulés sans plafond LLM de run/batch/journée pour pursuit, selon la
+  décision explicite de l'opérateur du 2 octobre 2026. L'ancienne variable
+  `OCTOPUS_PURSUIT_LLM_BUDGET_USD` est ignorée. Les autres parcours gardent leurs budgets.
 - Recherche, consultation Web publique gratuite, état des ressources et comptes.
 - Aucun envoi, contact commercial, publication, contrat, achat, paiement,
   génération vidéo ou installation autonome.
@@ -68,8 +72,9 @@ s'arrêter, adapter sa stratégie ou demander l'autorisation nécessaire.
   puis DeepSeek seul sous plafond. Une incompatibilité structurée autorise une
   seconde méthode du même modèle. Sans route disponible, la panne technique
   reste bornée aux trois cycles puis l'objectif est mis en pause ; elle ne crée
-  pas de demande de permission. Un plafond LLM explicitement atteint reste une
-  vraie frontière humaine. Désactiver la passerelle bloque le démarrage, sans appel direct.
+  pas de demande de permission. Les anciens blocages pursuit dus uniquement au plafond
+  LLM sont réconciliés lors d'une reprise explicite ; aucun droit d'action n'est accordé.
+  Désactiver la passerelle bloque le démarrage, sans appel direct.
 - Une réponse dans "Humain" ne modifie ni droits, ni budget. Les permissions
   spécialisées restent administrées par leurs mécanismes existants.
 

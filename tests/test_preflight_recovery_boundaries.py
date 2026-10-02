@@ -81,7 +81,7 @@ def test_explicit_resume_after_decision_reuses_same_task_memo_cost_and_decision(
         following = supervisor.work_tasks(activity.id, oid)[-1]
         assert following["id"] != tid and following["status"] == "queued"
         assert following["input"]["round"] == 2
-        assert following["budget_usd"] == pytest.approx(.20 - cost)
+        assert following["budget_usd"] is None
     else:
         assert strategy.get("objective", oid, activity.id)["status"] == "paused"
         assert len(supervisor.work_tasks(activity.id, oid)) == 1

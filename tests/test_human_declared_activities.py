@@ -94,7 +94,7 @@ def test_d_start_is_scoped_reusable_and_budget_unchanged():
     assert b.name in objective["statement"] and b.description in objective["statement"]
     work = supervisor.work_tasks(b.id, bid)
     assert len(work) == 1 and work[0]["business"] == b.id
-    assert work[0]["budget_usd"] == .20 and work[0]["input"]["browser_public_only"] is True
+    assert work[0]["budget_usd"] is None and work[0]["input"]["browser_public_only"] is True
     with pytest.raises(supervisor.SupervisorError):
         supervisor.start_pursuit(objective_id=aid, business=b.id)
     no_effects()
@@ -196,7 +196,7 @@ def test_o_description_is_only_data_and_cannot_inject_configuration():
     assert "evil.module" not in businesses.handler_modules()
     oid = supervisor.start_pursuit(business=b.id)
     task = supervisor.work_tasks(b.id, oid)[0]
-    assert task["budget_usd"] == .20 and set(task["input"]["allowed_tools"]) == supervisor.PURSUIT_TOOLS
+    assert task["budget_usd"] is None and set(task["input"]["allowed_tools"]) == supervisor.PURSUIT_TOOLS
     no_effects()
 
 

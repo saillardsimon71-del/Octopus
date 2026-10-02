@@ -38,7 +38,6 @@ def test_cold_prompt_projection_and_unchanged_execution_limits():
     assert captured["kwargs"]["max_duration_s"] == 120
     assert captured["kwargs"]["profile"] == "economical"
     assert supervisor.PURSUIT_ROUNDS == 3
-    assert supervisor.PURSUIT_LLM_BUDGET_USD == .20
     assert supervisor.PURSUIT_TOOLS == frozenset({"search", "browse", "resources_status", "economy_status",
         "browser_navigate", "browser_snapshot", "browser_scroll", "browser_back"})
     calls = {call["task"]: call["messages"] for call in captured["calls"]}

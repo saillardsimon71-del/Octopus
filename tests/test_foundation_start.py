@@ -32,7 +32,7 @@ def test_empty_start_persists_reason_and_never_creates_business_or_video(monkeyp
     assert calls[0][1]["profile"] == "economical"
     assert calls[0][1]["allowed_tools"] == supervisor.PURSUIT_TOOLS
     state = read_snapshot()
-    assert all(t["kind"] == supervisor.WORK_KIND and t["budget_usd"] == 0.20 for t in state["tasks"])
+    assert all(t["kind"] == supervisor.WORK_KIND and t["budget_usd"] is None for t in state["tasks"])
     assert state["allowances"] == [] and state["ledger"] == []
     assert state["generations"] == []
     assert state["objectives"][0]["created_by"] == "octopus"
@@ -41,23 +41,24 @@ def test_empty_start_persists_reason_and_never_creates_business_or_video(monkeyp
     assert state["tasks"][0]["result"]["economic_result"] is None
 
 
-def test_first_start_llm_cap_is_configurable_without_economic_allowance(monkeypatch):
+def test_obsolete_llm_cap_does_not_create_budget_or_economic_allowance(monkeypatch):
     monkeypatch.setenv("OCTOPUS_PURSUIT_LLM_BUDGET_USD", "0.05")
     objective_id = supervisor.start_pursuit()
     task = supervisor.work_tasks("octopus", objective_id)[0]
-    assert task["budget_usd"] == 0.05
+    assert task["budget_usd"] is None
+    assert "llm_cap_usd" not in task["input"]
     assert task["input"]["profile"] == "economical"
     assert not journal.query("SELECT id FROM spend_allowances")
     assert not journal.query("SELECT id FROM spend_requests")
 
 
-def test_first_start_rejects_invalid_llm_cap(monkeypatch):
+def test_first_start_ignores_obsolete_llm_cap(monkeypatch):
     monkeypatch.setenv("OCTOPUS_PURSUIT_LLM_BUDGET_USD", "nan")
-    with pytest.raises(supervisor.SupervisorError, match="positif et fini"):
-        supervisor.start_pursuit()
+    oid = supervisor.start_pursuit()
+    assert supervisor.work_tasks("octopus", oid)[0]["budget_usd"] is None
 
 
-def test_pursuit_cycles_share_one_llm_cap():
+def test_pursuit_cycles_keep_historical_costs_without_recreating_cap():
     oid = supervisor.start_pursuit()
     first = supervisor.work_tasks("octopus", oid)[0]
     with journal.run("octopus", "task:supervisor.objective_work", budget_usd=0.20) as run:
@@ -69,7 +70,7 @@ def test_pursuit_cycles_share_one_llm_cap():
         connection.execute("UPDATE tasks SET run_id=? WHERE id=?", (run.id, first["id"]))
     second_id = supervisor._queue_pursuit(oid, round_no=2, previous_id=first["id"], next_goal="Suite")
     second = tasks.get(second_id)
-    assert second["budget_usd"] == pytest.approx(0.13)
+    assert second["budget_usd"] is None
     with journal.run("octopus", "task:supervisor.objective_work", budget_usd=second["budget_usd"]) as run2:
         journal.record_llm_call({"ts": 2, "run_id": run2.id, "root_run_id": run2.root_id,
                                  "business": "octopus", "task": "agent.react_step", "profile": "economical",
@@ -78,10 +79,9 @@ def test_pursuit_cycles_share_one_llm_cap():
     with journal.connect() as connection:
         connection.execute("UPDATE tasks SET run_id=? WHERE id=?", (run2.id, second_id))
     third_id = supervisor._queue_pursuit(oid, round_no=3, previous_id=second_id, next_goal="Suite")
-    assert tasks.get(third_id)["budget_usd"] == pytest.approx(0.08)
+    assert tasks.get(third_id)["budget_usd"] is None
     snapshot = read_snapshot("octopus")
-    assert snapshot["pursuit_llm"] == {"spent_usd": 0.12, "budget_usd": 0.20,
-                                       "remaining_usd": 0.08}
+    assert snapshot["pursuit_llm"] == {"spent_usd": 0.12}
     assert snapshot["allowances"] == []
 
 

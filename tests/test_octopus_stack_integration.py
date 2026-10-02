@@ -222,7 +222,7 @@ def test_history_strategy_gap_and_worker_resume_converge(monkeypatch, boundary):
         "SELECT cost_usd FROM llm_calls WHERE provider='fixture' AND task='fixture.analysis' AND profile='economical'"
     )) == pytest.approx(0.01 * count)
     for task in supervisor.work_tasks(BUSINESS, oid):
-        assert task["budget_usd"] <= supervisor.PURSUIT_LLM_BUDGET_USD
+        assert task["budget_usd"] is None
     if len(states) > 1:
         assert states[1]["expériences_antérieures"][0]["review_id"] == history["result"]["review_id"]
     assert len(json.dumps(states[-1], ensure_ascii=False)) <= 64000
