@@ -1351,7 +1351,7 @@ def run_agent(role: str, goal: str, max_steps: int = 10,
     if search_browse_selector not in {"first", "evidence_relevance", "business_signal_relevance"}:
         raise ValueError(f"search_browse_selector inconnu : {search_browse_selector}")
     with journal.run(_business(business), "agent", label=f"{role} : {goal}",
-                     budget_usd=None if journal.current_run() and journal.current_run().budgets
+                     budget_usd=None if journal.current_run() and (journal.current_run().budgets or journal.current_run().llm_cost_observation_only)
                      else deepseek.config.CYCLE_BUDGET_USD):
         token = _ROLE.set(role)
         try:
@@ -1567,7 +1567,7 @@ def run_mission(goal: str, max_steps_per_agent: int = 8, *, business: str | None
     # explicitly selected legacy businesses retain their scope.
     mission_business = business or (journal.current_run().business if journal.current_run() else "octopus")
     with journal.run(mission_business, "mission", label=goal,
-                     budget_usd=None if journal.current_run() and journal.current_run().budgets
+                     budget_usd=None if journal.current_run() and (journal.current_run().budgets or journal.current_run().llm_cost_observation_only)
                      else deepseek.config.CYCLE_BUDGET_USD,
                      profile=profile):
         with cancel.scope(max_duration_s=max_duration_s), web_guard.session(), \

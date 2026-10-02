@@ -264,7 +264,7 @@ def test_9_local_validation_pause_does_not_force_a_new_discovery_cycle(monkeypat
     assert [state["intention"] for state in script.states] == ["discovery", "validation"]
     assert len(work[1]["output"]["results"]) == 1
     assert work[1]["output"]["decision"] == "pause" and len(work) == 2
-    assert all(w["input"]["llm_cap_usd"] == .20 for w in work)
+    assert all("llm_cap_usd" not in w["input"] and w["budget_usd"] is None for w in work)
     assert read_snapshot()["token_cost_usd"] < .20
     no_effects()
 
@@ -321,7 +321,7 @@ def test_discovery_recovery_after_all_sources_does_not_recollect(monkeypatch, tr
     no_effects()
 
 
-def test_discovery_budget_is_checked_before_any_additional_provider_call(monkeypatch, transport, providers_up):
+def test_discovery_can_exceed_old_llm_budget_without_human_permission(monkeypatch, transport, providers_up):
     from octopus import pricing
     Script(monkeypatch, transport)
     original = transport.handler
@@ -332,9 +332,10 @@ def test_discovery_budget_is_checked_before_any_additional_provider_call(monkeyp
     transport.handler = expensive
     oid = supervisor.start_pursuit()
     supervisor.run_pursuit(oid)
-    assert len(transport.calls) == 1
-    assert supervisor.work_tasks("octopus", oid)[0]["status"] == "waiting_human"
-    assert read_snapshot()["token_cost_usd"] == pytest.approx(.199)
+    assert len(transport.calls) > 1
+    assert supervisor.work_tasks("octopus", oid)[0]["status"] == "done"
+    assert read_snapshot()["token_cost_usd"] == pytest.approx(.199 * len(transport.calls))
+    assert not tasks.pending_human_requests("octopus")
     assert not journal.query("SELECT id FROM spend_requests")
 
 

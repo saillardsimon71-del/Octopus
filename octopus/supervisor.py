@@ -30,7 +30,6 @@ import hashlib
 import time
 import json
 import os
-import math
 from pathlib import Path
 
 from . import journal, strategy, tasks
@@ -77,7 +76,6 @@ PURSUIT_TOOLS = frozenset({"search", "browse", "resources_status", "economy_stat
                            "browser_navigate", "browser_snapshot", "browser_scroll", "browser_back"})
 PURSUIT_ROUNDS = 3
 PURSUIT_SIGNAL_TARGET = 0  # Compatibilité uniquement ; aucun seuil de découverte.
-PURSUIT_LLM_BUDGET_USD = 0.20
 
 
 def pursuit_capability_inventory():
@@ -134,18 +132,10 @@ def pursuit_strategy_effect(strategy: dict) -> dict:
             "strategy_key": strategy.get("key")}
 
 
-def pursuit_llm_budget_usd() -> float:
-    value = float(os.environ.get("OCTOPUS_PURSUIT_LLM_BUDGET_USD", PURSUIT_LLM_BUDGET_USD))
-    if not math.isfinite(value) or value <= 0:
-        raise SupervisorError("OCTOPUS_PURSUIT_LLM_BUDGET_USD doit être positif et fini")
-    return value
-
-
 def start_pursuit(goal: str | None = None, *, objective_id: int | None = None,
                   business: str = DEFAULT_BUSINESS) -> int:
     if os.environ.get("OCTOPUS_WORKBENCH_READONLY") == "1":
         raise PermissionError("Mode consultation : démarrage désactivé")
-    pursuit_llm_budget_usd()
     tasks.reap()
     from . import businesses
     business = strategy._business(business)
@@ -196,39 +186,34 @@ def start_pursuit(goal: str | None = None, *, objective_id: int | None = None,
                 if changed:
                     tasks._emit(conn, business, previous["id"], "pursuit.resume_decision", {"objective_id": objective_id})
                     return objective_id
+    prior = ((previous or {}).get("output") or
+             tasks.step_value((previous or {}).get("id", 0), "determination", {}))
+    choice = prior.get("determination") or {}
+    continuing = (previous and previous["status"] == "done"
+                  and (prior.get("decision") == "continue" or choice.get("action") == "continue")
+                  and prior.get("synthesis_status") == "validated" and (prior.get("next_goal") or choice.get("next_goal")))
     _queue_pursuit(objective_id, round_no=1, previous_id=previous["id"] if previous else None,
-                   next_goal="Réexaminer l'état et déterminer la prochaine action admissible.", business=business)
+                   next_goal=(prior.get("next_goal") or choice["next_goal"] if continuing else
+                              "Réexaminer l'état et déterminer la prochaine action admissible."),
+                   intent=(prior.get("next_pursuit_intent") or choice.get("intent") or prior.get("pursuit_intent")
+                           if continuing else None), business=business)
     return objective_id
 
 
 def _queue_pursuit(objective_id: int, *, round_no: int, previous_id: int | None, next_goal: str,
                    intent: str | None = None, business: str = DEFAULT_BUSINESS) -> int:
-    previous = tasks.get(previous_id) if previous_id and round_no > 1 else None
-    cap = (previous["input"].get("llm_cap_usd") or pursuit_llm_budget_usd()
-           if previous else pursuit_llm_budget_usd())
-    spent = 0.0
-    cost_roots = set()
-    cursor = previous
-    while cursor:
-        if cursor["business"] != business:
-            raise SupervisorError("Reprise de tâche hors de l'activité")
-        if cursor["run_id"]:
-            root = journal.root_run_id(cursor["run_id"])
-            if root not in cost_roots:
-                spent += journal.subtree_cost(root)
-                cost_roots.add(root)
-        if cursor["input"].get("round") == 1:
-            break
-        cursor = tasks.get(cursor["input"].get("previous_id"))
+    previous = tasks.get(previous_id) if previous_id else None
+    if previous and previous["business"] != business:
+        raise SupervisorError("Reprise de tâche hors de l'activité")
     task_id = tasks.enqueue(business, WORK_KIND,
                             {"objective_id": objective_id, "pursuit": True, "round": round_no,
                              "previous_id": previous_id, "goal": next_goal,
                              "pursuit_intent": intent,
-                             "profile": "economical", "llm_cap_usd": cap,
+                             "profile": "economical",
                              "allowed_tools": sorted(PURSUIT_TOOLS),
                              "browser_public_only": True,
                              "max_steps": 6, "max_duration_s": 120},
-                            budget_usd=max(0.0, cap - spent), resource="llm", max_attempts=1,
+                            resource="llm", max_attempts=1,
                             parent_id=previous_id,
                             idempotency_key=f"pursuit:{objective_id}:{previous_id or 'start'}")
     strategy.link(business, "objective", objective_id, "task", task_id, "executed_by")
@@ -478,22 +463,18 @@ def execute_pursuit(ctx) -> dict:
         if result.get("execution_status") in {"llm_unavailable", "synthesis_unavailable", "timeout"}:
             action = "continue"
             choice = {**choice, "next_goal": "Reprendre les observations conservées et compléter uniquement le travail manquant."}
-    budget_permission = None
-    if result.get("execution_status") == "budget_exceeded" or str(result.get("synthesis_error") or "").startswith("BudgetExceeded:"):
-        budget_permission = "Plafond LLM explicitement atteint ; décision de l'opérateur nécessaire."
     if technical_reasons and not execution_permission:
         # Une demande textuelle du modèle ne transforme pas un échec d'acquisition
         # constaté en besoin d'autorité. Les vraies frontières runtime ont priorité.
         model_permission = None
-    permission = budget_permission or execution_permission or model_permission
+    permission = execution_permission or model_permission
     if not permission and action == "request_permission":
         action = "continue"
         reason = "Source ou appel invalide abandonné : " + "; ".join(technical_reasons)
         choice = {**choice, "next_goal": "Abandonner les sources invalides et poursuivre avec une autre source Web publique, en réutilisant les observations acquises."}
     if permission:
         action, reason = "request_permission", str(permission)
-    elif int(ctx.input["round"]) >= PURSUIT_ROUNDS:
-        action, reason = "pause", "Limite de trois cycles atteinte. " + str(reason)
+    cycle_limit_reached = int(ctx.input["round"]) >= PURSUIT_ROUNDS
     if action == "continue" and not choice.get("next_goal"):
         action, reason = "pause", "La décision ne précise aucune prochaine action."
 
@@ -514,8 +495,8 @@ def execute_pursuit(ctx) -> dict:
             economically_invalidated=separation.invalidated_keys(ctx.business, objective_id), observation_only=True)
         adjusted = separation.apply_pursuit_choice(
             choice, action, str(reason), permission, assessment,
-            execution_boundary=bool(budget_permission or execution_permission),
-            rounds_left=int(ctx.input["round"]) < PURSUIT_ROUNDS,
+            execution_boundary=bool(execution_permission),
+            rounds_left=True,  # Le quantum arrête l'exécution, pas une continuation d'observation.
             continue_reasoning=bool(model_proposals), observation_only=True)
         action, reason, permission = adjusted["action"], adjusted["reason"], adjusted["permission"]
         choice = {**choice, "next_goal": adjusted["next_goal"]}
@@ -547,6 +528,8 @@ def execute_pursuit(ctx) -> dict:
     output = {**result, "objective_id": objective_id, "economic_result": None,
               "decision": action, "reason": str(reason), "next_goal": choice.get("next_goal"),
               "next_pursuit_intent": next_intent}
+    if cycle_limit_reached and action == "continue":
+        output["cycle_limit_reached"] = True
     if hypothesis_record is not None:
         output["strategy_hypothesis"] = hypothesis_record
         if hypothesis_record.get("hypothesis_id") is not None:
@@ -599,11 +582,13 @@ def execute_pursuit(ctx) -> dict:
         output["decision"] = "pause"
         output["reason"] = "Réponse reçue. Reprendre pour réexaminer l'état avec les mêmes limites."
     ctx.check_cancel()
-    if action == "continue" and strategy.get("objective", objective_id, ctx.business)["status"] == "active":
+    if action == "continue" and not cycle_limit_reached and strategy.get("objective", objective_id, ctx.business)["status"] == "active":
         output["next_task_id"] = _queue_pursuit(objective_id, round_no=int(ctx.input["round"]) + 1,
                                                previous_id=ctx.id, next_goal=choice["next_goal"], intent=next_intent, business=ctx.business)
     elif strategy.get("objective", objective_id, ctx.business)["status"] == "active":
-        strategy.transition("objective", objective_id, ctx.business, "paused", actor="octopus", note=str(reason)[:900])
+        note = ("Borne de cycles atteinte ; continuation conservée pour une reprise explicite. "
+                if cycle_limit_reached and action == "continue" else "") + str(reason)
+        strategy.transition("objective", objective_id, ctx.business, "paused", actor="octopus", note=note[:900])
     return output
 
 
@@ -621,8 +606,11 @@ def technical_pursuit_request(work: dict, request: dict, result: dict) -> bool:
     choice = result.get("determination") or {}
     if not isinstance(choice, dict) or not isinstance(result.get("results", []), list):
         return False
-    if not result or result.get("execution_status") == "budget_exceeded" \
-            or str(result.get("synthesis_error") or "").startswith("BudgetExceeded:"):
+    if (result.get("execution_status") == "budget_exceeded"
+            or str(result.get("synthesis_error") or "").startswith("BudgetExceeded:")):
+        return request.get("question") == (
+            "Plafond LLM explicitement atteint ; décision de l'opérateur nécessaire." + suffix)
+    if not result:
         return False
     refusals = []
     source_failure = False
@@ -684,6 +672,9 @@ def reconcile_pursuit_requests(objective_id: int, *, business: str = DEFAULT_BUS
                 conn.execute("UPDATE tasks SET status='queued', not_before=?, updated_at=? WHERE id=? AND status='waiting_human'",
                              (now, now, work["id"]))
                 conn.execute("DELETE FROM task_steps WHERE task_id=? AND key='pursuit.decision'", (work["id"],))
+                if (result.get("execution_status") == "budget_exceeded"
+                        or str(result.get("synthesis_error") or "").startswith("BudgetExceeded:")):
+                    conn.execute("DELETE FROM task_steps WHERE task_id=? AND key='determination'", (work["id"],))
     return reconciled
 
 

@@ -215,15 +215,16 @@ def test_technical_model_permission_retries_bounded_but_real_permission_survives
     assert "Publier" in tasks.pending_human_requests(BUSINESS)[0]["question"]
 
 
-def test_explicit_llm_budget_exhaustion_remains_human_boundary(monkeypatch):
+def test_old_llm_budget_error_does_not_create_human_boundary(monkeypatch):
     monkeypatch.setattr(runtime, "run_mission", lambda *a, **k: {
         "execution_status": "llm_unavailable", "synthesis_status": "degraded",
         "synthesis_error": "BudgetExceeded: plafond du run atteint", "results": []})
     oid = supervisor.start_pursuit()
     supervisor.run_pursuit(oid)
-    assert "Plafond LLM" in tasks.pending_human_requests(BUSINESS)[0]["question"]
+    assert not tasks.pending_human_requests(BUSINESS)
+    assert strategy.get("objective", oid, BUSINESS)["status"] == "paused"
     supervisor.start_pursuit(objective_id=oid)
-    assert supervisor.work_tasks(BUSINESS, oid)[0]["status"] == "waiting_human"
+    assert supervisor.work_tasks(BUSINESS, oid)[-1]["status"] == "queued"
 
 
 @pytest.mark.parametrize("old_metadata", [False, True])
@@ -250,7 +251,7 @@ def test_resumed_task_keeps_root_and_costs_for_next_cycle(old_metadata):
     with journal.run(BUSINESS, "task:supervisor.objective_work", resume_run_id=resumed.id) as third:
         assert third.root_id == first.id
     next_id = supervisor._queue_pursuit(oid, round_no=2, previous_id=work["id"], next_goal="Suite")
-    assert tasks.get(next_id)["budget_usd"] == pytest.approx(0.11)
+    assert tasks.get(next_id)["budget_usd"] is None
     assert read_snapshot()["pursuit_llm"]["spent_usd"] == pytest.approx(0.09)
 
 
@@ -517,6 +518,5 @@ def test_paused_degraded_pursuit_resumes_only_synthesis_with_real_gateway_and_fa
     assert not journal.query("SELECT id FROM channel_actions")
     assert not journal.query("SELECT id FROM tasks WHERE kind='capability.acquire'")
     assert not journal.query("SELECT id FROM spend_requests")
-    assert supervisor.PURSUIT_LLM_BUDGET_USD == .20
     assert all(work["input"]["allowed_tools"] == sorted(supervisor.PURSUIT_TOOLS)
                for work in supervisor.work_tasks(BUSINESS, oid))

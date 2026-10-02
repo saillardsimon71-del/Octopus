@@ -186,12 +186,8 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
                             (root["id"],)).fetchone()[0])
                         cost_roots.add(root["id"])
                 task_input = json.loads(cursor["input"] or "{}")
-                if task_input.get("round") == 1:
-                    break
                 cursor = by_task_id.get(task_input.get("previous_id"))
-            cap = json.loads(pursuit["input"] or "{}").get("llm_cap_usd", pursuit["budget_usd"])
-            pursuit_llm = {"spent_usd": round(spent, 6), "budget_usd": cap,
-                           "remaining_usd": round(max(0.0, cap - spent), 6) if cap is not None else None}
+            pursuit_llm = {"spent_usd": round(spent, 6)}
     finally:
         connection.close()
 

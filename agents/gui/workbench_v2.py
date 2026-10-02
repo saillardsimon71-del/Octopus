@@ -392,7 +392,7 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         self._line(hero, "Premier démarrage : 0 EUR. Consultation et analyse. Trois cycles bornés, délai cible de deux minutes chacun.",
                    COLORS["muted"], padx=20, pady=(0, 8))
         if obsolete:
-            self._line(hero, "Une ancienne erreur de source sera réconciliée au clic sur Reprendre. Aucune permission supplémentaire requise.",
+            self._line(hero, "Une ancienne interruption technique sera réconciliée au clic sur Reprendre. Aucune permission supplémentaire requise.",
                        COLORS["muted"], padx=20, pady=(0, 8))
         activity = next((item for item in state.get("activities", []) if item["id"] == self.selected_business_id), None)
         if activity and activity["description"]:
@@ -425,9 +425,8 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         self._line(body, f"Coût LLM calculé : {state['token_cost_usd']:g} USD. Le résultat économique se consulte dans les comptes, pas dans le nombre de tâches.",
                    COLORS["muted"])
         if state.get("pursuit_llm"):
-            llm_budget = state["pursuit_llm"]
-            self._line(body, f"Plafond LLM du travail : {llm_budget['spent_usd']:g} / {llm_budget['budget_usd']:g} USD "
-                       f"({llm_budget['remaining_usd']:g} USD restants). Budget économique externe : 0 EUR.",
+            self._line(body, f"Coût LLM enregistré pour cet objectif : {state['pursuit_llm']['spent_usd']:g} USD. "
+                       "Budget économique externe : 0 EUR.",
                        COLORS["muted"])
         self.overview_worker = self._line(body, "Exécution : " + self._worker_label() +
                                           ". Aucun appel Agnes automatique.", COLORS["muted"], pady=8)

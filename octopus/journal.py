@@ -725,6 +725,7 @@ class RunContext:
     profile: str | None
     budget_usd: float | None
     budgets: tuple[tuple[int, float], ...]  # (run_id, budget) du run et de ses parents budgetes
+    llm_cost_observation_only: bool = False
 
 
 _current: contextvars.ContextVar[RunContext | None] = contextvars.ContextVar("octopus_run", default=None)
@@ -736,12 +737,16 @@ def current_run() -> RunContext | None:
 
 @contextmanager
 def run(business: str, kind: str, *, label: str | None = None, budget_usd: float | None = None,
-        profile: str | None = None, resume_run_id: int | None = None):
+        profile: str | None = None, resume_run_id: int | None = None,
+        llm_cost_observation_only: bool = False):
     """Ouvre un run (imbrique dans le run courant s'il existe). Cede None si OCTOPUS=off."""
     if not enabled():
         yield None
         return
     parent = _current.get()
+    llm_cost_observation_only = llm_cost_observation_only or bool(parent and parent.llm_cost_observation_only)
+    if llm_cost_observation_only:
+        budget_usd = None
     previous = query("SELECT id, root_id, business, kind, profile FROM runs WHERE id=?", (resume_run_id,))[0] if resume_run_id else None
     if previous and (parent is not None or previous["business"] != business or previous["kind"] != kind):
         raise ValueError("reprise de run incompatible")
@@ -770,8 +775,10 @@ def run(business: str, kind: str, *, label: str | None = None, budget_usd: float
                           "SELECT id, budget_usd FROM a WHERE budget_usd IS NOT NULL", (resume_run_id,))
         prior_budgets = tuple((row["id"], row["budget_usd"]) for row in ancestors)
     budgets = (parent.budgets if parent else prior_budgets) + (((run_id, budget_usd),) if budget_usd is not None else ())
+    if llm_cost_observation_only:
+        budgets = ()
     ctx = RunContext(run_id, root_id if root_id else run_id, business, kind, effective_profile,
-                     budget_usd, budgets)
+                     budget_usd, budgets, llm_cost_observation_only)
     token = _current.set(ctx)
     status, error = "done", None
     try:

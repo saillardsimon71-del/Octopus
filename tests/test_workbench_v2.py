@@ -43,7 +43,7 @@ def test_snapshot_is_read_only_and_task_done_does_not_close_objective(monkeypatc
     assert read_snapshot("autre")["objectives"] == []
 
 
-def test_snapshot_shows_llm_route_cost_reason_and_remaining_budget():
+def test_snapshot_shows_historical_llm_route_cost_reason_without_budget():
     objective_id = supervisor.start_pursuit()
     task = supervisor.work_tasks("octopus", objective_id)[0]
     with journal.run("octopus", "task:supervisor.objective_work", budget_usd=0.20,
@@ -57,8 +57,7 @@ def test_snapshot_shows_llm_route_cost_reason_and_remaining_budget():
     with journal.connect() as connection:
         connection.execute("UPDATE tasks SET run_id=? WHERE id=?", (run.id, task["id"]))
     state = read_snapshot("octopus")
-    assert state["pursuit_llm"] == {"spent_usd": 0.01, "budget_usd": 0.20,
-                                    "remaining_usd": 0.19}
+    assert state["pursuit_llm"] == {"spent_usd": 0.01}
     assert state["llm_calls"][0]["provider"] == "deepseek"
     assert state["llm_calls"][0]["cost_usd"] == 0.01
     assert state["llm_calls"][0]["fallback"] is True

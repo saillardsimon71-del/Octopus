@@ -184,10 +184,12 @@ def run_one(owner: str | None = None, *, task_id: int | None = None, lease_s: fl
     log(f"[worker] #{task['id']} {task['kind']} (tentative {task['attempts']}/{task['max_attempts']})")
     started = time.time()
     try:
+        observation_only = task["kind"] == "supervisor.objective_work" and task["input"].get("pursuit") is True
         with journal.run(task["business"], f"task:{task['kind']}", label=f"tâche #{task['id']}",
                          budget_usd=task.get("budget_usd"),
-                         resume_run_id=(task.get("run_id") if task.get("budget_usd") is not None
-                                        and journal.current_run() is None else None)) as run:
+                         resume_run_id=(task.get("run_id") if (task.get("budget_usd") is not None or observation_only)
+                                        and journal.current_run() is None else None),
+                         llm_cost_observation_only=observation_only) as run:
             if run is not None:
                 tasks.set_run(task["id"], run.id, owner=owner)
             ctx.check_cancel()
