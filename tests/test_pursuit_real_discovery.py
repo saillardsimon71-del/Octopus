@@ -112,7 +112,7 @@ class Script:
             answer = ({"tool": "search", "args": {"query": f"monétisation {lane}"}} if index == 0 else
                       {"tool": "browse", "args": {"url": source_payload(lane)["url"]}} if index == 1 else
                       {"final": "Source acquise, interprétation et profit restent incertains"})
-        elif limit == 1600:
+        elif limit == 4000:
             answer = {"rapport": "Sources simulées distinctes ; aucun cash observé",
                       "determination": determination()}
             if self.intent == "discovery":
@@ -313,7 +313,7 @@ def test_discovery_recovery_after_all_sources_does_not_recollect(monkeypatch, tr
     supervisor.start_pursuit(objective_id=oid)
     supervisor.run_pursuit(oid)
     assert script.acquisitions == sources == ["service", "audience"]
-    assert [r["max_tokens"] for r in script.calls[requests:]] == [1600]
+    assert [r["max_tokens"] for r in script.calls[requests:]] == [4000]
     latest = supervisor.work_tasks("octopus", oid)[-1]
     assert latest["output"]["results"] == checkpoint["results"]
     assert latest["output"]["resumed_collection"] is True

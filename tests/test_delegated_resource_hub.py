@@ -494,15 +494,29 @@ def test_publication_grant_does_not_authorize_profile_autosave(monkeypatch):
 
 def test_migration_v9_preserves_legacy_grants_without_global_authority():
     cid = channel('https://company.example/contact', access='act')
+    tid = resources.request_account('legacy-request', 'Unknown', 'Observer les demandes', ['read'], BUSINESS,
+                                    created_by='agent:test', url=URL)
+    request = tasks.pending_human_requests(BUSINESS)[0]
+    tasks.answer(request['id'], 'reporter ; réponse humaine historique')
+    tasks.save_step(tid, 'pursuit.progress', {'collect_complete': True, 'results': ['observation historique']})
     with journal.connect() as conn:
         conn.execute('DROP TABLE channel_authority')
         conn.execute('DROP TABLE operational_mandates')
         conn.execute('ALTER TABLE resources DROP COLUMN web_account')
         conn.execute('PRAGMA user_version=9')
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        before = {}
+        for table in tables:
+            columns = ','.join('"' + r[1] + '"' for r in conn.execute(f'PRAGMA table_info("{table}")'))
+            before[table] = (columns, [tuple(r) for r in conn.execute(f'SELECT {columns} FROM "{table}" ORDER BY rowid')])
     with journal.connect() as conn:
         assert conn.execute('PRAGMA user_version').fetchone()[0] == 10
         assert conn.execute('SELECT access FROM economic_channels WHERE id=?', (cid,)).fetchone()[0] == 'act'
         assert not conn.execute('SELECT * FROM operational_mandates').fetchall()
+        for table, (columns, rows) in before.items():
+            assert [tuple(r) for r in conn.execute(f'SELECT {columns} FROM "{table}" ORDER BY rowid')] == rows, table
+    assert tasks.answer_for(tid, request['key']) == 'reporter ; réponse humaine historique'
+    assert tasks.step_value(tid, 'pursuit.progress')['results'] == ['observation historique']
 
 
 def test_workbench_hub_controls_and_readonly_share_canonical_state():
@@ -559,3 +573,163 @@ def test_account_urls_never_expose_query_session_tokens(monkeypatch):
         assert 'raw-session-token' not in json.dumps(checkpoint)
     finally:
         s.close()
+
+
+@pytest.mark.parametrize('resume_truncated', [False, True], ids=['complete', 'resume-truncated'])
+def test_hub_account_pursuit_long_synthesis_and_recovery(monkeypatch, transport, providers_up, resume_truncated):
+    """Both integrations execute together; token units and human onboarding are simulated."""
+    import copy
+    import ipaddress
+    import socket
+    import requests
+    from agents import agent_browser, browser
+    from octopus import businesses, llm, strategy, supervisor
+    from octopus.pricing import Usage
+
+    monkeypatch.setattr(requests.sessions.Session, 'request', lambda *a, **k: pytest.fail('real HTTP'))
+    monkeypatch.setattr(socket.socket, 'connect', lambda *a, **k: pytest.fail('real network'))
+    monkeypatch.setattr(web_guard, '_resolved_ips', lambda _: [ipaddress.ip_address('8.8.8.8')])
+    monkeypatch.setattr(agent_browser, 'Session', FakeAccountSession)
+    monkeypatch.setattr(supervisor, 'PURSUIT_ROUNDS', 1)
+    activity = businesses.create_activity('Produits digitaux & automatisation IA B2B', 'Observer les demandes B2B.')
+    business = activity.id
+    key, public_url = 'new-platform', 'https://public.example/demand'
+    acquired, child_views, grant_ids = [], [], []
+    state = {'child': False, 'resumed': False, 'outer_actions': 0, 'child_actions': 0}
+    next_goal = 'Comparer les demandes authentifiées conservées avec les observations publiques.'
+    report = 'Observations publiques et authentifiées simulées ; encaissement inconnu. ' * 110
+    answer = json.dumps({'rapport': report, 'business_signals': [], 'determination': {
+        'action': 'continue', 'reason': 'Comparer les observations déjà acquises.',
+        'next_goal': next_goal, 'permission': ''}}, ensure_ascii=False)
+    assert 1600 * 4 < len(answer) < 4000 * 4
+    with pytest.raises(ValueError):
+        llm.parse_json(answer[:1600 * 4])
+
+    def browse(args):
+        assert not state['resumed']
+        acquired.append(args['url'])
+        page = browser._page_record(requested_url=public_url, final_url=public_url, status=200,
+            content_type='text/html', title='Demande publique simulée', method='http:html_main',
+            rendered=False, blocked=False, error=None, text='Entreprise B2B cherche automatisation.', raw_chars=42)
+        return {'url': public_url, 'texte': page.main_text, 'page': page.as_dict()}
+
+    original_request = runtime.TOOLS['request_account']['fn']
+    original_account = runtime.TOOLS['account_task']['fn']
+    original_navigate = runtime.TOOLS['browser_navigate']['fn']
+
+    def human_onboarding(args):
+        result = original_request(args)
+        assert tasks.get(result['task_id'])['status'] == 'waiting_human'
+        resources.configure_account(key, actor='human', provider='Plateforme inconnue', label='Compte B2B',
+            url=URL, domains=['new-platform.example'], businesses=[business], ownership='business',
+            dedicated=True, authenticated_text='Déconnexion')
+        connector = resources.HumanConnection(key, actor='human', session_factory=FakeAccountSession)
+        assert connector.verify()
+        worker.run_one(task_id=result['task_id'])
+        assert tasks.get(result['task_id'])['status'] == 'done'
+        grant_ids.append(mandates.grant(business, 'Lecture B2B simulée', 'owned_account', ['read'],
+            actor='human', resource_keys=[key]))
+        return result
+
+    def account_work(args):
+        assert not state['resumed']
+        parent_state = web_guard.current()
+        state['child'] = True
+        try:
+            result = original_account(args)
+            assert result['status'] == 'done'
+            assert result['observations']['synthesis_status'] == 'validated'
+            return result
+        finally:
+            state['child'] = False
+            assert web_guard.current() is parent_state and not parent_state.account_read
+
+    def authenticated_observation(args):
+        assert state['child']
+        view = original_navigate(args)
+        workspace = bw.workspace()
+        assert workspace.account_mode and workspace.resource_key == key
+        assert workspace.scope.business == business
+        assert 'Déconnexion' in view['snapshot']
+        child_views.append(view)
+        return view
+
+    for name, fn in [('browse', browse), ('request_account', human_onboarding),
+                     ('account_task', account_work), ('browser_navigate', authenticated_observation)]:
+        monkeypatch.setitem(runtime.TOOLS, name, {**runtime.TOOLS[name], 'fn': fn})
+
+    def respond(provider, request):
+        maximum = request['max_tokens']
+        messages = json.dumps(request['messages'], ensure_ascii=False)
+        assert FakeAccountSession.secret not in messages
+        if maximum == 700:
+            assert not state['resumed']
+            output = {'tasks': [{'role': 'SOUT', 'task': 'Observer le compte' if state['child'] else 'Observer les demandes B2B'}]}
+        elif maximum == 500:
+            assert not state['resumed']
+            if state['child']:
+                index = state['child_actions']
+                state['child_actions'] += 1
+                output = ({'tool': 'browser_navigate', 'args': {'url': URL}} if index == 0
+                          else {'final': 'Déconnexion · Compte B2B, observation authentifiée conservée'})
+            else:
+                index = state['outer_actions']
+                state['outer_actions'] += 1
+                output = [
+                    {'tool': 'browse', 'args': {'url': public_url}},
+                    {'tool': 'request_account', 'args': {'key': key, 'platform': 'Plateforme inconnue',
+                        'reason': 'Observer les demandes professionnelles', 'capabilities': ['read'], 'url': URL}},
+                    {'tool': 'account_task', 'args': {'key': key, 'goal': 'Observer les demandes sans action externe'}},
+                    {'final': 'Observations publiques et authentifiées conservées'}][index]
+        else:
+            assert maximum == 4000
+            if state['child']:
+                output = {'rapport': 'Déconnexion · Compte B2B, observation authentifiée simulée.'}
+            else:
+                assert 'authentifiées conservées' in messages.lower()
+                text = answer[:1600 * 4] if resume_truncated and not state['resumed'] else answer
+                return llm.TransportResult(text, Usage(prompt_tokens=100, completion_tokens=(len(text)+3)//4),
+                    request['model'], resolved_provider='OfflineFake', provider_cost_usd=.002)
+        text = json.dumps(output, ensure_ascii=False)
+        return llm.TransportResult(text, Usage(prompt_tokens=100, completion_tokens=(len(text)+3)//4),
+            request['model'], resolved_provider='OfflineFake', provider_cost_usd=.001)
+
+    transport.handler = respond
+    oid = supervisor.start_pursuit(business=business)
+    supervisor.run_pursuit(oid, business=business)
+    current = supervisor.work_tasks(business, oid)[-1]
+    old_grants = copy.deepcopy(mandates.list_mandates(business))
+    old_account = copy.deepcopy(resources.get(key))
+    if resume_truncated:
+        assert current['status'] == 'done_degraded'
+        previous = copy.deepcopy(current)
+        old_calls = [dict(r) for r in journal.query('SELECT * FROM llm_calls ORDER BY id')]
+        count = len(transport.calls)
+        state['resumed'] = True
+        supervisor.start_pursuit(objective_id=oid, business=business)
+        supervisor.run_pursuit(oid, business=business)
+        current = supervisor.work_tasks(business, oid)[-1]
+        assert len(transport.calls) == count + 1
+        assert current['output']['resumed_collection']
+        assert current['output']['results'] == previous['output']['results']
+        assert tasks.get(previous['id']) == previous
+        assert [dict(r) for r in journal.query('SELECT * FROM llm_calls ORDER BY id')][:len(old_calls)] == old_calls
+    assert current['status'] == 'done'
+    assert current['output']['synthesis_status'] == 'validated'
+    assert current['output']['rapport'] == report
+    assert current['output']['next_goal'] == next_goal
+    assert mandates.list_mandates(business) == old_grants and old_grants[0]['id'] == grant_ids[0]
+    assert resources.get(key) == old_account and old_account['web_account']['session_status'] == 'connected'
+    assert acquired == [public_url] and len(child_views) == 1
+    assert tasks.pending_human_requests(business) == []
+    assert all(t['status'] != 'waiting_human' for t in tasks.list_tasks(business=business))
+    assert len(journal.query('SELECT id FROM strategy_decisions WHERE origin_task_id=?', (current['id'],))) == 1
+    rows = [dict(r) for r in journal.query('SELECT * FROM llm_calls ORDER BY id')]
+    assert 1600 < rows[-1]['completion_tokens'] < 4000 and rows[-1]['status'] == 'ok'
+    assert read_snapshot(business)['token_cost_usd'] == pytest.approx(sum(r['cost_usd'] for r in rows))
+    before = (len(rows), len(strategy.list_items('decision', business)))
+    supervisor.run_pursuit(oid, business=business)
+    assert (len(journal.query('SELECT * FROM llm_calls')), len(strategy.list_items('decision', business))) == before
+    for table in ('resources', 'events', 'tasks', 'human_requests', 'task_steps', 'llm_calls'):
+        assert FakeAccountSession.secret not in str([dict(r) for r in journal.query('SELECT * FROM ' + table)])
+    assert not journal.query('SELECT * FROM channel_actions')

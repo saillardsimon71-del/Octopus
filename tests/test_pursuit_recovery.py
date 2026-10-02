@@ -21,6 +21,95 @@ BUSINESS = "octopus"
 SUFFIX = " Une réponse seule n'accorde aucun droit. Adaptez l'objectif ou configurez une autorisation explicite."
 
 
+@pytest.mark.parametrize("resume_truncated", [False, True], ids=["first-synthesis", "resume-synthesis"])
+def test_complete_synthesis_beyond_old_1600_token_limit(monkeypatch, transport, providers_up, resume_truncated):
+    """A transport truncates at its requested quota; this tests serialization, not model quality."""
+    import requests
+    import socket
+    monkeypatch.setattr(requests.sessions.Session, "request", lambda *a, **k: pytest.fail("real HTTP"))
+    monkeypatch.setattr(socket.socket, "connect", lambda *a, **k: pytest.fail("real network"))
+    monkeypatch.setattr(supervisor, "PURSUIT_ROUNDS", 1)
+    url = "https://public.example/observation"
+    acquired = []
+    resumed = False
+    report = "Observation sourcée ; demande et encaissement inconnus. " * 140
+    answer = {"rapport": report, "business_signals": [], "determination": {
+        "action": "pause", "reason": "Synthèse simulée, aucun résultat économique établi.",
+        "next_goal": "", "permission": ""}}
+    complete = json.dumps(answer, ensure_ascii=False)
+    assert 1600 * 4 < len(complete) < 4000 * 4
+    with pytest.raises(ValueError, match="objet JSON introuvable"):
+        llm.parse_json(complete[:1600 * 4])
+
+    def browse(args):
+        assert not resumed, "A completed observation must not be collected again"
+        acquired.append(args["url"])
+        page = browser._page_record(requested_url=url, final_url=url, status=200,
+            content_type="text/html", title="Source simulée", method="http:html_main",
+            rendered=False, blocked=False, error=None, text="Observation publique simulée.", raw_chars=30)
+        return {"url": url, "texte": page.main_text, "page": page.as_dict()}
+
+    def respond(provider, request):
+        maximum = request["max_tokens"]
+        if maximum == 700:
+            assert not resumed, "Completed plan must be reused"
+            text = json.dumps({"tasks": [{"role": "SOUT", "task": "Observer une source publique"}]})
+        elif maximum == 500:
+            assert not resumed, "Completed agent must be reused"
+            text = json.dumps({"final": "Observation conservée"} if acquired else
+                              {"tool": "browse", "args": {"url": url}})
+        else:
+            assert request["model"] == "deepseek-flash"
+            # Approximate token units exist only in this fake transport. The old quota
+            # cuts the JSON before determination; the production parser stays strict.
+            effective_maximum = min(maximum, 1600) if resume_truncated and not resumed else maximum
+            text = complete[:effective_maximum * 4]
+        completion_tokens = (len(text) + 3) // 4
+        cost = completion_tokens * .000001 if request["model"] == "deepseek-flash" else 0.
+        return llm.TransportResult(text, Usage(prompt_tokens=100, completion_tokens=completion_tokens),
+                                   request["model"], resolved_provider="OfflineFake", provider_cost_usd=cost)
+
+    transport.handler = respond
+    monkeypatch.setitem(runtime.TOOLS, "browse", {**runtime.TOOLS["browse"], "fn": browse})
+    oid = supervisor.start_pursuit()
+    supervisor.run_pursuit(oid)
+    previous = supervisor.work_tasks(BUSINESS, oid)[0]
+    if resume_truncated:
+        assert previous["status"] == "done_degraded"
+        assert previous["output"]["execution_status"] == "synthesis_unavailable"
+        assert tasks.step_value(previous["id"], "pursuit.progress")["collect_complete"] is True
+        history = [dict(row) for row in journal.query("SELECT * FROM llm_calls ORDER BY id")]
+        assert history[-1]["status"] == "invalid"
+        assert history[-1]["completion_tokens"] == 1600
+        assert "objet JSON introuvable" in history[-1]["error"]
+        old_results = copy.deepcopy(previous["output"]["results"])
+        resumed = True
+        count = len(transport.calls)
+        assert supervisor.start_pursuit(objective_id=oid) == oid
+        supervisor.run_pursuit(oid)
+        current = supervisor.work_tasks(BUSINESS, oid)[-1]
+        assert len(transport.calls) == count + 1
+        assert current["output"]["results"] == old_results
+        assert current["output"]["resumed_collection"] is True
+        assert tasks.get(previous["id"]) == previous
+        rows = [dict(row) for row in journal.query("SELECT * FROM llm_calls ORDER BY id")]
+        assert rows[:len(history)] == history
+    else:
+        current = previous
+        rows = [dict(row) for row in journal.query("SELECT * FROM llm_calls ORDER BY id")]
+    assert current["status"] == "done"
+    assert current["output"]["synthesis_status"] == "validated"
+    assert current["output"]["rapport"] == report
+    assert transport.calls[-1][1]["max_tokens"] == 4000
+    assert rows[-1]["status"] == "ok" and 1600 < rows[-1]["completion_tokens"] < 4000
+    assert acquired == [url]
+    assert read_snapshot(BUSINESS)["token_cost_usd"] == pytest.approx(sum(row["cost_usd"] or 0 for row in rows))
+    assert len(strategy.list_items("decision", BUSINESS)) == (2 if resume_truncated else 1)
+    assert tasks.pending_human_requests(BUSINESS) == []
+    for table in ("ledger_entries", "spend_allowances", "spend_requests", "channel_actions"):
+        assert not journal.query(f"SELECT id FROM {table}")
+
+
 def determination(action="pause", permission=""):
     return {"rapport": "Observation publique, revenu inconnu.", "plan": [], "results": [],
             "execution_status": "completed", "synthesis_status": "validated",
@@ -454,7 +543,7 @@ def test_paused_degraded_pursuit_resumes_only_synthesis_with_real_gateway_and_fa
             text = json.dumps(answer)
         else:
             stages.append("synthesis")
-            assert request["max_tokens"] == 1600
+            assert request["max_tokens"] == 4000
             content = json.dumps(request["messages"], ensure_ascii=False)
             assert "Observation Web fixture" in content and all(url in content for url in sources)
             text = json.dumps(determination()) if resumed and "response_format" not in request else malformed
@@ -505,7 +594,7 @@ def test_paused_degraded_pursuit_resumes_only_synthesis_with_real_gateway_and_fa
     assert navigations == sources and stages.count("plan") == 1 and stages.count("agent") == 3
     assert len(transport.calls) == request_count + 2
     retry_requests = [request for _, request in transport.calls[request_count:]]
-    assert all(request["max_tokens"] == 1600 for request in retry_requests)
+    assert all(request["max_tokens"] == 4000 for request in retry_requests)
     assert retry_requests[0]["response_format"] == {"type": "json_object"}
     assert "response_format" not in retry_requests[1]
     after_calls = [dict(row) for row in journal.query("SELECT * FROM llm_calls ORDER BY id")]

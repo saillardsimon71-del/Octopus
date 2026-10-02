@@ -1914,7 +1914,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         syn = deepseek.call_json("ORBIT", "determination" if determination else "synthese", pro,
                                  [{"role": "system", "content": syn_sys},
                                   {"role": "user", "content": json.dumps(synthesis_input, ensure_ascii=False)}],
-                                 reasoning="high", max_tokens=1600 if economical else 4000,
+                                 reasoning="high", max_tokens=4000,
                                  validate=(lambda data: _validate_synthesis_contract(data, determination))
                                  if economical else None)
     except llm.GatewayError as exc:
