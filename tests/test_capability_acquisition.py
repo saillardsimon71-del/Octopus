@@ -242,6 +242,7 @@ def test_builder_claim_alone_never_validates_a_capability():
                                             objective_id=objective_id, hypothesis_id=stored["hypothesis_id"])
     result = run_task(started["task_id"])
     assert calls["build"] == 1
+
     assert result["output"]["status"] == "failed"
     assert result["output"]["available"] is False
     assert acquisition.validate("dummy_echo")["capable"] is False
@@ -622,11 +623,9 @@ def test_human_request_is_opened_only_for_a_real_frontier():
     forced["plans"][0]["options"][0]["executable_here"] = True
     started = acquisition.start_acquisition(BUSINESS, "signed_contract", forced, requested_by="human",
                                             objective_id=objective_id, hypothesis_id=stored["hypothesis_id"])
-    result = run_task(started["task_id"])
-    assert result["status"] == "waiting_human"
-    request = tasks.pending_human_requests(BUSINESS)[0]
-    assert request["key"] == "capability:signed_contract:signature"
-    assert "signature" in request["question"]
+    assert started["status"] == "refused"
+    assert started["task_id"] is None
+    assert tasks.pending_human_requests(BUSINESS) == []
     assert acquisition.acquisition_state(BUSINESS, "signed_contract", objective_id=objective_id,
                                          hypothesis_id=stored["hypothesis_id"])["state"] == "human_required"
 
@@ -683,7 +682,7 @@ def test_module_never_widens_permissions_spends_or_touches_foundation():
     assert "CAPABILITY" not in foundation
     separation_source = Path("octopus/strategy_separation.py").read_text(encoding="utf-8")
     assert "capability_acquisition" not in separation_source
-    assert acquisition.HUMAN_FRONTIERS == frozenset(resources.HUMAN_NEEDS)
+    assert acquisition.HUMAN_FRONTIERS == frozenset(resources.HUMAN_NEEDS) | {"permission", "physical_hardware"}
 
 
 def test_builder_registration_is_bounded_and_validated():
@@ -956,3 +955,481 @@ def test_cli_acquires_only_an_already_decided_local_capability(capsys):
     assert run_task(printed["task_id"])["output"]["status"] == "acquired"
     assert cli.cmd_capability(_args("validate", capability="dummy_echo")) == 0
     assert json.loads(capsys.readouterr().out)["confirmed_by"] == ["executor_registered"]
+
+
+# Targeted review of PR117: failures reproduced on c8ae5b0, offline only.
+def review_plan(**builder_fields):
+    calls, _ = local_double()
+    if builder_fields:
+        original = acquisition.builders()["dummy_echo"].build
+        acquisition.register_builder("dummy_echo", original, **builder_fields)
+    objective, task, stored, record = planned(
+        [proposal(DUMMY, capabilities=("dummy_echo",))], inventory())
+    return calls, objective, stored, record
+
+
+def test_review_authorization_survives_temporary_outage():
+    facts = separation.build_inventory(present_tools={"browse"}, allowed_execution={"browse"},
+                                       temporarily_unavailable={"browse"})
+    state = acquisition.capability_state("browser_interaction", facts)
+    assert state["capable"] and state["authorized"] and not state["available"]
+
+
+def test_review_absent_but_authorized_is_not_available():
+    facts = acquisition.system_inventory(allowed_execution={"dummy_echo"})
+    state = acquisition.capability_state("dummy_echo", facts)
+    assert state["authorized"] and not state["capable"] and not state["available"]
+
+
+@pytest.mark.parametrize("builder_financial,requirement_financial", [(None, 0.0), (0.0, None)])
+def test_review_unknown_cost_cannot_be_erased_by_builder(builder_financial, requirement_financial):
+    local_double()
+    acquisition.register_builder("dummy_echo", acquisition.builders()["dummy_echo"].build,
+                                 financial=builder_financial)
+    acquisition.register_requirement("dummy_echo", financial=requirement_financial, cost_class="unknown",
+                                     complexity=1, human_minutes=0.0, llm_usd=0.0)
+    _, _, _, record = planned([proposal(DUMMY, capabilities=("dummy_echo",))], inventory())
+    assert record["plans"][0]["decision"] == "defer"
+    assert record["plans"][0]["options"][0]["cost"]["financial"] is None
+
+
+def test_review_explicit_unknown_replaces_a_previous_cost():
+    acquisition.register_requirement("phone_call", financial=None)
+    assert acquisition.requirement("phone_call")["financial"] is None
+
+
+def test_review_unpersisted_plan_cannot_enqueue():
+    local_double()
+    objective, task, stored = persisted([proposal(DUMMY, capabilities=("dummy_echo",))], inventory())
+    record = acquisition.plan_for(BUSINESS, objective, task, stored, inventory=inventory(), persist=False)
+    assert acquisition.start_acquisition(BUSINESS, "dummy_echo", record, requested_by="human")["status"] == "refused"
+    assert not journal.query("SELECT id FROM tasks WHERE kind=?", (acquisition.TASK_KIND,))
+
+
+def test_review_scope_is_derived_from_persisted_study():
+    calls, objective, stored, record = review_plan()
+    strategy.transition("hypothesis", stored["hypothesis_id"], BUSINESS, "testing", actor="human")
+    strategy.transition("hypothesis", stored["hypothesis_id"], BUSINESS, "invalidated", actor="human")
+    started = acquisition.start_acquisition(BUSINESS, "dummy_echo", record, requested_by="human")
+    assert started["status"] in ("refused", "not_needed")
+    assert calls["build"] == 0
+
+
+@pytest.mark.parametrize("change", ["cost", "frontier", "unsafe"])
+def test_review_worker_rechecks_current_builder_and_requirements(change):
+    calls, objective, stored, record = review_plan()
+    started = acquisition.start_acquisition(BUSINESS, "dummy_echo", record, requested_by="human")
+    original = acquisition.builders()["dummy_echo"].build
+    if change == "cost":
+        acquisition.register_builder("dummy_echo", original, financial=10.0)
+    elif change == "unsafe":
+        acquisition.register_builder("dummy_echo", original, local_safe=False)
+    else:
+        acquisition.register_requirement("dummy_echo", needs=("signature",), financial=0.0,
+                                         complexity=1, human_minutes=0.0, cost_class="local")
+    result = run_task(started["task_id"])
+    assert calls["build"] == 0
+    assert result["output"]["status"] != "acquired"
+    assert not tasks.pending_human_requests(BUSINESS)
+
+
+def test_review_unsafe_input_is_not_a_human_frontier():
+    local_double()
+    tid = tasks.enqueue(BUSINESS, acquisition.TASK_KIND,
+                        {"capability": "dummy_echo", "decision": "acquire",
+                         "option": {"local_safe": False, "executable_here": False}})
+    result = run_task(tid)
+    assert result["status"] != "waiting_human"
+    assert not tasks.pending_human_requests(BUSINESS)
+
+
+def test_review_contract_claim_requires_actual_source():
+    acquisition.register_validator("dummy_echo", lambda _: {"ok": True, "source_ref": "invented://proof"})
+    try:
+        assert not acquisition.validate("dummy_echo")["capable"]
+    finally:
+        acquisition.unregister_builder("dummy_echo")
+
+
+def test_review_validate_resolves_alias_and_never_grants_permission():
+    actions.register_executor("dummy", "echo", lambda *_: {}, cost_class="local")
+    assert acquisition.validate("dummy_echo", inventory=inventory(
+        present={"dummy:echo"}, executable={"dummy:echo"}))["available"]
+    assert not acquisition.validate("dummy_echo")["available"]
+
+
+def test_review_probe_requires_a_successful_probe_not_persisted_state(monkeypatch):
+    resources.declare("dummy_resource", "service", "Dummy", created_by="human",
+                      capabilities=["dummy_echo"])
+    resources.update("dummy_resource", actor="human", state="available", source_ref="old://state")
+    assert not acquisition.validate("dummy_echo", probe=True)["capable"]
+
+
+def test_review_builder_validator_is_used():
+    calls, _ = local_double()
+    build = acquisition.builders()["dummy_echo"].build
+    checks = []
+    acquisition.register_builder("dummy_echo", build,
+                                 validate=lambda name: checks.append(name) or {"ok": False, "detail": "invalid"})
+    objective, task, stored, record = planned([proposal(DUMMY, capabilities=("dummy_echo",))], inventory())
+    started = acquisition.start_acquisition(BUSINESS, "dummy_echo", record, requested_by="human")
+    result = run_task(started["task_id"])
+    assert checks and result["output"]["status"] == "failed"
+
+
+@pytest.mark.parametrize("partial", [None, False, {"ok": False, "detail": "partial failure"}])
+def test_review_ambiguous_builder_return_cannot_be_acquired(partial):
+    calls, _ = local_double()
+    original = acquisition.builders()["dummy_echo"].build
+    acquisition.register_builder("dummy_echo", lambda payload: (original(payload), partial)[1])
+    objective, task, stored, record = planned([proposal(DUMMY, capabilities=("dummy_echo",))], inventory())
+    started = acquisition.start_acquisition(BUSINESS, "dummy_echo", record, requested_by="human")
+    assert run_task(started["task_id"])["output"]["status"] == "failed"
+
+
+def test_review_crash_before_build_memo_never_builds_twice(monkeypatch):
+    calls, objective, stored, record = review_plan()
+    started = acquisition.start_acquisition(BUSINESS, "dummy_echo", record, requested_by="human")
+    save = tasks.save_step
+    crashed = []
+    def crash(tid, key, value, **kwargs):
+        if key == "capability.build" and not crashed:
+            crashed.append(True)
+            raise RuntimeError("crash after builder, before memo")
+        return save(tid, key, value, **kwargs)
+    monkeypatch.setattr(tasks, "save_step", crash)
+    run_task(started["task_id"])
+    actions._EXECUTORS.pop(("dummy", "echo"), None)
+    ready(started["task_id"])
+    run_task(started["task_id"])
+    assert calls["build"] == 1
+
+
+@pytest.mark.parametrize("boundary", ["decision_memo", "validation", "completion"])
+def test_review_crash_does_not_duplicate_decision_or_validation(monkeypatch, boundary):
+    calls, objective, stored, record = review_plan()
+    started = acquisition.start_acquisition(BUSINESS, "dummy_echo", record, requested_by="human")
+    crashed = []
+    if boundary == "decision_memo":
+        original = tasks.save_step
+        def crash(tid, key, value, **kwargs):
+            if key == "capability.decision" and not crashed:
+                crashed.append(True)
+                raise RuntimeError("crash before memo")
+            return original(tid, key, value, **kwargs)
+        monkeypatch.setattr(tasks, "save_step", crash)
+    else:
+        original = acquisition._persist_validation if boundary == "validation" else tasks.complete
+        def crash(*args, **kwargs):
+            value = original(*args, **kwargs) if boundary == "validation" else None
+            if not crashed:
+                crashed.append(True)
+                raise RuntimeError("crash after validation")
+            return value if boundary == "validation" else original(*args, **kwargs)
+        monkeypatch.setattr(acquisition if boundary == "validation" else tasks,
+                            "_persist_validation" if boundary == "validation" else "complete", crash)
+    run_task(started["task_id"])
+    ready(started["task_id"])
+    result = run_task(started["task_id"])
+    assert result["output"]["status"] == "acquired"
+    assert calls["build"] == 1
+    assert len(strategy.list_items("decision", BUSINESS)) == 1
+    assert len(journal.query("SELECT id FROM strategy_evidence WHERE source_ref LIKE '%#validation#%'")) == 1
+
+
+def test_review_validation_does_not_hide_the_study_or_acquisition_state():
+    calls, objective, stored, record = review_plan()
+    tid = acquisition.start_acquisition(BUSINESS, "dummy_echo", record, requested_by="human",
+                                         objective_id=objective, hypothesis_id=stored["hypothesis_id"])["task_id"]
+    assert run_task(tid)["output"]["status"] == "acquired"
+    assert acquisition.latest(BUSINESS, stored["hypothesis_id"])["decisions"] == {"dummy_echo": "acquire"}
+    assert acquisition.snapshot(["dummy_echo"], business=BUSINESS)["capabilities"][0]["acquisition_state"] == "acquired"
+    assert acquisition.recorded(BUSINESS, objective)[0]["decisions"] == {"dummy_echo": "acquire"}
+
+
+def test_review_concurrent_scopes_share_one_acquisition():
+    calls, objective, stored, record = review_plan()
+    second_objective, _, second_stored, second_record = planned(
+        [proposal("Un second objectif pour le même écho.", capabilities=("dummy_echo",))], inventory())
+    results, errors = [], []
+    def enqueue(study, oid, hid):
+        try:
+            results.append(acquisition.start_acquisition(BUSINESS, "dummy_echo", study, requested_by="human",
+                                                         objective_id=oid, hypothesis_id=hid))
+        except Exception as exc:
+            errors.append(exc)
+    threads = [threading.Thread(target=enqueue, args=args) for args in
+               [(record, objective, stored["hypothesis_id"]),
+                (second_record, second_objective, second_stored["hypothesis_id"])] * 3]
+    for thread in threads: thread.start()
+    for thread in threads: thread.join()
+    assert not errors
+    assert len({item["task_id"] for item in results}) == 1
+
+
+def test_review_computed_study_is_not_an_economic_proof():
+    calls, objective, stored, record = review_plan()
+    value = acquisition.strategy_value({**stored["retained"], "evidence_ids": [record["evidence_annotation_id"]]})
+    assert value["proof_count"] == 0
+
+
+def test_review_reusability_cannot_outrank_a_stronger_criterion():
+    cash = acquisition.strategy_value({"economic_criteria": ["cash_received"], "economic_rank": 1})
+    margin = acquisition.strategy_value({"economic_criteria": ["margin"], "economic_rank": 1}, reusability=12)
+    assert cash["total"] > margin["total"]
+
+
+def test_review_no_criterion_or_proof_is_not_positive_value():
+    value = acquisition.strategy_value({"economic_rank": 1}, reusability=12)
+    assert value["total"] == 0.0
+
+
+def test_review_same_study_after_an_intervening_change_is_reused():
+    local_double()
+    objective, task, stored = persisted([proposal(DUMMY, capabilities=("dummy_echo",))], inventory())
+    first = acquisition.plan_for(BUSINESS, objective, task, stored, inventory=inventory())
+    acquisition.plan_for(BUSINESS, objective, None, stored,
+                         inventory=inventory(present={"dummy:echo"}, executable={"dummy:echo"}))
+    third = acquisition.plan_for(BUSINESS, objective, None, stored, inventory=inventory())
+    assert third["evidence_annotation_id"] == first["evidence_annotation_id"]
+    assert acquisition.latest(BUSINESS, stored["hypothesis_id"])["evidence_id"] == first["evidence_annotation_id"]
+
+
+@pytest.mark.parametrize("after_insert", [False, True])
+def test_review_crash_at_enqueue_keeps_one_task(monkeypatch, after_insert):
+    calls, objective, stored, record = review_plan()
+    enqueue = tasks.enqueue
+    crashed = []
+    def interrupted(*args, **kwargs):
+        if not crashed:
+            crashed.append(True)
+            if after_insert:
+                enqueue(*args, **kwargs)
+            raise RuntimeError("crash at task creation")
+        return enqueue(*args, **kwargs)
+    monkeypatch.setattr(tasks, "enqueue", interrupted)
+    with pytest.raises(RuntimeError):
+        acquisition.start_acquisition(BUSINESS, "dummy_echo", record, requested_by="human")
+    started = acquisition.start_acquisition(BUSINESS, "dummy_echo", record, requested_by="human")
+    assert started["status"] == "queued"
+    assert len(journal.query("SELECT id FROM tasks WHERE kind=?", (acquisition.TASK_KIND,))) == 1
+    assert run_task(started["task_id"])["output"]["status"] == "acquired"
+    assert calls["build"] == 1
+
+
+@pytest.mark.parametrize("boundary", ["before_intent", "after_intent", "after_validation", "before_decision", "after_event"])
+def test_review_remaining_crash_boundaries(monkeypatch, boundary):
+    calls, objective, stored, record = review_plan()
+    tid = acquisition.start_acquisition(BUSINESS, "dummy_echo", record, requested_by="human")["task_id"]
+    interrupted = []
+    if boundary in ("before_intent", "after_intent"):
+        original = tasks.save_step
+        def crash(task_id, key, value, **kwargs):
+            if key == "capability.build.started" and not interrupted:
+                interrupted.append(True)
+                if boundary == "after_intent": original(task_id, key, value, **kwargs)
+                raise RuntimeError("crash at build intent")
+            return original(task_id, key, value, **kwargs)
+        monkeypatch.setattr(tasks, "save_step", crash)
+    elif boundary == "after_validation":
+        original = acquisition.validate
+        def crash(*args, **kwargs):
+            value = original(*args, **kwargs)
+            if calls["build"] and not interrupted:
+                interrupted.append(True)
+                raise RuntimeError("crash after validation")
+            return value
+        monkeypatch.setattr(acquisition, "validate", crash)
+    else:
+        original = acquisition._record_decision if boundary == "before_decision" else tasks._emit
+        def crash(*args, **kwargs):
+            selected = boundary == "before_decision" or args[3] == "capability.acquisition"
+            if selected and not interrupted:
+                interrupted.append(True)
+                if boundary == "after_event": original(*args, **kwargs)
+                raise RuntimeError("crash at persistence")
+            return original(*args, **kwargs)
+        monkeypatch.setattr(acquisition if boundary == "before_decision" else tasks,
+                            "_record_decision" if boundary == "before_decision" else "_emit", crash)
+    run_task(tid)
+    ready(tid)
+    result = run_task(tid)
+    if boundary == "after_intent":
+        assert calls["build"] == 0 and result["output"]["status"] == "failed"
+    else:
+        assert calls["build"] == 1 and result["output"]["status"] == "acquired"
+        assert len(strategy.list_items("decision", BUSINESS)) == 1
+        assert len(journal.query("SELECT id FROM strategy_evidence WHERE source_ref LIKE '%#validation#%'")) == 1
+        assert len(journal.query("SELECT id FROM events WHERE type='capability.acquisition' AND task_id=?", (tid,))) == 1
+
+
+@pytest.mark.parametrize("failure", ["timeout", "DNS", "invalid JSON", "403", "404", "broken endpoint", "crash", "validation"])
+def test_review_builder_exception_is_not_retried_or_sent_to_a_human(failure):
+    calls, objective, stored, record = review_plan()
+    original = acquisition.builders()["dummy_echo"].build
+    def broken(payload):
+        original(payload)
+        raise RuntimeError(failure)
+    acquisition.register_builder("dummy_echo", broken)
+    tid = acquisition.start_acquisition(BUSINESS, "dummy_echo", record, requested_by="human")["task_id"]
+    run_task(tid)
+    ready(tid)
+    result = run_task(tid)
+    assert calls["build"] == 1
+    assert result["output"]["status"] != "acquired"
+    assert not tasks.pending_human_requests(BUSINESS)
+
+
+@pytest.mark.parametrize("need", sorted(acquisition.HUMAN_FRONTIERS))
+def test_review_all_human_frontiers_refuse_local_construction(need):
+    local_double()
+    acquisition.register_requirement("dummy_echo", needs=[need], financial=0.0, complexity=1,
+                                     human_minutes=0.0, cost_class="local")
+    _, _, _, study = planned([proposal(DUMMY, capabilities=("dummy_echo",))], inventory())
+    assert study["decisions"]["dummy_echo"] == "human_required"
+    assert acquisition.start_acquisition(BUSINESS, "dummy_echo", study, requested_by="human")["status"] == "refused"
+    assert not tasks.pending_human_requests(BUSINESS)
+
+
+@pytest.mark.parametrize("operation", ["state", "gaps", "validate"])
+def test_review_cli_read_only_without_probe(monkeypatch, capsys, operation):
+    from octopus import __main__ as cli
+    _, objective, _, _ = review_plan()
+    before = [dict(row) for row in journal.query("SELECT * FROM events")]
+    def forbidden(*args, **kwargs):
+        pytest.fail("read-only CLI attempted a probe, build, or acquisition")
+    monkeypatch.setattr(resources, "check", forbidden)
+    monkeypatch.setattr(acquisition, "start_acquisition", forbidden)
+    args = _args(operation, business=BUSINESS, objective=objective,
+                 capability=["dummy_echo"] if operation == "state" else "dummy_echo")
+    cli.cmd_capability(args)
+    capsys.readouterr()
+    assert before == [dict(row) for row in journal.query("SELECT * FROM events")]
+
+
+def test_review_process_workers_and_planners_share_one_builder(tmp_path):
+    import os
+    import subprocess
+    import sys
+    _, objective, stored, record = review_plan()
+    study = tmp_path / "study.json"
+    study.write_text(json.dumps(record), encoding="utf-8")
+    builds = tmp_path / "builds.txt"
+    program = '''
+import json, sys
+from pathlib import Path
+from octopus import actions, capability_acquisition as acquisition, worker
+def build(payload):
+    with Path(sys.argv[2]).open("a") as out: out.write("build\\n")
+    actions.register_executor("dummy", "echo", lambda *_: {}, cost_class="local")
+    return {"detail": "process-local double"}
+acquisition.register_builder("dummy_echo", build)
+record = json.loads(Path(sys.argv[1]).read_text())
+started = acquisition.start_acquisition("octopus", "dummy_echo", record, requested_by="human")
+if started["task_id"]:
+    worker.load_handlers(["octopus.builtin_handlers"])
+    worker.run_one(task_id=started["task_id"], log=lambda *_: None)
+'''
+    processes = [subprocess.Popen([sys.executable, "-c", program, str(study), str(builds)],
+                                  cwd=Path(__file__).resolve().parents[1], env=dict(os.environ),
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(4)]
+    for process in processes:
+        out, error = process.communicate(timeout=30)
+        assert process.returncode == 0, out + error
+    assert builds.read_text().splitlines() == ["build"]
+    assert len(journal.query("SELECT id FROM tasks WHERE kind=?", (acquisition.TASK_KIND,))) == 1
+    assert len(strategy.list_items("decision", BUSINESS)) == 1
+    assert len(journal.query("SELECT id FROM strategy_evidence WHERE source_ref LIKE '%#validation#%'")) == 1
+    # A process-local registration is not durable availability in another process.
+    state = acquisition.snapshot(["dummy_echo"], business=BUSINESS)["capabilities"][0]
+    assert state["state"] == "missing" and state["stale_acquisition"]
+
+
+@pytest.mark.parametrize("llm_cost", [0.1, None])
+def test_review_llm_financial_cost_is_never_implicitly_authorized(llm_cost):
+    local_double()
+    acquisition.register_requirement("dummy_echo", financial=0.0, llm_usd=llm_cost, complexity=1,
+                                     human_minutes=0.0, cost_class="local")
+    _, _, _, record = planned([proposal(DUMMY, capabilities=("dummy_echo",))], inventory())
+    assert record["decisions"]["dummy_echo"] in ("defer", "human_required")
+    assert acquisition.start_acquisition(BUSINESS, "dummy_echo", record, requested_by="human")["status"] == "refused"
+
+
+def test_review_local_safe_must_be_an_explicit_boolean():
+    with pytest.raises(acquisition.CapabilityAcquisitionError):
+        acquisition.register_builder("dummy_echo", lambda _: {}, local_safe="false")
+
+
+@pytest.mark.parametrize("need", ["permission", "physical_hardware"])
+def test_review_explicit_permission_and_physical_hardware_are_real_boundaries(need):
+    acquisition.register_requirement("dummy_echo", needs=[need], financial=0.0, llm_usd=0.0,
+                                     complexity=1, human_minutes=0.0, cost_class="local")
+    local_double()
+    _, _, _, record = planned([proposal(DUMMY, capabilities=("dummy_echo",))], inventory())
+    assert record["decisions"]["dummy_echo"] == "human_required"
+    assert acquisition.start_acquisition(BUSINESS, "dummy_echo", record, requested_by="human")["status"] == "refused"
+
+
+def test_review_permission_loss_does_not_make_a_valid_acquisition_stale():
+    state = acquisition.capability_state("dummy_echo", inventory(
+        present={"dummy:echo"}, human={"dummy:echo"}), acquisition={"state": "acquired"})
+    assert state["capable"] and not state["authorized"] and not state["available"]
+    assert not state["stale_acquisition"]
+
+
+def test_review_cli_empty_allowed_does_not_restore_default_permissions(capsys):
+    from octopus import __main__ as cli
+    cli.cmd_capability(_args("state", capability=["search"], allowed="", json=True))
+    state = json.loads(capsys.readouterr().out)["capabilities"][0]
+    assert state["capable"] and not state["authorized"] and not state["available"]
+
+
+def test_review_updating_cost_preserves_known_boundaries_and_risk():
+    acquisition.register_requirement("phone_call", financial=None)
+    needed = acquisition.requirement("phone_call")
+    assert set(needed["needs"]) == {"login", "payment_method"}
+    assert needed["risk"] == "high" and needed["cost_class"] == "paid"
+
+
+def test_review_known_money_legal_boundary_cannot_be_erased_by_registration():
+    with pytest.raises(acquisition.CapabilityAcquisitionError):
+        acquisition.register_requirement("payment_receive", needs=(), financial=0.0, risk="low",
+                                         complexity=1, human_minutes=0.0, cost_class="local")
+
+
+def test_review_economic_validation_is_not_an_invalidation():
+    calls, _, stored, record = review_plan()
+    strategy.transition("hypothesis", stored["hypothesis_id"], BUSINESS, "testing", actor="human")
+    strategy.transition("hypothesis", stored["hypothesis_id"], BUSINESS, "validated", actor="human")
+    started = acquisition.start_acquisition(BUSINESS, "dummy_echo", record, requested_by="human")
+    assert run_task(started["task_id"])["output"]["status"] == "acquired"
+    assert calls["build"] == 1
+
+
+def test_review_valid_contract_attests_an_actual_registered_source():
+    actions.register_executor("dummy", "echo", lambda *_: {}, cost_class="local")
+    acquisition.register_validator("dummy_echo", lambda _: {"ok": True, "source_ref": "actions.executor:dummy:echo"})
+    try:
+        checked = acquisition.validate("dummy_echo")
+        assert checked["capable"] and "contract_test" in checked["confirmed_by"]
+        assert not checked["available"]
+    finally:
+        acquisition.unregister_builder("dummy_echo")
+
+
+def test_review_contract_can_attest_an_explicit_successful_probe(monkeypatch):
+    from octopus import resource_probes
+    resources.declare("dummy_resource", "service", "Dummy", created_by="human", capabilities=["dummy_echo"])
+    probes = []
+    monkeypatch.setattr(resource_probes, "run", lambda resource: probes.append(resource["key"]) or
+                        resource_probes.ProbeResult(True, "local fixture", source_ref="local://fixture"))
+    acquisition.register_validator("dummy_echo", lambda _: {"ok": True, "source_ref": "resource:dummy_resource:local://fixture"})
+    try:
+        assert not acquisition.validate("dummy_echo")["capable"]
+        assert probes == []
+        checked = acquisition.validate("dummy_echo", probe=True)
+        assert checked["capable"] and not checked["available"]
+        assert checked["confirmed_by"] == ["contract_test", "resource_probe"]
+        assert probes == ["dummy_resource"]
+    finally:
+        acquisition.unregister_builder("dummy_echo")

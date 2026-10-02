@@ -72,7 +72,7 @@ RISK_LEVELS = ("low", "medium", "high", "critical")
 COST_CLASSES = ("zero_cost", "free_quota", "local", "paid", "unknown")
 
 # Frontières humaines réelles : le vocabulaire existant de l'inventaire des ressources.
-HUMAN_FRONTIERS = frozenset(resources.HUMAN_NEEDS)
+HUMAN_FRONTIERS = frozenset(resources.HUMAN_NEEDS) | {"permission", "physical_hardware"}
 # Frontières qui engagent de l'argent ou du juridique : aucun double local ne peut les lever.
 MONEY_LEGAL_FRONTIERS = frozenset({"payment_method", "legal", "kyc", "signature", "bank_validation"})
 
@@ -86,7 +86,7 @@ CRITERION_SCORE = {"cash_received": 8.0, "margin": 6.0, "recurrence": 4.0, "auto
 RANK_SCORE = {1: 2.0, 2: 1.0}
 PROOF_SCORE = 1.5
 PROOF_SCORE_MAX = 3.0
-REUSABILITY_SCORE = ((4, 2.5), (3, 2.0), (2, 1.5))
+REUSABILITY_SCORE = ((4, 0.75), (3, 0.5), (2, 0.25))
 RISK_SCORE = {"low": 0.0, "medium": 1.5, "high": 4.0, "critical": 8.0}
 COMPLEXITY_SCORE = 1.0
 HUMAN_MINUTES_SCORE = 1.0 / 30.0
@@ -181,15 +181,15 @@ _REQUIREMENTS: dict[str, dict] = {key: dict(value) for key, value in CAPABILITY_
 
 @dataclass(frozen=True)
 class Builder:
-    """Constructeur local d'une capacité. Aucun effet externe, aucune dépense, aucune permission."""
+    """Fonction locale de confiance, revue avant enregistrement. Pas une sandbox de code tiers."""
 
     capability: str
     build: Callable[[dict], dict]
     validate: Callable[[str], dict] | None = None
     financial: float | None = 0.0
     currency: str = "EUR"
-    llm_usd: float = 0.0
-    human_minutes: float = 0.0
+    llm_usd: float | None = 0.0
+    human_minutes: float | None = 0.0
     complexity: int = 1
     risk: str = "low"
     local_safe: bool = True
@@ -210,7 +210,8 @@ def register_builder(capability: str, build: Callable[[dict], dict], *,
                      description: str = "") -> Builder:
     """Enregistre un constructeur local explicite. Aucune découverte, aucune installation implicite.
 
-    Le constructeur ne peut ni élargir une permission, ni dépenser, ni produire un effet externe.
+    Contrat du constructeur : aucun effet externe, aucune dépense, aucune permission modifiée.
+    Cette API reçoit du code Python de confiance ; elle n'isole pas un callback malveillant.
     Sa réussite déclarée ne vaut pas validation : l'état est toujours recalculé depuis les registres.
     """
     identifier = canonical(capability)
@@ -220,6 +221,8 @@ def register_builder(capability: str, build: Callable[[dict], dict], *,
         raise CapabilityAcquisitionError("build doit être appelable")
     if validate is not None and not callable(validate):
         raise CapabilityAcquisitionError("validate doit être appelable")
+    if type(local_safe) is not bool:
+        raise CapabilityAcquisitionError("local_safe doit être un booléen explicite")
     if risk not in RISK_LEVELS:
         raise CapabilityAcquisitionError(f"risque invalide : {risk!r} (attendu : {RISK_LEVELS})")
     if type(complexity) is not int or not 1 <= complexity <= 5:
@@ -229,7 +232,9 @@ def register_builder(capability: str, build: Callable[[dict], dict], *,
                                   or value < 0 or value != value or value in (float("inf"), float("-inf"))):
             raise CapabilityAcquisitionError(f"{name} doit être un nombre fini positif ou nul, ou None (inconnu)")
     builder = Builder(identifier, build, validate, None if financial is None else float(financial),
-                      str(currency or "EUR").strip().upper(), float(llm_usd), float(human_minutes),
+                      str(currency or "EUR").strip().upper(),
+                      None if llm_usd is None else float(llm_usd),
+                      None if human_minutes is None else float(human_minutes),
                       complexity, risk, bool(local_safe), str(description or "")[:300])
     _BUILDERS[identifier] = builder
     return builder
@@ -273,18 +278,22 @@ def register_requirement(capability: str, **fields) -> None:
     identifier = canonical(capability)
     if not identifier:
         raise CapabilityAcquisitionError(f"capacité invalide : {capability!r}")
-    needs = tuple(str(n).strip().lower() for n in fields.get("needs") or ())
+    entry = dict(_REQUIREMENTS.get(identifier) or {})
+    needs = tuple(str(n).strip().lower() for n in fields.get("needs", entry.get("needs")) or ())
     unknown = sorted(set(needs) - HUMAN_FRONTIERS)
     if unknown:
         raise CapabilityAcquisitionError(f"frontière humaine inconnue : {unknown} (attendu : {sorted(HUMAN_FRONTIERS)})")
-    risk = fields.get("risk", "low")
+    protected = (set(entry.get("needs") or ())
+                 | set((CAPABILITY_REQUIREMENTS.get(identifier) or {}).get("needs") or ())) & MONEY_LEGAL_FRONTIERS
+    if not protected <= set(needs):
+        raise CapabilityAcquisitionError("une définition ne peut retirer une frontière argent ou juridique connue")
+    risk = fields.get("risk", entry.get("risk", "low"))
     if risk not in RISK_LEVELS:
         raise CapabilityAcquisitionError(f"risque invalide : {risk!r}")
-    cost_class = fields.get("cost_class", "unknown")
+    cost_class = fields.get("cost_class", entry.get("cost_class", "unknown"))
     if cost_class not in COST_CLASSES:
         raise CapabilityAcquisitionError(f"classe de coût invalide : {cost_class!r}")
-    entry = dict(_REQUIREMENTS.get(identifier) or {})
-    entry.update({key: value for key, value in fields.items() if value is not None})
+    entry.update(fields)
     entry.update(needs=needs, risk=risk, cost_class=cost_class)
     _REQUIREMENTS[identifier] = entry
 
@@ -350,10 +359,13 @@ def system_inventory(allowed_execution=()) -> separation.Inventory:
     """
     from agents.runtime import TOOLS
     present = set(TOOLS)
-    return separation.build_inventory(
+    inventory = separation.build_inventory(
         present_tools=present, allowed_execution=_canonical_set(allowed_execution),
         executors=separation.executor_ids(),
         temporarily_unavailable=separation.browser_unavailable_tools(present))
+    # Preserve the caller's policy even for absent targets; availability is a separate fact.
+    inventory.allowed_execution = frozenset(_canonical_set(allowed_execution))
+    return inventory
 
 
 def resource_facts(capability: str, *, limit: int = 12) -> list[dict]:
@@ -411,9 +423,15 @@ def capability_state(capability: str, inventory: separation.Inventory, *, facts=
         detected = "missing_capability"
     state = _STATE_FROM_EXECUTABILITY.get(detected, "not_established")
     capable = bool(alternatives)
-    authorized = detected == "executable"
+    policy = getattr(inventory, "allowed_execution", None)
+    if policy is None:
+        policy = (inventory.executable | inventory.temporarily_unavailable) - (
+            inventory.permission_denied | inventory.human_required)
+    authorization_targets = (set(alternatives) if alternatives else
+                             set(resolution["targets"]["tools"]) | set(resolution["targets"]["executors"]))
+    authorized = bool(authorization_targets & set(policy))
     acquired = str((acquisition or {}).get("state") or "none")
-    stale = acquired == "acquired" and state != "available"
+    stale = acquired == "acquired" and not capable
     if state == "available":
         effective = "available"
     elif acquired in ("planned", "in_progress"):
@@ -466,11 +484,17 @@ def gaps(assessment: dict, inventory: separation.Inventory, *, business: str | N
                 if canonical(identifier)][:_MAX_CAPABILITIES]
     states = acquisition_states or {}
     # Des exigences incomplètes ou illisibles ne permettent pas d'inventer un écart ni une acquisition.
-    complete = bool(retained.get("requirements_complete", True))
+    complete = (retained.get("requirements_complete") is True
+                and isinstance(retained.get("required_capabilities"), list)
+                and len(retained["required_capabilities"]) <= _MAX_CAPABILITIES
+                and all(canonical(name) for name in retained["required_capabilities"]))
     items = []
     for identifier in required:
         identifier = canonical(identifier)
         state = capability_state(identifier, inventory, acquisition=states.get(identifier))
+        if not complete:
+            state = {**state, "state": "not_established", "effective_state": "not_established",
+                     "available": False}
         kind = _GAP_KINDS.get(state["state"], "capability_gap") if complete else "requirements_incomplete"
         items.append({**state, "kind": kind,
                       "requires_acquisition": complete and kind == "capability_gap",
@@ -478,7 +502,7 @@ def gaps(assessment: dict, inventory: separation.Inventory, *, business: str | N
     return {"status": "assessed", "strategy_key": retained.get("key"),
             "hypothesis_id": retained.get("hypothesis_id"),
             "statement": retained.get("statement"), "executability": retained.get("executability"),
-            "requirements_complete": bool(retained.get("requirements_complete", True)),
+            "requirements_complete": complete,
             "items": items, "capability_gaps": [item for item in items if item["requires_acquisition"]]}
 
 
@@ -488,7 +512,7 @@ def _cost(financial, currency, llm_usd, human_minutes, complexity, risk, *, cost
           nature="estimated") -> dict:
     return {"financial": None if financial is None else float(financial),
             "currency": str(currency or "EUR").strip().upper(), "cost_nature": nature,
-            "cost_class": cost_class, "llm_usd": float(llm_usd or 0.0),
+            "cost_class": cost_class, "llm_usd": None if llm_usd is None else float(llm_usd),
             "human_minutes": None if human_minutes is None else float(human_minutes),
             "complexity": None if complexity is None else int(complexity), "risk": risk}
 
@@ -536,16 +560,20 @@ def acquisition_options(capability: str, inventory: separation.Inventory, *, fac
         cost = builder.cost()
         if needed.get("known"):
             cost = {**cost,
-                    "financial": (builder.financial if needed["financial"] is None else
-                                  max(builder.financial or 0.0, float(needed["financial"]))),
+                    "financial": (None if builder.financial is None or needed["financial"] is None else
+                                  max(builder.financial, float(needed["financial"]))),
+                    "llm_usd": (None if builder.llm_usd is None or needed["llm_usd"] is None else
+                                max(builder.llm_usd, float(needed["llm_usd"]))),
+                    "human_minutes": (None if builder.human_minutes is None or needed["human_minutes"] is None else
+                                      max(builder.human_minutes, float(needed["human_minutes"]))),
                     "cost_class": ("paid" if (cost["financial"] or 0) > 0 else needed["cost_class"]),
                     "risk": (needed["risk"] if RISK_LEVELS.index(needed["risk"]) > RISK_LEVELS.index(builder.risk)
                              else builder.risk),
                     "complexity": max(builder.complexity, int(needed["complexity"] or builder.complexity))}
         options.append(_option(
             identifier, "local_build", builder.description or f"construction locale de {identifier}",
-            cost, needs=needs, local_safe=builder.local_safe and not money_legal,
-            executable_here=builder.local_safe and not money_legal, builder=identifier,
+            cost, needs=needs, local_safe=builder.local_safe and not needs,
+            executable_here=builder.local_safe and not needs, builder=identifier,
             blocked_reason=("frontière argent ou juridique : aucun double local ne peut la lever"
                             if money_legal else None), source="builder_registry"))
     usable = next((fact for fact in facts if fact["state"] in ("available", "degraded")), None)
@@ -583,13 +611,26 @@ def strategy_value(retained: dict, *, reusability: int = 1) -> dict:
     criteria = [item for item in (retained or {}).get("economic_criteria") or [] if item in CRITERION_SCORE]
     criterion = min(criteria, key=lambda item: separation.ECONOMIC_CRITERIA.index(item)) if criteria else None
     rank = (retained or {}).get("economic_rank")
-    proofs = len((retained or {}).get("evidence_ids") or [])
+    proofs = 0
+    business = (retained or {}).get("business")
+    # An identifier or a computed study is not an economic observation. Consult canonical evidence.
+    for evidence_id in set((retained or {}).get("evidence_ids") or []):
+        rows = journal.query("SELECT * FROM strategy_evidence WHERE id=? AND status='active'", (evidence_id,))
+        if not rows or (business and rows[0]["business"] != business):
+            continue
+        row = rows[0]
+        if (row["nature"] == "observed" and row["source_ref"] and row["captured_at"]
+                or row["nature"] == "computed" and row["source_type"] == "economy.evaluate"
+                and row["created_by"] == "policy:evaluate"):
+            proofs += 1
     reusability = max(1, int(reusability))
     reusability_score = next((score for minimum, score in REUSABILITY_SCORE if reusability >= minimum), 0.0)
     proof_score = min(PROOF_SCORE_MAX, PROOF_SCORE * proofs)
     total = ((CRITERION_SCORE.get(criterion, 0.0) if criterion else 0.0) + RANK_SCORE.get(rank, 0.0)
              + proof_score + reusability_score)
-    return {"criterion": criterion, "criterion_score": CRITERION_SCORE.get(criterion, 0.0),
+    if criterion is None and proofs == 0:
+        total = 0.0
+    return {"nature": "internal_estimate", "criterion": criterion, "criterion_score": CRITERION_SCORE.get(criterion, 0.0),
             "economic_rank": rank, "rank_score": RANK_SCORE.get(rank, 0.0), "proof_count": proofs,
             "proof_score": proof_score, "reusability": reusability,
             "reusability_score": reusability_score, "total": round(total, 4),
@@ -612,7 +653,7 @@ def evaluate_option(option: dict, value: dict, *, sunk_cost_usd: float = 0.0,
                   + (COMPLEXITY_SCORE * complexity if complexity is not None else 0.0)
                   + (HUMAN_MINUTES_SCORE * human_minutes if human_minutes is not None else 0.0)
                   + LLM_USD_SCORE * float(cost.get("llm_usd") or 0.0))
-    unknown_cost = complexity is None or human_minutes is None or financial is None
+    unknown_cost = complexity is None or human_minutes is None or financial is None or cost.get("llm_usd") is None
     net = round(float(value.get("total") or 0.0) - cost_score, 4)
     cost_score = round(cost_score, 4)
     proof_count = int(value.get("proof_count") or 0)
@@ -624,9 +665,9 @@ def evaluate_option(option: dict, value: dict, *, sunk_cost_usd: float = 0.0,
     elif option.get("kind") == "none":
         decision = "defer"
         reasons.append("aucune option déterministe connue ; exigences inconnues")
-    elif needs & MONEY_LEGAL_FRONTIERS:
+    elif needs & HUMAN_FRONTIERS:
         decision = "human_required"
-        reasons.append("frontière humaine réelle : " + ", ".join(sorted(needs & MONEY_LEGAL_FRONTIERS)))
+        reasons.append("frontière humaine réelle : " + ", ".join(sorted(needs & HUMAN_FRONTIERS)))
     elif risk == "critical":
         decision = "human_required"
         reasons.append("risque critique : autorisation humaine requise")
@@ -637,6 +678,12 @@ def evaluate_option(option: dict, value: dict, *, sunk_cost_usd: float = 0.0,
         decision = "human_required"
         reasons.append(f"coût financier {float(financial):g} {cost.get('currency') or 'EUR'} : "
                        "enveloppe et autorisation humaine requises")
+    elif cost.get("llm_usd") is None:
+        decision = "defer"
+        reasons.append("coût LLM inconnu : aucune autorisation financière implicite")
+    elif float(cost["llm_usd"]) > 0:
+        decision = "human_required"
+        reasons.append("coût LLM positif : autorisation financière explicite requise")
     elif option.get("kind") == "already_present":
         decision = "human_required"
         reasons.append("capacité présente : il manque une autorisation explicite, pas une construction")
@@ -705,7 +752,7 @@ def plan_for(business: str, objective_id: int, task_id: int | None, assessment: 
         identifier = gap["capability"]
         facts = gap["resolution"]["resources"]
         options = acquisition_options(identifier, inventory, facts=facts)
-        value = strategy_value(retained, reusability=reusability(assessment, identifier))
+        value = strategy_value({**retained, "business": business}, reusability=reusability(assessment, identifier))
         sunk = float((sunk_costs or {}).get(identifier) or 0.0)
         evaluations = [evaluate_option(option, value, sunk_cost_usd=sunk, alternatives=alternatives)
                        for option in options]
@@ -749,19 +796,11 @@ def _persist_annotation(business: str, hypothesis_id: int, task_id: int | None, 
     observation = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     digest = hashlib.sha256(observation.encode()).hexdigest()[:16]
     with tasks._tx() as conn:
-        existing = conn.execute(
-            "SELECT e.id, e.observation FROM strategy_evidence e JOIN strategy_links l "
-            "ON l.business=e.business AND l.from_type='hypothesis' AND l.from_id=? "
-            "AND l.to_type='evidence' AND l.to_id=e.id AND l.relation=? "
-            "WHERE e.business=? AND e.source_type=? AND e.status='active' AND e.created_by=? "
-            "ORDER BY e.id DESC LIMIT 1", (hypothesis_id, RELATION, business, SOURCE_TYPE, ACTOR)).fetchone()
-        if existing and existing["observation"] == observation:
-            return int(existing["id"])
         source_ref = f"{SOURCE_TYPE}#h{hypothesis_id}#t{task_id or 0}#{digest}"
         reusable = conn.execute(
             "SELECT id FROM strategy_evidence WHERE business=? AND source_type=? AND created_by=? "
-            "AND source_ref=? AND status='active' LIMIT 1",
-            (business, SOURCE_TYPE, ACTOR, source_ref)).fetchone()
+            "AND observation=? AND status='active' LIMIT 1",
+            (business, SOURCE_TYPE, ACTOR, observation)).fetchone()
         if reusable:
             evidence_id = int(reusable["id"])
         else:
@@ -772,6 +811,15 @@ def _persist_annotation(business: str, hypothesis_id: int, task_id: int | None, 
                 _conn=conn, created_by=ACTOR, origin_task_id=task_id, nature="computed",
                 source_type=SOURCE_TYPE, source_ref=source_ref, observation=observation)
         strategy.link(business, "hypothesis", hypothesis_id, "evidence", evidence_id, RELATION, _conn=conn)
+        # History stays immutable; this existing link records which study is current even after A -> B -> A.
+        pointer = conn.execute("SELECT id FROM strategy_links WHERE business=? AND from_type='hypothesis' "
+                               "AND from_id=? AND to_type='evidence' AND relation=?",
+                               (business, hypothesis_id, RELATION + "_current")).fetchone()
+        if pointer:
+            conn.execute("UPDATE strategy_links SET to_id=? WHERE id=?", (evidence_id, pointer["id"]))
+        else:
+            strategy.link(business, "hypothesis", hypothesis_id, "evidence", evidence_id,
+                          RELATION + "_current", _conn=conn)
     return evidence_id
 
 
@@ -792,7 +840,7 @@ def _payload(row) -> dict | None:
         payload = json.loads(row["observation"])
     except (TypeError, ValueError, KeyError):
         return None
-    if not isinstance(payload, dict) or payload.get("schema") != SCHEMA:
+    if not isinstance(payload, dict) or payload.get("schema") != SCHEMA or payload.get("kind") == "validation":
         return None
     payload = dict(payload)
     payload["hypothesis_status"] = row["hypothesis_status"]
@@ -805,12 +853,19 @@ _ACQUISITION_QUERY = (
     "FROM strategy_hypotheses h JOIN strategy_links l ON l.business=h.business AND l.from_type='hypothesis' "
     "AND l.from_id=h.id AND l.to_type='evidence' AND l.relation=? "
     "JOIN strategy_evidence e ON e.business=h.business AND e.id=l.to_id AND e.status='active' "
-    "AND e.nature='computed' AND e.source_type=? AND e.created_by=? WHERE ")
+    "AND e.nature='computed' AND e.source_type=? AND e.created_by=? "
+    "AND e.source_ref NOT LIKE '%#validation#%' WHERE ")
+
+_CURRENT_STUDY = (
+    " AND (NOT EXISTS (SELECT 1 FROM strategy_links c WHERE c.business=h.business "
+    "AND c.from_type='hypothesis' AND c.from_id=h.id AND c.relation='capability_acquisition_current') "
+    "OR EXISTS (SELECT 1 FROM strategy_links c WHERE c.business=h.business AND c.from_type='hypothesis' "
+    "AND c.from_id=h.id AND c.relation='capability_acquisition_current' AND c.to_type='evidence' AND c.to_id=e.id))")
 
 
 def recorded(business: str, objective_id: int) -> list[dict]:
     """Dernière annotation d'acquisition par hypothèse. La reprise relit ces états persistés."""
-    rows = journal.query(_ACQUISITION_QUERY + "h.business=? AND h.objective_id=? ORDER BY e.id DESC",
+    rows = journal.query(_ACQUISITION_QUERY + "h.business=? AND h.objective_id=?" + _CURRENT_STUDY + " ORDER BY e.id DESC",
                          (RELATION, SOURCE_TYPE, ACTOR, strategy._business(business), int(objective_id)))
     seen, found = set(), []
     for row in rows:
@@ -824,7 +879,7 @@ def recorded(business: str, objective_id: int) -> list[dict]:
 
 
 def latest(business: str, hypothesis_id: int) -> dict | None:
-    rows = journal.query(_ACQUISITION_QUERY + "h.business=? AND h.id=? ORDER BY e.id DESC LIMIT 1",
+    rows = journal.query(_ACQUISITION_QUERY + "h.business=? AND h.id=?" + _CURRENT_STUDY + " ORDER BY e.id DESC LIMIT 1",
                          (RELATION, SOURCE_TYPE, ACTOR, strategy._business(business), int(hypothesis_id)))
     return _payload(rows[0]) if rows else None
 
@@ -874,43 +929,48 @@ def validate(capability: str, *, inventory: separation.Inventory | None = None,
     if present_tools:
         confirmed.append("tool_registered")
         sources += [f"tool_registry:{name}" for name in present_tools[:6]]
-    validator = _VALIDATORS.get(identifier)
+    builder = _BUILDERS.get(identifier)
+    validator = _VALIDATORS.get(identifier) or (builder.validate if builder else None)
     contract = None
     if validator is not None:
         try:
-            result = validator(identifier) or {}
+            result = validator(identifier)
+            if not isinstance(result, dict):
+                result = {"ok": False, "detail": "retour contractuel invalide"}
         except Exception as exc:
             result = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"[:200]}
-        contract = {"ok": bool(result.get("ok")), "detail": str(result.get("detail") or "")[:300],
+        contract = {"ok": result.get("ok") is True, "detail": str(result.get("detail") or "")[:300],
                     "source_ref": str(result.get("source_ref") or "")[:300]}
-        if contract["ok"] and contract["source_ref"]:
-            confirmed.append("contract_test")
-            sources.append(contract["source_ref"])
-        elif contract["ok"]:
-            contract["ok"] = False
-            contract["detail"] = "test contractuel sans source vérifiable"
     probed = []
     if probe:
         for fact in resource_facts(identifier):
+            if fact["state"] == "retired":
+                continue
             try:
                 checked = resources.check(fact["key"])
             except Exception as exc:
                 probed.append({"key": fact["key"], "ok": None, "detail": f"{type(exc).__name__}"[:200]})
                 continue
-            ok = checked["state"] in ("available", "degraded")
+            ok = checked.get("last_check_ok") == 1 and checked["state"] in ("available", "degraded")
             probed.append({"key": checked["key"], "ok": ok, "state": checked["state"],
                            "detail": str(checked.get("last_check_detail") or "")[:200]})
             if ok and checked.get("source_ref"):
                 confirmed.append("resource_probe")
                 sources.append(f"resource:{checked['key']}:{checked['source_ref']}")
-    capable = bool(confirmed)
-    available = capable
-    if inventory is not None:
-        available = capable and identifier in inventory.executable
+    if contract is not None:
+        if contract["ok"] and contract["source_ref"] in sources:
+            confirmed.append("contract_test")
+        else:
+            contract["ok"] = False
+            contract["detail"] = contract["detail"] or "test contractuel sans source vérifiable"
+            confirmed = []
+    capable = bool(confirmed) and (contract is None or contract["ok"])
+    state = capability_state(identifier, inventory) if inventory is not None else None
+    available = capable and bool(state and state["available"])
     return {"capability": identifier, "capable": capable, "available": available,
             "confirmed_by": sorted(set(confirmed)), "source_ref": sources[0] if sources else None,
             "sources": sources[:12], "contract": contract, "probes": probed,
-            "authorized": None if inventory is None else identifier in inventory.executable,
+            "authorized": None if state is None else state["authorized"],
             "validated_at": time.time(), "authority": "tool_registry+executors+probes"}
 
 
@@ -919,8 +979,8 @@ def validate(capability: str, *, inventory: separation.Inventory | None = None,
 def acquisition_idempotency_key(business: str, capability: str, *, objective_id: int | None = None,
                                 hypothesis_id: int | None = None) -> str:
     identifier = canonical(capability) or str(capability)
-    scope = f"h{int(hypothesis_id)}" if hypothesis_id else (f"o{int(objective_id)}" if objective_id else "global")
-    return f"capability:{strategy._business(business)}:{identifier}:{scope}"
+    # A capability is shared across hypotheses. They must not each launch their own builder.
+    return f"capability:{strategy._business(business)}:{identifier}:global"
 
 
 def acquisition_keys(business: str, capability: str, *, objective_id: int | None = None,
@@ -928,19 +988,21 @@ def acquisition_keys(business: str, capability: str, *, objective_id: int | None
     """Portées successives d'une acquisition : hypothèse, objectif, puis capacité seule."""
     identifier = canonical(capability) or str(capability)
     keys = []
-    if hypothesis_id:
-        keys.append(acquisition_idempotency_key(business, identifier, hypothesis_id=int(hypothesis_id)))
-    if objective_id:
-        keys.append(acquisition_idempotency_key(business, identifier, objective_id=int(objective_id)))
     keys.append(acquisition_idempotency_key(business, identifier))
+    # Read old scoped tasks without creating any new scoped acquisition.
+    if hypothesis_id:
+        keys.append(f"capability:{strategy._business(business)}:{identifier}:h{int(hypothesis_id)}")
+    if objective_id:
+        keys.append(f"capability:{strategy._business(business)}:{identifier}:o{int(objective_id)}")
     return list(dict.fromkeys(keys))
 
 
-def _task_by_keys(keys: list[str]) -> dict | None:
+def _task_by_keys(keys: list[str], business: str, capability: str) -> dict | None:
     """Tâche d'acquisition la plus récente parmi les portées connues. Lecture seule."""
     rows = journal.query(
         f"SELECT * FROM tasks WHERE idempotency_key IN ({','.join('?' for _ in keys)}) "
-        "ORDER BY id DESC LIMIT 1", tuple(keys))
+        "OR (kind=? AND business=? AND json_extract(input, '$.capability')=?) "
+        "ORDER BY id DESC LIMIT 1", tuple(keys) + (TASK_KIND, business, capability))
     return tasks._row(rows[0]) if rows else None
 
 
@@ -949,7 +1011,7 @@ def acquisition_state(business: str, capability: str, *, objective_id: int | Non
     """État d'acquisition relu depuis la tâche durable et l'annotation persistée. Jamais mémorisé."""
     identifier = canonical(capability) or ""
     keys = acquisition_keys(business, identifier, objective_id=objective_id, hypothesis_id=hypothesis_id)
-    task = _task_by_keys(keys)
+    task = _task_by_keys(keys, strategy._business(business), identifier)
     key = str((task or {}).get("idempotency_key") or keys[0])
     state, detail, output = "none", None, {}
     if task is not None:
@@ -989,6 +1051,47 @@ def acquisition_state(business: str, capability: str, *, objective_id: int | Non
 
 # --- démarrage et exécution d'une acquisition ------------------------------------------------------
 
+def _execution_plan(business: str, capability: str, study_id, *, objective_id=None, hypothesis_id=None):
+    """Read a persisted, current study and its current safety gates. Never re-rank a strategy."""
+    if type(study_id) is not int:
+        return None, None, "étude persistée requise"
+    evidence = strategy.get("evidence", study_id, business)
+    if (not evidence or evidence["status"] != "active" or evidence["nature"] != "computed"
+            or evidence["source_type"] != SOURCE_TYPE or evidence["created_by"] != ACTOR):
+        return None, None, "étude persistée non vérifiable"
+    try:
+        study = json.loads(evidence["observation"])
+    except (TypeError, ValueError):
+        return None, None, "étude illisible"
+    if study.get("schema") != SCHEMA or study.get("kind") == "validation":
+        return None, None, "ceci n'est pas une étude d'acquisition"
+    hid, oid = study.get("hypothesis_id"), study.get("objective_id")
+    if (not hid or not oid or hypothesis_id is not None and hypothesis_id != hid
+            or objective_id is not None and objective_id != oid):
+        return None, None, "portée incompatible avec l'étude persistée"
+    current = latest(business, hid)
+    hypothesis = strategy.get("hypothesis", hid, business)
+    objective = strategy.get("objective", oid, business)
+    retained = separation.latest_annotation(business, hid)
+    if (not current or current["evidence_id"] != study_id or not hypothesis or not objective
+            or hypothesis["objective_id"] != oid or objective["status"] != "active"
+            or hypothesis["status"] in {"invalidated", "abandoned"}
+            or study.get("strategic_state") != "retained"
+            or not retained or retained.get("strategic_state") != "retained"):
+        return None, None, "étude périmée, objectif arrêté ou stratégie non retenue"
+    plan = next((item for item in study.get("plans") or [] if item.get("capability") == capability), None)
+    if not plan or plan.get("decision") != "acquire":
+        return None, None, "décision persistée non exécutable"
+    option = next((item for item in acquisition_options(capability, system_inventory())
+                   if item["option_id"] == plan.get("chosen_option_id")), None)
+    if (not option or option["kind"] != "local_build" or not option["local_safe"]
+            or not option["executable_here"] or option["needs"]
+            or option["cost"]["financial"] != 0.0
+            or evaluate_option(option, plan["value"])["decision"] != "acquire"):
+        return None, None, "conditions actuelles incompatibles avec l'acquisition locale décidée"
+    return study, option, None
+
+
 def start_acquisition(business: str, capability: str, plan_record: dict, *, requested_by: str,
                       objective_id: int | None = None, hypothesis_id: int | None = None,
                       parent_task_id: int | None = None) -> dict:
@@ -1003,25 +1106,18 @@ def start_acquisition(business: str, capability: str, plan_record: dict, *, requ
     if not identifier:
         raise CapabilityAcquisitionError(f"capacité invalide : {capability!r}")
     requested_by = strategy._text(requested_by, "requested_by")
-    plan = next((item for item in (plan_record or {}).get("plans") or []
-                 if item.get("capability") == identifier), None)
-    if plan is None:
+    study_id = (plan_record or {}).get("evidence_annotation_id", (plan_record or {}).get("evidence_id"))
+    study, current_option, error = _execution_plan(
+        business, identifier, study_id, objective_id=objective_id, hypothesis_id=hypothesis_id)
+    if error:
+        hid = (plan_record or {}).get("hypothesis_id")
+        status = "not_needed" if type(hid) is int and _invalidated(business, hid) else "refused"
+        return {"status": status, "capability": identifier, "task_id": None, "reason": error}
+    if _annotation_payload(plan_record, study["hypothesis_id"]) != study:
         return {"status": "refused", "capability": identifier, "task_id": None,
-                "reason": "aucun plan d'acquisition pour cette capacité"}
-    if plan.get("decision") != "acquire":
-        return {"status": "refused", "capability": identifier, "task_id": None,
-                "reason": f"décision {plan.get('decision')} : {plan.get('reason')}"}
-    option = next((item for item in plan.get("options") or []
-                   if item.get("option_id") == plan.get("chosen_option_id")), None)
-    if option is None or not option.get("local_safe") or not option.get("executable_here"):
-        return {"status": "refused", "capability": identifier, "task_id": None,
-                "reason": "option non locale ou non sûre : aucune exécution automatique"}
-    if (option.get("cost") or {}).get("financial"):
-        return {"status": "refused", "capability": identifier, "task_id": None,
-                "reason": "coût financier : autorisation humaine et enveloppe requises"}
-    if identifier not in _BUILDERS:
-        return {"status": "refused", "capability": identifier, "task_id": None,
-                "reason": "aucun constructeur local enregistré"}
+                "reason": "déclaration différente de l'étude persistée"}
+    objective_id, hypothesis_id = study["objective_id"], study["hypothesis_id"]
+    plan = next(item for item in study["plans"] if item["capability"] == identifier)
     confirmed = validate(identifier)
     if confirmed["capable"]:
         # CAPABLE n'est pas AUTORISÉ : rien à acquérir, l'autorisation reste une décision humaine.
@@ -1029,16 +1125,13 @@ def start_acquisition(business: str, capability: str, plan_record: dict, *, requ
                 "confirmed_by": confirmed["confirmed_by"],
                 "reason": "capacité déjà confirmée par une source déterministe ; "
                           "son autorisation d'exécution reste distincte"}
-    if hypothesis_id and _invalidated(business, int(hypothesis_id)):
-        return {"status": "not_needed", "capability": identifier, "task_id": None,
-                "reason": "stratégie économiquement invalidée : acquisition non poursuivie"}
     task_id = tasks.enqueue(business, TASK_KIND,
                             {"capability": identifier, "objective_id": objective_id,
-                             "hypothesis_id": hypothesis_id, "option": option,
+                             "hypothesis_id": hypothesis_id, "study_id": study_id, "option": current_option,
                              "decision": plan.get("decision"), "value": plan.get("value"),
                              "reason": plan.get("reason"), "requested_by": requested_by,
                              "sunk_cost_usd": float(plan.get("sunk_cost_usd") or 0.0)},
-                            max_attempts=2, parent_id=parent_task_id,
+                            max_attempts=2, parent_id=parent_task_id, resource=f"capability:{identifier}",
                             idempotency_key=acquisition_idempotency_key(
                                 business, identifier, objective_id=objective_id, hypothesis_id=hypothesis_id))
     return {"status": "queued", "capability": identifier, "task_id": task_id,
@@ -1063,6 +1156,7 @@ def execute_acquisition(ctx) -> dict:
     hypothesis_id = ctx.input.get("hypothesis_id")
     option = ctx.input.get("option") if isinstance(ctx.input.get("option"), dict) else {}
     sunk_cost_usd = float(ctx.input.get("sunk_cost_usd") or 0.0)
+    ctx.check_cancel()
     inventory = system_inventory()
     state = capability_state(capability, inventory)
     confirmed = validate(capability, inventory=inventory)
@@ -1074,11 +1168,22 @@ def execute_acquisition(ctx) -> dict:
                   "available": state["available"], "authorized": state["authorized"],
                   "sunk_cost_usd": sunk_cost_usd, "sunk_cost_excluded": True,
                   "executed_external_action": False, **extra}
-        ctx.emit("capability.acquisition", {key: record[key] for key in
-                                            ("capability", "status", "option_id", "available")})
+        _emit_finished(ctx, record)
         return record
 
     built = tasks.step_value(ctx.id, "capability.build", None)
+    if hypothesis_id and _invalidated(ctx.business, int(hypothesis_id)):
+        return finish("not_needed", "stratégie économiquement invalidée : acquisition arrêtée")
+    study, current_option, error = _execution_plan(
+        ctx.business, capability, ctx.input.get("study_id"),
+        objective_id=objective_id, hypothesis_id=hypothesis_id)
+    if error or ctx.input.get("decision") != "acquire":
+        return finish("blocked", error or "décision non exécutable")
+    option = current_option
+    if built is not None and (not isinstance(built, dict) or built.get("ok") is False):
+        return finish("failed", "retour de construction ambigu ou échec explicite", build=built)
+    if tasks.step_value(ctx.id, "capability.build.started", None) is not None and built is None:
+        return finish("failed", "construction interrompue sans résultat durable : validation requise, aucun retry aveugle")
     if confirmed["capable"]:
         if isinstance(built, dict):
             # Reprise après un crash entre construction et validation : la capacité est confirmée
@@ -1094,38 +1199,19 @@ def execute_acquisition(ctx) -> dict:
         return finish("already_available", "capacité déjà confirmée par une source déterministe ; "
                                            "son autorisation d'exécution reste distincte",
                       validation=confirmed, state=state)
-    if hypothesis_id and _invalidated(ctx.business, int(hypothesis_id)):
-        return finish("not_needed", "stratégie économiquement invalidée : acquisition arrêtée ; "
-                                    "les coûts déjà dépensés ne motivent pas la poursuite")
-    if ctx.input.get("decision") != "acquire":
-        return finish("blocked", f"décision non exécutable : {ctx.input.get('decision')}")
-    needs = sorted(set(option.get("needs") or ()) & HUMAN_FRONTIERS)
-    if needs or not option.get("local_safe") or not option.get("executable_here"):
-        need = needs[0] if needs else "create"
-        question = (f"Capacité {capability} : {option.get('description') or 'acquisition requise'}. "
-                    f"Frontière humaine : {', '.join(needs) or 'aucune construction locale sûre'}. "
-                    "Une réponse seule n'accorde aucun droit et ne dépense rien.")
-        answer = ctx.ask_human(f"capability:{capability}:{need}", question,
-                               context={"capability": capability, "need": need, "objective_id": objective_id,
-                                        "hypothesis_id": hypothesis_id,
-                                        "requested_by": ctx.input.get("requested_by")})
-        inventory = system_inventory()
-        confirmed = validate(capability, inventory=inventory)
-        state = capability_state(capability, inventory)
-        return finish("acquired" if confirmed["capable"] else "human_required",
-                      "frontière humaine traitée ; capacité "
-                      + ("confirmée par une source déterministe" if confirmed["capable"]
-                         else "toujours absente : aucune déclaration ne la remplace"),
-                      answer=str(answer)[:200], validation=confirmed, state=state)
     builder = _BUILDERS.get(capability)
     if builder is None:
         return finish("blocked", "aucun constructeur local enregistré pour cette capacité")
+    if built is None:
+        # Write intent BEFORE invoking Python. A kill before result persistence cannot repeat the builder.
+        tasks.save_step(ctx.id, "capability.build.started", {"started": True}, owner=ctx.owner)
     build = ctx.memo("capability.build", lambda: builder.build({"capability": capability,
                                                                 "objective_id": objective_id,
                                                                 "hypothesis_id": hypothesis_id,
+                                                                "idempotency_key": ctx.task["idempotency_key"],
                                                                 "requested_by": ctx.input.get("requested_by")}))
-    if not isinstance(build, dict):
-        build = {"detail": str(build)[:200]}
+    if not isinstance(build, dict) or build.get("ok") is False:
+        return finish("failed", "retour de construction ambigu ou échec explicite", build=build)
     inventory = system_inventory()
     validation = validate(capability, inventory=inventory)
     state = capability_state(capability, inventory, acquisition={"state": "validation_required"})
@@ -1139,6 +1225,15 @@ def execute_acquisition(ctx) -> dict:
                   validation=validation, build=build, decision_id=decision_id, state=state)
 
 
+def _emit_finished(ctx, record: dict) -> None:
+    with tasks._tx() as conn:
+        tasks._owned(conn, ctx.id, ctx.owner)
+        if not conn.execute("SELECT id FROM events WHERE task_id=? AND type='capability.acquisition'",
+                            (ctx.id,)).fetchone():
+            tasks._emit(conn, ctx.business, ctx.id, "capability.acquisition", {key: record[key] for key in
+                        ("capability", "status", "option_id", "available")})
+
+
 def _record_decision(ctx, capability: str, objective_id, hypothesis_id, option: dict,
                      validation: dict, sunk_cost_usd: float) -> int:
     """Décision canonique d'acquisition (objet `decision` existant), créée une seule fois par tâche."""
@@ -1147,16 +1242,20 @@ def _record_decision(ctx, capability: str, objective_id, hypothesis_id, option: 
                  f"Coût financier : {(option.get('cost') or {}).get('financial')} "
                  f"{(option.get('cost') or {}).get('currency') or 'EUR'} (estimé). "
                  f"Coûts déjà dépensés exclus de la décision : {sunk_cost_usd:g} USD.")[:900]
-    decision_id = strategy.create(
-        "decision", ctx.business, f"Acquisition de capacité : {capability}", created_by=str(
-            ctx.input.get("requested_by") or "octopus"), origin_task_id=ctx.id,
-        decision="acquire", rationale=rationale,
-        resulting_action=f"capability.acquire {capability}")
-    strategy.link(ctx.business, "decision", decision_id, "task", ctx.id, "executed_by")
-    if objective_id:
-        strategy.link(ctx.business, "decision", decision_id, "objective", int(objective_id), "supervises")
-    if hypothesis_id:
-        strategy.link(ctx.business, "decision", decision_id, "hypothesis", int(hypothesis_id), "advances")
+    with tasks._tx() as conn:
+        tasks._owned(conn, ctx.id, ctx.owner)
+        existing = conn.execute("SELECT id FROM strategy_decisions WHERE business=? AND origin_task_id=? "
+                                "AND resulting_action=?", (ctx.business, ctx.id, f"capability.acquire {capability}")).fetchone()
+        decision_id = int(existing["id"]) if existing else strategy.create(
+            "decision", ctx.business, f"Acquisition de capacité : {capability}", _conn=conn, created_by=str(
+                ctx.input.get("requested_by") or "octopus"), origin_task_id=ctx.id,
+            decision="acquire", rationale=rationale,
+            resulting_action=f"capability.acquire {capability}")
+        strategy.link(ctx.business, "decision", decision_id, "task", ctx.id, "executed_by", _conn=conn)
+        if objective_id:
+            strategy.link(ctx.business, "decision", decision_id, "objective", int(objective_id), "supervises", _conn=conn)
+        if hypothesis_id:
+            strategy.link(ctx.business, "decision", decision_id, "hypothesis", int(hypothesis_id), "advances", _conn=conn)
     return decision_id
 
 
@@ -1170,7 +1269,7 @@ def _persist_validation(business: str, capability: str, hypothesis_id, task_id: 
                                                            if key in build},
                "validated_at": validation["validated_at"]}
     observation = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    source_ref = f"{SOURCE_TYPE}#validation#{capability}#{hashlib.sha256(observation.encode()).hexdigest()[:16]}"
+    source_ref = f"{SOURCE_TYPE}#validation#{capability}#t{task_id}"
     with tasks._tx() as conn:
         existing = conn.execute("SELECT id FROM strategy_evidence WHERE business=? AND source_type=? "
                                 "AND created_by=? AND source_ref=? AND status='active' LIMIT 1",
@@ -1184,7 +1283,7 @@ def _persist_validation(business: str, capability: str, hypothesis_id, task_id: 
                 source_ref=source_ref, observation=observation)
         if hypothesis_id:
             strategy.link(business, "hypothesis", int(hypothesis_id), "evidence", evidence_id,
-                          RELATION, _conn=conn)
+                          RELATION + "_validation", _conn=conn)
     return evidence_id
 
 

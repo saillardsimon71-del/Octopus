@@ -383,7 +383,7 @@ def cmd_capability(args) -> int:
     action = args.capability_cmd or "state"
     if action == "acquire" and os.environ.get("OCTOPUS_WORKBENCH_READONLY") == "1":
         raise PermissionError("Mode consultation : acquisition désactivée")
-    allowed = ({item.strip() for item in args.allowed.split(",") if item.strip()} if args.allowed
+    allowed = ({item.strip() for item in args.allowed.split(",") if item.strip()} if args.allowed is not None
                else set(supervisor.PURSUIT_TOOLS))
     if action == "state":
         names = args.capability or sorted(acquisition.CAPABILITY_TARGETS)
