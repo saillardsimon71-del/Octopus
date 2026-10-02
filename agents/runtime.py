@@ -1007,7 +1007,7 @@ GENERIC_ROLES = {
     "FORGE": "Production : fabrique ce que l'expérience exige (offre, contenu, produit, service, page, outil).",
     "GROWTH": "Distribution : analyse les canaux et mesure les retours ; agit dans les limites exposées.",
     "LEDGER": "Mesure économique : cash observé, coûts, verdicts et apprentissages.",
-    "ORBIT": "Arbitrage : choisit, arrête ou étend les expériences selon le cash net observé.",
+    "ORBIT": "Arbitrage : compare les possibilités économiques et la valeur de l'information, choisit, arrête ou étend les expériences selon leurs résultats réels.",
 }
 
 
@@ -1377,6 +1377,8 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
             "RÈGLE DE PREUVE : ne présente jamais comme observé, réel ou disponible un fait, un chiffre, "
             "un canal ou une ressource qui n'apparaît pas dans un résultat d'outil de cette exécution. "
             "Si l'information manque, écris qu'elle est inconnue ; une hypothèse ou une inférence doit rester explicitement telle.\n"
+            "Intérêt économique, faisabilité en principe et exécutabilité actuelle sont distincts : "
+            "un moyen conceptuel n'affirme ni exécuteur disponible ni permission.\n"
         )
         if "record_observation" in TOOLS and (allowed_tools is None or "record_observation" in allowed_tools):
             proof_rule += (
@@ -2006,6 +2008,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             "reconsiders_hypothesis_id, reconsideration_reason}]. economic_criteria : cash_received, margin, "
             "recurrence, autonomy, growth ; economic_rank : entier à critère égal ; required_capabilities : identifiants. "
             "Compare selon la valeur économique, indépendamment des outils disponibles. "
+            "Une option retenue n'est pas un engagement ; le prochain but peut comparer ou observer une autre piste. "
             "evidence_ids cite seulement les preuves persistées visibles ; reconsidérer une hypothèse invalidée "
             "exige une nouvelle preuve liée, son identifiant et la raison."
             + (f"\n{_business_signal_contract(business_signal_target)}\n" + signal_schema

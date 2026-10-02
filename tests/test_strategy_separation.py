@@ -382,12 +382,11 @@ def test_pursuit_keeps_the_better_missing_strategy_and_does_not_substitute(monke
     assert assessment["retained"]["strategic_state"] == "retained"
     assert assessment["retained"]["executability"] == "missing_capability"
     assert assessment["retained"]["missing_capabilities"] == ["phone_call"]
-    assert assessment["substitution_blocked"] is True
+    assert assessment["substitution_blocked"] is False  # But d'observation, aucun commit.
     assert first["strategy_execution"]["triggered"] is False
     assert first["strategy_execution"]["substituted"] is False
     assert triggered == []
-    assert first["next_goal"] != EMAIL
-    assert "Ne pas remplacer" in first["next_goal"]
+    assert first["next_goal"] == EMAIL
     hypothesis = strategy.get("hypothesis", assessment["hypothesis_id"], BUSINESS)
     assert hypothesis["status"] == "proposed"
     assert not journal.query("SELECT id FROM channel_actions")
@@ -595,7 +594,7 @@ def test_model_real_permission_is_not_erased_by_a_blocked_strategy(monkeypatch, 
 
 
 @pytest.mark.parametrize("capability", ["phone_call", "search"])
-def test_uncompared_next_goal_cannot_bypass_the_retained_strategy(monkeypatch, capability):
+def test_uncompared_next_goal_cannot_execute_or_replace_the_retained_strategy(monkeypatch, capability):
     monkeypatch.setattr(octopus, "enabled", lambda: True)
     def offline(*args, **kwargs):
         result = _pursuit_result(next_goal="Envoyer plutôt des emails car cet outil est disponible.")
@@ -605,8 +604,11 @@ def test_uncompared_next_goal_cannot_bypass_the_retained_strategy(monkeypatch, c
     oid = supervisor.start_pursuit("Ne pas substituer discrètement")
     supervisor.run_pursuit(oid)
     output = supervisor.work_tasks(BUSINESS, oid)[0]["output"]
-    assert PHONE in output["next_goal"]
-    assert "Envoyer plutôt des emails" not in output["next_goal"]
+    assert output["next_goal"] == "Envoyer plutôt des emails car cet outil est disponible."
+    assert output["strategy_assessment"]["retained"]["statement"] == PHONE
+    assert output["strategy_execution"]["authorized"] is False
+    assert output["strategy_execution"]["triggered"] is False
+    assert not journal.query("SELECT id FROM channel_actions")
 
 
 def test_missing_winner_is_not_lost_when_model_omits_it_on_the_next_cycle(monkeypatch):
@@ -698,7 +700,7 @@ def test_resume_rechecks_inventory_and_keeps_old_annotation_immutable(monkeypatc
     else:
         supervisor.run_pursuit(oid)
     work = supervisor.work_tasks(BUSINESS, oid)[0]
-    assert work["status"] == ("running" if same_task else "failed") and len(triggered) == 1
+    assert work["status"] == ("running" if same_task else "failed") and triggered == []
     old = separation.latest_annotation(BUSINESS, tasks.step_value(work["id"], "pursuit.strategy_assessment")["hypothesis_id"])
     before = dict(journal.query("SELECT * FROM strategy_evidence WHERE id=?", (old["evidence_id"],))[0])
     monkeypatch.setattr(supervisor, "pursuit_capability_inventory", lambda: inventory(present={"search"}, denied={"search"}))
@@ -707,7 +709,7 @@ def test_resume_rechecks_inventory_and_keeps_old_annotation_immutable(monkeypatc
         tasks.reap(now=time.time() + 120)
     supervisor.start_pursuit(objective_id=oid)
     supervisor.run_pursuit(oid)
-    assert len(triggered) == 1
+    assert triggered == []
     saved = tasks.step_value(supervisor.work_tasks(BUSINESS, oid)[-1]['id'], "pursuit.strategy_assessment")
     assert saved["retained"]["executability"] == "permission_denied"
     assert dict(journal.query("SELECT * FROM strategy_evidence WHERE id=?", (old["evidence_id"],))[0]) == before
@@ -781,7 +783,8 @@ def test_production_hook_is_noop_and_annotation_replays_do_not_duplicate(monkeyp
     supervisor.run_pursuit(oid)
     work = supervisor.work_tasks(BUSINESS, oid)
     first = work[0]['output']['strategy_assessment']
-    assert work[0]['output']['strategy_execution']['effect']['dispatched'] is False
+    assert work[0]['output']['strategy_execution']['effect'] is None
+    assert work[0]['output']['strategy_execution']['triggered'] is False
     ids = {t['output']['strategy_assessment']['retained']['evidence_annotation_id'] for t in work}
     assert len(ids) == 1
     assert blocked == [] and dict(actions._EXECUTORS) == before_executors

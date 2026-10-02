@@ -383,7 +383,7 @@ def invalidated_keys(business: str, objective_id: int | None = None) -> set[str]
     return keys
 
 
-def pursuit_proposals(business: str, objective_id: int, choice: dict) -> list[dict]:
+def pursuit_proposals(business: str, objective_id: int, choice: dict, *, observation_only=False) -> list[dict]:
     """Conserve le choix antérieur si le modèle omet une stratégie encore pertinente."""
     current = normalize_proposals(choice.get("strategies"))
     legacy = choice.get("hypothesis")
@@ -397,6 +397,10 @@ def pursuit_proposals(business: str, objective_id: int, choice: dict) -> list[di
     prior = recorded_strategies(business, objective_id)
     current_by_key = {item['key']: item for item in current}
     carried = normalize_proposals(prior)
+    if observation_only:
+        # Les nouvelles options occupent la fenêtre d'observation avant l'historique.
+        # Les anciennes restent dans le journal, sans devenir des obligations de recherche.
+        return normalize_proposals(current + carried)
     retained_keys = {strategy._hypothesis_key(item.get('statement')) for item in prior
                      if item.get('strategic_state') == 'retained'}
     return normalize_proposals(
@@ -478,9 +482,12 @@ def reasoning_reason(retained: dict) -> str:
 
 
 def apply_pursuit_choice(choice, action, reason, permission, assessment, *,
-                         execution_boundary: bool, rounds_left: bool, continue_reasoning=True) -> dict:
+                         execution_boundary: bool, rounds_left: bool, continue_reasoning=True,
+                         observation_only=False) -> dict:
     """Ajuste la suite de pursuit sans confondre stratégie, capacité et permission.
 
+    En observation seule, le classement ne réécrit ni recherche ni pause.
+    Les clauses suivantes restent celles du parcours qui protège un choix d'exécution.
     Une capacité absente ou temporairement indisponible ne devient pas une frontière humaine.
     Une stratégie non exécutable ne fait pas abandonner le raisonnement tant que le plafond
     de cycles n'est pas atteint et qu'aucune frontière d'exécution réelle n'est ouverte.
@@ -489,7 +496,7 @@ def apply_pursuit_choice(choice, action, reason, permission, assessment, *,
     retained = assessment.get("retained") if isinstance(assessment, dict) else None
     next_goal = str((choice or {}).get("next_goal") or "") if isinstance(choice, dict) else ""
     model_reason = str(reason or "")
-    substitution = bool(retained) and is_substitution(next_goal, assessment)
+    substitution = not observation_only and bool(retained) and is_substitution(next_goal, assessment)
     new_action = action if action in {"continue", "pause", "request_permission"} else "pause"
     new_reason = model_reason
     new_permission = permission
@@ -501,9 +508,19 @@ def apply_pursuit_choice(choice, action, reason, permission, assessment, *,
                              r"(?:n'est pas installée?|est absente?|est indisponible|manque)\.?",
                              str(new_permission or "").strip(), re.IGNORECASE)):
         new_permission = None
-    if not retained and assessment.get("considered") and not execution_boundary and not new_permission:
+    if (not retained and assessment.get("considered") and not execution_boundary and not new_permission
+            and (not observation_only or normalize_proposals((choice or {}).get("strategies")))):
+        # Une proposition actuelle réfutée reste bloquée ; l'historique seul ne ferme
+        # pas toute recherche indépendante encore sans proposition.
         new_action, new_goal = "pause", ""
         new_reason = "Aucune stratégie économiquement admissible ; une preuve nouvelle est requise."
+    if observation_only:
+        # Classer une option n'engage pas l'exécution : préserver recherche, pivot et pause.
+        # Une demande portant seulement sur un outil absent ne crée pas un droit humain.
+        if new_action == "request_permission" and not new_permission and not execution_boundary:
+            new_action = "continue" if rounds_left and new_goal else "pause"
+        return {"action": new_action, "reason": new_reason, "permission": new_permission,
+                "next_goal": new_goal, "substitution_blocked": False, "model_reason": model_reason}
     if new_permission:
         return {"action": new_action, "reason": new_reason, "permission": new_permission,
                 "next_goal": new_goal, "substitution_blocked": substitution, "model_reason": model_reason}

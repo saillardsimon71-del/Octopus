@@ -335,6 +335,11 @@ def _pursuit_mission(ctx, objective):
         "Choisis librement marchés, problèmes, acheteurs, offres, hypothèses et ordre d'exploration. "
         "Une stratégie peut rester pertinente si une capacité manque : les capacités et permissions "
         "limitent l'exécution, pas la réflexion stratégique.\n"
+        "Compare plusieurs possibilités économiquement distinctes avant d'approfondir. "
+        "Cherche l'information marginale utile : une piste épuisée peut être mise de côté sans réfutation, "
+        "et une piste indépendante observée ; approfondis encore si une observation reste informative. "
+        "Considère délai vers cash, coût du test, capital, travail humain, levier IA, volume, "
+        "coûts marginaux réels, distribution et risque.\n"
         "Distingue hypothèse, inférence, observation sourcée, preuve et résultat économique réel. "
         "L'absence de donnée reste inconnue, jamais zéro ni preuve négative. Une réussite technique "
         "n'est pas un encaissement.\n"
@@ -408,7 +413,7 @@ def execute_pursuit(ctx) -> dict:
     assessment_record = None
     acquisition_record = None
     model_proposals = separation.normalize_proposals(choice.get("strategies"))
-    proposals = separation.pursuit_proposals(ctx.business, objective_id, choice)
+    proposals = separation.pursuit_proposals(ctx.business, objective_id, choice, observation_only=True)
     if proposals:
         learning = tasks.step_value(ctx.id, "pursuit.learning_context", {})
         allowed_ids = learning.get("available_evidence_ids", []) if isinstance(learning, dict) else []
@@ -420,7 +425,7 @@ def execute_pursuit(ctx) -> dict:
             choice, action, str(reason), permission, assessment,
             execution_boundary=bool(budget_permission or execution_permission),
             rounds_left=int(ctx.input["round"]) < PURSUIT_ROUNDS,
-            continue_reasoning=bool(model_proposals))
+            continue_reasoning=bool(model_proposals), observation_only=True)
         action, reason, permission = adjusted["action"], adjusted["reason"], adjusted["permission"]
         choice = {**choice, "next_goal": adjusted["next_goal"]}
         assessment = {**assessment, "substitution_blocked": adjusted["substitution_blocked"],
@@ -466,10 +471,10 @@ def execute_pursuit(ctx) -> dict:
             output["hypothesis_id"] = hypothesis_record["hypothesis_id"]
     if assessment_record is not None:
         output["strategy_assessment"] = assessment_record
-        output["strategy_execution"] = separation.dispatch_if_authorized(
+        # Pursuit observe et compare. Une option retenue, même exécutable, n'est pas un commit.
+        output["strategy_execution"] = {**separation.dispatch_if_authorized(
             assessment_record, pursuit_strategy_effect,
-            execution_boundary=bool(permission or action != "continue"
-                                    or assessment_record.get("status") == "ignored" or ctx.cancelled()))
+            execution_boundary=True), "reason": "pursuit observation only"}
         if isinstance(output.get("determination"), dict):
             # La copie de sortie ne conserve pas une déclaration de disponibilité du modèle.
             output["determination"] = {**output["determination"], "strategies": proposals}
