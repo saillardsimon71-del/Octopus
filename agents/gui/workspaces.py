@@ -52,10 +52,12 @@ class WorkspaceRegistry:
             if self._businesses and not self.readonly:
                 self._save_file()
             return
-        # Activites declarees au moteur mais absentes d'un fichier existant : visibles, sans reecrire le fichier.
+        # Le TOML moteur est canonique pour les activités déclarées ; JSON reste métadonnée legacy.
         for engine in engine_businesses.discover().values():
-            if engine.id != DEFAULT_BUSINESS_ID and engine.id not in self._businesses:
-                self._businesses[engine.id] = Business(engine.id, engine.name, engine.description)
+            if engine.id != DEFAULT_BUSINESS_ID:
+                existing = self._businesses.get(engine.id)
+                self._businesses[engine.id] = Business(engine.id, engine.name, engine.description,
+                                                      existing.offers if existing else [])
 
     def all(self) -> list[Business]:
         return sorted(self._businesses.values(), key=lambda b: (b.id == DEFAULT_BUSINESS_ID, b.label().lower()))

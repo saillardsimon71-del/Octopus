@@ -6,6 +6,12 @@ jour pour cette activité), kpis (indicateurs suivis). Les autres champs restent
 from __future__ import annotations
 
 import time
+import json
+import os
+import re
+import tempfile
+import unicodedata
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -37,6 +43,51 @@ class Business:
 
 def root() -> Path:
     return paths.home() / "businesses"
+
+
+def create_activity(name: str, description: str) -> Business:
+    """Déclaration humaine uniquement : aucun handler, budget, objectif ou travail créé."""
+    if os.environ.get("OCTOPUS_WORKBENCH_READONLY") == "1":
+        raise PermissionError("Mode consultation : création désactivée")
+    for value, label, limit in ((name, "Nom", 160), (description, "Description", 4000)):
+        if not isinstance(value, str) or not value.strip() or len(value.strip()) > limit:
+            raise ValueError(f"{label} requis, {limit} caractères maximum")
+        value.encode("utf-8")
+    name, description = name.strip(), description.strip()
+    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_name).strip("-")[:40].rstrip("-") or "activite"
+    base = root()
+    base.mkdir(parents=True, exist_ok=True)
+    if not base.resolve().is_relative_to(paths.home().resolve()):
+        raise ValueError("Registre d'activités hors du DataRoot")
+    for _ in range(16):
+        business_id = f"{slug}-{uuid.uuid4().hex[:12]}"
+        folder = base / business_id
+        try:
+            folder.mkdir()
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise FileExistsError("Impossible de réserver un identifiant d'activité")
+    temp = None
+    try:
+        fd, temp = tempfile.mkstemp(prefix="declaration-", suffix=".tmp", dir=folder)
+        raw = {"id": business_id, "name": name, "description": description}
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            for key, value in raw.items():
+                encoded = json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
+                handle.write(f"{key} = {encoded}\n")
+            handle.write("handlers = []\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, folder / "business.toml")
+    except BaseException:
+        if temp:
+            Path(temp).unlink(missing_ok=True)
+        folder.rmdir()
+        raise
+    return discover()[business_id]
 
 
 def discover(base: Path | None = None) -> dict[str, Business]:

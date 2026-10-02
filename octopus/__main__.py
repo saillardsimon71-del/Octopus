@@ -166,11 +166,11 @@ def cmd_pursue(args) -> int:
     if args.pause:
         if args.objective is None:
             raise ValueError("--pause exige --objective")
-        supervisor.pause_pursuit(args.objective)
+        supervisor.pause_pursuit(args.objective, business=args.business)
         return 0
-    objective_id = supervisor.start_pursuit(args.goal, objective_id=args.objective)
-    print(f"Objectif #{objective_id} : 0 EUR, zero_cost, consultation, trois cycles maximum.")
-    supervisor.run_pursuit(objective_id)
+    objective_id = supervisor.start_pursuit(args.goal, objective_id=args.objective, business=args.business)
+    print(f"Activité {args.business}, objectif #{objective_id} : 0 EUR externe, economical borné, consultation, trois cycles maximum.")
+    supervisor.run_pursuit(objective_id, business=args.business)
     return 0
 
 
@@ -482,7 +482,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-tasks", type=int, default=4)
     p.add_argument("--max-failures", type=int, default=2)
     p.add_argument("--dry-run", action="store_true")
-    p = sub.add_parser("pursue", help="démarrer ou reprendre OCTOPUS à budget nul")
+    p = sub.add_parser("pursue", help="démarrer ou reprendre une activité dans les limites de pursuit")
+    p.add_argument("--business", default="octopus", help="activité ; défaut : discovery autonome historique")
     entry = p.add_mutually_exclusive_group()
     entry.add_argument("--goal", help="mission libre facultative")
     entry.add_argument("--objective", type=int, help="objectif existant à reprendre")

@@ -105,7 +105,7 @@ def get(key: str) -> dict | None:
 
 
 def list_resources(*, state: str | None = None, kind: str | None = None, capability: str | None = None,
-                   business: str | None = None) -> list[dict]:
+                   business: str | None = None, include_global: bool = False) -> list[dict]:
     sql, params = "SELECT * FROM resources WHERE 1=1", []
     if state:
         sql += " AND state=?"
@@ -114,7 +114,7 @@ def list_resources(*, state: str | None = None, kind: str | None = None, capabil
         sql += " AND kind=?"
         params.append(kind)
     if business:
-        sql += " AND business=?"
+        sql += " AND (business=? OR business IS NULL)" if include_global else " AND business=?"
         params.append(business)
     rows = [_row(r) for r in journal.query(sql + " ORDER BY kind, key", tuple(params))]
     if capability:
@@ -261,10 +261,10 @@ def check_all(*, kind: str | None = None) -> list[dict]:
     return [check(r["key"]) for r in list_resources(kind=kind) if r["state"] != "retired"]
 
 
-def blocked() -> list[dict]:
+def blocked(*, business: str | None = None) -> list[dict]:
     """Ressources declarees mais pas utilisables : etat non constate, indisponible, ou acces manquant."""
     out = []
-    for resource in list_resources():
+    for resource in list_resources(business=business, include_global=True):
         if resource["state"] in ("available", "degraded") and resource["access"] != "none":
             continue
         if resource["state"] == "retired":
@@ -311,8 +311,8 @@ def promote_to_channel(key: str, business: str, *, created_by: str) -> int:
     return channel_id
 
 
-def overview() -> dict:
-    rows = list_resources()
+def overview(*, business: str | None = None) -> dict:
+    rows = list_resources(business=business, include_global=True)
     by_state: dict[str, int] = {}
     by_kind: dict[str, int] = {}
     for r in rows:
@@ -324,8 +324,9 @@ def overview() -> dict:
             for capability in r["capabilities"]:
                 capabilities[capability] = capabilities.get(capability, 0) + 1
     return {"total": len(rows), "by_state": by_state, "by_kind": by_kind,
-            "capabilities_available": capabilities, "blocked": [b["key"] for b in blocked()],
-            "declarations": len(declarations())}
+            "capabilities_available": capabilities, "blocked": [b["key"] for b in blocked(business=business)],
+            "declarations": sum(not business or item.get("business") in (None, business)
+                                for item in declarations().values())}
 
 
 def render(rows: list[dict]) -> str:

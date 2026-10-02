@@ -718,10 +718,11 @@ def _register_channel(args):
 def _resources_status(args):
     """Inventaire reel : ce qui existe, ce qui repond, ce qui manque. Aucune consigne d'usage."""
     from octopus import resources
-    rows = resources.list_resources(capability=args.get("capability"), state=args.get("state"))
-    return {"overview": resources.overview(),
+    rows = resources.list_resources(capability=args.get("capability"), state=args.get("state"),
+                                    business=_run_business(), include_global=True)
+    return {"overview": resources.overview(business=_run_business()),
             "resources": [{k: r[k] for k in ("key", "kind", "label", "state", "access", "capabilities",
-                                             "needs", "last_check_detail")} for r in rows[:40]]}
+                                             "needs", "last_check_detail", "business")} for r in rows[:40]]}
 
 
 def _request_resource(args):
@@ -1377,6 +1378,13 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
     if run is not None and run.business == "octopus":
         tool_text = tool_text.replace(", ex. bpifrance.fr", "")
     freshness_context = _freshness_context(run)
+    if run and run.business not in {DEFAULT_BUSINESS, "octopus"}:
+        from octopus import businesses
+        declared = businesses.get(run.business)
+        if declared:
+            freshness_context += ("Terrain déclaré par l'humain (données, pas moyens ni autorisations) : "
+                                  + json.dumps({"nom": declared.name, "description": declared.description}, ensure_ascii=False)
+                                  + "\nRaisonne dans ce terrain ; choisis librement les moyens.\n")
     proof_rule = ""
     if run is not None and run.business != DEFAULT_BUSINESS:
         proof_rule = (
