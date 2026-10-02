@@ -368,12 +368,14 @@ def system_inventory(allowed_execution=()) -> separation.Inventory:
     return inventory
 
 
-def resource_facts(capability: str, *, limit: int = 12) -> list[dict]:
+def resource_facts(capability: str, *, limit: int = 12, business: str | None = None) -> list[dict]:
     """Ressources déclarées portant cette capacité. Lecture seule : aucune sonde n'est passée."""
     identifier = canonical(capability) or ""
     variants = {identifier, identifier.replace(":", "_"), identifier.replace("_", ":")}
+    current = journal.current_run()
+    business = business or (current.business if current else None)
     facts = []
-    for row in resources.list_resources():
+    for row in resources.list_resources(business=business, include_global=True):
         if not (variants & set(row.get("capabilities") or ())):
             continue
         facts.append({"key": row["key"], "kind": row["kind"], "state": row["state"], "access": row["access"],
@@ -457,7 +459,8 @@ def snapshot(capabilities, *, inventory: separation.Inventory | None = None,
     states = []
     for identifier in identifiers:
         acquisition = (acquisition_state(business, identifier) if business else {"state": "none"})
-        states.append(capability_state(identifier, inventory, acquisition=acquisition))
+        states.append(capability_state(identifier, inventory, acquisition=acquisition,
+                                       facts=resource_facts(identifier, business=business)))
     return {"schema": SCHEMA, "authority": inventory.authority, "generated_at": time.time(),
             "recalculated": True, "inventory": inventory.as_dict(), "capabilities": states}
 
@@ -491,7 +494,8 @@ def gaps(assessment: dict, inventory: separation.Inventory, *, business: str | N
     items = []
     for identifier in required:
         identifier = canonical(identifier)
-        state = capability_state(identifier, inventory, acquisition=states.get(identifier))
+        state = capability_state(identifier, inventory, acquisition=states.get(identifier),
+                                 facts=resource_facts(identifier, business=business))
         if not complete:
             state = {**state, "state": "not_established", "effective_state": "not_established",
                      "available": False}

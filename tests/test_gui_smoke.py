@@ -22,7 +22,7 @@ from agents.gui.intelligence import EntrepreneurialWorkbench  # noqa: E402
 from agents.gui.workbench_v2 import ADVANCED, META, PRIMARY, WorkbenchV2  # noqa: E402
 from agents.gui.workbench import PAGE_META  # noqa: E402
 from agents.gui.workspaces import Business  # noqa: E402
-from octopus import economy, strategy  # noqa: E402
+from octopus import businesses, economy, journal, paths, strategy, tasks  # noqa: E402
 from agents.gui.workbench_v2_data import read_snapshot  # noqa: E402
 
 
@@ -147,7 +147,7 @@ def test_v2_primary_navigation_at_requested_window_sizes(isolated):
     assert errors == []
 
 
-def test_v2_keeps_system_validation_out_of_business_choices(isolated):
+def test_v2_keeps_system_discovery_explicit_and_secondary(isolated):
     channel = economy.add_channel("octopus", "agnes_video", "Agnes local", created_by="human",
                                   locator="http://127.0.0.1:8765", capabilities=["agnes_submit"])
     economy.update_channel("octopus", channel, actor="human", status="active", access="act")
@@ -157,7 +157,7 @@ def test_v2_keeps_system_validation_out_of_business_choices(isolated):
         assert "octopus" in app._snapshot["businesses"]
         app.registry._businesses["podalux"] = Business("podalux", "Podalux")
         app._sync_business_menu()
-        assert app.business_menu.cget("values") == ["Toutes les activités"]
+        assert app.business_menu.cget("values") == ["Toutes les activités", "Discovery autonome (historique)"]
     finally:
         app.destroy()
 
@@ -177,6 +177,104 @@ def test_v2_readonly_mission_stays_disabled_after_refresh(isolated, monkeypatch)
                                   "success_criteria": "test"}]
         _snapshot_result(app, changed)
         assert app.mission_button.cget("state") == "disabled"
+    finally:
+        app.destroy()
+
+
+def _widgets(parent):
+    for child in parent.winfo_children():
+        yield child
+        yield from _widgets(child)
+
+
+def test_v2_activity_form_creates_without_starting_and_survives_restart(isolated, monkeypatch):
+    from agents import procs
+    monkeypatch.setattr(WorkbenchV2, "_load_snapshot", lambda self: None)
+    monkeypatch.setattr(procs, "spawn", lambda *_a, **_k: pytest.fail("Create launched a process"))
+    monkeypatch.setattr("octopus.supervisor.start_pursuit", lambda *_a, **_k: pytest.fail("Create started pursuit"))
+    app = WorkbenchV2()
+    try:
+        _snapshot_result(app, read_snapshot())
+        add = next(widget for widget in _widgets(app._body) if isinstance(widget, ctk.CTkButton)
+                   and widget.cget("text") == "+ Ajouter une activité")
+        add.invoke()
+        app.update()
+        dialog = next(widget for widget in app.winfo_children() if isinstance(widget, ctk.CTkToplevel))
+        name = next(widget for widget in dialog.winfo_children() if isinstance(widget, ctk.CTkEntry))
+        description = next(widget for widget in dialog.winfo_children() if isinstance(widget, ctk.CTkTextbox))
+        name.insert(0, "Vidéo B2B proactive")
+        description.insert("1.0", "Créer et vendre du contenu vidéo à des professionnels")
+        next(widget for widget in dialog.winfo_children() if isinstance(widget, ctk.CTkButton)).invoke()
+        item = next(iter(businesses.discover().values()))
+        assert app.selected_business_id == item.id and not dialog.winfo_exists()
+        assert not tasks.list_tasks() and not journal.query("SELECT id FROM llm_calls")
+    finally:
+        app.destroy()
+    second = WorkbenchV2()
+    try:
+        _snapshot_result(second, read_snapshot())
+        assert any("Vidéo B2B proactive" in label for label in second.business_menu.cget("values"))
+    finally:
+        second.destroy()
+
+
+def test_v2_all_primary_views_switch_scope_without_stale_content(isolated, monkeypatch):
+    import json
+    monkeypatch.setattr(WorkbenchV2, "_load_snapshot", lambda self: None)
+    a = businesses.create_activity("Première", "Terrain ONLY_A")
+    b = businesses.create_activity("Seconde", "Terrain ONLY_B")
+    for item, marker in ((a, "ONLY_A"), (b, "ONLY_B")):
+        strategy.create("objective", item.id, marker, created_by="human", statement=marker)
+        strategy.create("evidence", item.id, marker, created_by="human", nature="observed",
+                        source_type="fixture", source_ref=marker, captured_at=1, observation=marker)
+        strategy.create("decision", item.id, marker, created_by="human", decision=marker, rationale=marker)
+        economy.add_channel(item.id, "website", marker, created_by="human")
+        tid = tasks.enqueue(item.id, "fixture", {"goal": marker})
+        with journal.connect() as conn:
+            conn.execute("UPDATE tasks SET output=? WHERE id=?", (json.dumps({"rapport": marker}), tid))
+            observation = {"session": "closed", "at": 1, "url": "https://fixture.example/"+marker,
+                           "title": marker, "action": "snapshot", "refused": False, "ok": True, "snapshot": marker}
+            conn.execute("INSERT INTO task_steps(task_id,key,value,ts) VALUES (?, 'browser.observation', ?, 1)",
+                         (tid, json.dumps(observation)))
+    app = WorkbenchV2()
+    try:
+        for page in PRIMARY:
+            app._select_business_then(page, a.id)
+            _snapshot_result(app, read_snapshot(a.id))
+            app._select_business_then(page, b.id)
+            assert app._snapshot is None
+            _snapshot_result(app, read_snapshot(b.id))
+            app.update()
+            texts = []
+            for widget in _widgets(app._body):
+                if isinstance(widget, ctk.CTkLabel):
+                    texts.append(str(widget.cget("text")))
+                elif isinstance(widget, ctk.CTkTextbox):
+                    texts.append(widget.get("1.0", "end"))
+            assert "ONLY_A" not in "\n".join(texts)
+            assert any("ONLY_B" in text for text in texts) or page == "Activité"
+    finally:
+        app.destroy()
+
+
+def test_v2_readonly_disables_activity_creation_and_start(isolated, monkeypatch):
+    item = businesses.create_activity("Activité", "Terrain")
+    monkeypatch.setenv("OCTOPUS_WORKBENCH_READONLY", "1")
+    monkeypatch.setattr(WorkbenchV2, "_load_snapshot", lambda self: None)
+    app = WorkbenchV2()
+    try:
+        _snapshot_result(app, read_snapshot())
+        buttons = [widget for widget in _widgets(app._body) if isinstance(widget, ctk.CTkButton)]
+        assert next(widget for widget in buttons if widget.cget("text") == "+ Ajouter une activité").cget("state") == "disabled"
+        assert all(widget.cget("state") == "disabled" for widget in buttons if widget.cget("text") == "Démarrer / reprendre")
+        app._select_business(item.id)
+        _snapshot_result(app, read_snapshot(item.id))
+        start = next(widget for widget in _widgets(app._body) if isinstance(widget, ctk.CTkButton)
+                     and widget.cget("text") == "Démarrer / reprendre l'activité")
+        assert start.cget("state") == "disabled"
+        assert app._create_activity("interdit", "terrain") is None
+        app._start_pursuit()
+        assert not paths.journal_path().exists() and len(businesses.discover()) == 1
     finally:
         app.destroy()
 

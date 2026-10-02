@@ -19,7 +19,7 @@ with tempfile.TemporaryDirectory() as data:
     raw = {'rapport': niche*60, 'reason': conclusion, 'decision':'pause',
            'execution_status':'completed', 'determination':{'action':'pause','reason':conclusion,'next_goal':'','permission':''},
            'results':[{'steps':[{'tool':'browser_navigate','result':niche*20} for _ in range(12)]}]}
-    previous={'id':1,'status':'done','input':{},'output':raw}
+    previous={'id':1,'business':'octopus','status':'done','input':{},'output':raw}
     hypotheses=[{'hypothesis_id':i+1,'statement':niche*6,'economic_justification':niche*12,
                  'strategic_state':'retained' if not i else 'candidate','hypothesis_status':'proposed',
                  'economic_rank':i+1,'required_capabilities':['api_cost_monitoring'],'evidence_ids':[]} for i in range(3)]

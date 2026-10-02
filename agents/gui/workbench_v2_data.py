@@ -10,7 +10,49 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from octopus import agnes, journal, paths
+from octopus import agnes, businesses, journal, paths
+
+
+def _activity_rows(state: dict, declared: dict, business: str, costs: dict) -> list[dict]:
+    """Projection du registre et du journal, sans deuxième ledger ni écriture."""
+    out = []
+    for identifier in state["businesses"]:
+        if business != "all" and identifier != business:
+            continue
+        definition = declared.get(identifier)
+        objectives = [row for row in state["objectives"] if row["business"] == identifier]
+        work = [row for row in state["tasks"] if row["business"] == identifier]
+        pending = sum(row["business"] == identifier and row["status"] == "pending"
+                      and not row.get("technical_obsolete") for row in state["requests"])
+        objective = next((row for row in objectives if row["status"] == "active"),
+                         objectives[0] if objectives else None)
+        status = ("Intervention attendue" if pending else "En cours" if any(
+            row["status"] == "running" and (row.get("lease_until") or 0) > time.time() for row in work)
+            else "En attente" if any(row["status"] == "queued" for row in work)
+            else "En pause" if objective and objective["status"] == "paused"
+            else "À reprendre" if objective and objective["status"] == "active"
+            else "Historique disponible" if work or objectives else "Prête / non démarrée")
+        cash = {}
+        for row in state["ledger"]:
+            if row["business"] != identifier:
+                continue
+            cur = cash.setdefault(row["currency"], {"in_observed": 0., "out_observed": 0.,
+                                                    "in_unverified": 0., "out_unverified": 0.,
+                                                    "customer_receipts": 0.})
+            cur[f"{row['direction']}_{row['nature']}"] += row["amount"]
+            if row["direction"] == "in" and row["nature"] == "observed" and row["category"] == "customer_receipt":
+                cur["customer_receipts"] += row["amount"]
+        for cur in cash.values():
+            cur["net_observed"] = round(cur["in_observed"] - cur["out_observed"], 6)
+        dates = [row["updated_at"] for row in work] + [row["ts"] for row in state["events"] if row["business"] == identifier]
+        out.append({"id": identifier, "name": definition.name if definition else
+                    "Discovery autonome (historique)" if identifier == "octopus" else identifier,
+                    "description": definition.description if definition else "",
+                    "declared": definition is not None, "state": status,
+                    "last_activity": max(dates) if dates else None, "objective": objective,
+                    "pending_human": pending, "llm_cost_usd": round(costs.get(identifier, 0.), 6),
+                    "cash": cash, "budget_daily_usd": definition.budget_daily_usd if definition else None})
+    return out
 
 
 def _agnes_health(channels: list[dict]) -> str:
@@ -35,13 +77,16 @@ def _agnes_health(channels: list[dict]) -> str:
 
 
 def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
+    declared = businesses.discover()
     path = paths.journal_path()
     if not path.is_file():
-        return {"objectives": [], "tasks": [], "generations": [], "events": [],
+        state = {"objectives": [], "tasks": [], "generations": [], "events": [],
                 "requests": [], "channels": [], "allowances": [], "ledger": [],
-                "businesses": [], "token_cost_usd": 0.0, "agnes_api_cost": None,
+                "businesses": sorted(set(declared) | {"octopus"}), "token_cost_usd": 0.0, "agnes_api_cost": None,
                 "agnes_health": "Non sondé", "decisions": [], "evidence": [], "browser": [],
                 "llm_calls": [], "pursuit_llm": None}
+        state["activities"] = _activity_rows(state, declared, business, {})
+        return state
     connection = (journal.readonly_connection(path) if os.environ.get("OCTOPUS_WORKBENCH_READONLY") == "1"
                   else sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10))
     connection.row_factory = sqlite3.Row
@@ -60,6 +105,10 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
         return [dict(row) for row in connection.execute(sql, (*args, limit) if limit is not None else args)]
 
     try:
+        known = set(declared) | {"octopus"}
+        for table in ("tasks", "llm_calls", "strategy_objectives", "strategy_evidence", "economic_channels", "ledger_entries"):
+            if table in present:
+                known.update(row[0] for row in connection.execute(f"SELECT DISTINCT business FROM {table}") if row[0])
         objectives = rows("strategy_objectives")
         tasks = rows("tasks")
         generations = rows("agnes_video_generations")
@@ -98,6 +147,8 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
                         (observation["lease_until"] or 0) < time.time()):
                     observation["session"] = "unknown"
         if "llm_calls" in present:
+            costs = {row["business"]: float(row["cost"]) for row in connection.execute(
+                "SELECT business, COALESCE(SUM(cost_usd),0) AS cost FROM llm_calls" + clause + " GROUP BY business", args)}
             token_sql = "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls" + clause
             token_cost = round(float(connection.execute(token_sql, args).fetchone()[0]), 6)
             llm_calls = [dict(row) for row in connection.execute(
@@ -111,6 +162,7 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
                 call["fallback"] = call["status"] == "ok" and bool(failures)
                 call["route_reason"] = reason.get("explanation") or "; ".join(failures) or call["error"]
         else:
+            costs = {}
             token_cost = 0.0
             llm_calls = []
         pursuit = next((task for task in tasks if task["kind"] == "supervisor.objective_work"
@@ -187,15 +239,16 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
             event["data"] = data if isinstance(data, dict) else {}
         except (TypeError, ValueError):
             event["data"] = {}
-    return {"objectives": objectives, "tasks": tasks, "generations": generations,
+    state = {"objectives": objectives, "tasks": tasks, "generations": generations,
             "events": events, "requests": requests, "channels": channels,
             "allowances": allowances, "ledger": ledger, "decisions": list(decisions.values()),
             "evidence": list(evidence.values()), "browser": browser,
-            "businesses": sorted({item["business"] for group in
-                                   (objectives, tasks, generations, channels, ledger) for item in group}),
+            "businesses": sorted(known),
             "token_cost_usd": token_cost, "llm_calls": llm_calls, "pursuit_llm": pursuit_llm,
             "agnes_api_cost": None,
             "agnes_health": _agnes_health(channels) if check_health else "Non sondé"}
+    state["activities"] = _activity_rows(state, declared, business, costs)
+    return state
 
 
 def mission_state(objective: dict) -> tuple[str, str]:

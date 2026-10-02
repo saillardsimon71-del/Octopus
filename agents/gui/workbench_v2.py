@@ -26,7 +26,7 @@ META = {
     "Paramètres": ("Paramètres", "Services, permissions et outils avancés."),
 }
 PAGE_DATA_KEYS = {
-    "Vue d'ensemble": ("requests", "tasks", "objectives", "token_cost_usd", "pursuit_llm", "browser"),
+    "Vue d'ensemble": ("activities", "requests", "tasks", "objectives", "token_cost_usd", "pursuit_llm", "browser"),
     "Missions": ("objectives",),
     "Livrables": ("tasks", "decisions", "evidence", "generations"),
     "Navigateur": ("browser",),
@@ -158,35 +158,39 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             self.bind_all(f"<Control-Key-{index}>", lambda _event, name=page: self._show_page(name))
 
     def _on_business_menu(self, label: str) -> None:
-        selected = next((item.id for item in self._visible_businesses() if item.label() == label), DEFAULT_BUSINESS_ID)
-        self.selected_business_id = selected
-        self._sync_business_menu()
-        self._show_page(self.current_page)
-        self._load_snapshot()
+        selected = next((item.id for item in self._visible_businesses() if self._activity_label(item) == label), DEFAULT_BUSINESS_ID)
+        self._select_business_then(self.current_page, selected)
+
+    @staticmethod
+    def _activity_label(item) -> str:
+        return "Discovery autonome (historique)" if item.id == SYSTEM_BUSINESS else f"{item.label()} [{item.id}]"
 
     def _visible_businesses(self) -> list[Business]:
         known = self._visible_business_ids | set((self._snapshot or {}).get("businesses", []))
-        known.discard(SYSTEM_BUSINESS)
+        from octopus import businesses
+        known.update(businesses.discover())
         return [item for item in self.registry.all() if item.id in known]
 
     def _business_label(self) -> str:
         if self.selected_business_id == DEFAULT_BUSINESS_ID:
             return "Toutes les activités"
-        return super()._business_label()
+        item = self.registry.get(self.selected_business_id)
+        return self._activity_label(item) if item else self.selected_business_id
 
     def _sync_business_menu(self) -> None:
         self.business_menu.configure(values=["Toutes les activités"] +
-                                     [item.label() for item in self._visible_businesses()])
+                                     [self._activity_label(item) for item in self._visible_businesses()])
         self.business_menu.set(self._business_label())
         self.context_chip.configure(text=self._business_label())
 
     def _select_business(self, business_id: str) -> None:
-        self.selected_business_id = business_id
-        self._sync_business_menu()
-        self._show_page("Vue d'ensemble")
-        self._load_snapshot()
+        self._select_business_then("Vue d'ensemble", business_id)
 
     def _select_business_then(self, page: str, business_id: str) -> None:
+        if business_id != self.selected_business_id:
+            self._snapshot = None
+            self._snapshot_error = None
+            self._snapshot_at = 0.0
         self.selected_business_id = business_id
         self._sync_business_menu()
         self._show_page(page)
@@ -207,7 +211,7 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         scroll = old_body._parent_canvas.yview()[0] if old_body else 0.0
         draft = None
         restore_focus = False
-        if page == "Missions" and old_body and self.mission_prompt.winfo_exists():
+        if page == "Missions" and old_body and hasattr(self, "mission_prompt") and self.mission_prompt.winfo_exists():
             draft = self.mission_prompt.get("1.0", "end-1c")
             cursor = self.mission_prompt.index("insert")
             restore_focus = self.focus_lastfor() == self.mission_prompt._textbox
@@ -290,8 +294,91 @@ class WorkbenchV2(EntrepreneurialWorkbench):
     def _section(self, parent, title: str):
         self._line(parent, title, size=16, bold=True, pady=(20, 9))
 
+    def _show_activity_form(self) -> None:
+        if self._readonly:
+            return
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Ajouter une activité")
+        dialog.geometry("560x430")
+        self._line(dialog, "Nom", padx=20, pady=(18, 4))
+        name = ctk.CTkEntry(dialog)
+        name.pack(fill="x", padx=20)
+        self._line(dialog, "Description de l'activité", padx=20, pady=(15, 4))
+        description = ctk.CTkTextbox(dialog, height=150, wrap="word")
+        description.pack(fill="x", padx=20)
+        self._line(dialog, "Définissez le terrain. OCTOPUS choisira les moyens. Créer ne démarre aucun travail.",
+                   COLORS["muted"], padx=20, pady=10)
+        error = self._line(dialog, "", COLORS["bad"], padx=20)
+        def submit():
+            try:
+                if self._create_activity(name.get(), description.get("1.0", "end")):
+                    dialog.destroy()
+            except Exception as exc:
+                error.configure(text=str(exc))
+        self._secondary(dialog, "Créer l'activité", submit).configure(width=210)
+        dialog.transient(self)
+        dialog.grab_set()
+        name.focus_set()
+
+    def _create_activity(self, name: str, description: str):
+        if self._readonly:
+            return None
+        from octopus import businesses
+        item = businesses.create_activity(name, description)
+        self.registry.reload()
+        self._visible_business_ids.add(item.id)
+        self._select_business(item.id)
+        self._set_status("Activité créée, prête et non démarrée.", COLORS["good"])
+        return item
+
+    def _cash_lines(self, body, activity) -> None:
+        if not activity["cash"]:
+            self._line(body, "Aucun encaissement enregistré. Les coûts non enregistrés restent inconnus.", COLORS["muted"])
+        for currency, amounts in activity["cash"].items():
+            self._line(body, f"Clients encaissés (observés) : {amounts['customer_receipts']:g} {currency} ; "
+                       f"sorties observées : {amounts['out_observed']:g} {currency} ; "
+                       f"solde ledger calculé : {amounts['net_observed']:g} {currency}.", COLORS["muted"])
+            self._line(body, f"Entrées non vérifiées : {amounts['in_unverified']:g} {currency} ; "
+                       f"sorties non vérifiées : {amounts['out_unverified']:g} {currency}. "
+                       "Le solde inclut les apports ; il ne prouve pas une marge complète.", COLORS["muted"])
+
+    def _portfolio(self, body) -> None:
+        hero = self._card(body, "Portefeuille d'activités")
+        hero.pack(fill="x", pady=(0, 12))
+        self._line(hero, "Déclarez un terrain économique, puis démarrez explicitement son travail.", padx=18, pady=8)
+        button = self._secondary(hero, "+ Ajouter une activité", self._show_activity_form)
+        button.configure(width=220)
+        if self._readonly:
+            button.configure(state="disabled")
+        self._line(hero, f"Coûts LLM enregistrés, portefeuille : {self._snapshot['token_cost_usd']:g} USD.",
+                   COLORS["muted"], padx=18, pady=(0, 12))
+        totals = {}
+        for item in self._snapshot.get("activities", []):
+            for currency, amounts in item["cash"].items():
+                cur = totals.setdefault(currency, {key: 0. for key in amounts})
+                for key, value in amounts.items():
+                    cur[key] += value
+        self._cash_lines(hero, {"cash": totals})
+        for item in sorted(self._snapshot.get("activities", []), key=lambda row: row["id"] == SYSTEM_BUSINESS):
+            card = self._card(body, item["name"])
+            card.pack(fill="x", pady=(0, 10))
+            self._line(card, item["state"] + f" | Dernière activité : {_date(item['last_activity']) if item['last_activity'] else 'aucune'}",
+                       padx=18, pady=4)
+            if item["objective"]:
+                self._line(card, "Objectif : " + item["objective"]["summary"], padx=18, pady=4)
+            self._line(card, f"LLM : {item['llm_cost_usd']:g} USD | Demandes humaines : {item['pending_human']}",
+                       COLORS["muted"], padx=18, pady=4)
+            self._cash_lines(card, item)
+            self._secondary(card, "Sélectionner", lambda bid=item["id"]: self._select_business(bid))
+            start = self._secondary(card, "Démarrer / reprendre", lambda bid=item["id"]: self._start_pursuit(business=bid))
+            if self._readonly or self._creating:
+                start.configure(state="disabled")
+
     def _overview(self, body) -> None:
         state = self._snapshot
+        if self.selected_business_id == DEFAULT_BUSINESS_ID:
+            self._portfolio(body)
+            return
         pending = [r for r in state["requests"] if r["status"] == "pending" and not r.get("technical_obsolete")]
         obsolete = [r for r in state["requests"] if r.get("technical_obsolete")]
         running = [t for t in state["tasks"] if t["status"] == "running" and
@@ -307,7 +394,12 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         if obsolete:
             self._line(hero, "Une ancienne erreur de source sera réconciliée au clic sur Reprendre. Aucune permission supplémentaire requise.",
                        COLORS["muted"], padx=20, pady=(0, 8))
-        button = self._secondary(hero, "Démarrer / reprendre OCTOPUS", self._start_pursuit)
+        activity = next((item for item in state.get("activities", []) if item["id"] == self.selected_business_id), None)
+        if activity and activity["description"]:
+            self._line(hero, activity["description"], COLORS["muted"], padx=20, pady=(0, 8))
+        button = self._secondary(hero, "Démarrer / reprendre l'activité" if self.selected_business_id != SYSTEM_BUSINESS
+                                 else "Démarrer / reprendre discovery", self._start_pursuit)
+        button.configure(width=280)
         if self._readonly or self._creating:
             button.configure(state="disabled")
         self._secondary(hero, "Confier une mission", lambda: self._show_page("Missions"))
@@ -328,6 +420,8 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             if result.get("next_goal"):
                 self._line(card, "Prochaine recherche proposée : " + result["next_goal"], padx=18, pady=8)
         self._section(body, "Résultats et moyens")
+        if activity:
+            self._cash_lines(body, activity)
         self._line(body, f"Coût LLM calculé : {state['token_cost_usd']:g} USD. Le résultat économique se consulte dans les comptes, pas dans le nombre de tâches.",
                    COLORS["muted"])
         if state.get("pursuit_llm"):
@@ -353,7 +447,7 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         self.mission_prompt = ctk.CTkTextbox(compose, height=85, wrap="word", fg_color=COLORS["surface2"])
         self.mission_prompt.pack(fill="x", padx=18, pady=(0, 8))
         self.mission_button = self._secondary(compose, "Confier la mission", self._create_mission)
-        if self._readonly:
+        if self._readonly or self.selected_business_id == DEFAULT_BUSINESS_ID:
             self.mission_button.configure(state="disabled")
         self._section(body, "Objectifs et décisions")
         for objective in self._snapshot["objectives"]:
@@ -366,34 +460,38 @@ class WorkbenchV2(EntrepreneurialWorkbench):
                 result = task.get("result") or {}
                 self._line(card, result.get("reason") or task.get("error") or "Travail " + task["status"], padx=18, pady=4)
             if objective.get("success_criteria") == "bounded_determination":
-                for label, callback in (("Reprendre", lambda oid=objective["id"]: self._start_pursuit(objective_id=oid)),
-                                        ("Mettre en pause", lambda oid=objective["id"]: self._pause_pursuit(oid))):
+                for label, callback in (("Reprendre", lambda oid=objective["id"], bid=objective["business"]: self._start_pursuit(objective_id=oid, business=bid)),
+                                        ("Mettre en pause", lambda oid=objective["id"], bid=objective["business"]: self._pause_pursuit(oid, business=bid))):
                     button = self._secondary(card, label, callback)
                     if self._readonly:
                         button.configure(state="disabled")
             self._secondary(card, "Résultats", lambda: self._show_page("Livrables"))
 
-    def _start_pursuit(self, goal=None, objective_id=None) -> None:
+    def _start_pursuit(self, goal=None, objective_id=None, business=None) -> None:
         if self._readonly or self._creating:
+            return
+        business = business or self.selected_business_id
+        if business == DEFAULT_BUSINESS_ID:
+            self._set_status("Sélectionnez une activité avant de démarrer.", COLORS["warn"])
             return
         self._creating = True
         def start():
             try:
                 from octopus import supervisor
                 from agents import procs
-                oid = supervisor.start_pursuit(goal, objective_id=objective_id)
-                proc, log = procs.spawn(["pursue", "--objective", str(oid)], "octopus", module="octopus")
-                self._pursuit_processes.append(proc)
+                oid = supervisor.start_pursuit(goal, objective_id=objective_id, business=business)
+                proc, log = procs.spawn(["pursue", "--business", business, "--objective", str(oid)], "octopus", module="octopus")
+                self._pursuit_processes.append((business, proc))
                 self._background_results.put(("v2_created", oid))
             except Exception as exc:
                 self._background_results.put(("v2_action_error", str(exc)))
         threading.Thread(target=start, daemon=True).start()
 
-    def _pause_pursuit(self, objective_id) -> None:
+    def _pause_pursuit(self, objective_id, business=None) -> None:
         if self._readonly:
             return
         from octopus import supervisor
-        supervisor.pause_pursuit(objective_id)
+        supervisor.pause_pursuit(objective_id, business=business or self.selected_business_id)
         self._load_snapshot()
 
     def _create_mission(self) -> None:
@@ -535,6 +633,8 @@ class WorkbenchV2(EntrepreneurialWorkbench):
 
     def _settings(self, body) -> None:
         state = self._snapshot
+        self._line(body, "Moteur, outils installés et configuration LLM : partagés. Canaux et enveloppes ci-dessous : contexte sélectionné.",
+                   COLORS["muted"], pady=(0, 8))
         self._section(body, "Services et permissions")
         card = self._card(body)
         card.pack(fill="x")
@@ -569,10 +669,11 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             grid.grid_columnconfigure(index, weight=1)
 
     def _worker_label(self) -> str:
-        if any(p.poll() is None for p in self._pursuit_processes):
-            return "OCTOPUS en cours"
+        if any(p.poll() is None and self.selected_business_id in (DEFAULT_BUSINESS_ID, business)
+               for business, p in self._pursuit_processes):
+            return "Activité en cours"
         if self.worker_proc and self.worker_proc.poll() is None:
-            return "Actif dans cette fenêtre"
+            return "Worker moteur actif (global)"
         tasks = (self._snapshot or {}).get("tasks", [])
         if any(t["status"] == "running" and (t.get("lease_until") or 0) > time.time() for t in tasks):
             return "Activité détectée"
@@ -601,7 +702,7 @@ class WorkbenchV2(EntrepreneurialWorkbench):
                 snapshot = read_snapshot(business, check_health=check_health)
                 self._background_results.put(("v2_snapshot", business, snapshot))
             except Exception as exc:
-                self._background_results.put(("v2_error", f"{type(exc).__name__}: {exc}"))
+                self._background_results.put(("v2_error", f"{type(exc).__name__}: {exc}", business))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -621,9 +722,9 @@ class WorkbenchV2(EntrepreneurialWorkbench):
                                    for key in PAGE_DATA_KEYS[self.current_page])))
                     self._snapshot = result[2]
                     self._visible_business_ids.update(self._snapshot["businesses"])
+                    self.registry.reload()
                     for business_id in self._snapshot["businesses"]:
-                        if business_id != SYSTEM_BUSINESS:
-                            self.registry._businesses.setdefault(business_id, Business(business_id, business_id.title()))
+                        self.registry._businesses.setdefault(business_id, Business(business_id, business_id.title()))
                     self._sync_business_menu()
                     self._snapshot_error = None
                     self._snapshot_at = time.monotonic()
@@ -644,6 +745,8 @@ class WorkbenchV2(EntrepreneurialWorkbench):
                 self._set_status(result[1][:110], COLORS["bad"])
             elif kind == "v2_error":
                 self._snapshot_busy = False
+                if len(result) > 2 and result[2] != self.selected_business_id:
+                    continue
                 self._snapshot_error = result[1]
                 self._snapshot_at = time.monotonic()
                 self._set_status(result[1][:110], COLORS["bad"])
