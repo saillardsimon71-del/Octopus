@@ -66,7 +66,7 @@ class Trajectory:
             count = self.action_count.get(self.stage, 0)
             self.action_count[self.stage] = count + 1
             out = {"tool": "browse", "args": {"url": f"https://simulated.example/step{self.stage}"}} if count == 0 else {"final": f"Observation {self.stage} conservée"}
-        elif limit == 1600:
+        elif limit == 4000:
             permission = self.final_permission and self.stage == 6
             out = {"rapport": f"Observations {self.stage}, hypothèse uniquement.", "business_signals": [],
                 "determination": {"action": "request_permission" if permission else "continue",
@@ -200,7 +200,7 @@ def test_same_model_json_fallback_still_records_both_calls_without_cost_stop(mon
     def syntax_error_once(provider, request):
         nonlocal invalidated
         result = original(provider, request)
-        if request["max_tokens"] == 1600 and not invalidated:
+        if request["max_tokens"] == 4000 and not invalidated:
             invalidated = True
             assert request["response_format"] == {"type":"json_object"}
             return llm.TransportResult('{"rapport":"x" "determination":{}}', result.usage,
@@ -224,7 +224,7 @@ def test_third_cycle_missing_capability_keeps_adjusted_continuation(monkeypatch,
     original = script.respond
     def missing_tool(provider, request):
         result = original(provider, request)
-        if request["max_tokens"] == 1600 and script.stage == 3:
+        if request["max_tokens"] == 4000 and script.stage == 3:
             data = json.loads(result.text)
             data["determination"].update(action="request_permission", permission="L'outil email_send est absent.")
             return llm.TransportResult(json.dumps(data,ensure_ascii=False), result.usage, result.requested_model, provider_cost_usd=.001)
