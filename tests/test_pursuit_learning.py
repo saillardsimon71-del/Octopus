@@ -137,8 +137,8 @@ def test_evaluated_economic_experience_persists_lesson_links_costs_and_reuses_it
         if len(calls) == 1:
             assert lesson_from_journal["lesson_status"] == "persisted"
             assert "marge" in lesson_from_journal["lesson"].lower()
-            assert "SiteQuiVend" in goal and "ne sont ni preuve de marché" in goal
-            assert "ils ne motivent ni poursuite, ni abandon" in goal
+            assert "SiteQuiVend" not in goal
+            assert "les coûts passés ne déterminent pas la prochaine décision" in goal
             return _runtime_result(
                 "continue", next_goal="Vérifier l'acceptation client et la répétabilité avant de reproduire.",
                 hypothesis={"statement": "Une offre utile peut produire des paiements répétés",

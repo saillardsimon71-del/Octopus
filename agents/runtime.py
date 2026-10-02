@@ -1002,11 +1002,11 @@ ROLES = {
 
 # Hors Podalux, les rôles ne présupposent ni vidéo ni produit : ils décrivent des fonctions économiques.
 GENERIC_ROLES = {
-    "SOUT": "Observation du monde réel : demandes explicites, douleurs répétées, dépenses/budgets, alternatives payantes et canaux ; cite les sources consultées (record_observation).",
+    "SOUT": "Observation du monde réel : demandes explicites, douleurs répétées, dépenses/budgets, alternatives payantes et canaux ; cite les sources consultées.",
     "CONVERT": "Monétisation : ce qui peut être vendu, à qui, à quel prix, par quel canal ; propose des expériences mesurables.",
     "FORGE": "Production : fabrique ce que l'expérience exige (offre, contenu, produit, service, page, outil).",
-    "GROWTH": "Distribution : agit sur les canaux ouverts (act_on_channel) et mesure les retours.",
-    "LEDGER": "Mesure économique : cash observé, coûts, verdicts et apprentissages (economy_status).",
+    "GROWTH": "Distribution : analyse les canaux et mesure les retours ; agit dans les limites exposées.",
+    "LEDGER": "Mesure économique : cash observé, coûts, verdicts et apprentissages.",
     "ORBIT": "Arbitrage : choisit, arrête ou étend les expériences selon le cash net observé.",
 }
 
@@ -1026,6 +1026,10 @@ def _group() -> str:
     run = journal.current_run()
     if run is None or run.business == DEFAULT_BUSINESS:
         return "Podalux"
+    if run.business == "octopus":
+        from octopus import businesses
+        declared = businesses.get(run.business)
+        return declared.name if declared else "exploration économique"
     return f"OCTOPUS (business {run.business})"
 
 
@@ -1359,9 +1363,13 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
     run = journal.current_run()
     roles = GENERIC_ROLES if run is not None and run.business != DEFAULT_BUSINESS else ROLES
     role_desc = roles.get(role, "")
+    if allowed_tools is not None:
+        role_desc = GENERIC_ROLES.get(role, "")
     group = _group()
     legacy_search = run is None or run.business == DEFAULT_BUSINESS
     tool_text = tools_desc(allowed_tools, legacy_search=legacy_search)
+    if run is not None and run.business == "octopus":
+        tool_text = tool_text.replace(", ex. bpifrance.fr", "")
     freshness_context = _freshness_context(run)
     proof_rule = ""
     if run is not None and run.business != DEFAULT_BUSINESS:
@@ -1369,21 +1377,31 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
             "RÈGLE DE PREUVE : ne présente jamais comme observé, réel ou disponible un fait, un chiffre, "
             "un canal ou une ressource qui n'apparaît pas dans un résultat d'outil de cette exécution. "
             "Si l'information manque, écris qu'elle est inconnue ; une hypothèse ou une inférence doit rester explicitement telle.\n"
-            "CONTRAT record_observation : experiment_id et channel_id sont des identifiants NUMÉRIQUES de base "
-            "de données. S'ils sont inconnus, omets ces champs ; ne mets jamais un nom de rôle comme "
-            "ORBIT, SOUT ou FORGE à leur place.\n\n"
         )
+        if "record_observation" in TOOLS and (allowed_tools is None or "record_observation" in allowed_tools):
+            proof_rule += (
+                "CONTRAT record_observation : experiment_id et channel_id sont des identifiants NUMÉRIQUES de base "
+                "de données. S'ils sont inconnus, omets ces champs ; ne mets jamais un nom de rôle comme "
+                "ORBIT, SOUT ou FORGE à leur place.\n\n"
+            )
     if conversational:
+        tool_hint = ("un outil (search, browse, recall)" if allowed_tools is None
+                     else "les outils disponibles")
+        browser_hint = (
+            "IMPORTANT : tu es connecté à tes comptes (Stripe, Reddit, X, Fiverr, YouTube…) "
+            "via l'outil `browse`, qui ouvre les pages dans TON Chrome réel. Pour vérifier "
+            "un accès, utilise `browse` sur la page concernée.\n\n"
+            if allowed_tools is None else ""
+        )
         system = (
             f"Tu es l'agent {role} du groupe {group}. {role_desc} "
             f"Un humain t'a écrit. Réponds-lui DIRECTEMENT, en français, de façon utile "
-            f"et conversationnelle. Tu peux utiliser un outil (search, browse, recall) "
+            f"et conversationnelle. Tu peux utiliser {tool_hint} "
             f"si besoin, mais ta priorité est de répondre à sa demande.\n\n"
-            f"IMPORTANT : tu es connecté à tes comptes (Stripe, Reddit, X, Fiverr, YouTube…) "
-            f"via l'outil `browse`, qui ouvre les pages dans TON Chrome réel. Pour vérifier "
-            f"un accès, utilise `browse` sur la page concernée.\n\n"
+            f"{browser_hint}"
             f"Outils disponibles :\n{tool_text}\n\n"
             f"{freshness_context}"
+            f"{proof_rule}"
             "Réponds TOUJOURS en JSON : soit {\"tool\": \"<nom>\", \"args\": {...}} pour agir, "
             "soit {\"final\": \"<ta réponse à l'humain>\"}."
         )
@@ -1797,10 +1815,12 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         "et ne duplique pas la même collecte chez plusieurs rôles sans nécessité. "
         "Un même rôle peut recevoir plusieurs sous-tâches distinctes si elles relèvent de sa spécialité ; "
         "ne force jamais la diversité des rôles. "
-        f"Chaque sous-tâche doit être réalisable en au plus {max_steps_per_agent} étapes ; si plusieurs pistes "
+        f"Chaque sous-tâche à exécuter maintenant doit être réalisable en au plus {max_steps_per_agent} étapes ; si plusieurs pistes "
         "indépendantes demandent chacune plusieurs actions, répartis-les au lieu de surcharger un seul agent. "
-        "N'ajoute une tâche aval (offre, production, diffusion) que si un artefact amont exploitable existe "
-        "ou va exister : une mission sans preuve ne doit pas passer à la construction. "
+        "Cette borne concerne l'exécution, pas les marchés, offres ou stratégies que tu peux envisager. "
+        "Chaque tâche doit être autonome : indique quoi observer ou analyser et pourquoi économiquement. "
+        "La production ou diffusion exige un artefact amont exploitable et une justification ; "
+        "cela n'interdit pas de réfléchir à une offre ou une expérience sans preuve commerciale préalable. "
         "Les artefacts utiles des étapes amont (recherches, pages ouvertes, observations et statuts) seront transmis "
         "automatiquement au sous-agent suivant : il doit les réutiliser avant de recommencer une collecte équivalente. "
         "Réponds en JSON : "
@@ -1969,21 +1989,27 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         + (" Réponds en JSON : {\"rapport\":\"...\"}" if not business_signal_focus else "")
     )
     if determination:
-        from octopus.strategy_separation import STRATEGY_PROPOSAL_CLAUSE, STRATEGY_SEPARATION_CLAUSE
-        syn_sys += (
-            '\nAjoute "determination":{"action":"continue|pause|request_permission",'
+        syn_sys = (
+            "Tu es ORBIT. Synthétise les résultats en distinguant faits sourcés, inférences et hypothèses. "
+            "Un propos sans preuve visible reste non vérifié ; donnée absente = inconnue. "
+            "N'invente aucun fait, résultat ou encaissement. Une proposition stratégique n'est pas une action externe : "
+            "elle peut nécessiter une capacité absente, sans affirmer sa disponibilité.\n"
+            'Réponds en JSON : {"rapport":"...", "determination":{"action":"continue|pause|request_permission",'
             '"reason":"raison liée aux observations", "next_goal":"prochaine recherche précise ou vide",'
-            '"permission":"permission manquante ou vide"}. '
-            "Décide de la suite à partir des résultats réellement acquis. Pause si rien n'est justifié. "
-            "Demande une permission si une action nécessaire dépasse les limites. "
-            "Un rapport n'est pas une preuve et une décision n'accorde aucune permission. "
-            "Tu peux ajouter facultativement hypothesis sous la forme {statement, expected_signal, stop_criterion, "
-            "evidence_ids, reconsiders_hypothesis_id, reconsideration_reason}. C'est une proposition, jamais un fait; "
-            "cite seulement "
-            "des identifiants de preuves persistées et visibles dans le contexte. Ne répète pas une hypothèse invalidée "
-            "sans nouvelle preuve observée explicitement liée à elle; dans ce cas, indique son identifiant et la raison. "
-            "N'invente ni observation, ni résultat, ni encaissement. "
-            + STRATEGY_SEPARATION_CLAUSE + " " + STRATEGY_PROPOSAL_CLAUSE
+            '"permission":"permission manquante ou vide"}}. '
+            "Continue si une observation gratuite permise peut réduire une incertitude stratégique importante. "
+            "Pause si aucune exploration admissible et économiquement utile n'est justifiée. "
+            "request_permission concerne une exécution nécessaire dépassant les limites, jamais une simple proposition.\n"
+            "Champs facultatifs : hypothesis {statement, expected_signal, stop_criterion, evidence_ids, "
+            "reconsiders_hypothesis_id, reconsideration_reason} ; strategies [{statement, economic_justification, "
+            "economic_criteria, economic_rank, required_capabilities, evidence_ids, expected_signal, stop_criterion, "
+            "reconsiders_hypothesis_id, reconsideration_reason}]. economic_criteria : cash_received, margin, "
+            "recurrence, autonomy, growth ; economic_rank : entier à critère égal ; required_capabilities : identifiants. "
+            "Compare selon la valeur économique, indépendamment des outils disponibles. "
+            "evidence_ids cite seulement les preuves persistées visibles ; reconsidérer une hypothèse invalidée "
+            "exige une nouvelle preuve liée, son identifiant et la raison."
+            + (f"\n{_business_signal_contract(business_signal_target)}\n" + signal_schema
+               if business_signal_focus else "")
         )
     synthesis_input = {
         "objectif_original": goal,
