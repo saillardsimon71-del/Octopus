@@ -27,7 +27,8 @@ def test_empty_start_persists_reason_and_never_creates_business_or_video(monkeyp
     assert supervisor.start_pursuit() == oid
     supervisor.run_pursuit(oid)
     assert len(calls) == 1
-    assert "# OCTOPUS" in calls[0][0] and "0 EUR" in calls[0][0]
+    assert "performance économique réelle" in calls[0][0] and "0 EUR" in calls[0][0]
+    assert "# OCTOPUS" not in calls[0][0]
     assert calls[0][1]["profile"] == "economical"
     assert calls[0][1]["allowed_tools"] == supervisor.PURSUIT_TOOLS
     state = read_snapshot()

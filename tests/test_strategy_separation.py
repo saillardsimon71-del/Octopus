@@ -367,7 +367,7 @@ def test_pursuit_keeps_the_better_missing_strategy_and_does_not_substitute(monke
         goals.append(goal)
         assert kwargs["allowed_tools"] == supervisor.PURSUIT_TOOLS
         assert "phone_call" not in kwargs["allowed_tools"]
-        assert separation.STRATEGY_SEPARATION_CLAUSE in goal
+        assert "limitent l'exécution, pas la réflexion stratégique" in goal
         return _pursuit_result()
 
     monkeypatch.setattr(runtime, "run_mission", offline)
@@ -521,7 +521,8 @@ def test_determination_prompt_states_the_separation(monkeypatch):
     monkeypatch.setattr(runtime.deepseek, "call_json", call_json)
     result = runtime._run_mission("objectif", 2, determination=True)
     synthesis = next(text for task, text in prompts if task == "determination")
-    assert separation.STRATEGY_SEPARATION_CLAUSE in synthesis
+    assert "Une proposition stratégique n'est pas une action externe" in synthesis
+    assert "indépendamment des outils disponibles" in synthesis
     assert "required_capabilities" in synthesis
     stored = result["determination"]["strategies"][0]
     assert stored["required_capabilities"] == ["phone_call"]

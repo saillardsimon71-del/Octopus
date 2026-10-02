@@ -809,7 +809,8 @@ def test_pursuit_reports_the_gap_without_executing_anything(monkeypatch):
     assert not journal.query("SELECT id FROM tasks WHERE kind=?", (acquisition.TASK_KIND,))
     assert work["status"] != "waiting_human"
     assert output["decision"] in ("continue", "pause")
-    assert acquisition.CAPABILITY_ACQUISITION_CLAUSE in goals[0]
+    assert "limitent l'exécution, pas la réflexion stratégique" in goals[0]
+    assert acquisition.CAPABILITY_ACQUISITION_CLAUSE not in goals[0]
     state = json.loads(goals[0].rsplit("\n", 1)[-1])
     assert state["écarts_de_capacités"] == []
     persisted_study = tasks.step_value(work["id"], "pursuit.capability_acquisition")
