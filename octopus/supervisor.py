@@ -81,13 +81,8 @@ PURSUIT_LLM_BUDGET_USD = 0.20
 
 def pursuit_capability_inventory():
     """Inventaire d'exécution de pursuit. N'ajoute aucun outil et n'élargit aucune permission."""
-    from agents.runtime import TOOLS
-    from . import strategy_separation as separation
-    present = set(TOOLS)
-    return separation.build_inventory(
-        present_tools=present, allowed_execution=set(PURSUIT_TOOLS),
-        executors=separation.executor_ids(),
-        temporarily_unavailable=separation.browser_unavailable_tools(present))
+    from . import capability_acquisition as acquisition
+    return acquisition.system_inventory(PURSUIT_TOOLS)
 
 
 def pursuit_capability_study(ctx, objective_id: int, assessment_record: dict) -> dict | None:
@@ -97,14 +92,18 @@ def pursuit_capability_study(ctx, objective_id: int, assessment_record: dict) ->
     stratégie moins pertinente n'est substituée et aucune permission humaine n'est inventée. Cette
     étude ne change ni la décision, ni la raison, ni une permission ; elle n'exécute aucune
     acquisition, n'ouvre aucune demande humaine, n'ajoute aucun outil et n'élargit aucun droit.
-    Elle est mémoïsée : une reprise ne recalcule ni ne duplique l'annotation persistée.
+    L'état opérationnel est recalculé à la reprise, comme l'annotation #116. La persistance
+    réutilise une étude identique; un changement réel ajoute une étude sans réécrire l'ancienne.
     """
     from . import capability_acquisition as acquisition
     if not assessment_record or assessment_record.get("status") == "ignored" or ctx.cancelled():
         return None
-    return ctx.memo("pursuit.capability_acquisition", lambda: acquisition.plan_for(
+    ctx.check_cancel()
+    record = acquisition.plan_for(
         ctx.business, objective_id, ctx.id, assessment_record,
-        inventory=pursuit_capability_inventory(), allowed_execution=PURSUIT_TOOLS))
+        inventory=pursuit_capability_inventory(), allowed_execution=PURSUIT_TOOLS)
+    tasks.save_step(ctx.id, "pursuit.capability_acquisition", record, owner=ctx.owner)
+    return record
 
 
 def capability_study_summary(record: dict | None) -> dict | None:
