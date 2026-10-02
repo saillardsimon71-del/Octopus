@@ -227,17 +227,13 @@ def test_refuted_history_alone_does_not_close_independent_discovery():
     assert not separation.authorize_execution(assessed)["authorized"]
 
 
-def test_discovery_prompt_covers_economics_and_conceptual_feasibility():
+def test_discovery_prompt_states_finality_without_a_comparison_procedure():
     from pursuit_prompt_capture import capture
-
-    captured = capture()
-    goal = captured["goal"]
-    for dimension in ("possibilités économiquement distinctes", "information marginale utile",
-                      "mise de côté sans réfutation", "levier IA", "coûts marginaux réels", "distribution"):
-        assert dimension in goal
-    action = next(call for call in captured["calls"] if call["task"] == "action")
-    assert "faisabilité en principe et exécutabilité actuelle sont distincts" in action["messages"][0]["content"]
-    assert len(goal) < 2500
+    goal = capture()["goal"]
+    assert "performance économique réelle" in goal
+    assert "limitent l'exécution, pas la réflexion stratégique" in goal
+    assert "argent client réellement encaissé" in goal
+    assert "Compare plusieurs" not in goal and "Considère délai" not in goal
 
 
 def test_executable_option_still_cannot_dispatch_during_discovery(monkeypatch):

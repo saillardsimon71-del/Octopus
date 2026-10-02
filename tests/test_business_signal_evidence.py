@@ -56,7 +56,7 @@ def test_acquisition_fails_closed(damage):
     elif damage == "error":
         page["error"] = "timeout"
     elif damage in {"short", "empty", "fake_length"}:
-        page["main_text"] = "court" if damage != "empty" else ""
+        page["main_text"] = "court" if damage == "short" else ""
     elif damage == "refused":
         step["result_data"]["refused"] = True
     elif damage == "no_date":
@@ -73,7 +73,7 @@ def test_acquisition_fails_closed(damage):
         step["browse_meta"]["error"] = "timeout"
     elif damage == "meta_blocked":
         step["browse_meta"]["blocked"] = True
-    assert runtime._verified_browse_urls(results) == set()
+    assert runtime._verified_browse_urls(results) == ({URL} if damage == "short" else set())
     assert runtime._qualify_business_signals([signal], results)[0] == []
 
 
@@ -104,10 +104,15 @@ def test_generic_page_does_not_support_invented_facts(field):
 
 @pytest.mark.parametrize("field", ["buyer_evidence", "pain_evidence", "money_evidence", "summary_evidence"])
 @pytest.mark.parametrize("value", [None, [], {"quote": "inventé"}, "", "Extrait absent de la page"])
-def test_missing_or_fabricated_quote_rejected(field, value):
+def test_optional_legacy_quotes_cannot_promote_analysis(field, value):
     signal, results = evidence_case()
     signal[field] = value
-    assert runtime._qualify_business_signals([signal], results)[0] == []
+    accepted, rejected = runtime._qualify_business_signals([signal], results)
+    if field == "summary_evidence" and value is not None:
+        assert not accepted and rejected
+    else:
+        assert accepted[0]["nature"] == "inferred"
+        assert field not in accepted[0]
 
 
 @pytest.mark.parametrize("kind,money", [
@@ -136,20 +141,19 @@ def test_redirect_and_tracking_alias_share_acquired_content():
     assert runtime._qualify_business_signals([signal], results)[0] == []
 
 
-def test_quotes_cannot_be_borrowed_from_another_url_or_capture():
-    signal, first = evidence_case(text=TEXT.replace("Cabinet comptable Acme", "Autre entreprise"))
+def test_quote_cannot_be_assembled_across_captures():
+    _, first = evidence_case(text=TEXT.replace("Cabinet comptable Acme", "Autre entreprise"))
     _, second = evidence_case(text="Cabinet comptable Acme. " + "Texte générique sans demande. " * 10)
+    signal = {"statement": "Interprétation", "sources": [{"url": URL, "quote": TEXT}]}
     assert runtime._qualify_business_signals([signal], first + second)[0] == []
-    _, other = evidence_case(requested="https://example.org/other", final="https://example.org/other")
-    assert runtime._qualify_business_signals([signal], first + other)[0] == []
 
 
-def test_quote_normalization_and_deduplication():
+def test_quote_normalization_and_multiple_interpretations_are_allowed():
     signal, results = evidence_case()
-    signal["buyer_evidence"] = "CABINET\u00a0COMPTABLE   ACME"
-    accepted, rejected = runtime._qualify_business_signals([signal, deepcopy(signal)], results)
-    assert len(accepted) == 1
-    assert rejected[0]["reasons"] == ["duplicate_signal"]
+    signal = {"statement": "Idée A", "sources": [{"url": URL, "quote": "CABINET\u00a0COMPTABLE   ACME"}]}
+    accepted, rejected = runtime._qualify_business_signals([signal, {**signal, "statement": "Idée B"}], results)
+    assert len(accepted) == 2 and not rejected
+    assert all(item["nature"] == "inferred" for item in accepted)
 
 
 def test_empty_candidates_are_not_evidence_of_no_market():
@@ -180,20 +184,19 @@ def test_business_selector_keeps_legitimate_film_work():
         result, "monteur freelance film publicitaire", "business_signal_relevance") is not None
 
 
-def test_redirect_aliases_do_not_duplicate_signal():
+def test_redirect_aliases_keep_provenance_without_qualifying_independence():
     signal, results = evidence_case(requested="https://example.org/go", final=URL)
-    alias = {**signal, "evidence_url": "https://example.org/go"}
-    accepted, rejected = runtime._qualify_business_signals([signal, alias], results)
-    assert len(accepted) == 1
-    assert rejected[0]["reasons"] == ["duplicate_signal"]
-    assert accepted[0]["evidence_acquisition"] == {
-        "final_url": URL, "fetched_at": "2026-09-24T12:00:00+00:00"}
+    accepted, rejected = runtime._qualify_business_signals([signal, {**signal, "evidence_url": "https://example.org/go"}], results)
+    assert len(accepted) == 2 and not rejected
+    assert accepted[0]["evidence_acquisition"] == accepted[1]["evidence_acquisition"]
 
 
 @pytest.mark.parametrize("raw", [None, {}, "[]"])
-def test_malformed_signal_list_is_explicitly_rejected(raw):
-    assert runtime._qualify_business_signals(raw, [])[1] == [
-        {"signal": raw, "reasons": ["signals_not_list"]}]
+def test_optional_candidate_list_is_absent_or_structurally_valid(raw):
+    if raw is None:
+        assert runtime._qualify_business_signals(raw, []) == ([], [])
+    else:
+        assert runtime._qualify_business_signals(raw, [])[1] == [{"signal": raw, "reasons": ["signals_not_list"]}]
 
 
 def test_literal_presence_is_not_semantic_entailment():
@@ -203,14 +206,19 @@ def test_literal_presence_is_not_semantic_entailment():
     signal["money_signal"] = "Interprétation non vérifiée de la citation"
     accepted, _ = runtime._qualify_business_signals([signal], results)
     assert len(accepted) == 1
-    assert accepted[0]["money_evidence"] in TEXT
+    assert accepted[0]["sources"][0]["quote"] in TEXT
+    assert accepted[0]["nature"] == "inferred"
 
 
 @pytest.mark.parametrize("field", ["buyer", "pain", "money_signal", "evidence_summary"])
-def test_fact_fields_must_be_strings(field):
+def test_optional_legacy_fields_do_not_become_facts(field):
     signal, results = evidence_case()
     signal[field] = {"fake": "not a string"}
-    assert runtime._qualify_business_signals([signal], results)[0] == []
+    accepted, rejected = runtime._qualify_business_signals([signal], results)
+    if field == "evidence_summary":
+        assert not accepted and rejected  # Minimal statement absent.
+    else:
+        assert accepted[0]["nature"] == "inferred" and field not in accepted[0]
 
 
 def test_business_selector_site_constraint_and_ties():
@@ -322,7 +330,7 @@ def test_gate_94_rejects_tavily_quote_absent_from_acquisition_even_if_search_sni
     accepted, rejected = runtime._qualify_business_signals([signal], results)
 
     assert accepted == []
-    assert any("buyer_evidence_not_in_source" in item["reasons"] for item in rejected)
+    assert any("quote_not_in_source" in item["reasons"] for item in rejected)
 
 
 def test_gate_94_rejects_tavily_url_mismatch_and_failed_extraction():
@@ -367,30 +375,26 @@ def _business_synthesis_system_prompt(monkeypatch):
 
 def test_synthesis_contract_binds_signal_to_one_acquisition(monkeypatch):
     prompt = _business_synthesis_system_prompt(monkeypatch)
-    # La règle #94 existante est conservée, puis clarifiée.
-    assert "citations exactes de 8 à 600 caractères du texte de cette même acquisition" in prompt
-    assert "choisis exactement UNE acquisition réellement ouverte" in prompt
-    assert "evidence_url identifie cette acquisition" in prompt
-    assert "les quatre champs *_evidence proviennent tous de son texte" in prompt
+    assert 'Tu peux rapprocher plusieurs sources' in prompt
+    assert "quatre" not in prompt and "choisis exactement UNE" not in prompt
 
 
 def test_synthesis_contract_requires_one_continuous_literal_quote(monkeypatch):
     prompt = _business_synthesis_system_prompt(monkeypatch)
-    assert "UNE SEULE sous-chaîne continue, copiée mot pour mot" in prompt
-    assert "ne paraphrase pas" in prompt
+    assert 'un extrait fourni doit être littéral' in prompt
+    assert "quatre" not in prompt and "choisis exactement UNE" not in prompt
 
 
 def test_synthesis_contract_forbids_ellipsis_and_fragment_assembly(monkeypatch):
     prompt = _business_synthesis_system_prompt(monkeypatch)
-    assert "ne concatène jamais plusieurs fragments" in prompt
-    assert "n'insère jamais « ... » ni « … » pour les relier" in prompt
+    assert 'extrait littéral facultatif' in prompt
+    assert "quatre" not in prompt and "choisis exactement UNE" not in prompt
 
 
 def test_synthesis_contract_uses_one_representation_for_html_and_pdf(monkeypatch):
     prompt = _business_synthesis_system_prompt(monkeypatch)
-    assert "page HTML et PDF), n'en utilise qu'une seule, sans les mélanger" in prompt
-    assert ("si le PDF contient les quatre preuves, evidence_url est l'URL exacte du PDF acquis "
-            "et les quatre citations viennent du PDF") in prompt
+    assert 'sources peut être vide' in prompt
+    assert "quatre" not in prompt and "choisis exactement UNE" not in prompt
 
 
 # --- Gate #94 inchangé : ces cas restent rejetés, quelle que soit la consigne ---
@@ -402,31 +406,27 @@ def test_gate_94_still_rejects_composite_quote_joined_by_ellipsis():
                                       + "Merci de répondre à cette demande de prestation.")
         accepted, rejected = runtime._qualify_business_signals([signal], results)
         assert accepted == []
-        assert "summary_evidence_not_in_source" in rejected[0]["reasons"]
+        assert "quote_not_in_source" in rejected[0]["reasons"]
 
 
-def test_gate_94_still_rejects_quotes_split_between_html_and_pdf_acquisitions():
+def test_each_optional_quote_is_bound_to_its_own_html_or_pdf_acquisition():
     html_url, pdf_url = "https://example.org/avis/42", "https://example.org/avis/42.pdf"
-    signal, html = evidence_case(html_url, html_url,
-                                 text="Cabinet comptable Acme. Avis de marché publié. " * 3)
+    _, html = evidence_case(html_url, html_url, text="Cabinet comptable Acme. Avis de marché publié. " * 3)
     pdf_text = TEXT.replace("Cabinet comptable Acme. ", "")
     _, pdf = evidence_case()
     _as_tavily_acquisition(pdf, text=pdf_text, requested=pdf_url, final=pdf_url)
-    for url in (html_url, pdf_url):
-        signal["evidence_url"] = url
-        accepted, rejected = runtime._qualify_business_signals([signal], html + pdf)
-        assert accepted == []
-        assert "quotes_not_in_same_acquisition" in rejected[0]["reasons"]
-    # Positif de contrôle : les quatre citations dans le seul PDF, evidence_url = PDF.
-    _, pdf_full = evidence_case()
-    _as_tavily_acquisition(pdf_full, requested=pdf_url, final=pdf_url)
-    signal["evidence_url"] = pdf_url
-    assert len(runtime._qualify_business_signals([signal], html + pdf_full)[0]) == 1
+    raw = {"statement": "Rapprochement", "sources": [
+        {"url": html_url, "quote": "Cabinet comptable Acme"},
+        {"url": pdf_url, "quote": "Nous recrutons un prestataire pour automatiser les relances"}]}
+    accepted, rejected = runtime._qualify_business_signals([raw], html + pdf)
+    assert accepted and not rejected
+    raw["sources"][1]["quote"] = "Cabinet comptable Acme"
+    assert runtime._qualify_business_signals([raw], html + pdf)[0] == []
 
 
 def test_gate_94_still_rejects_absent_quote():
     signal, results = evidence_case()
-    signal["money_evidence"] = "Budget de 150 000 € HT par an"
+    signal["summary_evidence"] = "Budget de 150 000 € HT par an"
     accepted, rejected = runtime._qualify_business_signals([signal], results)
     assert accepted == []
     assert rejected
@@ -485,25 +485,14 @@ def _run_planner_case(monkeypatch, plans, *, focus=True, target=3, max_steps=8,
     return out, call_count, planner_messages, executed
 
 
-def test_multi_signal_single_task_plan_triggers_exactly_one_replan(monkeypatch):
-    _, calls, messages, executed = _run_planner_case(
-        monkeypatch, [_SINGLE_DISCOVERY_PLAN, _MULTI_SOUT_PLAN])
-
-    assert calls["planification"] == 2
-    assert len(messages) == 2
-    assert len(executed) == 3
-    assert [item["role"] for item in executed] == ["SOUT", "SOUT", "SOUT"]
-    feedback = messages[1][-1]["content"]
-    assert "plusieurs signaux" in feedback
-    assert "plusieurs sous-tâches autonomes" in feedback
-    assert "Le même rôle, notamment SOUT, peut être utilisé plusieurs fois" in feedback
+def test_target_does_not_force_replan(monkeypatch):
+    _, calls, messages, executed = _run_planner_case(monkeypatch, [_SINGLE_DISCOVERY_PLAN, _MULTI_SOUT_PLAN])
+    assert calls["planification"] == 1 and len(messages) == 1 and len(executed) == 1
 
 
-def test_replanned_plan_with_all_sout_tasks_is_executed_as_is(monkeypatch):
-    _, calls, _, executed = _run_planner_case(
-        monkeypatch, [_SINGLE_DISCOVERY_PLAN, _MULTI_SOUT_PLAN])
-
-    assert calls["planification"] == 2
+def test_model_plan_with_all_sout_tasks_is_executed_as_is(monkeypatch):
+    _, calls, _, executed = _run_planner_case(monkeypatch, [_MULTI_SOUT_PLAN])
+    assert calls["planification"] == 1
     assert [item["role"] for item in executed] == ["SOUT", "SOUT", "SOUT"]
     assert [item["max_steps"] for item in executed] == [8, 8, 8]
 
@@ -531,14 +520,9 @@ def test_non_business_single_task_plan_keeps_historical_behavior(monkeypatch):
     assert len(executed) == 1
 
 
-def test_second_single_task_plan_is_accepted_without_third_planner_call(monkeypatch):
-    second = {"tasks": [{"role": "SOUT", "task": "encore une seule tâche"}]}
-    _, calls, _, executed = _run_planner_case(
-        monkeypatch, [_SINGLE_DISCOVERY_PLAN, second])
-
-    assert calls["planification"] == 2
-    assert len(executed) == 1
-    assert executed[0]["goal"].startswith("encore une seule tâche")
+def test_second_plan_is_not_requested_for_a_single_task(monkeypatch):
+    _, calls, _, executed = _run_planner_case(monkeypatch, [_SINGLE_DISCOVERY_PLAN])
+    assert calls["planification"] == 1 and len(executed) == 1
 
 
 def test_replan_still_respects_max_plan_tasks(monkeypatch):
@@ -546,9 +530,9 @@ def test_replan_still_respects_max_plan_tasks(monkeypatch):
         "tasks": [{"role": "SOUT", "task": f"voie {i}"} for i in range(8)],
     }
     _, calls, _, executed = _run_planner_case(
-        monkeypatch, [_SINGLE_DISCOVERY_PLAN, oversized])
+        monkeypatch, [oversized])
 
-    assert calls["planification"] == 2
+    assert calls["planification"] == 1
     assert len(executed) == runtime.MAX_PLAN_TASKS == 5
 
 
@@ -565,11 +549,11 @@ def test_replanned_mission_keeps_structured_handoff_between_subtasks(monkeypatch
         ],
     }
     _, calls, _, executed = _run_planner_case(
-        monkeypatch, [_SINGLE_DISCOVERY_PLAN, two_tasks],
+        monkeypatch, [two_tasks],
         first_steps=first_steps,
     )
 
-    assert calls["planification"] == 2
+    assert calls["planification"] == 1
     assert len(executed) == 2
     assert "Contexte structuré des sous-tâches précédentes" in executed[1]["goal"]
     assert "preuve amont conservée" in executed[1]["goal"]

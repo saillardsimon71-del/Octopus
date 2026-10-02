@@ -282,7 +282,7 @@ def _contains_block_marker(*parts: str) -> bool:
 
 
 def is_public_text_acquisition(record, *, require_text: bool = True,
-                               require_fetched_at: bool = True) -> bool:
+                               require_fetched_at: bool = True, min_text_chars: int = PUBLIC_MIN_TEXT_CHARS) -> bool:
     """Mechanical definition of a technically usable public text acquisition.
 
     This is intentionally not business qualification.  It only says that BROWSE produced
@@ -302,12 +302,12 @@ def is_public_text_acquisition(record, *, require_text: bool = True,
         return False
     text = _record_get(record, "main_text", "")
     if require_text:
-        if not isinstance(text, str) or len(" ".join(text.split())) < PUBLIC_MIN_TEXT_CHARS:
+        if not isinstance(text, str) or len(" ".join(text.split())) < min_text_chars:
             return False
         if _payload_starts_pdf(text):
             return False
     text_chars = _record_get(record, "text_chars")
-    if not isinstance(text_chars, int) or text_chars < PUBLIC_MIN_TEXT_CHARS:
+    if not isinstance(text_chars, int) or text_chars < min_text_chars:
         return False
     status = _record_get(record, "http_status")
     if status is not None and (type(status) is not int or not 200 <= status < 300):
@@ -328,13 +328,13 @@ def is_public_text_acquisition(record, *, require_text: bool = True,
     return True
 
 
-def is_public_text_acquisition_meta(meta) -> bool:
+def is_public_text_acquisition_meta(meta, *, min_text_chars: int = PUBLIC_MIN_TEXT_CHARS) -> bool:
     """Same technical acquisition contract for compact browse metadata.
 
     Metadata does not carry the full text, so callers with ``result_data.page`` should prefer
     ``is_public_text_acquisition(page)`` and use this only as a compatibility fallback.
     """
-    return is_public_text_acquisition(meta, require_text=False, require_fetched_at=False)
+    return is_public_text_acquisition(meta, require_text=False, require_fetched_at=False, min_text_chars=min_text_chars)
 
 
 def _decode_body(response) -> str:
@@ -1008,6 +1008,7 @@ def acquire_public_page(url: str, guard=None) -> PublicPageRecord:
             error=None if text else (http_record.error or "contenu vide après rendu"),
         )
     except Exception as exc:
+        guard_refused = bool(guard is not None and b.blocked)
         return _page_record(
             requested_url=str(url),
             final_url=http_record.final_url or str(url),
@@ -1016,10 +1017,11 @@ def acquire_public_page(url: str, guard=None) -> PublicPageRecord:
             title=http_record.title,
             method="playwright",
             rendered=True,
-            blocked=http_record.blocked,
+            blocked=guard_refused or http_record.blocked,
             text=http_record.main_text,
             raw_chars=http_record.raw_chars,
-            error=f"{type(exc).__name__}: {str(exc)[:300]}",
+            error=("navigation refusée par le garde-fou" if guard_refused
+                   else f"{type(exc).__name__}: {str(exc)[:300]}"),
         )
     finally:
         b.stop()

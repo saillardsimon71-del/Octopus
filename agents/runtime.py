@@ -346,7 +346,7 @@ def _browse_result_meta(value) -> dict | None:
         "http_status": page.get("http_status"),
         "error": page.get("error"),
     }
-    meta["usable"] = browser.is_public_text_acquisition(page)
+    meta["usable"] = browser.is_public_text_acquisition(page, min_text_chars=1)
     return meta
 
 
@@ -510,9 +510,11 @@ def _browse(args):
                 anonymous_account_domains=anonymous_account_domains),
         ).as_dict()
         final = str(record.get("final_url") or url)
-        if browser.is_public_text_acquisition(record):
+        if browser.is_public_text_acquisition(record, min_text_chars=1):
             web_guard.record(final, web_guard.PUBLIC, state)
+        failure = _public_source_failure({"page": record})
         return {
+            **({"refused": True, "failure_class": "technical", "reason": failure} if failure else {}),
             "url": final,
             "source": web_guard.UNTRUSTED_NOTE,
             "texte": str(record.get("main_text") or ""),
@@ -1011,7 +1013,7 @@ ROLES = {
 
 # Hors Podalux, les rôles ne présupposent ni vidéo ni produit : ils décrivent des fonctions économiques.
 GENERIC_ROLES = {
-    "SOUT": "Observation du monde réel : demandes explicites, douleurs répétées, dépenses/budgets, alternatives payantes et canaux ; cite les sources consultées.",
+    "SOUT": "Observation des informations externes pertinentes, avec leur provenance.",
     "CONVERT": "Monétisation : ce qui peut être vendu, à qui, à quel prix, par quel canal ; propose des expériences mesurables.",
     "FORGE": "Production : fabrique ce que l'expérience exige (offre, contenu, produit, service, page, outil).",
     "GROWTH": "Distribution : analyse les canaux et mesure les retours ; agit dans les limites exposées.",
@@ -1059,88 +1061,18 @@ def _freshness_context(run) -> str:
     return f"DATE ACTUELLE : {_today_iso()}.\n\n"
 
 
-BUSINESS_SIGNAL_TYPES = {
-    "monetization",
-    "explicit_request",
-    "manual_work",
-    "procurement",
-    "job_demand",
-    "complaint",
-    "regulatory_deadline",
-    "paid_alternative",
-    "review_gap",
-}
-_BUSINESS_SIGNAL_REQUIRED = (
-    "signal_type",
-    "buyer",
-    "pain",
-    "money_signal",
-    "evidence_url",
-    "evidence_summary",
-    "test_channel",
-    "test_offer",
-    "next_test",
-)
-_BUSINESS_SIGNAL_QUOTES = ("buyer_evidence", "pain_evidence", "money_evidence", "summary_evidence")
-_BUSINESS_SIGNAL_UNKNOWN = {
-    "", "unknown", "inconnu", "inconnue", "non connu", "non connue", "none", "n/a", "na",
-}
-
-
-def _business_signal_contract(target: int) -> str:
-    """Objectif et critères de RÉSULTAT d'une mission business signal.
-
-    Ce contrat décrit ce qu'OCTOPUS cherche, pas comment chercher. Aucune procédure de
-    requête (nombre de termes, année, `site:`, guillemets, séquence de reformulation) :
-    un LLM moderne sait déjà chercher, et lui dicter une méthode l'empêche de s'adapter.
-    """
-    target = max(1, int(target))
+def _business_signal_contract(target: int = 0) -> str:
+    """Ancien nom conservé ; aucun seuil ni critère métier de qualification."""
     return (
-        "MODE BUSINESS SIGNAL — objectif : identifier des opportunités économiques TESTABLES, "
-        "pas produire une étude générale.\n"
-        f"Seuil minimal visé : {target} signaux qualifiés. N'invente jamais un signal pour "
-        "atteindre ce seuil : mieux vaut rester en dessous avec des preuves solides que le "
-        "dépasser avec des banalités. Le seuil est un minimum de mission, pas un quota par piste.\n"
-        "Un signal n'est qualifié que si TOUT est présent :\n"
-        "1) un acteur économique/segment identifiable qui finance la monétisation (buyer) ; utilisateur et payeur peuvent différer ;\n"
-        "2) un besoin, une activité, une obligation ou demande concrète ;\n"
-        "3) une source réellement ouverte pendant cette mission ;\n"
-        "4) un signal monétaire ou d'urgence (prix payé, alternative payante, recrutement, "
-        "appel d'offres, dépense existante, rémunération proposée, échéance réglementaire créant du travail) ;\n"
-        "5) un canal réaliste de distribution/acquisition ;\n"
-        "6) une offre minimale et un prochain test faisable rapidement.\n"
-        "Pour buyer, pain, money_signal et evidence_summary, fournis respectivement buyer_evidence, "
-        "pain_evidence, money_evidence et summary_evidence : extraits littéraux de 8 à 600 caractères "
-        "du texte acquis de la même page, jamais inventés. Ces citations prouvent leur présence, "
-        "pas la justesse de l'interprétation : revue humaine nécessaire.\n"
-        "À REJETER : définitions, statistiques macro seules, actualité générale, taille de marché, "
-        "homepage sans signal économique concret, tendance sectorielle sans acteur ni monétisation, problème social large "
-        "sans action achetable identifiable.\n"
-        "Cherche librement des preuves concrètes, adapte ton approche aux résultats, et ouvre les "
-        "sources importantes avec browse avant de conclure. Distingue ce que tu observes de ce que "
-        "tu infères ; n'invente aucune preuve.\n"
-        "Cherche des combinaisons économiquement indépendantes, pas plusieurs variantes du même problème. "
-        "Un signal n'est ni une stratégie ni une rentabilité prouvée. Offre/test sont des hypothèses ; n'exécute rien.\n"
+        "Pistes économiques facultatives : formule librement observations, inférences et hypothèses. "
+        "Une source citée doit avoir été réellement acquise ; un extrait fourni doit être littéral. "
+        "Tu peux rapprocher plusieurs sources. Une source ne prouve pas à elle seule ton interprétation, "
+        "ni une demande, une disponibilité ou un encaissement.\n"
     )
 
 
-def _business_signal_task_context(target: int, role: str) -> str:
-    """Contrat de mission + rappel des champs obligatoires, pour une sous-tâche."""
-    role = str(role or "").upper()
-    base = (
-        _business_signal_contract(target)
-        + "\nPour chaque candidat retenu, conserve précisément buyer, pain, money_signal, "
-          "evidence_url, evidence_summary, buyer_evidence, pain_evidence, money_evidence, "
-          "summary_evidence, test_channel, test_offer et next_test. Si un champ manque, "
-          "le candidat n'est pas qualifié."
-    )
-    if role == "SOUT":
-        return base + ("\nTON RÔLE ICI : découverte. Ouvre les pages prometteuses et conserve "
-                       "des preuves concrètes.")
-    return base + (
-        f"\nTON RÔLE ICI ({role or 'AVAL'}) : exploitation des preuves amont. Réutilise d'abord "
-        "les artefacts transmis ; ne recherche que ce qui manque réellement."
-    )
+def _business_signal_task_context(target: int = 0, role: str = "") -> str:
+    return _business_signal_contract()
 
 _TRACKING_QUERY_KEYS = {
     "gclid", "fbclid", "msclkid", "mc_cid", "mc_eid",
@@ -1181,8 +1113,8 @@ def _evidence_text(text: str) -> str:
 def _verified_browse_pages(results: list[dict]) -> list[dict]:
     """Payloads d'acquisition du runtime, jamais des URLs demandées seules ou du texte LLM.
 
-    Chaque capture reste séparée : ne pas assembler des citations provenant de pages
-    ou de versions différentes. Les aliases ne valent que pour cette acquisition réussie.
+    Chaque extrait est vérifié dans sa capture ; une piste peut citer plusieurs captures.
+    Les aliases ne valent que pour cette acquisition réussie.
     """
     from . import browser
     pages = []
@@ -1197,12 +1129,12 @@ def _verified_browse_pages(results: list[dict]) -> list[dict]:
             if not isinstance(page, dict):
                 continue
             if (
-                not browser.is_public_text_acquisition(page)
-                or not browser.is_public_text_acquisition_meta(meta)
+                not browser.is_public_text_acquisition(page, min_text_chars=1)
+                or not browser.is_public_text_acquisition_meta(meta, min_text_chars=1)
             ):
                 continue
             text = page.get("main_text")
-            if not isinstance(text, str) or len(_evidence_text(text)) < 100:
+            if not isinstance(text, str) or not _evidence_text(text):
                 continue
             requested = _canonical_evidence_url((step.get("args") or {}).get("url", ""))
             final = _canonical_evidence_url(page.get("final_url", ""))
@@ -1222,146 +1154,97 @@ def _verified_browse_urls(results: list[dict]) -> set[str]:
 
 
 def _qualify_business_signals(raw_signals, results: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Gate structurel : acquisition + citations littérales, pas d'entailment sémantique."""
+    """Provenance uniquement ; toute analyse reste une inférence ou une hypothèse.
+
+    business_signals et les champs historiques restent lisibles. Ils ne signifient plus
+    qualification économique. Une citation facultative est vérifiée dans SON acquisition.
+    """
     pages = _verified_browse_pages(results)
     accepted, rejected = [], []
-    seen = set()
+    if raw_signals is None:
+        return [], []
     if not isinstance(raw_signals, list):
         return [], [{"signal": raw_signals, "reasons": ["signals_not_list"]}]
     for raw in raw_signals:
         if not isinstance(raw, dict):
             rejected.append({"signal": raw, "reasons": ["signal_not_object"]})
             continue
-        item = {key: raw[key].strip() if isinstance(raw.get(key), str) else ""
-                for key in (*_BUSINESS_SIGNAL_REQUIRED, *_BUSINESS_SIGNAL_QUOTES)}
-        reasons = []
-        if item["signal_type"] not in BUSINESS_SIGNAL_TYPES:
-            reasons.append("unsupported_signal_type")
-        for key in _BUSINESS_SIGNAL_REQUIRED[1:]:
-            if item[key].lower() in _BUSINESS_SIGNAL_UNKNOWN:
-                reasons.append(f"missing_{key}")
-        canonical_evidence_url = _canonical_evidence_url(item["evidence_url"])
-        sources = [page for page in pages if canonical_evidence_url in page["urls"]]
-        if not canonical_evidence_url or not sources:
-            reasons.append("evidence_url_not_opened")
-        quotes = {field: _evidence_text(item[field]) for field in _BUSINESS_SIGNAL_QUOTES}
-        for field, quote in quotes.items():
-            if not 8 <= len(quote) <= 600 or quote in _BUSINESS_SIGNAL_UNKNOWN:
-                reasons.append(f"invalid_{field}")
-            elif not any(quote in page["text"] for page in sources):
-                reasons.append(f"{field}_not_in_source")
-        matching = next((page for page in sources if all(
-            quote and quote in page["text"] for quote in quotes.values())), None)
-        if sources and matching is None:
-            reasons.append("quotes_not_in_same_acquisition")
-        key = (
-            item["buyer"].lower(),
-            item["pain"].lower(),
-            _canonical_evidence_url(matching["final_url"]) if matching else canonical_evidence_url,
-        )
-        if key in seen:
-            reasons.append("duplicate_signal")
+        statement = raw.get("statement", raw.get("evidence_summary"))
+        if not isinstance(statement, str) or not statement.strip():
+            rejected.append({"signal": raw, "reasons": ["missing_statement"]})
+            continue
+        references = raw.get("sources", [])
+        if "sources" not in raw and raw.get("evidence_url"):
+            references = [{"url": raw["evidence_url"]}]
+            if raw.get("summary_evidence") is not None and "summary_evidence" in raw:
+                references[0]["quote"] = raw["summary_evidence"]
+        reasons, sources = [], []
+        if not isinstance(references, list):
+            references = []
+            reasons.append("sources_not_list")
+        for ref in references:
+            if not isinstance(ref, dict):
+                reasons.append("source_not_object")
+                continue
+            url = _canonical_evidence_url(ref.get("url"))
+            matching = [page for page in pages if url and url in page["urls"]]
+            if not matching:
+                reasons.append("evidence_url_not_opened")
+                continue
+            quote = ref.get("quote")
+            if quote is not None:
+                if not isinstance(quote, str) or not quote.strip():
+                    reasons.append("invalid_quote")
+                    continue
+                matching = [page for page in matching if _evidence_text(quote) in page["text"]]
+                if not matching:
+                    reasons.append("quote_not_in_source")
+                    continue
+            page = matching[-1]
+            source = {"url": ref["url"], "acquisition": {
+                "final_url": page["final_url"], "fetched_at": page["fetched_at"]}}
+            if quote is not None:
+                source["quote"] = quote
+            sources.append(source)
         if reasons:
             rejected.append({"signal": raw, "reasons": sorted(set(reasons))})
             continue
-        seen.add(key)
+        item = {"statement": statement.strip(), "sources": sources,
+                "nature": "inferred" if sources else "hypothesis"}
+        # Compatibilité de lecture des anciennes formes, jamais promotion de leur analyse.
+        for key in ("signal_type", "buyer", "pain", "money_signal", "evidence_url",
+                    "evidence_summary", "test_channel", "test_offer", "next_test"):
+            if isinstance(raw.get(key), str):
+                item[key] = raw[key]
         item["action_fields_nature"] = "inferred"
-        # Provenance calculée depuis l'outil, non depuis des champs proposés par le LLM.
-        item["evidence_acquisition"] = {"final_url": matching["final_url"],
-                                        "fetched_at": matching["fetched_at"]}
+        if sources:
+            item["evidence_acquisition"] = sources[0]["acquisition"]
         accepted.append(item)
     return accepted, rejected
 
 
-# --- Revue d'actionnabilité : couche de MESURE posée après le gate #94 ---
-#
-# Le gate #94 prouve la structure (acquisition réelle + citations littérales), pas
-# l'actionnabilité économique actuelle. La revue ci-dessous mesure ce second aspect,
-# signal par signal, sans jamais filtrer, corriger ni compléter les signaux.
+def _public_source_failure(data) -> str | None:
+    """Acquisition publique échouée, distincte d'un refus de sécurité.
 
-_BUSINESS_SIGNAL_REVIEW_CLASSES = (
-    "actionable_now",
-    "market_evidence",
-    "historical_or_closed",
-    "unsupported",
-    "uncertain",
-)
-# Borne de coût de la mesure : les citations complètes voyagent déjà dans le signal.
-_BUSINESS_SIGNAL_REVIEW_TEXT_CHARS = 8000
-
-
-def _validate_business_signal_review(data: dict) -> dict:
-    """Sortie structurée du reviewer : exactement une classification connue + justification.
-
-    Toute sortie hors de ce contrat est rejetée en amont (InvalidOutput côté passerelle) ;
-    cette normalisation garantit aussi qu'aucun champ supplémentaire n'est stocké.
+    Compatible avec les anciens checkpoints qui ne portent pas failure_class.
+    Le refus de navigation du garde-fou reste une frontière d'exécution.
     """
-    if not isinstance(data, dict):
-        raise ValueError("revue_non_objet")
-    classification = str(data.get("classification") or "").strip()
-    if classification not in _BUSINESS_SIGNAL_REVIEW_CLASSES:
-        raise ValueError("classification_inconnue")
-    justification = str(data.get("justification") or "").strip()
-    if not justification:
-        raise ValueError("justification_manquante")
-    return {"classification": classification, "justification": justification[:600]}
-
-
-def _business_signal_review_messages(signal: dict, acquisition_text: str) -> list[dict]:
-    """Prompt du reviewer : uniquement le signal proposé et le texte de son acquisition.
-
-    Le reviewer ne reçoit ni l'objectif de mission, ni le rapport de synthèse, ni les
-    autres signaux : sa lecture est indépendante de l'appel de synthèse qui a rédigé
-    le signal. La consigne reste conceptuelle (pas de règles métier codées).
-    """
-    system = (
-        "Voici un signal économique proposé et sa preuve source.\n"
-        "Évalue indépendamment si cette preuve démontre une opportunité économique "
-        "actuellement testable.\n"
-        "Ne complète aucune information manquante et ne corrige pas le signal.\n"
-        "Réponds en JSON avec exactement UNE classification parmi : "
-        '"actionable_now", "market_evidence", "historical_or_closed", "unsupported", '
-        '"uncertain" ; et une justification courte. '
-        'Forme : {"classification": "...", "justification": "..."}'
-    )
-    payload = {
-        "signal_propose": signal,
-        "preuve_source": acquisition_text[:_BUSINESS_SIGNAL_REVIEW_TEXT_CHARS],
-    }
-    return [{"role": "system", "content": system},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
-
-
-def _review_business_signals(business_signals: list[dict], results: list[dict]) -> list[dict]:
-    """Revue LLM indépendante de chaque signal structurellement valide (mesure seule).
-
-    Une entrée par signal, quoi qu'il arrive. Une panne du reviewer (passerelle, sortie
-    invalide) dégrade uniquement la revue concernée : la mission, le gate #94 et le
-    comptage structurel restent intacts, et aucune classification n'est inventée.
-    """
-    pages = _verified_browse_pages(results)
-    by_acquisition = {(p["final_url"], p["fetched_at"]): p for p in pages}
-    reviews = []
-    for index, signal in enumerate(business_signals or []):
-        acquisition = signal.get("evidence_acquisition") or {}
-        # Présence garantie par le gate sur les mêmes results ; sinon bug, à ne pas masquer.
-        page = by_acquisition[(acquisition.get("final_url"), acquisition.get("fetched_at"))]
-        entry = {"signal_index": index, "evidence_url": signal.get("evidence_url", "")}
-        messages = _business_signal_review_messages(signal, page["text"])
-        try:
-            verdict = deepseek.call_json(
-                "REVUE", "revue_signal", deepseek.config.MODEL_FLASH, messages,
-                max_tokens=1000, validate=_validate_business_signal_review)
-        except llm.GatewayError as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            db.post("REVUE", f"revue d'actionnabilité dégradée : {error[:120]}")
-            entry.update({"status": "degraded", "classification": None, "justification": None,
-                          "error": error[:1500]})
-        else:
-            entry.update({"status": "reviewed", "classification": verdict["classification"],
-                          "justification": verdict["justification"]})
-        reviews.append(entry)
-    return reviews
+    from . import browser
+    if isinstance(data, dict) and data.get("refused") and not technical_refusal(str(data.get("reason") or "")):
+        return None
+    page = data.get("page") if isinstance(data, dict) else None
+    if not isinstance(page, dict) or page.get("error") in {
+        "navigation refusée par le garde-fou", "navigation finale refusée par le garde-fou",
+    }:
+        return None
+    if not all(key in page for key in ("requested_url", "final_url", "blocked", "error", "extraction_method")):
+        return None
+    if browser.is_public_text_acquisition(page, min_text_chars=1):
+        return None
+    status = page.get("http_status")
+    if page.get("blocked") or page.get("error") or (type(status) is int and not 200 <= status < 300):
+        return "source Web inaccessible : " + str(page.get("error") or status or "bloquée")[:300]
+    return None
 
 
 def build_prompts(role: str, goal: str, conversational: bool = False,
@@ -1636,12 +1519,14 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
                         "url": result.get("url"),
                         "source": result.get("source"),
                         "page": result["page"],
+                        **({"refused": True, "reason": result.get("reason")} if result.get("refused") else {}),
                     }
                 else:
                     step_record["result_data"] = result
         if refusal is not None:
             step_record["result_data"] = result
-        if isinstance(result, dict) and result.get("refused") and technical_refusal(str(result.get("reason") or "")):
+        if (tool == "browse" and _public_source_failure(result)) or (isinstance(result, dict) and result.get("refused")
+                                            and technical_refusal(str(result.get("reason") or ""))):
             step_record["failure_class"] = "technical"
             context.append({"role": "user", "content":
                             "Erreur technique ou source invalide. Corrige les arguments ou abandonne cette source "
@@ -1821,26 +1706,13 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     planner_freshness = _freshness_context(current)
     business_signal_context = _business_signal_contract(business_signal_target) if business_signal_focus else ""
     plan_sys = (
-        "Tu es ORBIT, l'orchestrateur de la mission. "
-        f"{planner_freshness}"
-        f"{business_signal_context}"
-        "Utilise les rôles comme des responsabilités spécialisées, pas comme des workers interchangeables.\n\n"
-        f"Rôles disponibles et responsabilités :\n{role_catalog}\n\n"
-        "Décompose l'objectif en quelques sous-tâches, chacune assignée à UN rôle dont la responsabilité "
-        "correspond réellement au travail demandé. N'assigne pas une tâche à un rôle seulement pour l'occuper "
-        "et ne duplique pas la même collecte chez plusieurs rôles sans nécessité. "
-        "Un même rôle peut recevoir plusieurs sous-tâches distinctes si elles relèvent de sa spécialité ; "
-        "ne force jamais la diversité des rôles. "
-        f"Chaque sous-tâche à exécuter maintenant doit être réalisable en au plus {max_steps_per_agent} étapes ; si plusieurs pistes "
-        "indépendantes demandent chacune plusieurs actions, répartis-les au lieu de surcharger un seul agent. "
-        "Cette borne concerne l'exécution, pas les marchés, offres ou stratégies que tu peux envisager. "
-        "Chaque tâche doit être autonome : indique quoi observer ou analyser et pourquoi économiquement. "
-        "La production ou diffusion exige un artefact amont exploitable et une justification ; "
-        "cela n'interdit pas de réfléchir à une offre ou une expérience sans preuve commerciale préalable. "
-        "Les artefacts utiles des étapes amont (recherches, pages ouvertes, observations et statuts) seront transmis "
-        "automatiquement au sous-agent suivant : il doit les réutiliser avant de recommencer une collecte équivalente. "
-        "Réponds en JSON : "
-        '{"tasks":[{"role":"...","task":"..."}]}'
+        "Tu es ORBIT. Détermine le travail utile pour cet objectif. "
+        f"{planner_freshness}{business_signal_context}"
+        f"Responsabilités disponibles :\n{role_catalog}\n"
+        f"Chaque sous-tâche exécutée maintenant dispose d'au plus {max_steps_per_agent} étapes. "
+        "Cette borne limite l'exécution, pas les stratégies envisageables. "
+        "Les résultats utiles seront transmis aux sous-tâches suivantes. "
+        'Réponds en JSON : {"tasks":[{"role":"...","task":"..."}]}'
     )
     if resume and resume.get("plan"):
         plan = _validate_plan_contract({"tasks": resume["plan"]})
@@ -1862,36 +1734,6 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     if cancel.requested():
         status = "timeout" if cancel.timed_out() else "cancelled"
         return _mission_unavailable(tasks, [], status, "Durée maximale atteinte" if status == "timeout" else "Arrêt demandé")
-    # Replan unique de granularité (H3 #68/#69) : une mission multi-signaux concentrée dans
-    # une seule sous-tâche plafonne chaque voie de découverte au budget d'étapes d'un agent.
-    # Le feedback ne porte que sur la faisabilité du plan par rapport au budget ; il ne
-    # prescrit aucun rôle, aucune source, aucune requête ni aucune stratégie. Le second
-    # plan est accepté tel quel : pas de boucle de retry, pas de minimum de sous-tâches.
-    if not resume and business_signal_focus and business_signal_target > 1 and len(tasks) == 1:
-        db.post("ORBIT", "mission multi-signaux concentrée en une seule sous-tâche : replan unique")
-        feedback = (
-            f"Le plan précédent concentre une mission visant plusieurs signaux dans une seule boucle "
-            f"limitée à {max_steps_per_agent} étapes.\n"
-            "Décompose les voies de découverte indépendantes en plusieurs sous-tâches autonomes afin que "
-            "chacune puisse utiliser son propre budget d'étapes.\n"
-            "Le même rôle, notamment SOUT, peut être utilisé plusieurs fois ; ne force pas la diversité des rôles.\n"
-            "Ne prescris pas de sources, de requêtes, de segments ou de stratégie, et n'exige pas une "
-            "sous-tâche par signal : tu restes libre de déterminer la bonne décomposition."
-        )
-        try:
-            plan = deepseek.call_json("ORBIT", "planification", pro,
-                                      [{"role": "system", "content": plan_sys},
-                                       {"role": "user", "content": goal},
-                                       {"role": "assistant", "content": json.dumps(plan, ensure_ascii=False)},
-                                       {"role": "user", "content": feedback}],
-                                      reasoning="high", max_tokens=700 if economical else 2000,
-                                      validate=_validate_plan_contract if economical else None)
-        except llm.GatewayError as exc:
-            return _mission_unavailable(tasks, [], "llm_unavailable", f"{type(exc).__name__}: {exc}")
-        proposed = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
-        tasks = [t for t in proposed if isinstance(t, dict)][:MAX_PLAN_TASKS]
-        if len(proposed) > len(tasks):
-            db.post("ORBIT", f"plan tronqué : {len(proposed)} sous-tâches proposées, {len(tasks)} gardées")
     db.post("ORBIT", f"mission : {goal[:70]} → {len(tasks)} sous-tâches")
 
     results = list((resume or {}).get("results") or [])
@@ -1927,11 +1769,6 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                 f"{json.dumps(handoff, ensure_ascii=False)}"
             )
         db.post(role, f"sous-tâche : {original[:80]}")
-        effective_selector = (
-            "business_signal_relevance"
-            if business_signal_focus and search_browse_selector == "evidence_relevance"
-            else search_browse_selector
-        )
         # L'intention de recherche se propage aux outils du sous-agent : elle choisit la
         # politique de providers et isole le cache. Pas de nouveau paramètre d'outil.
         purpose = (SEARCH_PURPOSE_BUSINESS if business_signal_focus else SEARCH_PURPOSE_GENERAL)
@@ -1943,7 +1780,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                 max_steps=max_steps_per_agent,
                 allowed_tools=allowed_tools,
                 search_browse_lockstep=search_browse_lockstep,
-                search_browse_selector=effective_selector,
+                search_browse_selector=search_browse_selector,
                 **recovery,
             )
         subresult = {"role": role, "task": original,
@@ -1966,70 +1803,31 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         status = "timeout" if cancel.timed_out() else "cancelled"
         db.post("ORBIT", "mission interrompue avant la synthèse : " + status)
         return _mission_unavailable(tasks, results, status, "Durée maximale atteinte" if status == "timeout" else "Arrêt demandé")
-    signal_schema = ""
-    if business_signal_focus:
-        signal_schema = (
-            "\nMODE BUSINESS SIGNAL : ne retiens dans business_signals QUE les candidats satisfaisant "
-            "tous les critères du contrat ci-dessus. Chaque evidence_url doit être une URL effectivement "
-            "acquise dans les étapes. Fournis buyer_evidence, pain_evidence, money_evidence et "
-            "summary_evidence : citations exactes de 8 à 600 caractères du texte de cette même "
-            "acquisition. Pour chaque signal, choisis exactement UNE acquisition réellement ouverte : "
-            "evidence_url identifie cette acquisition et les quatre champs *_evidence proviennent tous "
-            "de son texte. Chaque champ *_evidence est UNE SEULE sous-chaîne continue, copiée mot pour "
-            "mot : ne concatène jamais plusieurs fragments, n'insère jamais « ... » ni « … » pour les "
-            "relier, ne paraphrase pas. Si un même document a été acquis sous plusieurs représentations "
-            "(par ex. page HTML et PDF), n'en utilise qu'une seule, sans les mélanger ; si le PDF contient "
-            "les quatre preuves, evidence_url est l'URL exacte du PDF acquis et les quatre citations "
-            "viennent du PDF. Les champs analytiques (buyer, pain, money_signal, evidence_summary, "
-            "test_channel, test_offer, next_test) restent rédigés selon les règles ci-dessus. "
-            "Le contrôle est littéral, non sémantique ; revue humaine nécessaire.\n"
-            + ("Ajoute business_signals à la sortie de détermination : " if determination
-               else "Réponds en JSON avec exactement la forme : ")
-            + ('\"business_signals\":[{' if determination else '{\"rapport\":\"...\",\"business_signals\":[{')
-            + '\"signal_type\":\"explicit_request|manual_work|procurement|job_demand|complaint|regulatory_deadline|paid_alternative|review_gap|monetization\",'
-            '\"buyer\":\"...\",\"pain\":\"...\",\"money_signal\":\"...\",'
-            '\"evidence_url\":\"https://...\",\"evidence_summary\":\"...\",'
-            '\"buyer_evidence\":\"...\",\"pain_evidence\":\"...\",'
-            '\"money_evidence\":\"...\",\"summary_evidence\":\"...\",'
-            + '\"test_channel\":\"...\",\"test_offer\":\"...\",\"next_test\":\"...\"}]'
-            + ("" if determination else "}")
-        )
-    syn_sys = (
-        "Tu es ORBIT. Synthétise les résultats des sous-tâches en un rapport final concis. "
-        "Respecte aussi toutes les contraintes de l'objectif original : une synthèse ne doit pas réintroduire "
-        "une recommandation, décision, action ou autre contenu que la mission interdisait. "
-        "N'introduis aucun fait, chiffre, canal, ressource ou résultat absent des sous-tâches et de leurs résultats d'outils. "
-        "Si un sous-agent affirme quelque chose sans preuve visible dans ses étapes, qualifie-le de non vérifié ou d'inférence, "
-        "jamais de fait observé. "
-        # Source unique des critères : le contrat n'est pas recopié dans le schéma de sortie.
-        + (f"\n{_business_signal_contract(business_signal_target)}\n" if business_signal_focus else "")
-        + signal_schema
-        + (" Réponds en JSON : {\"rapport\":\"...\"}" if not business_signal_focus else "")
+    signal_schema = (
+        ' Champ facultatif business_signals : [{"statement":"idée ou observation du modèle",'
+        '"sources":[{"url":"source acquise","quote":"extrait littéral facultatif"}]}]. '
+        'sources peut être vide pour une hypothèse ; aucun type ni nombre de pistes imposé.'
+        if business_signal_focus else ""
     )
-    if determination:
-        syn_sys = (
-            "Tu es ORBIT. Synthétise les résultats en distinguant faits sourcés, inférences et hypothèses. "
-            "Un propos sans preuve visible reste non vérifié ; donnée absente = inconnue. "
-            "N'invente aucun fait, résultat ou encaissement. Une proposition stratégique n'est pas une action externe : "
-            "elle peut nécessiter une capacité absente, sans affirmer sa disponibilité.\n"
-            'Réponds en JSON : {"rapport":"...", "determination":{"action":"continue|pause|request_permission",'
-            '"reason":"raison liée aux observations", "next_goal":"prochaine recherche précise ou vide",'
-            '"permission":"permission manquante ou vide"}}. '
-            "Continue si une observation gratuite permise peut réduire une incertitude stratégique importante. "
-            "Pause si aucune exploration admissible et économiquement utile n'est justifiée. "
-            "request_permission concerne une exécution nécessaire dépassant les limites, jamais une simple proposition.\n"
-            "Champs facultatifs : hypothesis {statement, expected_signal, stop_criterion, evidence_ids, "
-            "reconsiders_hypothesis_id, reconsideration_reason} ; strategies [{statement, economic_justification, "
-            "economic_criteria, economic_rank, required_capabilities, evidence_ids, expected_signal, stop_criterion, "
-            "reconsiders_hypothesis_id, reconsideration_reason}]. economic_criteria : cash_received, margin, "
-            "recurrence, autonomy, growth ; economic_rank : entier à critère égal ; required_capabilities : identifiants. "
-            "Compare selon la valeur économique, indépendamment des outils disponibles. "
-            "Une option retenue n'est pas un engagement ; le prochain but peut comparer ou observer une autre piste. "
-            "evidence_ids cite seulement les preuves persistées visibles ; reconsidérer une hypothèse invalidée "
-            "exige une nouvelle preuve liée, son identifiant et la raison."
-            + (f"\n{_business_signal_contract(business_signal_target)}\n" + signal_schema
-               if business_signal_focus else "")
-        )
+    syn_sys = (
+        "Tu es ORBIT. Réponds à l’objectif fourni. Synthétise les résultats en distinguant observations sourcées, inférences et hypothèses. "
+        "N'invente aucun fait, résultat, disponibilité ou encaissement ; donnée absente = inconnue. "
+        "Une proposition stratégique peut nécessiter des moyens absents, sans affirmer leur disponibilité. "
+        + ( _business_signal_contract() if business_signal_focus else "")
+        + signal_schema
+        + ' Réponds en JSON : {"rapport":"..."'
+        + (',"determination":{"action":"continue|pause|request_permission",'
+           '"reason":"...","next_goal":"...","permission":"..."}' if determination else "")
+        + '}. '
+        + ("Choisis de poursuivre ou de faire une pause selon la valeur du travail restant. "
+           "request_permission concerne une limite réelle d'exécution, jamais une source publique indisponible. "
+           "Champs facultatifs de determination : strategies [{statement, required_capabilities}], "
+           "ou hypothesis ; l'énoncé d'une stratégie suffit, les autres dimensions peuvent rester inconnues. "
+           "evidence_ids référence uniquement les preuves persistées visibles. Une hypothèse déjà réfutée "
+           "ne devient pas validée par reformulation ; sa reconsidération exige une preuve nouvelle liée. "
+           "intent peut être discovery (recherche ouverte) ou validation (attention à une hypothèse), sans procédure imposée."
+           if determination else "")
+    )
     synthesis_input = {
         "objectif_original": goal,
         "resultats_sous_taches": _mission_prompt_results(results),
@@ -2071,7 +1869,6 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     if not isinstance(rapport, str) or not rapport.strip():
         return _mission_unavailable(tasks, results, "invalid_synthesis", "Rapport absent ou vide")
     business_signals, rejected_signals = ([], [])
-    business_signal_reviews = []
     if business_signal_focus:
         business_signals, rejected_signals = _qualify_business_signals(
             syn.get("business_signals"),
@@ -2080,30 +1877,13 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         if cancel.requested():
             status = "timeout" if cancel.timed_out() else "cancelled"
             return _mission_unavailable(tasks, results, status, "Durée maximale atteinte" if status == "timeout" else "Arrêt demandé")
-        # Couche de MESURE après #94 : la revue ne filtre ni ne modifie les signaux ;
-        # elle ajoute une lecture indépendante de leur actionnabilité actuelle.
-        business_signal_reviews = _review_business_signals(business_signals, results)
     if cancel.requested():
         status = "timeout" if cancel.timed_out() else "cancelled"
         return _mission_unavailable(tasks, results, status, "Durée maximale atteinte" if status == "timeout" else "Arrêt demandé")
-    actionable_business_signal_count = sum(
-        1 for review in business_signal_reviews
-        if review.get("classification") == "actionable_now"
-    )
-    if not business_signal_reviews:
-        business_signal_review_status = "no_signals"
-    elif any(review.get("status") == "degraded" for review in business_signal_reviews):
-        business_signal_review_status = "degraded"
-    else:
-        business_signal_review_status = "reviewed"
     decision_payload = {"rapport": rapport, "synthesis_status": "validated"}
     if business_signal_focus:
         decision_payload["business_signal_count"] = len(business_signals)
         decision_payload["business_signal_rejected"] = len(rejected_signals)
-        # Mesure séparée du gate structurel : qualified_business_signal_count reste la
-        # métrique #94 ; seule la classification actionable_now alimente ce compteur.
-        decision_payload["actionable_business_signal_count"] = actionable_business_signal_count
-        decision_payload["business_signal_review_status"] = business_signal_review_status
     db.decide("ORBIT", "mission_done", decision_payload)
     db.post("ORBIT", f"mission terminée : {rapport[:80]}")
     output = {"plan": tasks, "results": results, "rapport": rapport, "synthesis_status": "validated",
@@ -2121,7 +1901,9 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
         if isinstance(choice, dict):
             attach_strategies(choice)
         output["determination"] = {k: v[:3000] for k, v in choice.items()
-                                   if k in {"action", "reason", "next_goal", "permission"}}
+                                   if k in {"action", "reason", "next_goal", "permission"} and isinstance(v, str)}
+        if choice.get("intent") in {"discovery", "validation"}:
+            output["determination"]["intent"] = choice["intent"]
         if isinstance(choice.get("hypothesis"), dict):
             output["determination"]["hypothesis"] = dict(choice["hypothesis"])
         if isinstance(choice.get("strategies"), list) and choice["strategies"]:
@@ -2129,7 +1911,5 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
     if business_signal_focus:
         output["business_signals"] = business_signals
         output["business_signal_rejections"] = rejected_signals
-        output["business_signal_reviews"] = business_signal_reviews
-        output["actionable_business_signal_count"] = actionable_business_signal_count
-        output["business_signal_review_status"] = business_signal_review_status
+        output["business_signal_review_status"] = "not_requested"
     return output

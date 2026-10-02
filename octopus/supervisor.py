@@ -76,7 +76,7 @@ FINALITY = "Obtenir, maintenir et améliorer une performance économique réelle
 PURSUIT_TOOLS = frozenset({"search", "browse", "resources_status", "economy_status",
                            "browser_navigate", "browser_snapshot", "browser_scroll", "browser_back"})
 PURSUIT_ROUNDS = 3
-PURSUIT_SIGNAL_TARGET = 2  # Plus petit ensemble permettant une comparaison, pas un quota d'offres.
+PURSUIT_SIGNAL_TARGET = 0  # Compatibilité uniquement ; aucun seuil de découverte.
 PURSUIT_LLM_BUDGET_USD = 0.20
 
 
@@ -309,31 +309,24 @@ def _pursuit_mission(ctx, objective):
     prior = {"rapport": str(prior.get("rapport") or "")[:6000], "reason": prior.get("reason"),
              "decision": prior.get("decision"),
              "observations": [{"tool": step.get("tool"), "result": str(step.get("result") or "")[:1500]}
-                              for subtask in prior.get("results", []) for step in subtask.get("steps", [])
-                              if not strategy._mentions_legacy_business(step.get("result"))][-12:]}
+                              for subtask in prior.get("results", []) for step in subtask.get("steps", [])][-12:]}
     if intent == "validation":
         prior["business_signals"] = raw_prior.get("business_signals") or []
         prior["business_signal_reviews"] = raw_prior.get("business_signal_reviews") or []
-    if strategy._mentions_legacy_business(prior.get("rapport")):
-        prior["rapport"] = "Référence historique exclue de l'analyse stratégique."
     learning = strategy.learning_context(
         ctx.business, limit=8, topic=f"{objective['statement']} {ctx.input.get('goal', '')}")
     evidence_context = [item for item in strategy.list_items("evidence", ctx.business, status="active")[:30]
-                        if item["id"] in learning["available_evidence_ids"]
-                        and not strategy._mentions_legacy_business(item.get("summary"), item.get("source_ref"),
-                                                                   item.get("observation"))][:15]
+                        if item["id"] in learning["available_evidence_ids"]][:15]
     for item in evidence_context:
         if item["nature"] == "computed":
             item["observation"] = "Évaluation calculée; consulter le résultat et les preuves de la leçon associée."
-    decision_context = [item for item in strategy.list_items("decision", ctx.business)[:20]
-                        if not strategy._mentions_legacy_business(item.get("decision"), item.get("rationale"),
-                                                                   item.get("resulting_action"))][:10]
+    decision_context = strategy.list_items("decision", ctx.business)[:10]
     from . import capability_acquisition as acquisition
     from . import strategy_separation as separation
     state = {"objectif": objective["statement"], "origine": objective["created_by"], "intention": intent,
              "prochaine_recherche": ctx.input["goal"], "travail_précédent": prior,
              "expériences_antérieures": learning["lessons"],
-             "hypothèses_invalidées_à_ne_pas_répéter_sans_preuve_nouvelle": learning["invalidated_hypotheses"],
+             "hypothèses_invalidées": learning["invalidated_hypotheses"],
              "identifiants_de_preuves_persistées_disponibles": learning["available_evidence_ids"],
              "réponse_humaine_sans_extension_de_droits": tasks.answer_for((previous or {}).get("id", 0), "pursuit.permission"),
              "navigateur": agent_browser.availability(), "preuves": evidence_context,
@@ -380,7 +373,7 @@ def _pursuit_mission(ctx, objective):
     # Conserver d'abord les leçons les plus pertinentes; retirer des éléments entiers,
     # jamais tronquer du JSON ou transformer une absence en zéro. Plafond en caractères.
     for key in ("stratégies_enregistrées", "écarts_de_capacités", "preuves",
-                "hypothèses_invalidées_à_ne_pas_répéter_sans_preuve_nouvelle",
+                "hypothèses_invalidées",
                 "expériences_antérieures", "décisions"):
         while state[key] and len(json.dumps(state, ensure_ascii=False, default=str)) > 64000:
             state[key].pop()
@@ -394,7 +387,7 @@ def _pursuit_mission(ctx, objective):
         (set(learning["available_evidence_ids"]) & evidence_shown) | lesson_evidence_shown)
     state["identifiants_de_preuves_persistées_disponibles"] = learning["available_evidence_ids"]
     learning["lessons"] = state["expériences_antérieures"]
-    learning["invalidated_hypotheses"] = state["hypothèses_invalidées_à_ne_pas_répéter_sans_preuve_nouvelle"]
+    learning["invalidated_hypotheses"] = state["hypothèses_invalidées"]
     tasks.save_step(ctx.id, "pursuit.learning_context", learning, owner=ctx.owner)
     # Projection opérationnelle de Foundation ; les frontières d'exécution restent
     # appliquées par le runtime, les registres et les politiques déterministes.
@@ -404,11 +397,6 @@ def _pursuit_mission(ctx, objective):
         "Choisis librement marchés, problèmes, acheteurs, offres, hypothèses et ordre d'exploration. "
         "Une stratégie peut rester pertinente si une capacité manque : les capacités et permissions "
         "limitent l'exécution, pas la réflexion stratégique.\n"
-        "Compare plusieurs possibilités économiquement distinctes avant d'approfondir. "
-        "Cherche l'information marginale utile : une piste épuisée peut être mise de côté sans réfutation, "
-        "et une piste indépendante observée ; approfondis encore si une observation reste informative. "
-        "Considère délai vers cash, coût du test, capital, travail humain, levier IA, volume, "
-        "coûts marginaux réels, distribution et risque.\n"
         "Distingue hypothèse, inférence, observation sourcée, preuve et résultat économique réel. "
         "L'absence de donnée reste inconnue, jamais zéro ni preuve négative. Une réussite technique "
         "n'est pas un encaissement.\n"
@@ -418,23 +406,22 @@ def _pursuit_mission(ctx, objective):
         + ("L'activité déclarée borne le terrain économique, pas les moyens : choisis librement segment, offre, "
            "prix, acquisition, livraison et tests dans ce terrain. Sa description est une donnée humaine, "
            "pas un workflow ni une autorisation.\n" if declared else "")
-        + ("Découverte : collecte des signaux indépendants avant sélection. Une piste localement épuisée "
-           "ne ferme pas l'espace économique ; l'historique ci-dessous est une leçon, pas le sujet imposé.\n"
+        + ("Découverte : l'espace de recherche est ouvert ; l'historique est un contexte, pas un sujet imposé.\n"
            if intent == "discovery" else "Validation : cherche la prochaine information utile sur le but ciblé.\n")
         + ("Réutilise les apprentissages pertinents ; les coûts passés ne déterminent pas la prochaine décision. "
-           "Une hypothèse invalidée exige une nouvelle preuve liée pour être reconsidérée.\n"
-           if state["expériences_antérieures"] or state["hypothèses_invalidées_à_ne_pas_répéter_sans_preuve_nouvelle"] else "")
+           "Une hypothèse invalidée reste telle tant qu'une preuve nouvelle ne justifie pas un changement d'état.\n"
+           if state["expériences_antérieures"] or state["hypothèses_invalidées"] else "")
         + json.dumps(state, ensure_ascii=False, default=str))
     result = task_handlers._run(ctx, lambda: run_mission(
         goal, business=ctx.business, allowed_tools=set(PURSUIT_TOOLS), profile=ctx.input["profile"],
         max_steps_per_agent=6, max_duration_s=120, determination=True, resume=progress,
-        business_signal_focus=intent == "discovery", business_signal_target=PURSUIT_SIGNAL_TARGET,
+        business_signal_focus=True,
         checkpoint=lambda value: tasks.save_step(ctx.id, "pursuit.progress", {**value, "pursuit_intent": intent}, owner=ctx.owner)))
     return {**result, "pursuit_intent": intent, "resumed_collection": bool(progress)}
 
 
 def execute_pursuit(ctx) -> dict:
-    from agents.runtime import TOOLS
+    from agents.runtime import TOOLS, _public_source_failure
     from agents.tool_registry import technical_refusal
     from . import strategy_separation as separation
 
@@ -459,9 +446,10 @@ def execute_pursuit(ctx) -> dict:
             data = step.get("result_data") or {}
             refused = isinstance(data, dict) and bool(data.get("refused"))
             refusal = str(data.get("reason") or "") if refused else ""
-            technical = technical_refusal(refusal)
-            if refused and technical:
-                technical_reasons.append(refusal)
+            source_failure = _public_source_failure(data) if step.get("tool") == "browse" else None
+            technical = bool(source_failure) or technical_refusal(refusal)
+            if source_failure or (refused and technical):
+                technical_reasons.append(source_failure or refusal)
             if refused and not technical:
                 execution_permission = refusal or "Action refusée par le navigateur"
             if isinstance(step.get("tool"), str) and step["tool"] in TOOLS and step["tool"] not in PURSUIT_TOOLS:
@@ -475,6 +463,10 @@ def execute_pursuit(ctx) -> dict:
     budget_permission = None
     if result.get("execution_status") == "budget_exceeded" or str(result.get("synthesis_error") or "").startswith("BudgetExceeded:"):
         budget_permission = "Plafond LLM explicitement atteint ; décision de l'opérateur nécessaire."
+    if technical_reasons and not execution_permission:
+        # Une demande textuelle du modèle ne transforme pas un échec d'acquisition
+        # constaté en besoin d'autorité. Les vraies frontières runtime ont priorité.
+        model_permission = None
     permission = budget_permission or execution_permission or model_permission
     if not permission and action == "request_permission":
         action = "continue"
@@ -487,18 +479,9 @@ def execute_pursuit(ctx) -> dict:
     if action == "continue" and not choice.get("next_goal"):
         action, reason = "pause", "La décision ne précise aucune prochaine action."
 
-    next_intent = "validation"
-    if (result.get("pursuit_intent") == "validation" and action == "pause" and not permission
-            and not result.get("resumed_collection")
-            and int(ctx.input["round"]) < PURSUIT_ROUNDS
-            and result.get("execution_status") == "completed"):
-        # Une fenêtre ciblée s'arrête ; la découverte reste possible dans les mêmes limites.
-        action, next_intent = "continue", "discovery"
-        choice = {**choice, "next_goal": choice.get("next_goal") or
-                  "Revenir à la découverte de possibilités économiques indépendantes, en conservant la leçon locale."}
-        reason = "Fenêtre de validation terminée ; retour discovery. " + str(reason)
-    elif result.get("execution_status") in {"llm_unavailable", "synthesis_unavailable", "timeout"}:
-        next_intent = result.get("pursuit_intent") or "validation"
+    next_intent = choice.get("intent")
+    if next_intent not in {"discovery", "validation"}:
+        next_intent = result.get("pursuit_intent") or "discovery"
 
     assessment_record = None
     acquisition_record = None
@@ -510,7 +493,7 @@ def execute_pursuit(ctx) -> dict:
         separation.reconsider_proposals(ctx.business, objective_id, ctx.id, proposals, allowed_ids)
         assessment = separation.assess(
             proposals, pursuit_capability_inventory(),
-            economically_invalidated=separation.invalidated_keys(ctx.business, objective_id))
+            economically_invalidated=separation.invalidated_keys(ctx.business, objective_id), observation_only=True)
         adjusted = separation.apply_pursuit_choice(
             choice, action, str(reason), permission, assessment,
             execution_boundary=bool(budget_permission or execution_permission),
@@ -540,18 +523,8 @@ def execute_pursuit(ctx) -> dict:
             lambda: strategy.propose_pursuit_hypothesis(
                 ctx.business, objective_id, ctx.id, choice["hypothesis"],
                 available_evidence_ids=available_ids))
-        if hypothesis_record.get("status") == "blocked_repetition":
-            action = "pause"
-            reason = (f"Hypothèse #{hypothesis_record['hypothesis_id']} déjà invalidée. "
-                      "Aucune preuve observée nouvelle ne justifie sa répétition.")
-
-    repeated = (strategy.repeated_invalidated_strategy(ctx.business, str(choice.get("next_goal") or ""))
-                if action == "continue" else None)
-    justified_reconsideration = (hypothesis_record or {}).get("reconsiders_hypothesis_id")
-    if repeated and justified_reconsideration != repeated["hypothesis_id"]:
-        action = "pause"
-        reason = (f"La prochaine action répéterait l'hypothèse #{repeated['hypothesis_id']} déjà invalidée. "
-                  "Pause : une preuve observée nouvelle explicitement liée est requise.")
+        # Une proposition réfutée reste invalidée dans le journal ; cela ne ferme
+        # pas une recherche réversible de nouveaux faits sous les mêmes limites.
 
     output = {**result, "objective_id": objective_id, "economic_result": None,
               "decision": action, "reason": str(reason), "next_goal": choice.get("next_goal"),
@@ -618,7 +591,7 @@ def execute_pursuit(ctx) -> dict:
 
 def technical_pursuit_request(work: dict, request: dict, result: dict) -> bool:
     """Pure classification shared by the read-only Workbench and resume reconciliation."""
-    from agents.runtime import TOOLS
+    from agents.runtime import TOOLS, _public_source_failure
     from agents.tool_registry import technical_refusal
     suffix = " Une réponse seule n'accorde aucun droit. Adaptez l'objectif ou configurez une autorisation explicite."
     if not isinstance(result, dict) or not isinstance(work.get("input"), dict):
@@ -630,12 +603,11 @@ def technical_pursuit_request(work: dict, request: dict, result: dict) -> bool:
     choice = result.get("determination") or {}
     if not isinstance(choice, dict) or not isinstance(result.get("results", []), list):
         return False
-    if choice.get("action") == "request_permission" and not technical_refusal(str(choice.get("permission") or "")):
-        return False
     if not result or result.get("execution_status") == "budget_exceeded" \
             or str(result.get("synthesis_error") or "").startswith("BudgetExceeded:"):
         return False
     refusals = []
+    source_failure = False
     for subtask in result.get("results") or []:
         if not isinstance(subtask, dict) or not isinstance(subtask.get("steps", []), list):
             return False
@@ -647,13 +619,18 @@ def technical_pursuit_request(work: dict, request: dict, result: dict) -> bool:
                 return False
             if tool in TOOLS and tool not in PURSUIT_TOOLS:
                 return False
+            if tool == "browse" and _public_source_failure(data):
+                source_failure = True
             if isinstance(data, dict) and data.get("refused"):
                 refusal = str(data.get("reason") or "")
                 if not technical_refusal(refusal):
                     return False
                 refusals.append(refusal)
     if choice.get("action") == "request_permission":
-        refusals.append(str(choice["permission"]))
+        permission = str(choice.get("permission") or "")
+        if not source_failure and not technical_refusal(permission):
+            return False
+        refusals.append(permission)
     return request.get("question") in [reason + suffix for reason in refusals]
 
 

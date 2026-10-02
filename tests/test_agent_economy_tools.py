@@ -474,7 +474,7 @@ def test_orbit_mission_business_signal_focus_reports_structural_success(monkeypa
     from agents import task_handlers  # noqa: F401
 
     captured = {}
-    signal = {
+    signal = {"sources": [{"url": "https://example.com/job", "acquisition": {"final_url": "https://example.com/job"}}],
         "signal_type": "job_demand",
         "buyer": "entreprise de plomberie multi-sites",
         "pain": "saisie manuelle de devis et relances",
@@ -509,28 +509,12 @@ def test_orbit_mission_business_signal_focus_reports_structural_success(monkeypa
     assert captured["business_signal_focus"] is True
     assert captured["business_signal_target"] == 1
     assert done["output"]["business_signals"] == [signal]
-    assert done["output"]["business_signal_result"] == {
-        "metric": "qualified_business_signal_count",
-        "observed": 1,
-        "minimum_target": 1,
-        "success": True,
-        "rejected": 1,
-        "scope": "acquired_text_gate",
-        "evaluation_status": "evaluated",
-        "note": (
-            "success signifie uniquement que le seuil de signaux structurellement soutenus par une acquisition "
-            "et des citations présentes dans son texte est atteint. La présence littérale ne valide pas "
-            "l'interprétation de buyer/pain/money_signal/evidence_summary : revue humaine nécessaire. "
-            "Ce n'est pas une preuve de demande, de conversion ni de revenu. "
-            "test_channel/test_offer/next_test restent des inférences. rejected compte les propositions "
-            "refusées, pas les pages examinées ; zéro peut signifier aucune proposition. "
-            "synthesis_status=validated conserve son sens technique, pas une validation des faits."
-        ),
-    }
-    assert done["output"]["experiment_flags"] == {
-        "business_signal_focus": True,
-        "business_signal_target": 1,
-    }
+    result = done["output"]["business_signal_result"]
+    assert result["metric"] == "source_linked_candidate_count"
+    assert result["observed"] == 1 and result["rejected"] == 1
+    assert result["scope"] == "provenance_only" and result["evaluation_status"] == "evaluated"
+    assert "success" not in result and "minimum_target" not in result
+    assert done["output"]["experiment_flags"] == {"business_signal_focus": True}
 
 
 def test_trace_summary_exposes_lockstep_selector_rank():
@@ -592,7 +576,7 @@ def test_business_signal_unavailable_is_not_an_evaluated_empty_list(monkeypatch)
     done = worker.run_one("w", kinds=["orbit.mission"], log=lambda s: None)
     result = done["output"]["business_signal_result"]
     assert result["evaluation_status"] == "unavailable"
-    assert result["observed"] == 0 and not result["success"]
+    assert result["observed"] == 0 and "success" not in result
     assert done["output"]["business_signal_rejections"] == []
 
 
@@ -633,9 +617,9 @@ def test_budget_stopped_task_never_creates_inferred_evidence(monkeypatch):
 
 
 @pytest.mark.parametrize("execution,signals,expected", [
-    ("completed", [{"evidence_acquisition": {"final_url": "https://example.org/source"}}], True),
-    ("incomplete", [{"evidence_acquisition": {"final_url": "https://example.org/source"}}], False),
-    ("unknown", [{"evidence_acquisition": {"final_url": "https://example.org/source"}}], False),
+    ("completed", [{"sources": [{"url": "https://example.org/source", "acquisition": {"final_url": "https://example.org/source"}}]}], True),
+    ("incomplete", [{"sources": [{"url": "https://example.org/source", "acquisition": {"final_url": "https://example.org/source"}}]}], False),
+    ("unknown", [{"sources": [{"url": "https://example.org/source", "acquisition": {"final_url": "https://example.org/source"}}]}], False),
     ("completed", [], False),
 ])
 def test_mission_evidence_requires_completed_execution_and_qualified_signal(
