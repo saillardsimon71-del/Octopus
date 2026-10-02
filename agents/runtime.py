@@ -485,10 +485,16 @@ def _browse(args):
     url = str(args.get("url", ""))
     kind = web_guard.check(url, state)
     account = kind == web_guard.ACCOUNT
+    from octopus import tasks
+    task_id = _current_task_id(strict=True)
+    task = tasks.get(task_id) if task_id else None
+    public_only = bool((task or {}).get("input", {}).get("browser_public_only"))
+    if public_only and state.account_read:
+        raise web_guard.BrowseRefused("lecture publique refusée après lecture d'un compte connecté")
     anonymous_account_domains: tuple = ()
-    if account and not state.account_read and not browser.profile_has_cookies(url):
-        # Domaine capable d'héberger un compte, mais le profil connecté ne détient aucun
-        # cookie pour cette origine : le serveur ne peut rattacher la requête à un compte.
+    if account and not state.account_read and (public_only or not browser.profile_has_cookies(url)):
+        # Domaine de compte lu anonymement : le mode public ignore le profil enregistré,
+        # sinon l'absence de cookies pour cette origine est vérifiée.
         # L'acquisition est anonyme par construction (HTTP sans session ou contexte
         # éphémère) et ne doit pas tainter la mission comme la lecture d'un compte.
         account = False
@@ -838,7 +844,7 @@ def _agnes_submit(args):
                 "note": "En cas de résultat incertain, ne pas déclencher aveuglément nouvelle génération; reconcile"}
 
 
-def _current_task_id():
+def _current_task_id(*, strict=False):
     try:
         from octopus import journal
         run = journal.current_run()
@@ -847,6 +853,8 @@ def _current_task_id():
         rows = journal.query("SELECT id FROM tasks WHERE run_id=? ORDER BY id DESC LIMIT 1", (run.root_id,))
         return int(rows[0]["id"]) if rows else None
     except Exception:
+        if strict:
+            raise
         return None
 
 
@@ -1051,6 +1059,7 @@ def _freshness_context(run) -> str:
 
 
 BUSINESS_SIGNAL_TYPES = {
+    "monetization",
     "explicit_request",
     "manual_work",
     "procurement",
@@ -1092,28 +1101,25 @@ def _business_signal_contract(target: int) -> str:
         "atteindre ce seuil : mieux vaut rester en dessous avec des preuves solides que le "
         "dépasser avec des banalités. Le seuil est un minimum de mission, pas un quota par piste.\n"
         "Un signal n'est qualifié que si TOUT est présent :\n"
-        "1) un acheteur/segment identifiable ;\n"
-        "2) une douleur, tâche manuelle, obligation ou demande concrète ;\n"
+        "1) un acteur économique/segment identifiable qui finance la monétisation (buyer) ; utilisateur et payeur peuvent différer ;\n"
+        "2) un besoin, une activité, une obligation ou demande concrète ;\n"
         "3) une source réellement ouverte pendant cette mission ;\n"
         "4) un signal monétaire ou d'urgence (prix payé, alternative payante, recrutement, "
-        "appel d'offres, dépense existante, échéance réglementaire créant du travail) ;\n"
-        "5) un canal réaliste pour atteindre ce type d'acheteur ;\n"
+        "appel d'offres, dépense existante, rémunération proposée, échéance réglementaire créant du travail) ;\n"
+        "5) un canal réaliste de distribution/acquisition ;\n"
         "6) une offre minimale et un prochain test faisable rapidement.\n"
         "Pour buyer, pain, money_signal et evidence_summary, fournis respectivement buyer_evidence, "
         "pain_evidence, money_evidence et summary_evidence : extraits littéraux de 8 à 600 caractères "
         "du texte acquis de la même page, jamais inventés. Ces citations prouvent leur présence, "
         "pas la justesse de l'interprétation : revue humaine nécessaire.\n"
-        "Sources à PRIORISER : demandes explicites de prestataire ou d'outil, missions freelance, "
-        "offres d'emploi révélant un travail coûteux, appels d'offres, forums où le problème est "
-        "décrit, avis négatifs, comparatifs et prix de solutions payantes, obligations "
-        "réglementaires qui créent une tâche concrète.\n"
         "À REJETER : définitions, statistiques macro seules, actualité générale, taille de marché, "
-        "homepage de société, tendance sectorielle sans acheteur ni dépense, problème social large "
+        "homepage sans signal économique concret, tendance sectorielle sans acteur ni monétisation, problème social large "
         "sans action achetable identifiable.\n"
         "Cherche librement des preuves concrètes, adapte ton approche aux résultats, et ouvre les "
         "sources importantes avec browse avant de conclure. Distingue ce que tu observes de ce que "
         "tu infères ; n'invente aucune preuve.\n"
-        "Ne construis rien et ne recommande pas encore un business : collecte et qualifie des signaux.\n"
+        "Cherche des combinaisons économiquement indépendantes, pas plusieurs variantes du même problème. "
+        "Un signal n'est ni une stratégie ni une rentabilité prouvée. Offre/test sont des hypothèses ; n'exécute rien.\n"
     )
 
 
@@ -1969,14 +1975,16 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             "viennent du PDF. Les champs analytiques (buyer, pain, money_signal, evidence_summary, "
             "test_channel, test_offer, next_test) restent rédigés selon les règles ci-dessus. "
             "Le contrôle est littéral, non sémantique ; revue humaine nécessaire.\n"
-            "Réponds en JSON avec exactement la forme : "
-            '{\"rapport\":\"...\",\"business_signals\":[{'
-            '\"signal_type\":\"explicit_request|manual_work|procurement|job_demand|complaint|regulatory_deadline|paid_alternative|review_gap\",'
+            + ("Ajoute business_signals à la sortie de détermination : " if determination
+               else "Réponds en JSON avec exactement la forme : ")
+            + ('\"business_signals\":[{' if determination else '{\"rapport\":\"...\",\"business_signals\":[{')
+            + '\"signal_type\":\"explicit_request|manual_work|procurement|job_demand|complaint|regulatory_deadline|paid_alternative|review_gap|monetization\",'
             '\"buyer\":\"...\",\"pain\":\"...\",\"money_signal\":\"...\",'
             '\"evidence_url\":\"https://...\",\"evidence_summary\":\"...\",'
             '\"buyer_evidence\":\"...\",\"pain_evidence\":\"...\",'
             '\"money_evidence\":\"...\",\"summary_evidence\":\"...\",'
-            '\"test_channel\":\"...\",\"test_offer\":\"...\",\"next_test\":\"...\"}]}'
+            + '\"test_channel\":\"...\",\"test_offer\":\"...\",\"next_test\":\"...\"}]'
+            + ("" if determination else "}")
         )
     syn_sys = (
         "Tu es ORBIT. Synthétise les résultats des sous-tâches en un rapport final concis. "

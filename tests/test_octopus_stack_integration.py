@@ -246,7 +246,7 @@ def test_pursuit_keeps_caller_authorization_when_a_tool_is_absent(monkeypatch):
     assert state["state"] == "missing"
     assert state["capable"] is False and state["available"] is False
     assert state["authorized"] is True
-    assert supervisor.PURSUIT_TOOLS == frozenset({"search", "resources_status", "economy_status",
+    assert supervisor.PURSUIT_TOOLS == frozenset({"search", "browse", "resources_status", "economy_status",
                                                 "browser_navigate", "browser_snapshot", "browser_scroll", "browser_back"})
 
 

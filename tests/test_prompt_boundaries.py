@@ -202,8 +202,8 @@ def test_business_prompt_keeps_the_objective_and_result_criteria():
     task = runtime._business_signal_task_context(3, "SOUT")
 
     for criterion in (
-        "acheteur/segment identifiable",
-        "douleur, tâche manuelle, obligation ou demande concrète",
+        "acteur économique/segment identifiable",
+        "besoin, une activité, une obligation ou demande concrète",
         "source réellement ouverte pendant cette mission",
         "signal monétaire ou d'urgence",
         "canal réaliste",

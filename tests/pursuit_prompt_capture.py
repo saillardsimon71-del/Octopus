@@ -77,7 +77,9 @@ def capture():
          patch.object(runtime.db, "post", return_value=0), \
          patch.object(runtime.db, "decide", return_value=None):
         result = runtime._run_mission(captured["goal"], 6, set(supervisor.PURSUIT_TOOLS),
-                                      determination=True)
+                                      determination=True,
+                                      business_signal_focus=captured["kwargs"].get("business_signal_focus", False),
+                                      business_signal_target=captured["kwargs"].get("business_signal_target", 3))
     return {**captured, "steps": steps, "calls": calls, "result": result,
             "state": json.loads(captured["goal"].rsplit("\n", 1)[-1])}
 
