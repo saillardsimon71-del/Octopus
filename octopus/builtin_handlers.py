@@ -80,7 +80,13 @@ def resources_acquire(ctx):
     need = str(ctx.input.get("need", "create"))
     question = str(ctx.input.get("question") or f"Ressource {key} : {need} requis")
     answer = ctx.ask_human(f"resource:{key}:{need}", question,
-                           context={"key": key, "need": need, "requested_by": ctx.input.get("requested_by")})
+                           context={"key": key, "need": need, "requested_by": ctx.input.get("requested_by"),
+                                    "web_request": ctx.input.get("web_request")})
+    if ctx.input.get("web_request"):
+        # Structured decisions only: never log free-text credentials or imply permissions.
+        state = resources.get(key)
+        return {"key": key, "decision": "connected" if answer == "connected" else "declined",
+                "session_status": (state.get("web_account") or {}).get("session_status", "absent")}
     state = resources.check(key)
     resources.update(key, actor="human", notes=f"reponse humaine ({need}) : {answer[:200]}")
     ctx.emit("resources.acquired", {"key": key, "need": need, "state": state["state"], "answer": answer[:200]})
@@ -131,3 +137,20 @@ def supervisor_objective_work(ctx):
                                       ("objective_id", "execution_status", "synthesis_status", "observed",
                                        "success", "measured", "human_boundary")})
     return result
+
+
+@handler('resources.account_work', max_attempts=1)
+def account_work(ctx):
+    """Same runtime/worker, separate network state and Chromium workspace."""
+    from agents import web_guard, task_handlers
+    from . import browser_workspace, mandates
+    key = ctx.input['browser_resource_key']
+    if not mandates.account_authority(ctx.business, key, 'read'):
+        raise PermissionError('lecture compte non mandatée ou session indisponible')
+    # Caller-owned input is rebuilt, even if somebody manually enqueued an unsafe task.
+    ctx.input['allowed_tools'] = ['browser_navigate', 'browser_snapshot', 'browser_scroll', 'browser_back',
+                                 'browser_click', 'browser_type', 'browser_select', 'browser_check',
+                                 'browser_press', 'browser_verify', 'browser_upload']
+    ctx.input['browser_public_only'] = False
+    with web_guard.isolated_session(), browser_workspace.mission_scope(isolated=True):
+        return task_handlers.orbit_mission(ctx)

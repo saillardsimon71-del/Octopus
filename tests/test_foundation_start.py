@@ -143,7 +143,7 @@ def test_pause_during_work_then_resume_cannot_execute_external_effect(monkeypatc
     entered, release = threading.Event(), threading.Event()
     def run(*args, **kwargs):
         assert "agnes_generate_video" not in kwargs["allowed_tools"]
-        assert "browser_click" not in kwargs["allowed_tools"]
+        assert "browser_click" in kwargs["allowed_tools"]
         entered.set()
         assert release.wait(8)
         return result("continue", next_goal="Autre observation")
@@ -182,15 +182,15 @@ def test_runtime_refuses_effect_even_when_model_asks_and_exposes_request(monkeyp
             return {"tasks": [{"role": "SOUT", "task": "Examiner la possibilité"}]}
         if stage == "action":
             if not selections:
-                selections.append("click")
-                return {"tool": "browser_click", "args": {"ref": "@e1"}}
+                selections.append("spend")
+                return {"tool": "request_spend", "args": {"amount": 1.0, "currency": "EUR", "reason": "dépense"}}
             return {"final": "Action refusée"}
         return result()
     monkeypatch.setattr(deepseek, "call_json", model)
     monkeypatch.setattr(browser_workspace, "call", lambda *a, **k: pytest.fail("Effet interdit exécuté"))
     oid = supervisor.start_pursuit("Préparer une proposition")
     supervisor.run_pursuit(oid)
-    assert "browser_click" in tasks.pending_human_requests("octopus")[0]["question"]
+    assert "request_spend" in tasks.pending_human_requests("octopus")[0]["question"]
     assert not journal.query("SELECT id FROM channel_actions")
 
 

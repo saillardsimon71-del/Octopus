@@ -84,7 +84,7 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
                 "requests": [], "channels": [], "allowances": [], "ledger": [],
                 "businesses": sorted(set(declared) | {"octopus"}), "token_cost_usd": 0.0, "agnes_api_cost": None,
                 "agnes_health": "Non sondé", "decisions": [], "evidence": [], "browser": [],
-                "llm_calls": [], "pursuit_llm": None}
+                "llm_calls": [], "pursuit_llm": None, "accounts": [], "mandates": []}
         state["activities"] = _activity_rows(state, declared, business, {})
         return state
     connection = (journal.readonly_connection(path) if os.environ.get("OCTOPUS_WORKBENCH_READONLY") == "1"
@@ -109,6 +109,15 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
         for table in ("tasks", "llm_calls", "strategy_objectives", "strategy_evidence", "economic_channels", "ledger_entries"):
             if table in present:
                 known.update(row[0] for row in connection.execute(f"SELECT DISTINCT business FROM {table}") if row[0])
+        mandate_rows = rows('operational_mandates')
+        account_rows = []
+        if 'resources' in present:
+            for raw in connection.execute('SELECT * FROM resources ORDER BY label'):
+                item = dict(raw)
+                item['web_account'] = json.loads(item.get('web_account') or '{}')
+                item['capabilities'] = json.loads(item.get('capabilities') or '[]')
+                if item['kind'] == 'web_account' or item['web_account']:
+                    account_rows.append(item)
         objectives = rows("strategy_objectives")
         tasks = rows("tasks")
         generations = rows("agnes_video_generations")
@@ -237,6 +246,7 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
             event["data"] = {}
     state = {"objectives": objectives, "tasks": tasks, "generations": generations,
             "events": events, "requests": requests, "channels": channels,
+            "accounts": account_rows, "mandates": mandate_rows,
             "allowances": allowances, "ledger": ledger, "decisions": list(decisions.values()),
             "evidence": list(evidence.values()), "browser": browser,
             "businesses": sorted(known),

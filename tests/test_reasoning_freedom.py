@@ -143,7 +143,9 @@ def test_runtime_marks_public_block_and_reports_next_source_to_agent(monkeypatch
 
 def test_j_budgets_tools_and_finance_are_unchanged():
     assert supervisor.PURSUIT_ROUNDS == 3
-    assert supervisor.PURSUIT_TOOLS == {"search", "browse", "resources_status", "economy_status", "browser_navigate", "browser_snapshot", "browser_scroll", "browser_back"}
+    assert supervisor.PURSUIT_TOOLS == {"search", "browse", "resources_status", "economy_status", "browser_navigate", "browser_snapshot", "browser_scroll", "browser_back",
+        "account_task", "request_account", "create_artifact", "register_channel", "act_on_channel",
+        "browser_click", "browser_type", "browser_select", "browser_check", "browser_press", "browser_verify", "browser_upload"}
     no_effects()
 
 

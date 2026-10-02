@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import enabled, paths
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -550,6 +550,51 @@ _SCHEMA_V9_COLUMNS = (
 # ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
 _SCHEMA_V9 = ""
 
+_SCHEMA_V10 = """
+CREATE TABLE IF NOT EXISTS operational_mandates (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ business TEXT NOT NULL,
+ label TEXT NOT NULL,
+ target TEXT NOT NULL,
+ effects TEXT NOT NULL,
+ resource_keys TEXT NOT NULL DEFAULT '[]',
+ status TEXT NOT NULL DEFAULT 'active',
+ granted_by TEXT NOT NULL,
+ created_at REAL NOT NULL,
+ revoked_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_mandates_business ON operational_mandates(business, status);
+CREATE TABLE IF NOT EXISTS channel_authority (
+ channel_id INTEGER PRIMARY KEY REFERENCES economic_channels(id),
+ business TEXT NOT NULL,
+ target TEXT NOT NULL,
+ resource_key TEXT,
+ source_ref TEXT NOT NULL,
+ qualified_at REAL NOT NULL
+);
+"""
+
+
+def _migrate_v10(conn):
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute("PRAGMA user_version").fetchone()[0] < 10:
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(resources)")}
+            if "web_account" not in columns:
+                conn.execute("ALTER TABLE resources ADD COLUMN web_account TEXT NOT NULL DEFAULT '{}'")
+            statement = ""
+            for line in _SCHEMA_V10.splitlines(keepends=True):
+                statement += line
+                if sqlite3.complete_statement(statement):
+                    conn.execute(statement)
+                    statement = ""
+            conn.execute("PRAGMA user_version=10")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
 _MIGRATIONS = ((1, _SCHEMA_V1), (2, _SCHEMA_V2), (3, _SCHEMA_V3), (4, _SCHEMA_V4), (5, _SCHEMA_V5),
                (6, _SCHEMA_V6), (7, _SCHEMA_V7), (8, _SCHEMA_V8), (9, _SCHEMA_V9))
 
@@ -674,6 +719,7 @@ def connect() -> sqlite3.Connection:
             conn.commit()
             if version < 9:
                 _migrate_v9(conn)
+            _migrate_v10(conn)
         except BaseException:
             conn.rollback()
             conn.close()

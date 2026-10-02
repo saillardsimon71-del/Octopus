@@ -512,6 +512,7 @@ def _browse(args):
         final = str(record.get("final_url") or url)
         if browser.is_public_text_acquisition(record, min_text_chars=1):
             web_guard.record(final, web_guard.PUBLIC, state)
+            state.public_pages[final] = str(record.get("main_text") or "")
         failure = _public_source_failure({"page": record})
         return {
             **({"refused": True, "failure_class": "technical", "reason": failure} if failure else {}),
@@ -714,7 +715,11 @@ def _register_channel(args):
                                      nature="observed" if _seen_this_session(source) else "unverified",
                                      source_ref=source or None,
                                      notes=args.get("notes"))
-    return {"channel_id": channel_id, "access": "none", "note": "accès à qualifier avant toute action"}
+    from octopus import mandates
+    qualified = mandates.qualify_public(channel_id, _run_business(), source_url=source,
+                                         observed_text=web_guard.current().public_pages.get(source, ''))
+    return {"channel_id": channel_id, "access": "none", "qualified_under_mandate": qualified,
+            "note": "mandat vérifié à chaque effet" if qualified else "accès à qualifier avant toute action"}
 
 
 def _resources_status(args):
@@ -722,9 +727,11 @@ def _resources_status(args):
     from octopus import resources
     rows = resources.list_resources(capability=args.get("capability"), state=args.get("state"),
                                     business=_run_business(), include_global=True)
-    return {"overview": resources.overview(business=_run_business()),
+    from octopus import mandates
+    return {"mandates": mandates.list_mandates(_run_business(), active=True),
+            "overview": resources.overview(business=_run_business()),
             "resources": [{k: r[k] for k in ("key", "kind", "label", "state", "access", "capabilities",
-                                             "needs", "last_check_detail", "business")} for r in rows[:40]]}
+                                             "needs", "last_check_detail", "business", "web_account")} for r in rows[:40]]}
 
 
 def _request_resource(args):
@@ -853,8 +860,8 @@ def _current_task_id(*, strict=False):
         run = journal.current_run()
         if run is None:
             return None
-        rows = journal.query("SELECT id FROM tasks WHERE run_id=? ORDER BY id DESC LIMIT 1", (run.root_id,))
-        return int(rows[0]["id"]) if rows else None
+        from octopus import tasks
+        return tasks.current_task_id()
     except Exception:
         if strict:
             raise
@@ -947,6 +954,64 @@ def _agnes_generate_full(args):
         return {"ok": False, "error": str(exc)[:500],
                 "note": "Full cycle failed or rate limited; will retry with backoff, no blind new generation"}
 
+
+
+def _account_task(args):
+    from octopus import resources
+    return resources.account_task(_run_business(), str(args['key']), str(args['goal']),
+                                  parent_id=_current_task_id(strict=True))
+
+
+def _request_account(args):
+    from octopus import resources
+    tid = resources.request_account(str(args['key']), str(args['platform']), str(args['reason']),
+                                    args.get('capabilities') or [], _run_business(), created_by='agent:' + _ROLE.get(),
+                                    url=args.get('url'), desired_actions=args.get('desired_actions'))
+    return {'task_id': tid, 'status': 'waiting_human', 'note': 'Connexion et mandat restent humains'}
+
+
+def _create_artifact(args):
+    from octopus import browser_workspace, tasks
+    from agents import agent_browser
+    import hashlib
+    import os
+    filename = browser_workspace._safe_filename(str(args['filename']))
+    text = str(args['text'])
+    if len(text.encode('utf-8')) > 1000000 or agent_browser.contains_secret(text):
+        raise ValueError('artefact trop volumineux ou contenant un secret')
+    directory = browser_workspace.outbox_dir(_run_business())
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / filename
+    if not browser_workspace._within(path, directory):
+        raise ValueError('artefact hors de la boîte de sortie')
+    content = text.encode('utf-8')
+    digest = hashlib.sha256(content).hexdigest()
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError:
+        if not path.is_file() or browser_workspace._sha256(path) != digest:
+            raise ValueError('nom déjà utilisé pour un contenu différent ; choisissez un autre nom')
+    result = {'filename': filename, 'path': str(path), 'sha256': digest, 'bytes': len(content), 'local_only': True}
+    tid = _current_task_id(strict=True)
+    if tid:
+        tasks.save_step(tid, 'artifact:' + filename, result)
+    tasks.emit(_run_business(), tid, 'artifact.created', result)
+    return result
+
+
+TOOLS.update({
+    'account_task': {'desc': 'sous-tâche compte connectée isolée, lecture et effets uniquement sous mandat actif ; renvoie ses observations puis ferme sa session réseau',
+                     'params': {'key': 'str', 'goal': 'str'}, 'fn': _account_task},
+    'request_account': {'desc': 'demande structurée de compte à l’humain ; ne crée ni compte ni mandat',
+                        'params': {'key': 'str', 'platform': 'str', 'reason': 'str', 'capabilities': 'list?',
+                                   'url': 'str?', 'desired_actions': 'list?'}, 'fn': _request_account},
+    'create_artifact': {'desc': 'crée un fichier texte/HTML/script local dans la boîte de sortie ; ne publie et n’exécute rien',
+                        'params': {'filename': 'str', 'text': 'str'}, 'fn': _create_artifact},
+})
 
 TOOLS.update({
     "browser_navigate": {"desc": "espace de travail navigateur persistant de la tâche : ouvre une URL et renvoie "
@@ -1257,7 +1322,17 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
         role_desc = GENERIC_ROLES.get(role, "")
     group = _group()
     legacy_search = run is None or run.business == DEFAULT_BUSINESS
-    tool_text = tools_desc(allowed_tools, legacy_search=legacy_search)
+    described_tools = allowed_tools if allowed_tools is not None else set(TOOLS) - {'account_task', 'request_account', 'create_artifact'}
+    tool_text = tools_desc(described_tools, legacy_search=legacy_search)
+    if allowed_tools is not None:
+        tool_text = tool_text.replace(_BROWSER_ACT,
+            "exige un mandat actif couvrant la cible et l’effet, ou un accès act humain explicite ; ")
+    if allowed_tools is not None and 'resources_status' in allowed_tools and run is not None:
+        from octopus import mandates
+        active_authority = mandates.list_mandates(run.business, active=True)
+        tool_text += "\nAutorité humaine active pour cette activité : " + json.dumps([
+            {k: m[k] for k in ('id', 'target', 'effects', 'resource_keys')} for m in active_authority], ensure_ascii=False)
+        tool_text += "\nLes handlers vérifient le mandat à chaque effet. Consulte resources_status pour l’état des comptes. Une action couverte ne demande pas de nouvelle permission."
     if allowed_tools is not None and "browse" in allowed_tools:
         tool_text = tool_text.replace(TOOLS["browse"]["desc"],
                                       "consulte une page Web et renvoie le contenu réellement acquis")

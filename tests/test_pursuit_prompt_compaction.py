@@ -39,7 +39,9 @@ def test_cold_prompt_projection_and_unchanged_execution_limits():
     assert captured["kwargs"]["profile"] == "economical"
     assert supervisor.PURSUIT_ROUNDS == 3
     assert supervisor.PURSUIT_TOOLS == frozenset({"search", "browse", "resources_status", "economy_status",
-        "browser_navigate", "browser_snapshot", "browser_scroll", "browser_back"})
+        "browser_navigate", "browser_snapshot", "browser_scroll", "browser_back",
+        "account_task", "request_account", "create_artifact", "register_channel", "act_on_channel",
+        "browser_click", "browser_type", "browser_select", "browser_check", "browser_press", "browser_verify", "browser_upload"})
     calls = {call["task"]: call["messages"] for call in captured["calls"]}
     planner = calls["planification"][0]["content"]
     assert "au plus 6 étapes" in planner

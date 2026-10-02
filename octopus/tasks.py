@@ -468,3 +468,17 @@ def materialize_due(now: float | None = None, resources: dict[str, str] | None =
             conn.execute("UPDATE schedules SET next_run=?, last_task_id=? WHERE id=?",
                          (now + sched["interval_s"], task_id, sched["id"]))
     return created
+
+
+def current_task_id():
+    """Nearest durable task of the current run, including isolated nested account work."""
+    run = journal.current_run()
+    if run is None:
+        return None
+    rows = journal.query(
+        'WITH RECURSIVE lineage(id,parent_id,depth) AS ('
+        'SELECT id,parent_id,0 FROM runs WHERE id=? UNION ALL '
+        'SELECT r.id,r.parent_id,l.depth+1 FROM runs r JOIN lineage l ON r.id=l.parent_id) '
+        'SELECT t.id FROM tasks t JOIN lineage l ON t.run_id=l.id '
+        'WHERE t.business=? ORDER BY l.depth,t.id DESC LIMIT 1', (run.id, run.business))
+    return int(rows[0]['id']) if rows else None
