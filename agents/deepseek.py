@@ -3,7 +3,7 @@
 Depuis OCTOPUS M1, chaque appel passe par la passerelle `octopus.llm` : journal
 (data/octopus.db), cout a la grille officielle, budget par run et profils de cout.
 Signatures historiques conservées. Le profil par défaut des agents Podalux est maintenant
-`zero_cost` lorsque OmniRoute est actif, afin d'éviter les appels DeepSeek payants après
+`zero_cost`, afin d'éviter les appels DeepSeek payants après
 épuisement du quota ; définir explicitement `OCTOPUS_PROFILE=legacy` pour restaurer le
 routage historique.
 """

@@ -39,13 +39,12 @@ Pas de schema, framework, workflow plateforme, changement Foundation ni migratio
 2. **Routing** : une partie image ajoute obligatoirement `vision` aux besoins. Un modèle
    text-only est inéligible, même pin explicite. Les alternatives gratuites du même task
    peuvent être utilisées si les préférences economical sont textuelles ; aucun fournisseur
-   payant supplémentaire n'est autorisé. Dans le catalogue actuel, les routes text-only
-   GPT-OSS/dots sont écartées ; Qwen local, une route OmniRoute explicite vision si configurée/attestée et
-   DeepSeek flash dans la politique existante sont possibles. Le choix dépend de disponibilité,
+   payant supplémentaire n'est autorisé. Le catalogue actuel retient les modèles fixes
+   OpenRouter dont les métadonnées attestent vision et gratuité, ainsi que DeepSeek Flash
+   dans la politique payante explicitement autorisée. Le choix dépend de disponibilité,
    évidence et profil. Le journal indique le modèle demandé/résolu, pas une disponibilité inventée.
-   Le pool automatique auto-free n'identifie pas un modèle compatible : son ancienne
-   déclaration universelle de vision est retirée. Une route explicite correspondant à un modèle
-   vision du catalogue peut déclarer vision via OMNIROUTE_MODEL. Absence de route compatible
+   Les pools opaques sont exclus. La vision vient de `architecture.input_modalities`,
+   jamais d'une déclaration d'environnement. Absence de route compatible
    → erreur explicite, jamais faux expired.
 3. **Coût** : comptabilité et ledger existants, usage provider réel si fourni, estimation
    d'image existante pour l'admission. Aucun plafond monétaire pursuit ajouté. Les captures

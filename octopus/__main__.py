@@ -58,19 +58,26 @@ def cmd_bench(args) -> int:
 
 
 def cmd_models(args) -> int:
-    cat = catalog.load()
+    cat = catalog.load(refresh=args.refresh)
+    state = cat.raw['openrouter_catalog']
+    print(f"OpenRouter: {state['count']} modeles gratuits ; source={state['source']} ; "
+          f"cache={state['state']} ; age_s={state['age_s']}")
+    if state['refresh_error']:
+        print(state['refresh_error'])
     for model_id, model in cat.raw["models"].items():
+        capabilities = set(model.get('capabilities', []))
+        if args.browser_candidates and not {'vision', 'json'} <= capabilities:
+            continue
         ok, why = llm.provider_status(model["provider"], cat.provider(model["provider"]))
-        print(f"{model_id:24} {model['cost_class']:10} {','.join(model.get('capabilities', [])):28} "
-              f"{'disponible' if ok else 'indisponible'} ({why})")
-    rules = cat.evidence_rules()
-    print("\nPreuves du banc par tache :")
-    for task in cat.raw.get("tasks", {}):
-        for model_id in cat.raw["models"]:
-            proof = journal.evidence(task, model_id, rules)
-            if "n" in proof:
-                print(f"  {task:24} {model_id:24} {proof['reason']}")
-    return 0
+        proof = llm.browser_quality(model)
+        qualification = 'qualified' if proof['eligible'] else 'unqualified' if proof.get('samples') else 'not-benchmarked'
+        print(f"{model_id} {model['cost_class']} text={'text' in model.get('output_modalities', ['text'])} "
+              f"vision={'vision' in capabilities} tools={'tools' in capabilities} json={'json' in capabilities} "
+              f"context={model.get('context_length', 'unknown')} "
+              f"{'disponible' if ok else 'indisponible'} ({why}) browser={qualification}")
+        if args.browser_candidates:
+            print('  TECHNICAL candidate ; ' + proof['reason'])
+    return 1 if args.refresh and state['refresh_error'] else 0
 
 
 def _ram_gb() -> float | None:
@@ -442,9 +449,9 @@ def cmd_browser(args) -> int:
     if args.browser_cmd == "benchmark":
         from . import browser_bench
         result = browser_bench.run([m.strip() for m in args.models.split(',') if m.strip()],
-            repeats=args.repeats, allow_paid=args.allow_paid, max_cost_usd=args.max_cost)
+            repeats=args.repeats, allow_paid=args.allow_paid, max_cost_usd=args.max_cost, max_requests=args.max_requests)
         print(json.dumps(result, ensure_ascii=False, indent=1))
-        return 0 if result['rows'] and all(r['passed'] for r in result['rows']) else 1
+        return 0 if result['rows'] and not result['incomplete'] and not result['skipped'] and all(r['passed'] for r in result['rows']) else 1
     if args.browser_cmd == "actions":
         rows = browser_workspace.list_actions(args.business, status=args.status, task_id=args.task)
         for r in rows:
@@ -474,7 +481,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--repeats", type=int, default=None)
     p.add_argument("--allow-paid", action="store_true")
     p.add_argument("--max-cost", type=float, default=0.05, help="plafond du banc en USD (defaut 0.05)")
-    sub.add_parser("models", help="catalogue, disponibilite et preuves")
+    p = sub.add_parser("models", help="catalogue, disponibilite et preuves")
+    p.add_argument("--refresh", action="store_true", help="rafraichir les metadonnees OpenRouter")
+    p.add_argument("--browser-candidates", action="store_true", help="candidats TECHNICAL vision/JSON et qualification distincte")
     sub.add_parser("doctor", help="verification de l'installation")
     p = sub.add_parser("worker", help="execute les taches de la file")
     p.add_argument("--once", action="store_true", help="une seule tache puis sortie")
@@ -590,6 +599,7 @@ def main(argv: list[str] | None = None) -> int:
     x.add_argument("--repeats", type=int, default=2)
     x.add_argument("--allow-paid", action="store_true")
     x.add_argument("--max-cost", type=float, default=.05)
+    x.add_argument("--max-requests", type=int, default=240, help="plafond global de requetes, tentatives structurees incluses")
     x = bsub.add_parser("actions", help="actions navigateur à effet et leur état")
     x.add_argument("business")
     x.add_argument("--status", default=None)

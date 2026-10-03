@@ -1,5 +1,8 @@
 # Audit browser — base #133
 
+Audit historique de la PR #134. Le catalogue, les fournisseurs et le protocole
+courants sont décrits dans [OPENROUTER_CATALOG.md](OPENROUTER_CATALOG.md).
+
 Base exacte : `78c1641d803a0c3d9cdeca93e8123b41f588c968`.
 
 ## Phase 0, avant patch
@@ -118,10 +121,10 @@ Le fast-path de marqueur explicitement configuré et HumanConnection sont conser
 
 ## Benchmark exécutable et mesure
 
-`python -m octopus browser benchmark --models "<IDs catalogue configurés>" --repeats 2 --max-cost 0`
+`python -m octopus browser benchmark --models "<IDs fixes explicitement sélectionnés>" --repeats 2 --max-cost 0 --max-requests 240`
 
-Les providers gratuits/local/Groq/OpenRouter/OmniRoute peuvent concourir selon
-leurs capacités et leur configuration. `browser.bench_step` est un task de
+Les modèles fixes gratuits OpenRouter et DeepSeek direct peuvent concourir selon
+leurs capacités et la politique humaine. `browser.bench_step` est un task de
 bootstrap explicitement pincé en profil bench ; il ne nécessite pas une preuve
 browser préalable. `browser.react_step` exige cette preuve dans TOUS les profils,
 y compris bench et legacy. Sans candidat qualifié : incomplete explicite ; aucun

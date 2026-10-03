@@ -133,6 +133,7 @@ def _run_one(suite: str, task: EvalTask, item: EvalItem, model_id: str, rep: int
     first_call_id = journal.query("SELECT COALESCE(MAX(id), 0) AS id FROM llm_calls")[0]["id"]
     text, cost, call_id, error = "", 0.0, None, None
     completion = None
+    evaluated_model = catalog.load().model(model_id)
     if model_id == CODE:
         text = item.baseline()
     else:
@@ -178,7 +179,7 @@ def _run_one(suite: str, task: EvalTask, item: EvalItem, model_id: str, rep: int
         "cache_hit_tokens": completion.usage.cache_hit_tokens if completion else None,
         "cache_miss_tokens": completion.usage.cache_miss_tokens if completion else None,
         "provider_cost_usd": completion.provider_cost_usd if completion else None,
-        "calculated_cost_usd": (pricing.call_cost(catalog.load().model(model_id).get("price"),
+        "calculated_cost_usd": (pricing.call_cost(evaluated_model.get("price"),
                                                   completion.usage, False) if completion else None),
         "rate_limited": "429" in (error or ""),
         "timeout": "timeout" in (error or "").lower(),
@@ -186,7 +187,11 @@ def _run_one(suite: str, task: EvalTask, item: EvalItem, model_id: str, rep: int
         "retries": max(0, len(attempts) - 1),
         "fallbacks": 0,
     }
-    journal.record_bench_result({key: row[key] for key in journal._BENCH_COLUMNS if key in row})
+    record = {key: row[key] for key in journal._BENCH_COLUMNS if key in row}
+    if evaluated_model:
+        record["model"] = (completion.justification.get("evidence_identity", model_id) if completion
+                           else evaluated_model.get("evidence_identity", model_id))
+    journal.record_bench_result(record)
     log(f"  {task.name:22} {item.id:30} {model_id:22} {'OK' if result.passed else 'KO'} "
         f"score {result.score:.2f} {latency_ms} ms {cost:.5f} $ {result.notes[:70]}")
     return row

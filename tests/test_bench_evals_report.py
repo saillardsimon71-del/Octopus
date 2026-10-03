@@ -10,7 +10,7 @@ import pytest
 
 from agents import config, deepseek, evals
 from agents.agents import CATALOG, ORBIT
-from octopus import bench, journal, octopus_evals, report
+from octopus import bench, catalog, journal, octopus_evals, report
 from octopus.bench import CheckResult, EvalItem, EvalTask
 from octopus.pricing import Usage
 
@@ -20,6 +20,11 @@ MSG = [{"role": "user", "content": "decide en JSON"}]
 def _check_done(text: str) -> CheckResult:
     ok = json.loads(text).get("decision") == "done"
     return CheckResult(ok, float(ok), {"done": ok})
+
+
+@pytest.fixture(autouse=True)
+def no_inference_pacing(monkeypatch):
+    monkeypatch.setattr(bench.time, "sleep", lambda _: None)
 
 
 @pytest.fixture
@@ -37,16 +42,16 @@ def stub_suite(monkeypatch):
 
 def test_bench_skips_paid_models_without_permission(stub_suite, transport, providers_up, tmp_path):
     transport.reply('{"decision": "done"}')
-    result = bench.run_bench(stub_suite, ["code", "ollama/qwen3.5-2b", "deepseek/flash"], out_dir=tmp_path / "b",
+    result = bench.run_bench(stub_suite, ["code", "openrouter/fixture/vision-beta:free", "deepseek/flash"], out_dir=tmp_path / "b",
                              log=lambda s: None)
     assert result["skipped"] == {"deepseek/flash": "modele payant : relancer avec --allow-paid"}
-    assert set(transport.models) == {"qwen3.5:2b"} and len(transport.calls) == 5
+    assert set(transport.models) == {"fixture/vision-beta:free"} and len(transport.calls) == 5
     decisions = {r["model"]: r for r in result["matrix"]}
     assert decisions["code"]["pass_rate"] == 1.0
     assert decisions["code"]["decision"].startswith("REMPLACER PAR DU CODE")
-    assert [r["model"] for r in result["matrix"]] == ["code", "ollama/qwen3.5-2b"]  # tri : code, local, gratuit, payant
+    assert [r["model"] for r in result["matrix"]] == ["code", "openrouter/fixture/vision-beta:free"]  # tri : code, local, gratuit, payant
     assert all((tmp_path / "b" / name).exists() for name in ("resultats.csv", "matrice.md"))
-    proof = journal.evidence("podalux.arbitrate", "ollama/qwen3.5-2b", {"min_samples": 5, "min_pass_rate": 0.9,
+    proof = journal.evidence("podalux.arbitrate", catalog.load().model("openrouter/fixture/vision-beta:free")["evidence_identity"], {"min_samples": 5, "min_pass_rate": 0.9,
                                                                         "max_age_days": 60})
     assert proof["eligible"] is True
     bench_run = journal.query("SELECT * FROM runs WHERE kind='bench'")[0]
@@ -64,12 +69,12 @@ def test_bench_cap_stops_paid_calls(stub_suite, transport, tmp_path):
 
 def test_bench_decision_without_qualified_model():
     task = EvalTask("t", "d", [], min_pass_rate=0.9)
-    rows = [{"model": "ollama/x", "cost_class": "local", "pass_rate": 0.5, "n": 10, "mean_cost_usd": 0,
+    rows = [{"model": "openrouter/fixture/text-delta:free", "cost_class": "free_quota", "pass_rate": 0.5, "n": 10, "mean_cost_usd": 0,
              "p50_latency_ms": 1}]
     assert bench._decide(task, rows).startswith("AUCUN MODELE AU NIVEAU")
-    rows.append({"model": "gemini/y", "cost_class": "free_quota", "pass_rate": 1.0, "n": 5, "mean_cost_usd": 0,
+    rows.append({"model": "openrouter/fixture/vision-beta:free", "cost_class": "free_quota", "pass_rate": 1.0, "n": 5, "mean_cost_usd": 0,
                  "p50_latency_ms": 1})
-    assert bench._decide(task, rows) == "ROUTER VERS gemini/y (preuve limitee : moins de 10 essais)"
+    assert bench._decide(task, rows) == "ROUTER VERS openrouter/fixture/vision-beta:free (preuve limitee : moins de 10 essais)"
 
 
 def test_checker_crash_does_not_break_the_bench(transport, providers_up, monkeypatch, tmp_path):
@@ -78,7 +83,7 @@ def test_checker_crash_does_not_break_the_bench(transport, providers_up, monkeyp
         EvalItem("x", MSG, lambda text: 1 / 0, max_tokens=50)])]
     monkeypatch.setitem(sys.modules, "crash_suite", module)
     transport.reply("{}")
-    result = bench.run_bench("crash_suite", ["ollama/qwen3.5-2b"], out_dir=tmp_path, log=lambda s: None)
+    result = bench.run_bench("crash_suite", ["openrouter/fixture/vision-beta:free"], out_dir=tmp_path, log=lambda s: None)
     assert result["rows"][0]["passed"] == 0
 
 
@@ -96,7 +101,7 @@ def test_bench_records_valid_structured_tool_call(transport, providers_up, monke
     monkeypatch.setitem(sys.modules, "tool_suite", module)
     transport.reply('{"action":"lookup_record","id":"R-17"}')
 
-    result = bench.run_bench("tool_suite", ["groq/gpt-oss-120b"], out_dir=tmp_path,
+    result = bench.run_bench("tool_suite", ["openrouter/fixture/text-gamma:free"], out_dir=tmp_path,
                              log=lambda s: None)
 
     assert result["rows"][0]["tool_valid"] is True

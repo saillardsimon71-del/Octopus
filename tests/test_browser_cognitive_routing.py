@@ -7,7 +7,7 @@ import pytest
 from agents import deepseek, runtime
 from octopus import browser_workspace as bw, catalog, journal, llm
 from octopus.pricing import Usage
-from browser_evidence import qualify
+from browser_evidence import qualify, prove
 
 
 def reply(transport, action=None):
@@ -19,7 +19,7 @@ def test_json_success_is_not_browser_qualification(transport, providers_up, monk
     reply(transport)
     with journal.run('a', 'test', profile='economical'):
         journal.record_bench_result({'ts': time.time(), 'bench_run_id': journal.current_run().id, 'suite': 'json',
-            'task': 'octopus.json', 'item': 'valid', 'model': 'openrouter/dots-3-free', 'passed': 1, 'score': 1.})
+            'task': 'octopus.json', 'item': 'valid', 'model': 'openrouter/fixture/text-delta:free', 'passed': 1, 'score': 1.})
         with pytest.raises(llm.NoEligibleModel):
             llm.complete('browser.react_step', [{'role': 'user', 'content': 'navigate'}], json_mode=True)
     assert transport.calls == []
@@ -34,10 +34,10 @@ def test_every_profile_requires_browser_evidence(profile, transport, providers_u
 
 
 def test_free_qualified_beats_equivalent_paid(transport, providers_up):
-    qualify('ollama/qwen3.5-4b'); qualify('deepseek/flash')
+    qualify('openrouter/fixture/vision-alpha:free'); qualify('deepseek/flash')
     reply(transport)
     c = llm.complete('browser.react_step', [], profile='economical')
-    assert c.model == 'ollama/qwen3.5-4b'
+    assert c.model == 'openrouter/fixture/vision-alpha:free'
     assert c.justification['browser_qualification']['eligible']
 
 
@@ -50,9 +50,9 @@ def test_qualified_paid_fallback_and_zero_cost_stays_free(transport, providers_u
 
 
 def test_technical_failure_keeps_existing_fallback(transport, providers_up):
-    qualify('ollama/qwen3.5-4b'); qualify('deepseek/flash')
+    qualify('openrouter/fixture/vision-alpha:free'); qualify('deepseek/flash')
     def handler(provider, request):
-        if request['model'] == 'qwen3.5:4b': raise ConnectionError('offline')
+        if request['model'] == 'fixture/vision-alpha:free': raise ConnectionError('offline')
         return '{}', Usage(prompt_tokens=10, completion_tokens=2)
     transport.handler = handler
     assert llm.complete('browser.react_step', [], profile='economical').model == 'deepseek/flash'
@@ -68,13 +68,13 @@ def test_latest_rerun_and_expiry_not_old_reputation():
     qualify('deepseek/flash')
     qualify('deepseek/flash', fail=('vision',))
     assert not llm.browser_quality(catalog.load().model('deepseek/flash'))['eligible']
-    qualify('ollama/qwen3.5-4b', age=15*86400)
-    assert not llm.browser_quality(catalog.load().model('ollama/qwen3.5-4b'))['eligible']
+    qualify('openrouter/fixture/vision-alpha:free', age=15*86400)
+    assert not llm.browser_quality(catalog.load().model('openrouter/fixture/vision-alpha:free'))['eligible']
 
 
 def test_pool_without_fixed_identity_never_acquires_qualification():
-    assert llm.browser_identity({'api_model': 'auto/best-free', 'provider': 'omniroute'}) is None
-    assert llm.browser_identity({'api_model': 'kilo-auto/free', 'provider': 'kilo'}) is None
+    assert llm.browser_identity({'api_model': 'openrouter/free', 'provider': 'openrouter'}) is None
+    assert llm.browser_identity({'api_model': 'auto', 'provider': 'openrouter'}) is None
 
 
 def test_resolved_identity_changed_is_blocked(transport, providers_up):
@@ -85,12 +85,10 @@ def test_resolved_identity_changed_is_blocked(transport, providers_up):
     assert journal.query('SELECT status FROM llm_calls')[-1]['status'] == 'blocked'
 
 
-def test_unknown_pool_bench_records_underlying_identity_only(transport, providers_up):
-    transport.handler = lambda provider, request: llm.TransportResult('{}', Usage(), request['model'],
-        resolved_model='underlying-v1', resolved_provider='vendor')
-    c = llm.complete('browser.bench_step', [], profile='bench', pin_model='kilo/auto-free')
-    assert llm.browser_identity(catalog.load().model(c.model), c.resolved_model) == 'browser.model:underlying-v1'
-    assert not llm.browser_quality(catalog.load().model(c.model))['eligible']
+def test_unknown_pool_never_executes_in_bench(transport, providers_up):
+    with pytest.raises(llm.NoEligibleModel):
+        llm.complete('browser.bench_step', [], profile='bench', pin_model='openrouter/openrouter/free')
+    assert not transport.calls
 
 
 @pytest.mark.parametrize('tool,args', [
@@ -144,7 +142,7 @@ def test_trace_never_logs_form_contents_secrets_or_image_bytes():
 
 
 def runtime_fake(monkeypatch, transport, pages, action_fn):
-    qualify('ollama/qwen3.5-4b', fail=('sufficient_dom',)); qualify('deepseek/flash')
+    qualify('openrouter/fixture/vision-alpha:free', fail=('sufficient_dom',)); qualify('deepseek/flash')
     calls=[]
     def handler(provider, request):
         calls.append(copy.deepcopy(request))
@@ -162,7 +160,7 @@ def test_escalation_retains_full_history_and_does_not_reset_browser(monkeypatch,
         if tool=='browser_click': state['clicked']+=1
         return {'ok':True,'url':'https://x.test/','snapshot':'Account visible [ref=e1]'}
     def action(request,n):
-        if request['model']=='qwen3.5:4b': return {'tool':'browser_click','args':{'ref':'e1'}}
+        if request['model']=='fixture/vision-alpha:free': return {'tool':'browser_click','args':{'ref':'e1'}}
         return {'final':'observed', 'objective_status':'completed','missing':[], 'evidence':[{'step':1,'quote':'Account visible'}]}
     calls=runtime_fake(monkeypatch, transport,page,action)
     checkpoints=[]
@@ -223,9 +221,9 @@ def test_browser_final_requires_grounding_and_acknowledges_missing():
 
 
 def test_escalation_resume_keeps_exclusions_and_does_not_replay_effect(monkeypatch,transport,providers_up):
-    qualify('ollama/qwen3.5-4b',fail=('sufficient_dom',));qualify('deepseek/flash')
+    qualify('openrouter/fixture/vision-alpha:free',fail=('sufficient_dom',));qualify('deepseek/flash')
     saved=[{'step':1,'tool':'browser_click','args':{'ref':'e1'},'result_data':{'ok':True,'url':'https://x.test/','snapshot':'Existing evidence'},
-            'result':'Existing evidence','browser_controller':{'escalation':True,'excluded_models':['ollama/qwen3.5-4b'],'min_quality':.9}}]
+            'result':'Existing evidence','browser_controller':{'escalation':True,'excluded_models':['openrouter/fixture/vision-alpha:free'],'min_quality':.9}}]
     def respond(provider,request):
         assert request['model']=='deepseek-flash'
         assert 'Existing evidence' in json.dumps(request['messages'])
@@ -259,6 +257,7 @@ def test_incomplete_browser_cannot_be_embellished_by_synthesis(monkeypatch):
 
 def test_task16_technically_ok_sequence_cannot_qualify_mouse_controller(monkeypatch,transport,providers_up):
     monkeypatch.setenv('OPENROUTER_API_KEY','offline-fixture')
+    prove('octopus.json', 'openrouter/fixture/text-delta:free')
     sequence=[{'tool':'browser_navigate','args':{'url':'https://market.example/'}},
               {'tool':'browser_click','args':{'ref':'e34','channel_id':'symbol','effect':'navigate'}},
               {'tool':'browser_click','args':{'ref':'e34'}},
@@ -273,12 +272,12 @@ def test_task16_technically_ok_sequence_cannot_qualify_mouse_controller(monkeypa
     transport.handler=handler
     for _ in sequence:
         c=llm.complete('agent.react_step',[],profile='economical',json_mode=True,validate=llm.parse_json)
-        assert c.model=='openrouter/dots-3-free'
+        assert c.model=='openrouter/fixture/text-delta:free'
     assert all(r['status']=='ok' for r in journal.query("SELECT status FROM llm_calls WHERE task='agent.react_step'"))
     qualify('deepseek/flash')
     c=llm.complete('browser.react_step',[],profile='economical',json_mode=True,validate=llm.parse_json)
     assert c.model=='deepseek/flash'
-    assert not llm.browser_quality(catalog.load().model('openrouter/dots-3-free'))['eligible']
+    assert not llm.browser_quality(catalog.load().model('openrouter/fixture/text-delta:free'))['eligible']
 
 
 def test_unsupported_screenshot_is_recoverable_without_human(monkeypatch,transport,providers_up):

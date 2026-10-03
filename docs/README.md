@@ -19,7 +19,7 @@ La documentation est organisée pour distinguer **état courant**, **runbooks te
 ## Installation / exploitation
 
 - `LOCAL_SETUP.md` - poste Windows et control-plane;
-- `OMNIROUTE_SETUP.md` - gateway LLM;
+- `OPENROUTER_CATALOG.md` - catalogue LLM dynamique, qualification et protocole Windows;
 - `RESOURCES.md` - inventaire de ressources réelles;
 - `GUI.md` - Workbench;
 - `ORCA_INTEGRATION.md` - pont de développement optionnel.

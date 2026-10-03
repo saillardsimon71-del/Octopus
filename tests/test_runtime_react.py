@@ -552,22 +552,16 @@ def test_legacy_podalux_prompt_does_not_change_with_search_freshness(monkeypatch
     assert "DATE ACTUELLE" not in system
 
 
-def test_agent_profiles_have_omniroute_auto_free_fallback(monkeypatch):
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
-    monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
+def test_agent_profiles_have_dynamic_free_candidates():
     cat = catalog.load()
-
-    for task_name in ("agent.react_step", "agent.plan", "agent.synthesize"):
+    for task_name in ('agent.react_step', 'agent.plan', 'agent.synthesize'):
         task = cat.task(task_name)
-        for profile_name in ("zero_cost", "low_cost", "flash_fallback"):
-            assert task["candidates"][profile_name][:2] == [
-                "omniroute/devworker-groq",
-                "omniroute/auto-free",
-            ]
-
-    assert cat.model("kilo/auto-free")["api_model"] == "kilo-auto/free"
-    assert cat.model("kilo/ling-3.0-flash-vl-free") is None
-    assert cat.task("web.inspect_page")["needs"] == []
+        for profile_name in ('zero_cost', 'low_cost', 'flash_fallback'):
+            candidates = task['candidates'][profile_name]
+            free = [mid for mid in candidates if cat.model(mid)['provider'] == 'openrouter']
+            assert free and candidates[:len(free)] == free
+            assert all(cat.model(mid)['free_verified'] for mid in free)
+    assert cat.task('web.inspect_page')['needs'] == []
 
 
 def test_mission_profile_is_inherited_by_all_llm_calls(monkeypatch):
@@ -1171,8 +1165,8 @@ def test_mission_keeps_subagent_results_when_synthesis_gateway_fails(monkeypatch
     def call_json(agent, task, model, messages, **kwargs):
         if task == "synthese":
             raise llm.NoEligibleModel("agent.synthesize", "zero_cost", [
-                {"model": "omniroute/devworker-groq", "reason": "structured output failed"},
-                {"model": "kilo/ling-3.0-flash-vl-free", "reason": "structured output failed"},
+                {"model": "openrouter/fixture/text-delta:free", "reason": "structured output failed"},
+                {"model": "openrouter/fixture/text-gamma:free", "reason": "structured output failed"},
             ])
         return next(actions)
 

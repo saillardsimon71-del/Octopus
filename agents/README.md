@@ -4,9 +4,10 @@
 > offres et évaluations existants restent disponibles. Les commandes cycle/batch,
 > les outils render_offer/qc et le Studio de génération ont été supprimés.
 
-Les appels LLM normaux passent par OmniRoute en `zero_cost` ; le premier démarrage autonome
-utilise `economical` via la même passerelle. La frontière Agnes sera
-traitée dans la phase C ; aucune génération vidéo n'est disponible à la fin de la phase B.
+Les appels LLM normaux passent par `octopus.llm` en `zero_cost`.
+OpenRouter fournit les modèles gratuits découverts ; DeepSeek direct reste
+un repli payé sous profil humain explicite et budget. Une découverte ne prouve
+ni la qualité par tâche, ni la compétence computer-use.
 
 ## Roster
 
@@ -21,30 +22,15 @@ traitée dans la phase C ; aucune génération vidéo n'est disponible à la fin
 
 ## Architecture LLM
 
-```text
-agents/deepseek.py
-       ↓
-  octopus.llm
-       ↓
-OmniRoute localhost
-       ↓
- model virtuel auto/free
-       ↓
- provider gratuit disponible
-```
+`agents/deepseek.py` conserve les signatures existantes et délègue à `octopus.llm`.
+Deux fournisseurs actifs : OpenRouter et DeepSeek direct. Les candidats OpenRouter
+viennent de `/api/v1/models`, filtrés par prix nuls et capacités observées.
+Les tâches déclarent leurs besoins ; les bancs fournissent les preuves.
 
-Le profil par défaut des agents devient `zero_cost` lorsque `OMNIROUTE_ENABLED=1`. Dans ce profil, un provider payant n'est jamais sélectionné automatiquement. Une panne du pool gratuit produit un échec explicite.
-
-Variables locales :
-
-```text
-OMNIROUTE_ENABLED=1
-OMNIROUTE_BASE_URL=http://127.0.0.1:20128/v1
-OMNIROUTE_MODEL=auto/free
-OMNIROUTE_API_KEY=<secret runtime uniquement>
-```
-
-La clé ne doit jamais entrer dans Git.
+Secrets runtime uniquement : `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`.
+`zero_cost` ne déclenche aucun repli payant. `browser.react_step` exige
+`browser.trajectory/browser-v1`, y compris sous pin, legacy ou profil payant.
+Voir [catalogue, cache et qualification](../docs/OPENROUTER_CATALOG.md).
 
 ## Centre de travail GUI
 
@@ -106,7 +92,7 @@ Voir `../docs/migrations/VIDEO_ENGINE_REMOVAL.md` pour le périmètre et les lim
 - redirections HTTP contrôlées saut par saut ;
 - navigations et appels actifs (`fetch`, `xhr`, `websocket`, `eventsource`, `beacon`) soumis au `web_guard` ;
 - lecture de compte suivie d'une restriction empêchant la sortie vers des domaines publics dans le même contexte ;
-- `see()` capture la page et utilise le routage vision OCTOPUS ; compte = tâche sensible/local, page publique = `web.inspect_page`/OmniRoute quand disponible ;
+- `see()` capture la page et utilise le routage vision OCTOPUS ; compte = tâche sensible refusée par le routage cloud normal, page publique = `web.inspect_page` sous sa politique ;
 - `handoff()` pour login, 2FA, CAPTCHA et validation humaine.
 
 Tests : `tests/test_browser_integration.py` vérifie redirection tierce, navigation script et exfiltration `fetch`.
@@ -145,7 +131,7 @@ Après installation des paquets Python :
 python -m playwright install chromium
 ```
 
-Docker Desktop + OmniRoute restent requis pour le routage LLM local. Pour le cycle vidéo cloud, `PODALUX_RUNPOD_ENDPOINT_ID` et `PODALUX_RUNPOD_API_TOKEN` doivent être présents.
+Le routage LLM utilise les deux API directement. Pour le cycle vidéo cloud, `PODALUX_RUNPOD_ENDPOINT_ID` et `PODALUX_RUNPOD_API_TOKEN` doivent être présents.
 
 Orca est installé séparément uniquement pour les workflows de développement qui l'utilisent.
 

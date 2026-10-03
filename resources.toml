@@ -220,14 +220,6 @@ needs = ["login", "2fa"]
 
 # --- moyens techniques ---
 [[resource]]
-key = "omniroute"
-kind = "passerelle_llm"
-label = "OmniRoute (passerelle LLM locale)"
-locator = "http://127.0.0.1:20128/v1/models"
-capabilities = ["llm", "routage_gratuit"]
-probe = "http"
-
-[[resource]]
 key = "openrouter"
 kind = "passerelle_llm"
 label = "OpenRouter"

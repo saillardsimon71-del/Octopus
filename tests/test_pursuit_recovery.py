@@ -26,6 +26,8 @@ def test_complete_synthesis_beyond_old_1600_token_limit(monkeypatch, transport, 
     """A transport truncates at its requested quota; this tests serialization, not model quality."""
     import requests
     import socket
+    from agents import agent_browser
+    monkeypatch.setattr(agent_browser, "availability", lambda: {"ready": False})
     monkeypatch.setattr(requests.sessions.Session, "request", lambda *a, **k: pytest.fail("real HTTP"))
     monkeypatch.setattr(socket.socket, "connect", lambda *a, **k: pytest.fail("real network"))
     monkeypatch.setattr(supervisor, "PURSUIT_ROUNDS", 1)
@@ -468,6 +470,10 @@ def test_persistent_technical_llm_failures_pause_after_three_cycles_without_huma
 @pytest.mark.parametrize("failure", ["structured_400", "invalid_json", "429", "provider_down"])
 def test_real_gateway_supervisor_path_recovers_without_live_provider(monkeypatch, transport, providers_up, failure):
     """Real routing/contracts, fake HTTP transport, real durable worker and supervisor."""
+    from browser_evidence import prove
+    for task in ("agent.plan", "agent.react_step", "agent.synthesize"):
+        for mid in ("openrouter/fixture/text-delta:free", "openrouter/fixture/text-gamma:free"):
+            prove(task, mid)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     failed = False
     searches = []

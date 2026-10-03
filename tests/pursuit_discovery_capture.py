@@ -51,6 +51,6 @@ with tempfile.TemporaryDirectory() as data:
              'business_signal_target':captured['kwargs'].get('business_signal_target'),
              'provider_calls':0,'quality_benchmark':False}
     out=Path(sys.argv[2]);out.mkdir(exist_ok=True)
-    (out/'capture.json').write_text(serialized(captured))
-    (out/'metrics.json').write_text(serialized(metrics))
+    (out/'capture.json').write_text(serialized(captured), encoding='utf-8')
+    (out/'metrics.json').write_text(serialized(metrics), encoding='utf-8')
     print(serialized(metrics))

@@ -1,26 +1,52 @@
-# Routage LLM du profil economical
+# Politique de routage LLM
 
-Le routage d'un appel logique est : tâche -> meilleur gratuit qualifié et disponible -> un autre gratuit qualifié -> DeepSeek Flash sous le plafond du run. La limite est de deux routes gratuites et trois requêtes gratuites au total : une route peut essayer une seconde méthode de sortie si la première est incompatible. Chaque modèle essaie au plus deux méthodes ; DeepSeek reste le seul repli payant. Un seul repair local des caractères de contrôle JSON est possible par appel logique, sans nouvelle requête et avec validation du contrat.
+Le runtime utilise deux fournisseurs : OpenRouter gratuit et DeepSeek direct.
+Le profil normal est `zero_cost`. Les crédits OpenRouter ne constituent jamais
+une autorisation de choisir un modèle payant. Une clé DeepSeek ne suffit pas
+à autoriser le paiement : profil humain explicite et budgets restent nécessaires.
 
-Le classement lit le dernier banc par tâche et modèle, puis les appels réels des dernières 24 heures. Il tient compte du taux de réussite, des sorties JSON et tool-call du banc, du taux de succès récent et de la latence. Une route avec au moins deux essais et moins de 90 % de réussite est retirée du pool pour ce type de tâche. Le journal conserve les routes, refus, coûts, usages, replis et raisons de choix. Le Workbench V2 reprend ces informations sans panneau supplémentaire.
+Les tâches déclarent leurs besoins dans le catalogue canonique. Les candidats
+OpenRouter sont construits à partir des métadonnées de `/api/v1/models`, avec
+prix finis nuls et identité fixe. Le nom du modèle ne détermine aucune capacité.
+Une découverte ne crée aucune preuve. Les tâches sensibles ne gagnent pas
+de nouveau candidat cloud.
 
-| Type de tâche | Premier gratuit observé | Second gratuit | Repli |
-|---|---|---|---|
-| plan | OpenRouter Dots | aucun autre gratuit qualifié actuellement | DeepSeek Flash |
-| action JSON, synthèse, extraction | OmniRoute Groq | OpenRouter Dots | DeepSeek Flash |
-| tool-call structuré | OmniRoute Groq | aucun autre gratuit qualifié actuellement | DeepSeek Flash |
-| décision stratégique avec preuve incomplète | - | - | DeepSeek Flash directement |
+Les preuves générales sont enregistrées sur l'identifiant exact et le modèle
+canonique. Le seuil reste cinq essais, au moins 90 %, dans les 60 jours.
+Le profil `economical` n'exempte plus OpenRouter de cette preuve : il lit la
+tâche demandée et ses tâches d'évaluation correspondantes. Les derniers
+résultats et la santé récente ordonnent les gratuits éligibles.
 
-Cet ordre provient du dernier banc et peut changer avec les appels observés. Qwen direct a subi des 429 répétés ; il reste écarté des tâches courantes tant que sa disponibilité n'est pas requalifiée. Dots ne prend pas en charge le tool-call structuré testé. `auto/best-free` a été moins fiable que la route OmniRoute Groq dédiée. La décision difficile garde DeepSeek Flash même si les gratuits ont réussi les deux exemples publics : cet échantillon est trop étroit pour leur confier une décision de mission.
+`economical` borne chaque appel logique à deux routes gratuites et trois
+requêtes gratuites, au plus deux méthodes par modèle, puis DeepSeek seul
+sous budget. Un repair local de caractères de contrôle ne fait aucun nouvel
+appel. Les plafonds de sortie restent 500 tokens pour une action, 700 pour un
+plan et 1600 pour une synthèse. `quality_first` conserve la préférence payante
+explicite et peut se replier sur un gratuit qualifié si le budget bloque.
 
-OpenRouter direct accepte uniquement les identifiants `:free` du catalogue, envoie `provider.max_price.prompt=0` et `provider.max_price.completion=0`, puis exige un coût retourné de 0, un modèle résolu `:free` et un fournisseur résolu. Tout manque ou coût positif bloque la réponse et suspend OpenRouter pendant une heure. Les deux modèles sont `dots-studio/dots-3-note-preview:free` pour JSON, extraction et synthèse, et `qwen/qwen3.8-27b:free` pour le tool-call quand il n'est pas limité. Le coût de la réponse est contrôlé après facturation ; le plafond de prix côté OpenRouter est la protection avant l'appel. L'API `/api/v1/key` indiquait un usage de 0 USD après qualification.
+Avant une requête OpenRouter, les prix du catalogue doivent être nuls et
+`provider.max_price` impose prompt=0 et completion=0. Après réponse, coût
+observé fini exactement nul, fournisseur amont et identité attendue sont
+obligatoires. Une réponse payante ou ambiguë est refusée et suspend OpenRouter.
+Le contrôle de réponse survient après l'appel ; il ne peut annuler une
+facturation incorrecte du fournisseur. Aucun retry payant implicite n'existe.
 
-Les 429 respectent `Retry-After` numérique ou HTTP-date, avec un plancher de 30 secondes. Un 429 lié au quota du compte écarte les routes partageant le provider ; un 429 lié au pool amont écarte seulement le modèle. Les cooldowns sont enregistrés dans `llm_calls` et retrouvés après redémarrage. Le transport n'effectue aucun retry automatique dans `economical` et `bench` ; le gateway peut tenter un seul autre gratuit avant DeepSeek. Une incompatibilité de sortie structurée peut déclencher une seconde méthode du même modèle ; une sortie JSON avec caractères de contrôle non échappés peut être corrigée localement une fois, puis revalidée.
+Les 429 respectent `Retry-After` numérique ou HTTP-date avec un plancher de
+30 secondes. Un quota compte suspend les routes OpenRouter ; un quota pool
+amont suspend le modèle. Les cooldowns persistent dans `llm_calls`.
+Le transport ne fait aucun retry automatique sous `economical` ou `bench`.
 
-Le banc s'exécute avec `python -m octopus bench --suite octopus.octopus_evals --models groq/gpt-oss-120b,openrouter/qwen3.8-27b-free,openrouter/dots-3-free,omniroute/devworker-groq,omniroute/auto-free,deepseek/flash --repeats 2 --allow-paid --max-cost 0.05`. Il teste sept tâches publiques : plan structuré, action JSON, tool-call `search`, extraction Web fournie, rapport de synthèse, détermination et critique. Les checks déterministes valident les contrats du runtime, faits, contraintes et appels d'outil ; décision et critique utilisent des repères lexicaux explicites. Les sorties comprennent par appel succès, score, validité JSON/tool-call, tokens, cache, coûts observé/calculé, 429, timeout, 5xx, retries et replis ; la matrice fournit p50/p95. Deux essais par couple donnent une qualification provisoire et doivent être réévalués si la disponibilité change.
+`browser.react_step` exige toujours `browser.trajectory/browser-v1`, quel
+que soit le profil, le pin ou le baseline DeepSeek. Les dix scénarios doivent
+être couverts, le score moyen atteindre 90 %, les scénarios critiques réussir
+et la suite être complète. Ni le JSON, ni tools, ni un faible prix ne donnent
+cette qualification. Le benchmark exige une shortlist et un plafond global
+`--max-requests`, indépendant de `--max-cost`.
+
+[Découverte, cache, identités et protocole Windows](OPENROUTER_CATALOG.md).
+
+## Mesures historiques de septembre, sans valeur de qualification courante
 
 Sur tous les appels de qualification de cette intervention, y compris les essais de réduction des prompts, le journal totalise 0.008951724 USD, uniquement sur DeepSeek. La dernière matrice consolidée compte 14/14 réussites pour DeepSeek Flash, 13/14 pour OmniRoute Groq, 12/14 pour OpenRouter Dots et 1/14 pour OpenRouter Qwen (429 inclus). Ces taux concernent les petits exemples du banc, pas une estimation de fiabilité en production.
 
 Le parcours autonome réduit les messages d'action répétés, garde les deux derniers tours d'outil complets et transmet une sélection bornée des faits et URL antérieurs. La synthèse utilise les handoffs compacts. Les plafonds de sortie `economical` sont 500 tokens pour une action, 700 pour un plan et 1600 pour la synthèse. Sur un scénario public de huit observations, les appels DeepSeek ont utilisé 2062 -> 995 tokens d'entrée, 21 -> 21 tokens de sortie et 0.0006438 -> 0.0003237 USD ; les deux réponses donnaient le prix et l'URL attendus. La latence de cet échantillon est 2958 -> 3838 ms, sans gain démontré.
-
-Limites : la clé Groq directe est absente sur cet hôte ; Groq est évalué via la route dédiée OmniRoute. `auto/best-free` et Qwen direct ont montré des échecs/429 et ne sont pas des routes par défaut. Le banc ne prouve pas une fiabilité de production avec deux répétitions. Aucun run autonome n'a été lancé pour cette qualification.

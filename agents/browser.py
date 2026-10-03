@@ -928,8 +928,7 @@ class BrowserTool:
                     txt = deepseek.vision_text(agent, task, [str(shot)], prompt)
             else:
                 # Pour le web public, le DOM est déjà la preuve primaire. Le passer comme contenu texte
-                # évite d'envoyer un message multimodal à une route OmniRoute qui peut résoudre vers un
-                # modèle texte uniquement ("messages[0].content must be a string").
+                # suffit pour cette inspection textuelle sans requête multimodale.
                 page_text = self.snapshot(6000)
                 inspection_prompt = (
                     f"{prompt}\n\n"

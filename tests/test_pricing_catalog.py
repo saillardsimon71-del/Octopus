@@ -76,8 +76,7 @@ def test_real_catalog_is_valid_and_consistent():
     assert "paid" not in raw["profiles"]["zero_cost"]["allowed_cost_classes"]
 
 
-def test_flash_fallback_profile_uses_only_flash_as_paid_agent_fallback(monkeypatch):
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+def test_flash_fallback_profile_uses_only_flash_as_paid_agent_fallback():
     cat = catalog.load()
 
     assert cat.profile("flash_fallback")["fallback"] is True
@@ -85,7 +84,7 @@ def test_flash_fallback_profile_uses_only_flash_as_paid_agent_fallback(monkeypat
 
     for task_name in ("agent.react_step", "agent.plan", "agent.synthesize"):
         candidates = cat.task(task_name)["candidates"]["flash_fallback"]
-        assert candidates[0] == "omniroute/devworker-groq"
+        assert cat.model(candidates[0])["provider"] == "openrouter"
         paid = [model_id for model_id in candidates if cat.model(model_id)["cost_class"] == "paid"]
         assert paid == ["deepseek/flash"]
         assert "deepseek/v4-pro" not in candidates
@@ -100,13 +99,11 @@ def test_legacy_task_mapping():
     assert cat.legacy_task("LEDGER", "inconnue") == "legacy.ledger.inconnue"
 
 
-def test_flash_fallback_public_inspection_is_free_first(monkeypatch):
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+def test_flash_fallback_public_inspection_is_free_first():
     cat = catalog.load()
-    assert cat.task("web.inspect_page")["candidates"]["flash_fallback"] == [
-        "omniroute/auto-free",
-        "deepseek/flash",
-    ]
+    candidates = cat.task("web.inspect_page")["candidates"]["flash_fallback"]
+    assert candidates[-1] == "deepseek/flash"
+    assert all(cat.model(mid)["provider"] == "openrouter" for mid in candidates[:-1])
 
 
 @pytest.mark.parametrize("mutate, message", [

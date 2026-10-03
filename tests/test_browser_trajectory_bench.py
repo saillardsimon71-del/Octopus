@@ -1,5 +1,6 @@
 """Offline harness tests: synthetic decisions prove machinery, never a real model's quality."""
 import base64
+import contextlib
 import io
 import json
 import re
@@ -155,6 +156,59 @@ def test_missing_backend_fails_before_any_provider_call(monkeypatch,transport):
     assert not transport.calls
 
 
+def test_request_cap_counts_structured_retries_and_invalidates_partial_run(monkeypatch, transport, providers_up, tmp_path):
+    mid = 'openrouter/fixture/vision-alpha:free'
+    qualify(mid)
+    monkeypatch.setattr(agent_browser, 'require_backend', lambda: None)
+    original = bb.local_workspace
+    def workspace(fixture):
+        monkeypatch.setattr(agent_browser, 'Session', lambda *a, **k: FixtureSession(fixture))
+        return original(fixture)
+    monkeypatch.setattr(bb, 'local_workspace', workspace)
+    class UnsupportedFormat(Exception):
+        status_code = 400
+        body = {'error': {'message': 'response_format is not supported'}}
+    transport.handler = lambda provider, request: UnsupportedFormat('400')
+    logs = []
+    result = bb.run([mid, 'openrouter/fixture/vision-beta:free'], repeats=2,
+                    max_requests=1, max_cost_usd=0, out_dir=tmp_path, log=logs.append)
+    assert result['requests_used'] == len(transport.calls) == 1
+    assert result['incomplete'] and len(result['rows']) == 1
+    assert result['preflight']['trajectories'] == 40
+    assert result['preflight']['step_requests_upper_bound'] == 480
+    assert result['preflight']['structured_requests_upper_bound'] == 960
+    assert logs[0].startswith('Preflight: ')
+    checks = json.loads(result['rows'][0]['checks'])
+    assert checks['benchmark_incomplete'] and checks['calls'] == 1
+    assert not llm.browser_quality(catalog.load().model(mid))['eligible']
+    assert result['summaries'][0]['cost_per_completed_objective_usd'] is None
+    assert not journal.query('SELECT * FROM operational_mandates')
+
+
+@pytest.mark.parametrize('limit', [0, -1, True, 1.5])
+def test_invalid_request_ceiling_fails_before_backend_or_provider(limit, monkeypatch, transport):
+    monkeypatch.setattr(agent_browser, 'require_backend', lambda: pytest.fail('backend contacted'))
+    with pytest.raises(ValueError, match='max_requests'):
+        bb.run(['deepseek/flash'], allow_paid=True, max_requests=limit)
+    assert not transport.calls
+
+
+@pytest.mark.parametrize('failure', [TimeoutError, llm.BudgetExceeded])
+def test_failed_rerun_does_not_retain_browser_qualification(failure, monkeypatch, tmp_path):
+    mid = 'openrouter/fixture/vision-alpha:free'
+    qualify(mid)
+    monkeypatch.setattr(agent_browser, 'require_backend', lambda: None)
+    def fail(*args, **kwargs):
+        raise failure('fixture')
+    monkeypatch.setattr(bb, 'trajectory', fail)
+    monkeypatch.setattr(bb, 'local_workspace', lambda fixture: contextlib.nullcontext(None))
+    result = bb.run([mid], max_cost_usd=0, out_dir=tmp_path, log=lambda line: None)
+    assert not llm.browser_quality(catalog.load().model(mid))['eligible']
+    assert all(not row['passed'] for row in result['rows'])
+    if failure is llm.BudgetExceeded:
+        assert result['incomplete'] and len(result['rows']) == 1
+
+
 def test_live_stagnation_is_separate_from_provider_health_and_rerun_can_restore():
     identity=qualify('deepseek/flash')
     for step in (1,2):
@@ -167,9 +221,9 @@ def test_live_stagnation_is_separate_from_provider_health_and_rerun_can_restore(
 
 
 def test_multimodal_escalation_delivers_real_png_and_keeps_capture_history(monkeypatch,transport,providers_up):
-    qualify('ollama/qwen3.5-4b',fail=('sufficient_dom',))
+    qualify('openrouter/fixture/vision-alpha:free',fail=('sufficient_dom',))
     qualify('deepseek/flash')
-    qualify('groq/gpt-oss-120b')  # Synthetic proof; capabilities still forbid this text-only model after image.
+    qualify('openrouter/fixture/text-gamma:free')  # Synthetic proof; capabilities still forbid this text-only model after image.
     with bb.Fixture('vision') as fixture:
         session=FixtureSession(fixture)
         monkeypatch.setattr(agent_browser,'Session',lambda *a,**k:session)
