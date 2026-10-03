@@ -186,7 +186,8 @@ def test_runtime_refuses_effect_even_when_model_asks_and_exposes_request(monkeyp
                 return {"tool": "request_spend", "args": {"amount": 1.0, "currency": "EUR", "reason": "dépense"}}
             return {"final": "Action refusée"}
         return result()
-    monkeypatch.setattr(deepseek, "call_json", model)
+    from browser_evidence import adapt_decider
+    monkeypatch.setattr(deepseek, "call_json", adapt_decider(model))
     monkeypatch.setattr(browser_workspace, "call", lambda *a, **k: pytest.fail("Effet interdit exécuté"))
     oid = supervisor.start_pursuit("Préparer une proposition")
     supervisor.run_pursuit(oid)
@@ -210,7 +211,8 @@ def test_invalid_tool_call_can_recover_without_human_request(monkeypatch, bad_ac
             return next(actions)
         return result()
 
-    monkeypatch.setattr(deepseek, "call_json", model)
+    from browser_evidence import adapt_decider
+    monkeypatch.setattr(deepseek, "call_json", adapt_decider(model))
     monkeypatch.setitem(runtime.TOOLS["search"], "fn", lambda args: {"ok": True, "query": args["query"]})
     oid = supervisor.start_pursuit("Chercher une source publique")
     supervisor.run_pursuit(oid)
@@ -243,7 +245,8 @@ def test_unresolvable_browser_host_can_use_public_alternative_without_human_requ
             return {"ok": False, "refused": True, "reason": "hôte non résolvable : unresolvable.example"}
         return {"ok": True, "url": kwargs["url"], "snapshot": "Observation publique alternative"}
 
-    monkeypatch.setattr(deepseek, "call_json", model)
+    from browser_evidence import adapt_decider
+    monkeypatch.setattr(deepseek, "call_json", adapt_decider(model))
     monkeypatch.setattr(browser_workspace, "call", navigate)
     oid = supervisor.start_pursuit("Observer une source publique")
     supervisor.run_pursuit(oid)
@@ -323,7 +326,8 @@ def test_real_hermes_observation_is_visible_in_workbench(monkeypatch):
             assert "Demande locale de traduction" in json.dumps(messages, ensure_ascii=False)
             return result()
         raise AssertionError(stage)
-    monkeypatch.setattr(deepseek, "call_json", model)
+    from browser_evidence import adapt_decider
+    monkeypatch.setattr(deepseek, "call_json", adapt_decider(model))
     try:
         oid = supervisor.start_pursuit("Observer une possibilité sur " + origin)
         supervisor.run_pursuit(oid)

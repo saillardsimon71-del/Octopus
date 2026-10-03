@@ -346,7 +346,11 @@ class Session:
         if timed_out:
             return {"success": False, "error": f"délai de {timeout:.0f} s dépassé pour {command!r}",
                     "indeterminate": True}
-        result = unwrap_batch_result(interpret_output(command, stdout, stderr, proc.returncode), command)
+        parsed = interpret_output(command, stdout, stderr, proc.returncode)
+        # Explicit read-only batches need every result; shim single-command batches
+        # continue to unwrap exactly one response as before.
+        result = ({'success': True, 'data': {'results': parsed}} if command == 'batch' and isinstance(parsed, list)
+                  else unwrap_batch_result(parsed, command))
         if command == "open" and result.get("success"):
             self._opened = True
         return result

@@ -364,6 +364,8 @@ def test_human_public_login_dependencies_never_expand_agent_authority(monkeypatc
         resources.account_task(BUSINESS, key, 'Observer le compte')
     mandates.grant(BUSINESS, 'Lecture simulée', 'owned_account', ['read'], actor='human', resource_keys=[key])
     monkeypatch.setattr(agent_browser, 'Session', FakeAccountSession)
+    from browser_evidence import qualify
+    qualify('deepseek/flash')
     calls = 0
     def respond(provider, request):
         nonlocal calls
@@ -371,11 +373,11 @@ def test_human_public_login_dependencies_never_expand_agent_authority(monkeypatc
         assert FakeAccountSession.secret not in content
         if request['max_tokens'] == 700:
             output = {'tasks': [{'role': 'SOUT', 'task': 'Lire le compte et constater le périmètre'}]}
-        elif request['max_tokens'] == 500:
+        elif request['max_tokens'] in (500,1200):
             output = [
                 {'tool': 'browser_navigate', 'args': {'url': verified}},
                 {'tool': 'browser_navigate', 'args': {'url': flow[2]}},
-                {'final': 'Lecture du compte ; navigation OAuth refusée'}][calls]
+                {'final': 'Lecture du compte ; navigation OAuth refusée', 'objective_status': 'completed', 'missing': [], 'evidence': [{'step': 1, 'quote': 'Déconnexion'}]}][calls]
             if calls == 2:
                 assert 'refus' in content.lower()
             calls += 1
@@ -383,7 +385,7 @@ def test_human_public_login_dependencies_never_expand_agent_authority(monkeypatc
             assert request['max_tokens'] == 4000
             output = {'rapport': 'Compte observé ; OAuth reste inaccessible à la tâche agent.'}
         return llm.TransportResult(json.dumps(output), Usage(prompt_tokens=20, completion_tokens=20),
-            request['model'], resolved_provider='OfflineFake', provider_cost_usd=0.)
+            request['model'], resolved_model=request['model'], resolved_provider='OfflineFake', provider_cost_usd=0.)
     transport.handler = respond
     before_instances = len(FakeAccountSession.instances)
     result = resources.account_task(BUSINESS, key, 'Lire le compte et tester le périmètre')
@@ -852,6 +854,9 @@ def test_hub_account_pursuit_long_synthesis_and_recovery(monkeypatch, transport,
                      ('account_task', account_work), ('browser_navigate', authenticated_observation)]:
         monkeypatch.setitem(runtime.TOOLS, name, {**runtime.TOOLS[name], 'fn': fn})
 
+    from browser_evidence import qualify
+    qualify('deepseek/flash')
+
     def respond(provider, request):
         maximum = request['max_tokens']
         messages = json.dumps(request['messages'], ensure_ascii=False)
@@ -859,13 +864,13 @@ def test_hub_account_pursuit_long_synthesis_and_recovery(monkeypatch, transport,
         if maximum == 700:
             assert not state['resumed']
             output = {'tasks': [{'role': 'SOUT', 'task': 'Observer le compte' if state['child'] else 'Observer les demandes B2B'}]}
-        elif maximum == 500:
+        elif maximum in (500,1200):
             assert not state['resumed']
             if state['child']:
                 index = state['child_actions']
                 state['child_actions'] += 1
                 output = ({'tool': 'browser_navigate', 'args': {'url': URL}} if index == 0
-                          else {'final': 'Déconnexion · Compte B2B, observation authentifiée conservée'})
+                          else {'final': 'Déconnexion · Compte B2B, observation authentifiée conservée', 'objective_status': 'completed', 'missing': [], 'evidence': [{'step': 1, 'quote': 'Déconnexion'}]})
             else:
                 index = state['outer_actions']
                 state['outer_actions'] += 1
@@ -883,10 +888,10 @@ def test_hub_account_pursuit_long_synthesis_and_recovery(monkeypatch, transport,
                 assert 'authentifiées conservées' in messages.lower()
                 text = answer[:1600 * 4] if resume_truncated and not state['resumed'] else answer
                 return llm.TransportResult(text, Usage(prompt_tokens=100, completion_tokens=(len(text)+3)//4),
-                    request['model'], resolved_provider='OfflineFake', provider_cost_usd=.002)
+                    request['model'], resolved_model=request['model'], resolved_provider='OfflineFake', provider_cost_usd=.002)
         text = json.dumps(output, ensure_ascii=False)
         return llm.TransportResult(text, Usage(prompt_tokens=100, completion_tokens=(len(text)+3)//4),
-            request['model'], resolved_provider='OfflineFake', provider_cost_usd=.001)
+            request['model'], resolved_model=request['model'], resolved_provider='OfflineFake', provider_cost_usd=.001)
 
     transport.handler = respond
     oid = supervisor.start_pursuit(business=business)

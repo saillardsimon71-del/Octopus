@@ -624,7 +624,7 @@ def verify_account_connection(key, *, actor, session_factory=None):
                 verification = {'method': 'human_hint', 'state': 'authenticated'}
         reason = diagnostic['reason']
         status = ('connected' if ok else 'connection_required' if reason in ('challenge_detected', 'semantic_uncertain', 'sensitive_surface')
-                  else 'unavailable' if reason in ('backend_error', 'semantic_backend_error') else 'expired')
+                  else 'unavailable' if reason in ('backend_error', 'semantic_backend_error', 'semantic_browser_unqualified') else 'expired')
         set_account_session(key, status, detail=reason, verification=verification)
     except Exception:
         ok = False
@@ -707,19 +707,46 @@ def _semantic_account_page(session, account, key, diagnostic):
                 'Aucune action, login, résolution de challenge ni secret. Un challenge exige un humain.'},
                 {'role': 'user', 'content': json.dumps({'domains': account['domains'],
                     'optional_hint': account.get('authenticated_text', ''), 'observation': snapshot()}, ensure_ascii=False)}]
-            for _ in range(6):  # Same bounded observation loop as account work, no scripted UI sequence.
+            trajectory = bw.BrowserTrajectory()
+            trajectory.record('browser_snapshot', {}, json.loads(messages[-1]['content'])['observation'])
+            def trace_decision(completion, step, tool, args, observation):
+                trace = {**trajectory.record(tool, args, observation), 'step': step,
+                    'model': completion.model, 'provider': completion.provider,
+                    'requested_model': completion.requested_model, 'resolved_model': completion.resolved_model,
+                    'resolved_provider': completion.resolved_provider, 'call_id': completion.call_id,
+                    'cost_usd': completion.cost_usd, 'qualification': completion.justification.get('browser_qualification'),
+                    'selection_reason': completion.justification.get('selection_reason'), 'tool': tool,
+                    'validated_args': bw.trace_args(args), 'screenshot_used': bool(llm._prompt_size(messages)[1]),
+                    'controller_scope': 'account.verify', 'escalations': trajectory.escalations}
+                if tool == 'browser_verify' and args.get('state') != 'uncertain':
+                    trace['stagnation'] = None  # Terminal interpretation, not an unfinished trajectory.
+                if trace['stagnation'] and trajectory.escalations == 0:
+                    trajectory.escalations = 1
+                    trajectory.excluded.add(completion.model)
+                    trajectory.min_quality = (completion.justification.get('browser_qualification') or {}).get('quality', 0.)
+                    trajectory.reset_detection()
+                    trace.update(escalation=True, excluded_models=sorted(trajectory.excluded),
+                                 min_quality=trajectory.min_quality, escalations=1)
+                bw.record_controller_trace(trace)
+                return bool(trace['stagnation'] and not trace.get('escalation'))
+            for i in range(6):  # Bounded verifier, same session/conversation during one escalation.
                 safe()
-                response = llm.complete('agent.react_step', messages, business=business, agent='account.verify',
-                    max_tokens=500, json_mode=True, validate=validate).data
+                completion = llm.complete('browser.react_step', messages, business=business, agent='account.verify',
+                    max_tokens=1200, json_mode=True, validate=validate, exclude_models=tuple(trajectory.excluded),
+                    browser_min_quality=trajectory.min_quality)
+                response = completion.data
                 messages.append({'role': 'assistant', 'content': json.dumps(response)})
                 state = response.get('state')
                 if state and state != 'uncertain':
+                    trace_decision(completion, i + 1, 'browser_verify', {'state': state}, {'ok': True})
                     safe()
                     diagnostic['reason'] = ('semantic_authenticated' if state == 'authenticated' else
                         'challenge_detected' if state == 'challenge' else 'semantic_unauthenticated')
                     return state == 'authenticated', {'method': 'semantic_observation', 'state': state,
                         'run_id': run.id, 'business': business, 'resource_key': key, 'evidence': evidence}
                 if state == 'uncertain':
+                    if trace_decision(completion, i + 1, 'browser_verify', {'state': state}, {'ok': True}):
+                        break
                     messages.append({'role': 'user', 'content': 'Choisis une observation de lecture supplémentaire '
                                      'si elle peut lever l’incertitude ; aucune nouvelle autorité.'})
                     continue
@@ -745,15 +772,21 @@ def _semantic_account_page(session, account, key, diagnostic):
                     # Verifier reads are explicitly authorized by human completion, before any mandate.
                     part = bw.image_part(image, business=business, scope_key=scope_key)
                     messages.append({'role': 'user', 'content': [{'type': 'text', 'text': web_guard.UNTRUSTED_NOTE}, part]})
+                    if trace_decision(completion, i + 1, tool, args, {'ok': True, 'url': safe(), 'image': image}):
+                        break
                     continue
                 messages.append({'role': 'user', 'content': json.dumps(observation, ensure_ascii=False)})
+                if trace_decision(completion, i + 1, tool, args, observation):
+                    break
             diagnostic['reason'] = 'semantic_uncertain'
             return False, {'method': 'semantic_observation', 'state': 'uncertain', 'run_id': run.id,
                            'business': business, 'resource_key': key, 'evidence': evidence}
     except Exception as exc:
         safe_reasons = {'verify_domain_mismatch', 'sensitive_surface', 'visible_login_field_present',
                         'challenge_detected', 'backend_error'}
-        if isinstance(exc, ResourceError) and str(exc) in safe_reasons:
+        if isinstance(exc, llm.NoEligibleModel):
+            diagnostic['reason'] = 'semantic_uncertain' if evidence and 'trajectory' in locals() and trajectory.escalations else 'semantic_browser_unqualified'
+        elif isinstance(exc, ResourceError) and str(exc) in safe_reasons:
             diagnostic['reason'] = str(exc)
         elif diagnostic.get('reason') == 'authenticated':
             diagnostic['reason'] = 'semantic_backend_error'
@@ -857,7 +890,7 @@ def account_task(business, key, goal, *, parent_id=None):
         'allowed_tools': ['browser_navigate', 'browser_snapshot', 'browser_screenshot', 'browser_scroll', 'browser_back',
                           'browser_click', 'browser_type', 'browser_select', 'browser_check',
                           'browser_press', 'browser_verify', 'browser_upload'],
-        'business_signal_focus': False, 'max_steps': 6, 'max_duration_s': 120},
+        'business_signal_focus': False, 'max_steps': 8, 'max_duration_s': 300},
         parent_id=parent_id, max_attempts=1,
         idempotency_key='account-task:' + business + ':' + str(parent_id) + ':' + key + ':'
                         + hashlib.sha256(goal.encode()).hexdigest())

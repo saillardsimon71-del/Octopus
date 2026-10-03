@@ -47,8 +47,11 @@ def _legacy_request(model: str, messages: list[dict], max_tokens: int, reasoning
 
 def _complete(agent: str, task: str, model: str, messages: list[dict], max_tokens: int,
               reasoning: str | None = None, json_mode: bool = False, needs: tuple[str, ...] = (),
-              validate: Callable[[str], Any] | None = None) -> Any:
+              validate: Callable[[str], Any] | None = None, *, cognitive_task=None,
+              exclude_models=(), browser_min_quality=0., completion_meta=None) -> Any:
     if not octopus.enabled():
+        if cognitive_task == 'browser.react_step':
+            raise RuntimeError('browser control requires the OCTOPUS qualification gateway')
         legacy_allowed = (os.environ.get("OCTOPUS", "").strip().lower() == "off"
                           and os.environ.get("OCTOPUS_ALLOW_LEGACY_DIRECT", "").strip() == "1")
         if not legacy_allowed:
@@ -59,9 +62,15 @@ def _complete(agent: str, task: str, model: str, messages: list[dict], max_token
         return validate(content) if validate is not None else content
     from octopus import journal, llm
     run = journal.current_run()  # coûts rattachés au business du run (mission, tâche), pas toujours à Podalux
-    c = llm.complete(llm.legacy_task(agent, task), messages, agent=agent, business=run.business if run else "podalux",
+    c = llm.complete(cognitive_task or llm.legacy_task(agent, task), messages, agent=agent, business=run.business if run else "podalux",
                      max_tokens=max_tokens, json_mode=json_mode, reasoning=reasoning, needs=needs,
-                     pin_model=_MODEL_IDS.get(model, model), validate=validate)
+                     pin_model=None if cognitive_task == "browser.react_step" else _MODEL_IDS.get(model, model), validate=validate,
+                     exclude_models=tuple(exclude_models), browser_min_quality=browser_min_quality)
+    if completion_meta is not None:
+        completion_meta.update(model=c.model, provider=c.provider, requested_model=c.requested_model,
+            resolved_model=c.resolved_model, resolved_provider=c.resolved_provider, call_id=c.call_id,
+            cost_usd=c.cost_usd, qualification=c.justification.get("browser_qualification"),
+            selection_reason=c.justification.get("selection_reason"))
     used = model if c.model == _MODEL_IDS.get(model) else c.model
     db.log_cost(agent, task, used, c.usage.prompt_tokens, c.usage.completion_tokens, cost_usd=c.cost_usd)
     return c.data if validate is not None else c.text
@@ -89,10 +98,13 @@ def call(agent: str, task: str, model: str, messages: list[dict],
 
 def call_json(agent: str, task: str, model: str, messages: list[dict],
               max_tokens: int = 2000, reasoning: str | None = None,
-              validate: Callable[[dict], Any] | None = None) -> dict:
+              validate: Callable[[dict], Any] | None = None, *, cognitive_task=None,
+              exclude_models=(), browser_min_quality=0., completion_meta=None) -> dict:
     """Appel texte, parse un objet JSON (tolérant aux balises)."""
     return _complete(agent, task, model, messages, max_tokens, reasoning, json_mode=True,
-                     validate=_json_validator(validate))
+                     validate=_json_validator(validate), cognitive_task=cognitive_task,
+                     exclude_models=exclude_models, browser_min_quality=browser_min_quality,
+                     completion_meta=completion_meta)
 
 
 def build_vision_messages(frames: list[str], prompt: str) -> list[dict]:

@@ -480,7 +480,7 @@ def test_runtime_registers_browser_tools_and_closes_sessions_with_the_mission(mo
         view = runtime._tool_result_view("browser_navigate", result)
         assert view.startswith("{") and "PAGE (refs @eN) :" in view and "Formulaire de contact" in view
     assert FakeSession.instances[-1].closed >= 2  # fermeture de démarrage + fin de mission
-    assert runtime.TOOLS.dispatch("browser_click", {"ref": 3})[0].startswith("argument ref")
+    assert runtime.TOOLS.dispatch("browser_click", {"ref": 3})[0].startswith("invalid_tool_arguments:")
 
 
 def test_supervisor_measures_verified_browser_actions_and_escalates_ambiguity():

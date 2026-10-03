@@ -555,6 +555,9 @@ def _ineligibility(cat, profile_name: str, profile: dict, task: str, task_def: d
     ok, why = provider_status(model["provider"], cat.provider(model["provider"]))
     if not ok:
         return why
+    if task == "browser.react_step":
+        proof = browser_quality(model)
+        return None if proof["eligible"] else proof["reason"]
     evidence_required = profile.get("require_evidence") and model_id != task_def.get("baseline")
     if profile_name == "economical" and model["provider"] == "deepseek" and model["cost_class"] == "paid":
         evidence_required = False
@@ -860,12 +863,83 @@ def _rank_economical(task: str, candidates: list[str], cat: catalog.Catalog) -> 
     return sorted(qualified, key=score)
 
 
+# Multi-step fixture evidence is independent of JSON/API health. No baseline exemption.
+BROWSER_BENCH_TASK = "browser.trajectory"
+BROWSER_BENCH_VERSION = "browser-v1"
+BROWSER_SCENARIOS = frozenset({"affordance", "dynamic_menu", "recovery", "ambiguous_dom",
+    "sufficient_dom", "stale_refs", "invalid_args", "multi_screen", "language_layout", "vision"})
+
+
+def browser_identity(model: dict, resolved_model: str | None = None) -> str | None:
+    """Identity of the underlying model, never reputation for an unknown auto pool."""
+    name = resolved_model or model.get("api_model", "")
+    if not name or any(token in name.lower() for token in ("auto", "best-free", "router")):
+        return None
+    if model.get("provider") == "omniroute" and resolved_model is None:
+        # Explicit OmniRoute routes must declare the underlying identity in catalog,
+        # then it is checked against the actual response before returning a decision.
+        name = model.get("browser_identity")
+        if not name:
+            return None
+    if resolved_model == model.get('api_model') and model.get('browser_identity'):
+        name = model['browser_identity']
+    return "browser.model:" + name
+
+
+def browser_quality(model: dict, *, resolved_model: str | None = None) -> dict:
+    identity = browser_identity(model, resolved_model)
+    if identity is None:
+        return {"eligible": False, "quality": 0., "identity": None, "reason": "browser: identité fixe inconnue"}
+    rows = journal.query("SELECT * FROM bench_results WHERE task=? AND model=? AND prompt_version=? "
+                         "AND ts>=? ORDER BY ts DESC,id DESC",
+                         (BROWSER_BENCH_TASK, identity, BROWSER_BENCH_VERSION, time.time() - 14 * 86400))
+    if not rows:
+        return {"eligible": False, "quality": 0., "identity": identity,
+                "reason": "browser: qualification absente ; lancer browser benchmark sur fixtures locales"}
+    # Last completed/attempted suite wins: a failed rerun cannot fall back to old glory.
+    latest = rows[0]["bench_run_id"]
+    samples = [r for r in rows if r["bench_run_id"] == latest and r["item"] in BROWSER_SCENARIOS]
+    by_item = {item: [r for r in samples if r["item"] == item] for item in BROWSER_SCENARIOS}
+    coverage = all(by_item.values())
+    rates = {item: sum(r["passed"] for r in group) / len(group) if group else 0.
+             for item, group in by_item.items()}
+    quality = sum(rates.values()) / len(BROWSER_SCENARIOS)
+    safe = all(not json.loads(r["checks"] or "{}").get("forbidden", False) for r in samples)
+    mandatory = all(rates[x] == 1. for x in ("vision", "ambiguous_dom", "recovery", "invalid_args", "stale_refs"))
+    live = journal.query("SELECT passed FROM bench_results WHERE task='browser.execution' AND model=? AND ts>? "
+                         "ORDER BY id DESC LIMIT 3", (identity, max(r['ts'] for r in rows)))
+    # Only operationally measured stagnation contributes here, not API/JSON success.
+    live_block = len(live) >= 2 and sum(r['passed'] for r in live) == 0
+    eligible = coverage and quality >= .9 and mandatory and safe and not live_block
+    return {"eligible": eligible, "quality": quality, "identity": identity, "samples": len(samples),
+            "coverage": coverage, "bench_run_id": latest, "live_stagnations": len(live),
+            "reason": "browser: 10 scénarios, >=90%, recovery/refs/arguments/vision réussis" if eligible
+                      else "browser: seuil ou couverture insuffisant"}
+
+
+def _rank_browser(candidates, cat, *, exclude_models=(), min_quality=0.):
+    proof = {m: browser_quality(cat.model(m)) for m in candidates if cat.model(m)}
+    qualified = [m for m in candidates if m not in exclude_models and m in proof
+                 and proof[m]['eligible'] and proof[m]['quality'] > min_quality]
+    def rank(mid):
+        model = cat.model(mid)
+        # Price wins only AFTER competence qualification; API reliability remains observable.
+        paid = model["cost_class"] == "paid"
+        price = sum(v for v in model.get("price", {}).values() if isinstance(v, (float, int)))
+        recent = journal.query("SELECT status FROM llm_calls WHERE task='browser.react_step' AND model=? "
+                               "ORDER BY id DESC LIMIT 10", (mid,))
+        reliability = sum(r["status"] == "ok" for r in recent) / len(recent) if recent else 1.
+        return (paid, price, -reliability, -proof[mid]["quality"])
+    return sorted(qualified, key=rank)
+
+
 def complete(task: str, messages: list[dict], *, agent: str = "", business: str | None = None,
              max_tokens: int = 1200, json_mode: bool = False, json_schema: dict | None = None,
              tool_schemas: list[dict] | None = None,
              reasoning: str | None = None,
              needs: tuple[str, ...] = (), pin_model: str | None = None, profile: str | None = None,
-             validate: Callable[[str], Any] | None = None) -> Completion:
+             validate: Callable[[str], Any] | None = None,
+             exclude_models: tuple[str, ...] = (), browser_min_quality: float = 0.) -> Completion:
     cat = catalog.load()
     ctx = journal.current_run()
     profile_name = _resolve_profile(cat, profile, ctx)
@@ -878,7 +952,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
         candidates = [pin_model]
     else:
         candidates = list(task_def.get("candidates", {}).get(profile_name, [])) or ([pin_model] if pin_model else [])
-    if profile_name == "economical":
+    if profile_name == "economical" and task != "browser.react_step":
         candidates = _rank_economical(task, candidates, cat)
     prompt_chars, images = _prompt_size(messages)
     if images:
@@ -892,6 +966,14 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
             candidates = list(dict.fromkeys([m for m in candidates if cat.model(m)
                 and cat.model(m)["cost_class"] != "paid"] + free_vision +
                 [m for m in candidates if not cat.model(m) or cat.model(m)["cost_class"] == "paid"]))
+    if task == "browser.react_step":
+        # Apply AFTER vision expansion: an unqualified multimodal route is still unqualified.
+        candidates = _rank_browser(candidates, cat, exclude_models=exclude_models,
+                                   min_quality=browser_min_quality)
+        if not candidates:
+            raise NoEligibleModel(task, profile_name, [{"model": m, "eligible": False,
+                "reason": browser_quality(cat.model(m))["reason"] if cat.model(m) else "absent"}
+                for m in task_def.get("candidates", {}).get(profile_name, [])])
     digest = hashlib.sha256(json.dumps(messages, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     considered: list[dict] = []
     last_error: Exception | None = None
@@ -1083,11 +1165,19 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                                 json_syntax_error = isinstance(repair_exc, json.JSONDecodeError)
                             else:
                                 text, status, error, repaired = fixed, "ok", None, True
+            if task == "browser.react_step" and status == "ok":
+                expected = browser_identity(model)
+                actual = browser_identity(model, result.resolved_model) if result.resolved_model else None
+                if actual != expected or not browser_quality(model, resolved_model=result.resolved_model)["eligible"]:
+                    status, error = "blocked", "browser: modèle résolu non qualifié ou identité différente"
             if images and status == 'invalid':
                 error = 'sortie multimodale invalide'  # Validator/provider errors may echo image content.
             justification = _justify(profile_name, task, model_id, model,
                                      considered + [{"model": model_id, "eligible": True, "reason": "choisi"}], pinned)
             justification["structured_method"] = structured_method
+            if task == "browser.react_step":
+                justification["browser_qualification"] = browser_quality(model)
+                justification["selection_reason"] = "compétence browser démontrée puis coût minimal ; identité résolue contrôlée"
             if repair_attempted_here:
                 justification["json_repair_attempted"] = True
             if repaired:
