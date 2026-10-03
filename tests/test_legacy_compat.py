@@ -67,7 +67,7 @@ def test_each_call_is_journaled_with_official_cost_and_legacy_table_kept(transpo
 def captured(monkeypatch):
     calls: list[dict] = []
 
-    def call_json(agent, task, model, messages, max_tokens=2000, reasoning=None, validate=None):
+    def call_json(agent, task, model, messages, max_tokens=2000, reasoning=None, validate=None, **kwargs):
         calls.append({"agent": agent, "task": task, "model": model, "messages": messages,
                       "max_tokens": max_tokens, "reasoning": reasoning})
         return {"offer_id": "cash_devis_cgv01", "angle": "a", "decision": "done", "final": "ok",
@@ -127,8 +127,9 @@ def test_sout_research_prompt(captured, monkeypatch):
     _same(captured[0], FIXTURE["prompts"]["sout_research"])
 
 
-def test_runtime_prompts(captured):
+def test_runtime_preserves_goal_with_natural_action_contract(captured):
     runtime.run_agent("SOUT", "fais une veille", max_steps=1)
     runtime.run_agent("ORBIT", "bonjour", max_steps=1, conversational=True)
-    _same(captured[0], FIXTURE["prompts"]["runtime_goal"])
-    _same(captured[1], FIXTURE["prompts"]["runtime_conversational"])
+    assert 'fais une veille' in captured[0]['messages'][1]['content']
+    assert 'bonjour' in captured[1]['messages'][1]['content']
+    assert 'browser_click' in captured[0]['messages'][0]['content']

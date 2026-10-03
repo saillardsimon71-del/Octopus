@@ -460,7 +460,7 @@ def execute_pursuit(ctx) -> dict:
             refused = isinstance(data, dict) and bool(data.get("refused"))
             refusal = str(data.get("reason") or "") if refused else ""
             source_failure = _public_source_failure(data) if step.get("tool") == "browse" else None
-            technical = bool(source_failure) or technical_refusal(refusal)
+            technical = bool(source_failure) or technical_refusal(data if refused else refusal)
             if source_failure or (refused and technical):
                 technical_reasons.append(source_failure or refusal)
             if refused and not technical:
@@ -473,7 +473,7 @@ def execute_pursuit(ctx) -> dict:
         if result.get("execution_status") in {"llm_unavailable", "synthesis_unavailable", "timeout"}:
             action = "continue"
             choice = {**choice, "next_goal": "Reprendre les observations conservées et compléter uniquement le travail manquant."}
-    if technical_reasons and not execution_permission:
+    if model_permission in technical_reasons and not execution_permission:
         # Une demande textuelle du modèle ne transforme pas un échec d'acquisition
         # constaté en besoin d'autorité. Les vraies frontières runtime ont priorité.
         model_permission = None
@@ -604,7 +604,7 @@ def execute_pursuit(ctx) -> dict:
 
 def technical_pursuit_request(work: dict, request: dict, result: dict) -> bool:
     """Pure classification shared by the read-only Workbench and resume reconciliation."""
-    from agents.runtime import TOOLS, _public_source_failure
+    from agents.runtime import TOOLS
     from agents.tool_registry import technical_refusal
     suffix = " Une réponse seule n'accorde aucun droit. Adaptez l'objectif ou configurez une autorisation explicite."
     if not isinstance(result, dict) or not isinstance(work.get("input"), dict):
@@ -623,7 +623,6 @@ def technical_pursuit_request(work: dict, request: dict, result: dict) -> bool:
     if not result:
         return False
     refusals = []
-    source_failure = False
     for subtask in result.get("results") or []:
         if not isinstance(subtask, dict) or not isinstance(subtask.get("steps", []), list):
             return False
@@ -635,16 +634,14 @@ def technical_pursuit_request(work: dict, request: dict, result: dict) -> bool:
                 return False
             if tool in TOOLS and tool not in PURSUIT_TOOLS:
                 return False
-            if tool == "browse" and _public_source_failure(data):
-                source_failure = True
             if isinstance(data, dict) and data.get("refused"):
                 refusal = str(data.get("reason") or "")
-                if not technical_refusal(refusal):
+                if not technical_refusal(data):
                     return False
                 refusals.append(refusal)
     if choice.get("action") == "request_permission":
         permission = str(choice.get("permission") or "")
-        if not source_failure and not technical_refusal(permission):
+        if permission not in refusals and not technical_refusal(permission):
             return False
         refusals.append(permission)
     return request.get("question") in [reason + suffix for reason in refusals]

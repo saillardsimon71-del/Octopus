@@ -257,6 +257,8 @@ def load(path: Path | None = None, *, refresh=False) -> Catalog:
         if task.get("baseline") not in raw["models"]:
             task.pop("baseline", None)
         needs = set(task.get("needs", []))
+        if name in {'browser.react_step', 'browser.bench_step'}:
+            needs.discard('json')
         free = [mid for mid, model in discovered.items() if needs <= set(model["capabilities"])]
         for profile, policy in raw["profiles"].items():
             previous = task.setdefault("candidates", {}).get(profile, [])

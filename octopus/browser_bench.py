@@ -144,11 +144,8 @@ def local_workspace(fixture):
 
 
 def _parse_action(text):
-    action = llm.parse_json(text)
-    if 'final' not in action and (not isinstance(action.get('tool'), str)
-                                 or not isinstance(action.get('args', {}), dict)):
-        raise ValueError('browser action requires a tool string and an args object')
-    return action
+    from agents.runtime import TOOLS
+    return TOOLS.parse_action(text)
 
 
 def _retry_delay(exc, model_id, since):
@@ -179,12 +176,13 @@ def trajectory(model_id, fixture, space, *, decide=None, request_budget=None, lo
     registry = ToolRegistry({name: {**TOOLS[name], 'fn': lambda args, name=name: bw.call_on(space, name[8:], **args)} for name in allowed})
     descriptions = registry.describe(allowed, browser_details=True)
     messages = [{'role': 'system', 'content': 'Observe this local interface and choose your own actions. '
-        'Do not invent internal routes or evidence. Return JSON {"tool":"name","args":{...}} or {"final":"report"}. '
+        'Do not invent internal routes or evidence. For an action use JSON {"tool":"name", ...parameters}; conclude with your report. '
         'Report the account evidence code once you actually obtain it. Use screenshots when useful.\n' + descriptions},
         {'role': 'user', 'content': 'Reach the operational state of the account and report its evidence code. Start at ' + fixture.start_url}]
     monitor = bw.BrowserTrajectory()
     records, identities, call_ids = [], set(), []
     final = ''
+    friction = {'immediate': 0, 'normalized': 0, 'ambiguous': 0, 'format': 0, 'tool_error': 0}
     injection_done = False
     screenshot_used = False
     recovered = fixture.scenario not in ('stale_refs', 'invalid_args', 'recovery')
@@ -214,11 +212,18 @@ def trajectory(model_id, fixture, space, *, decide=None, request_budget=None, lo
             call_ids.append(c.call_id)
         else:
             action = decide(messages)
+        if '_protocol' not in action:
+            action = registry.parse_action(action)
+        protocol = action.pop('_protocol', 'immediate')
+        protocol_error = action.pop('_protocol_error', None)
+        friction[protocol] += 1
         if 'final' in action:
             final = str(action['final'])
             break
         tool, args = action.get('tool'), action.get('args', {})
-        if tool not in allowed:
+        if protocol_error:
+            result = {'ok': False, 'refused': True, 'error_code': protocol, 'reason': protocol_error}
+        elif tool not in allowed:
             result = {'ok': False, 'refused': True, 'reason': 'forbidden tool'}
         elif fixture.scenario == 'stale_refs' and tool == 'browser_click' and not injection_done:
             injection_done = True
@@ -227,12 +232,14 @@ def trajectory(model_id, fixture, space, *, decide=None, request_budget=None, lo
         elif fixture.scenario == 'invalid_args' and tool == 'browser_click' and not injection_done:
             injection_done = True
             result = {'ok': False, 'refused': True, 'error_code': 'invalid_tool_arguments',
-                      'reason': 'invalid_tool_arguments: fixture rejected arguments; ref must match @eN; effect contact|publish|edit|omitted. Reobserve or correct.'}
+                      'reason': 'La cible de cette action est indisponible. Observe à nouveau la page ou choisis une autre cible.'}
         else:
             reason, result = registry.dispatch(tool, args, allowed)
             if reason:
                 result = {'ok': False, 'refused': True, 'error_code': 'invalid_tool_arguments', 'reason': reason}
         progress = monitor.record(tool, args, result)
+        if not progress['tool_ok'] and not protocol_error:
+            friction['tool_error'] += 1
         if injection_done and progress['progress'] and result.get('ok'):
             recovered = True
         if fixture.scenario == 'recovery' and result.get('url') != fixture.start_url and progress['progress']:
@@ -244,9 +251,7 @@ def trajectory(model_id, fixture, space, *, decide=None, request_budget=None, lo
             content = [{'type': 'text', 'text': content}, part]
             screenshot_used = True  # The next model request receives the actual PNG.
         messages.append({'role': 'user', 'content': content})
-        records.append({'tool': tool, 'args': bw.trace_args(args), 'result': result, **progress})
-        if monitor.no_progress >= 5:
-            break
+        records.append({'tool': tool, 'args': bw.trace_args(args), 'result': result, 'protocol_status': protocol, **progress})
     # DOM truth is observed separately from the model's report, never an exact-path score.
     attained = space._current_url() == fixture.origin + fixture.routes['done']
     observed = any(fixture.token in str(row['result'].get('snapshot', '')) for row in records)
@@ -258,7 +263,10 @@ def trajectory(model_id, fixture, space, *, decide=None, request_budget=None, lo
     score = (.6 * (attained and evidence) + .15 * valid + .1 * recovered + .1 * (len(records) <= 9) + .05 * (not visual or screenshot_used))
     return {'passed': int(complete and score >= .9), 'score': score, 'checks': {'goal': attained,
         'evidence': evidence, 'recovery': recovered, 'tool_valid_rate': valid, 'forbidden': forbidden,
-        'vision': screenshot_used, 'steps': len(records)}, 'identities': identities, 'call_ids': call_ids,
+        'vision': screenshot_used, 'steps': len(records), 'protocol_friction': friction,
+        'failure_layer': None if complete else 'FORMAT' if friction['format'] and not any(r['tool_ok'] for r in records)
+            else 'PROTOCOL' if friction['ambiguous'] and not any(r['tool_ok'] for r in records) else 'MODEL_COGNITION'},
+        'identities': identities, 'call_ids': call_ids,
         'trace': records, 'final': final}
 
 
@@ -286,7 +294,8 @@ def run(models, *, repeats=2, allow_paid=False, max_cost_usd=.05, max_requests=2
         'trajectories': len(runnable) * len(llm.BROWSER_SCENARIOS) * repeats,
         'step_requests_upper_bound': len(runnable) * len(llm.BROWSER_SCENARIOS) * repeats * MAX_STEPS,
         'structured_requests_upper_bound': sum(len(llm._structured_methods(cat.model(mid), True, None, None))
-            for mid in runnable) * len(llm.BROWSER_SCENARIOS) * repeats * MAX_STEPS,
+            if 'json' in cat.model(mid).get('capabilities', []) else 1 for mid in runnable)
+            * len(llm.BROWSER_SCENARIOS) * repeats * MAX_STEPS,
         'rate_limit_retries_per_decision': 1, 'max_retry_wait_s': 60,
         'max_requests': max_requests, 'max_cost_usd': max_cost_usd}
     preflight['transport_requests_upper_bound'] = min(max_requests, 2 * preflight['structured_requests_upper_bound'])
@@ -304,19 +313,25 @@ def run(models, *, repeats=2, allow_paid=False, max_cost_usd=.05, max_requests=2
                 for rep in range(repeats):
                     started = time.monotonic()
                     first = journal.query('SELECT COALESCE(MAX(id),0) id FROM llm_calls')[0]['id']
-                    outcome, error = None, None
+                    outcome, error, failure_layer = None, None, None
                     try:
                         with Fixture(scenario) as fixture, local_workspace(fixture) as space:
                             outcome = trajectory(mid, fixture, space, request_budget=budget, log=log)
                     except llm.RequestLimitExceeded:
                         stopped, error = True, 'request ceiling reached; benchmark incomplete'
+                        failure_layer = 'INFRASTRUCTURE'
                     except llm.BudgetExceeded:
                         stopped, error = True, 'cost ceiling reached; benchmark incomplete'
+                        failure_layer = 'INFRASTRUCTURE'
                     except llm.InvalidOutput as exc:
                         error = type(exc).__name__
+                        failure_layer = 'FORMAT'
                     except Exception as exc:
                         stopped = True
                         error = type(exc).__name__  # No provider echo or image bytes in benchmark error.
+                        failure_layer = ('TEMPORARY_UNAVAILABLE' if isinstance(exc, llm.NoEligibleModel) else
+                            'PROVIDER' if llm._rate_limit_delay(exc) is not None or isinstance(exc, llm.GatewayError)
+                            else 'RUNTIME')
                     calls = journal.query('SELECT * FROM llm_calls WHERE id>? AND run_id=?', (first, ctx.id))
                     identities = outcome['identities'] if outcome else set()
                     identity = next(iter(identities)) if len(identities) == 1 and None not in identities else None
@@ -329,6 +344,7 @@ def run(models, *, repeats=2, allow_paid=False, max_cost_usd=.05, max_requests=2
                         'repeat': rep, 'prompt_version': llm.BROWSER_BENCH_VERSION, 'passed': int(passed),
                         'score': outcome['score'] if outcome and identity else 0., 'value': None,
                         'checks': json.dumps({**(outcome['checks'] if outcome else {}), 'requested_model': mid,
+                            **({'failure_layer': failure_layer} if failure_layer else {}),
                             'benchmark_incomplete': stopped, 'status': status, 'calls': len(calls),
                             'prompt_tokens': sum(c['prompt_tokens'] or 0 for c in calls),
                             'completion_tokens': sum(c['completion_tokens'] or 0 for c in calls),

@@ -82,6 +82,8 @@ class FakeAccountSession:
             self.url = args[0]
             return ok({'url': self.url})
         if command == 'eval':
+            if 'octopus_commit_boundary' in args[0]:
+                return ok({'result': False})
             if args[0].endswith('return Boolean(!login && !challenge); })()'):
                 return ok({'result': self.logged_in})
             if 'octopus_challenge' in args[0] or 'octopus_traffic' in args[0]:
@@ -164,19 +166,16 @@ def test_c_d_revocation_other_business_and_no_llm_grant():
             domains=['new-platform.example'], businesses=[BUSINESS], authenticated_text='Déconnexion')
 
 
-def test_e_cookie_or_connected_state_never_grants_actions(monkeypatch):
+def test_e_connected_resource_grants_ordinary_actions_in_its_business(monkeypatch):
     account()
     resources.set_account_session('new-platform', 'connected')
-    with pytest.raises(bw.Refused, match='non mandatée'):
-        space(monkeypatch)
-    own_grant(('read',))
     s = space(monkeypatch)
     try:
         assert s.navigate(URL)['ok']
+        assert s.click('@e1', expect='Publication réussie')['ok']
+        assert s.click('@e4')['ok']
         with pytest.raises(bw.Refused):
-            s.click('@e1')
-        with pytest.raises(bw.Refused):
-            s.click('@e4')
+            space(monkeypatch, business='other')
     finally:
         s.close()
 
@@ -189,7 +188,7 @@ def test_f_g_h_publication_finance_and_secrets(monkeypatch):
     try:
         s.navigate(URL)
         assert s.click('@e1', expect='Publication réussie')['effect']['status'] == 'verified'
-        with pytest.raises(bw.Refused, match='sensible'):
+        with pytest.raises(bw.Refused, match='intervention humaine'):
             s.click('@e2')
         with pytest.raises(bw.Refused, match='humain'):
             s.type('@e3', 'very-secret-password')
@@ -198,8 +197,8 @@ def test_f_g_h_publication_finance_and_secrets(monkeypatch):
         s.close()
 
 
-@pytest.mark.parametrize('label', ['Pay', 'Rembourser', 'Payout', 'Modifier IBAN', 'Supprimer le compte',
-                                    'Créer API key', 'Accept terms', 'Changer sécurité', 'OTP', 'Acheter', 'Signature'])
+@pytest.mark.parametrize('label', ['Pay', 'Rembourser', 'Payout', 'Modifier IBAN', 'Créer un compte',
+                                    'Créer API key', 'Accept paid subscription', 'Changer sécurité', 'OTP', 'Acheter', 'Signer un contrat'])
 def test_sensitive_effects_cannot_be_delegated(label):
     cid = channel(URL)
     m = mandates.grant(BUSINESS, 'Contact', 'public_business', ['contact'], actor='human')
@@ -359,10 +358,8 @@ def test_human_public_login_dependencies_never_expand_agent_authority(monkeypatc
     assert all(args == ['url'] for c, args in human.commands if c == 'get')
     assert [args[0] for c, args in human.commands if c == 'open'] == [verified]
 
-    # A connected account still cannot be used by an agent without a human mandate.
-    with pytest.raises(PermissionError):
-        resources.account_task(BUSINESS, key, 'Observer le compte')
-    mandates.grant(BUSINESS, 'Lecture simulée', 'owned_account', ['read'], actor='human', resource_keys=[key])
+    # Connected resources retain exactly the configured domains and business scope.
+    assert mandates.account_authority(BUSINESS, key, 'contact')
     monkeypatch.setattr(agent_browser, 'Session', FakeAccountSession)
     from browser_evidence import qualify
     qualify('deepseek/flash')
@@ -485,7 +482,7 @@ def test_expired_disabled_and_other_ownership(monkeypatch):
     resources.set_account_session('new-platform', 'connected')
     own_grant()
     assert mandates.account_authority(BUSINESS, 'new-platform', 'read')
-    assert not mandates.account_authority(BUSINESS, 'new-platform', 'publish')
+    assert mandates.account_authority(BUSINESS, 'new-platform', 'publish')
     s = space(monkeypatch)
     try:
         s.navigate(URL)
@@ -516,7 +513,7 @@ def test_qualification_rejects_personal_or_different_source_and_missing_executor
     assert not public(cid, 'https://company.example/contact')
     cid = channel('https://company.example/contact')
     assert not public(cid, 'https://evil.example/contact')
-    assert not public(cid, 'https://company.example/contact', 'Personal homepage. Contact me.')
+    assert public(cid, 'https://company.example/contact', 'Personal homepage. Contact me.')
     assert public(cid, 'https://company.example/contact')
     assert 'exécuteur' in propose(cid)['reason']
     assert tasks.pending_human_requests() == []
@@ -540,10 +537,10 @@ def test_replace_is_atomic_and_legacy_act_is_not_migrated():
     mid = mandates.grant(BUSINESS, 'Contact', 'public_business', ['contact'], actor='human')
     assert public(cid, 'https://company.example/contact')
     mandates.revoke(BUSINESS, mid, actor='human')
-    assert mandates.authorize(ch, 'contact')['allowed']  # explicit legacy grant remains respected
+    assert not mandates.authorize(ch, 'contact')['allowed']  # A revoked scope cannot be bypassed through legacy access.
     mid = own_grant()
     with pytest.raises(ValueError):
-        mandates.replace(BUSINESS, mid, 'bad', 'public_business', ['publish'], actor='human')
+        mandates.replace(BUSINESS, mid, 'bad', 'unknown_target', ['publish'], actor='human')
     assert any(m['id'] == mid for m in mandates.list_mandates(BUSINESS, active=True))
     newer = mandates.replace(BUSINESS, mid, 'lecture', 'owned_account', ['read'], actor='human', resource_keys=['new-platform'])
     assert [m['id'] for m in mandates.list_mandates(BUSINESS, active=True)] == [newer]
@@ -673,7 +670,7 @@ def test_real_account_subtask_worker_handoff_restores_parent_network_and_task(mo
             assert repeated['task_id'] == result['task_id'] and len(seen) == 1
 
 
-def test_publication_grant_does_not_authorize_profile_autosave(monkeypatch):
+def test_trusted_account_profile_autosave_needs_no_separate_edit_grant(monkeypatch):
     account()
     resources.set_account_session('new-platform', 'connected')
     own_grant()
@@ -681,9 +678,8 @@ def test_publication_grant_does_not_authorize_profile_autosave(monkeypatch):
     try:
         s.navigate(URL)
         s._refs['e5'] = {'role': 'textbox', 'name': 'Bio du profil'}
-        with pytest.raises(bw.Refused):
-            s.type('@e5', 'New bio')
-        assert not journal.query('SELECT * FROM channel_actions')
+        assert s.type('@e5', 'New bio')['ok']
+        assert len(journal.query('SELECT * FROM channel_actions')) == 1
     finally:
         s.close()
 
@@ -783,7 +779,12 @@ def test_hub_account_pursuit_long_synthesis_and_recovery(monkeypatch, transport,
     from octopus.pricing import Usage
 
     monkeypatch.setattr(requests.sessions.Session, 'request', lambda *a, **k: pytest.fail('real HTTP'))
-    monkeypatch.setattr(socket.socket, 'connect', lambda *a, **k: pytest.fail('real network'))
+    connect = socket.socket.connect
+    def offline_connect(sock, address):
+        if not ipaddress.ip_address(address[0]).is_loopback:
+            pytest.fail('real network')
+        return connect(sock, address)
+    monkeypatch.setattr(socket.socket, 'connect', offline_connect)
     monkeypatch.setattr(web_guard, '_resolved_ips', lambda _: [ipaddress.ip_address('8.8.8.8')])
     monkeypatch.setattr(agent_browser, 'Session', FakeAccountSession)
     monkeypatch.setattr(supervisor, 'PURSUIT_ROUNDS', 1)

@@ -5,6 +5,7 @@ import io
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image, ImageDraw
@@ -150,6 +151,17 @@ def test_bench_rejects_factually_wrong_report_even_after_reaching_goal(monkeypat
             assert not out['passed'] and out['checks']['goal'] and not out['checks']['evidence']
 
 
+def test_report_before_navigation_is_cognitive_failure_without_opening_browser(monkeypatch):
+    monkeypatch.setattr(agent_browser, 'Session', lambda *a, **k: pytest.fail('Unrequested browser session'))
+    with bb.Fixture('sufficient_dom') as fixture, bb.local_workspace(fixture) as space:
+        out = bb.trajectory('deepseek/flash', fixture, space,
+                            decide=lambda messages: runtime.TOOLS.parse_action('I cannot operate this browser.'))
+    assert not out['passed']
+    assert out['checks']['failure_layer'] == 'MODEL_COGNITION'
+    assert out['checks']['steps'] == 0
+    assert not out['checks']['goal'] and not out['checks']['evidence']
+
+
 def test_missing_backend_fails_before_any_provider_call(monkeypatch,transport):
     monkeypatch.setattr(agent_browser,'require_backend',lambda:(_ for _ in ()).throw(agent_browser.BackendUnavailable('absent')))
     with pytest.raises(agent_browser.BackendUnavailable): bb.run(['deepseek/flash'],allow_paid=True)
@@ -176,7 +188,7 @@ def test_request_cap_counts_structured_retries_and_invalidates_partial_run(monke
     assert result['incomplete'] and len(result['rows']) == 1
     assert result['preflight']['trajectories'] == 40
     assert result['preflight']['step_requests_upper_bound'] == 480
-    assert result['preflight']['structured_requests_upper_bound'] == 960
+    assert result['preflight']['structured_requests_upper_bound'] == 2 * result['preflight']['step_requests_upper_bound']
     assert logs[0].startswith('Preflight: ')
     checks = json.loads(result['rows'][0]['checks'])
     assert checks['benchmark_incomplete'] and checks['calls'] == 1
@@ -209,12 +221,14 @@ def test_failed_rerun_does_not_retain_browser_qualification(failure, monkeypatch
         assert result['incomplete'] and len(result['rows']) == 1
 
 
-def test_live_stagnation_is_separate_from_provider_health_and_rerun_can_restore():
+def test_live_stagnation_is_observable_without_replacing_objective_qualification():
     identity=qualify('deepseek/flash')
     for step in (1,2):
         with journal.run('a','agent'):
-            bw.record_controller_trace({'step':step,'qualification':{'identity':identity},'stagnation':'repeated_action'})
-    assert not llm.browser_quality(catalog.load().model('deepseek/flash'))['eligible']
+            bw.record_controller_trace({'step':step,'qualification':{'identity':identity},'stagnation':'repeated_action',
+                                        'failure_layer': 'MODEL_COGNITION'})
+    assert llm.browser_quality(catalog.load().model('deepseek/flash'))['eligible']
+    assert len(journal.query("SELECT * FROM events WHERE type='browser.controller'")) == 2
     assert not journal.query('SELECT * FROM llm_calls')
     qualify('deepseek/flash')
     assert llm.browser_quality(catalog.load().model('deepseek/flash'))['eligible']
@@ -335,24 +349,25 @@ def test_429_retry_respects_request_and_wait_limits(request_limit, retry_after, 
     assert result['incomplete'] and result['requests_used'] == 1 and result['not_run'] == 19
 
 
-def test_invalid_json_is_a_cognitive_failure(monkeypatch, transport, providers_up, tmp_path):
+def test_plain_report_without_observed_goal_is_a_cognitive_failure(monkeypatch, transport, providers_up, tmp_path):
     mid = 'openrouter/fixture/vision-alpha:free'
     monkeypatch.setattr(agent_browser, 'require_backend', lambda: None)
-    monkeypatch.setattr(bb, 'local_workspace', lambda fixture: contextlib.nullcontext(None))
+    monkeypatch.setattr(bb, 'local_workspace', lambda fixture: contextlib.nullcontext(SimpleNamespace(_current_url=lambda: '')))
     transport.reply('not json')
     result = bb.run([mid], max_cost_usd=0, out_dir=tmp_path, log=lambda line: None)
-    assert not result['incomplete'] and result['not_run'] == 0
+    assert not result['incomplete'] and result['not_run'] == 0, result['rows'][-1]['error']
     assert result['summaries'][0]['evaluated'] == result['summaries'][0]['failed'] == 20
 
 
 @pytest.mark.parametrize('action', [{'tool': ['browser_navigate'], 'args': {}}, {'tool': 'browser_click', 'args': []}])
-def test_invalid_action_envelope_is_cognitive(action, monkeypatch, transport, providers_up, tmp_path):
+def test_invalid_action_envelope_is_an_observation_with_attribution(action, monkeypatch, transport, providers_up, tmp_path):
     mid = 'openrouter/fixture/vision-alpha:free'
     monkeypatch.setattr(agent_browser, 'require_backend', lambda: None)
-    monkeypatch.setattr(bb, 'local_workspace', lambda fixture: contextlib.nullcontext(None))
+    monkeypatch.setattr(bb, 'local_workspace', lambda fixture: contextlib.nullcontext(SimpleNamespace(_current_url=lambda: '')))
     transport.reply(json.dumps(action))
     result = bb.run([mid], max_cost_usd=0, out_dir=tmp_path, log=lambda line: None)
-    assert not result['incomplete'] and result['summaries'][0]['failed'] == 20
+    assert not result['incomplete'] and result['summaries'][0]['failed'] == 20, result['rows'][-1]['error']
+    assert all(json.loads(r['checks'])['failure_layer'] in {'FORMAT', 'PROTOCOL'} for r in result['rows'])
 
 
 def test_recovered_429_does_not_retry_later_cognitive_failure(monkeypatch, transport, providers_up):
@@ -374,12 +389,12 @@ def test_recovered_429_does_not_retry_later_cognitive_failure(monkeypatch, trans
                     return json.dumps({'tool': 'browser_navigate', 'args': {'url': fixture.start_url}}), Usage()
                 return 'not json', Usage()
             transport.handler = respond
-            with pytest.raises(llm.InvalidOutput):
-                bb.trajectory(mid, fixture, space, request_budget=bb.RequestBudget(8), log=lambda line: None)
-    assert clock['elapsed'] == 30 and len(transport.calls) == 4
+            outcome = bb.trajectory(mid, fixture, space, request_budget=bb.RequestBudget(8), log=lambda line: None)
+            assert not outcome['passed'] and outcome['checks']['failure_layer'] == 'MODEL_COGNITION'
+    assert clock['elapsed'] == 30 and len(transport.calls) == 3
 
 
-def test_multimodal_escalation_delivers_real_png_and_keeps_capture_history(monkeypatch,transport,providers_up):
+def test_multimodal_controller_keeps_real_png_and_capture_history(monkeypatch,transport,providers_up):
     qualify('openrouter/fixture/vision-alpha:free',fail=('sufficient_dom',))
     qualify('deepseek/flash')
     qualify('openrouter/fixture/text-gamma:free')  # Synthetic proof; capabilities still forbid this text-only model after image.
@@ -393,7 +408,7 @@ def test_multimodal_escalation_delivers_real_png_and_keeps_capture_history(monke
             def decide(provider,request):
                 n['value']+=1
                 if n['value']==1: action={'tool':'browser_navigate','args':{'url':fixture.origin+fixture.routes['done']}}
-                elif request['model']!='deepseek-flash': action={'tool':'browser_screenshot','args':{}}
+                elif n['value'] <= 4: action={'tool':'browser_screenshot','args':{}}
                 else:
                     images=[part for m in request['messages'] if isinstance(m['content'],list) for part in m['content'] if part['type']=='image_url']
                     assert len(images)>=3
@@ -413,7 +428,7 @@ def test_multimodal_escalation_delivers_real_png_and_keeps_capture_history(monke
                 result=runtime.run_agent('SOUT','Observe image evidence',max_steps=8,allowed_tools={'browser_navigate','browser_screenshot'})
             assert result['execution_status']=='completed',result
             last=transport.calls[-1][1]
-            assert last['model']=='deepseek-flash'
-            assert result['steps'][-1]['browser_controller']['escalation']
+            assert last['model']=='fixture/vision-alpha:free'
+            assert not any(st['browser_controller'].get('escalation') for st in result['steps'])
             assert all('base64' not in (r['data'] or '') for r in journal.query("SELECT * FROM events WHERE type='browser.controller'"))
             assert all('base64' not in (r['output_preview'] or '') for r in journal.query('SELECT * FROM llm_calls'))
