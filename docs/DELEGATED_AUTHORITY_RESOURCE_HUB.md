@@ -60,7 +60,8 @@ Les trois niveaux sont donc distincts : stratégie libre, délégation humaine d
 6. La session devient `connected` si cette vérification réussit ; sinon `expired`/`unavailable`. Les demandes correspondantes sont répondues avec la seule valeur structurée `connected`.
 7. Accorder un mandat puis reprendre l'activité depuis Workbench.
 
-Le navigateur humain d'onboarding peut contacter le Web public nécessaire au login
+Le navigateur humain d’onboarding est Google Chrome stable installé sous Windows, lancé
+directement sans agent-browser, CDP, snapshot, injection ou automatisation. Il peut contacter le Web public nécessaire au login
 (redirections, OAuth, scripts et assets), via le GuardProxy conservé. HTTP/HTTPS seulement,
 localhost/réseaux privés refusés, contrôle DNS à la connexion et protections des services
 du navigateur conservés. Aucun domaine visité n'est ajouté au compte, mandat ou canal.
@@ -139,7 +140,7 @@ Le diff exact est celui de la PR draft empilée sur #126, onglet Files changed ;
 
 Limites réelles :
 
-- Vérification générique par repère humain et domaines explicites, pas détecteur universel d'authentification. Un repère mauvais ne prouve pas l'identité. OAuth/CDN peuvent demander des domaines supplémentaires configurés par l'humain.
+- Vérification générique par repère humain et domaines explicites, pas détecteur universel d'authentification. Un repère mauvais ne prouve pas l'identité. OAuth/CDN sont libres sur le Web public pendant le login humain ; les domaines configurés ne bornent que les tâches agent et la vérification.
 - Qualification publique conservatrice : labels professionnels constatés, pas vérification juridique de l'entreprise. Formulaires atypiques, contacts nominatifs et contrôles inconnus restent à qualifier ; aucun droit inventé.
 - Les libellés d'interface servent à borner les effets ordinaires. Aucun adaptateur générique ne peut certifier les conséquences cachées d'un site arbitraire ; les parcours ambigus restent refusés.
 - Les observations de compte sont volontairement filtrées. Le masquage conservateur de nombres de 4–8 chiffres peut retirer des données utiles. Ce n'est pas un analyseur universel de secrets encodés dans du contenu arbitraire.
@@ -156,8 +157,8 @@ Préserver le DataRoot du run à reprendre. Arrêter son exécution et fermer le
 Depuis un checkout du dépôt, créer un worktree séparé :
 
 ```powershell
-git fetch origin feat/delegated-resource-hub
-git worktree add C:\Users\saill\Projects\Octopus-delegated --detach origin/feat/delegated-resource-hub
+git fetch origin fix/native-human-login
+git worktree add C:\Users\saill\Projects\Octopus-delegated --detach origin/fix/native-human-login
 Set-Location C:\Users\saill\Projects\Octopus-delegated
 ```
 
@@ -175,7 +176,7 @@ Dans Workbench :
 
 1. Sélectionner l'activité voulue. Ouvrir **Paramètres**.
 2. **Ajouter un compte**, ou **Accepter / connecter** la demande de ressource. Définir clé, plateforme libre, nom, ownership/dédié, URL, domaines, business et repère de la page connectée.
-3. Terminer login/signup/CAPTCHA/2FA dans le Chromium visible. Cliquer **J’ai terminé — vérifier**. Vérifier l'état **Connecté** et la date.
+3. **Ouvrir la connexion** lance Chrome stable. Terminer login/signup/CAPTCHA/2FA manuellement. Fermer toutes les fenêtres de cette identité, puis cliquer **J’ai terminé — vérifier**. La vérification séparée utilise le même Chrome stable, le même profil et une garde limitée aux domaines du compte. Vérifier l’état **Connecté** et la date ; un échec ne vaut jamais connexion.
 4. **Accorder un mandat** pour cette activité : `public_business/contact` pour contacter des entreprises ; `owned_account` avec `read` et les effets souhaités pour les comptes. `publish` n'accorde pas `edit`. Les opérations de lecture nécessaires doivent être explicitement incluses.
 5. Contrôler la liste **Mandats accordés à cette activité**, les ressources sélectionnées et les business du compte.
 6. Depuis **Missions**, reprendre **le même objectif économique**. Si une ancienne demande `pursuit.permission` attend encore une réponse, répondre seulement que le mandat a été configuré dans Paramètres ; ce texte n'accorde aucun droit à lui seul.
@@ -184,3 +185,97 @@ Dans Workbench :
 Ce protocole décrit l'essai opérateur suivant ; il n'a pas été exécuté sur le PC Windows pendant cette mission.
 
 Verdict : **READY FOR DELEGATED AUTONOMY** sur le périmètre contrôlé testé. Le premier essai Windows devra valider les domaines, le repère et les contrôles de la plateforme choisie ; aucune compatibilité universelle ni performance économique n’est déduite des tests.
+
+
+## Correctif du smoke #130 : navigateur humain natif
+
+Trois environnements sont distincts : navigateur public agent existant (automation anonyme),
+navigateur compte agent (automation mandatée et domaines stricts), navigateur humain
+(Chrome stable installé, lancement natif sans contrôle OCTOPUS). Aucune dissimulation
+de webdriver, modification de fingerprint/UA, injection stealth ou résolution de CAPTCHA.
+
+La découverte humaine examine les installations Windows standards de Google Chrome.
+Chrome absent ou installation non standard : erreur explicite, sans repli vers Chrome for
+Testing. Le navigateur public et les search providers existants ne changent pas de backend.
+L’environnement natif filtre les clés LLM et les options d’automatisation héritées. Le proxy
+reste pour interdire les destinations privées/locales, contrôler le DNS et bloquer les
+services internes pertinents. QUIC et UDP WebRTC non proxifiés restent désactivés.
+Le proxy ne lit pas le DOM, les inputs ou les cookies et ne journalise pas le parcours.
+
+Chaque ressource reconnectée choisit une nouvelle identité `account_profiles/<hash>-stable`.
+Aucune copie depuis l’ancien profil CfT ou le profil personnel Windows. Les anciennes
+identités restent intactes ; ouvrir cette connexion invalide leur disponibilité déclarée.
+Le registre ne conserve que `browser_kind=chrome_stable`, aucun secret. Le schéma V10,
+les mandats, l’objectif, les observations, décisions et coûts sont inchangés.
+
+Pendant le login, seule l’existence du processus est contrôlée. Fermer Workbench arrête
+son proxy mais ne prend jamais le contrôle et ne tue pas la fenêtre humaine. Fermer les
+fenêtres de cette identité avant de rouvrir Workbench ou de vérifier. Une poignée native
+encore active ou le verrou de profil Chrome interdit toute vérification/automation. Le
+verrou Windows est contrôlé sans lire son contenu, y compris après redémarrage Workbench.
+Ne pas supprimer un verrou pour forcer une reprise.
+
+Après « J’ai terminé » et fermeture, un vérificateur distinct utilise agent-browser avec
+**le même Chrome stable installé** et le profil dédié, sous garde stricte des domaines.
+Il ouvre `verify_url`, contrôle le domaine final puis exécute le seul prédicat booléen
+repère authentifié + absence de password/OTP standard. Aucun snapshot, texte libre,
+input.value ou cookie n’est demandé. Un profil incompatible, un backend absent, une
+connexion non reconnue ou une fermeture ambiguë reste expiré/indisponible. Cette
+vérification n’accorde aucun mandat, business, canal act ni droit financier. Elle peut
+répondre à la demande de connexion/challenge déjà en attente, jamais à une permission.
+
+Les tâches compte utilisent ensuite le même exécutable et profil, avec `_guard()` inchangé.
+Session et mandat sont recontrôlés ; les domaines OAuth/CDN rencontrés pendant le login
+ne deviennent pas autorité agent. Les dépendances tierces d’une tâche agent restent
+refusées : le login humain libre ne garantit pas la compatibilité d’un site avec cette
+politique stricte.
+
+Un challenge détecté dans une Workspace agent suspend la tâche avant snapshot ou
+interaction et crée une demande humaine durable ; aucun solveur ou retry aveugle.
+La session compte devient « connexion requise ». Reconnecter/vérifier explicitement cette
+identité dans Chrome stable permet de rendre la tâche reprenable avec son mandat intact.
+Un challenge public peut nécessiter une ressource configurée, un handoff humain ou une
+API officielle : résoudre dans une autre identité ne prouve pas que le profil anonyme
+agent sera réutilisable. « unusual traffic / trafic exceptionnel » est une source
+indisponible ; conserver les search providers, sans chercher à contourner Google.
+
+### Smoke Windows sur le même DataRoot
+
+1. Arrêter le run et Workbench ; sauvegarder le DataRoot existant à froid. Ne pas créer
+   un DataRoot neuf ni copier un profil Chrome personnel. Vérifier le head du livrable
+   après le checkout de `fix/native-human-login`, puis relancer avec le même `-DataRoot`.
+2. Dans Paramètres, conserver les business, domaines agent et repère existants ; cliquer
+   « Ouvrir la connexion ». Vérifier Google Chrome stable (aucune mention CfT/tests) et
+   l’absence de port de debugging/drapeau automation dans sa ligne de commande.
+3. Naviguer manuellement, login/OAuth/CAPTCHA/2FA compris. Aucune commande OCTOPUS
+   pendant ce parcours. Si le site refuse encore, constater la limite ; aucun bypass.
+4. Cliquer vérifier en laissant la fenêtre ouverte : refus attendu. Fermer toutes les
+   fenêtres de cette identité puis vérifier : booléen strict, état honnête, aucun nouveau
+   mandat/canal act. Contrôler les détails de dernière vérification en cas d’échec.
+5. Avec le mandat préexistant ou explicitement accordé par l’humain, faire une lecture
+   compte bornée ; constater le refus hors domaines. Vérifier SQLite/journal sans
+   chercher ou afficher des secrets : aucun cookie, password, OTP ou contenu de login.
+6. Fermer Workbench/navigateurs, redémarrer sur le même DataRoot puis cliquer vérifier.
+   Refaire une lecture bornée. **Ce test Windows est nécessaire pour valider la persistance** :
+   les tests fake ne prouvent ni une session réelle réutilisable ni l’absence de CAPTCHA.
+7. Si la session n’est pas réutilisable, conserver l’état explicite et passer à une API/OAuth
+   officielle ou handoff humain. Ne pas désactiver App-Bound Encryption ni extraire/déchiffrer
+   des cookies. Reprendre le même objectif uniquement après ce contrôle opérateur.
+
+### CHROME PROFILE IMPORT — DEFER
+
+L’import du profil personnel existant reste hors patch. Copier Cookies/Local State ne
+prouve pas la réutilisation : App-Bound Encryption lie les secrets au contexte Chrome,
+les profils vivants sont verrouillés et certaines sessions dépendent du device.
+Chrome 136 refuse le debugging du répertoire par défaut ; un répertoire dédié utilise
+une autre clé. L’approche présente crée une identité neuve avec Chrome stable, puis
+réutilise **ce même exécutable** après fermeture, sans copier ni déchiffrer un profil.
+Cela reste une hypothèse de compatibilité à observer sur Windows, pas une garantie.
+Le prochain chantier éventuel doit tester une copie indépendante explicitement choisie
+et l’exécutable installé sans lire de cookies/mots de passe, puis valider séparément
+chaque ressource ; les identités partagées demanderaient en outre un changement du
+modèle actuel (profil par ressource). Ne pas retarder le smoke pour cet import.
+
+Sources primaires : [Chrome 136 et remote debugging](https://developer.chrome.com/blog/remote-debugging-port),
+[App-Bound Encryption Windows, code Chromium](https://github.com/chromium/chromium/blob/main/chrome/browser/os_crypt/app_bound_encryption_provider_win.cc),
+[verrou de profil Windows, code Chromium](https://chromium.googlesource.com/chromium/src/+/master/chrome/browser/process_singleton_win.cc).

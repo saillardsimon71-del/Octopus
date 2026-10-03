@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,9 @@ URL = 'https://new-platform.example/dashboard'
 
 @pytest.fixture(autouse=True)
 def no_external_executors(monkeypatch):
+    monkeypatch.setattr(resources, 'stable_chrome_executable', lambda: '/fake/installed/Google/Chrome/chrome.exe')
+    monkeypatch.setattr(resources, '_human_processes', {})
+    monkeypatch.setattr(resources, '_launch_human_browser', lambda *a: SimpleNamespace(poll=lambda: 0))
     monkeypatch.setattr(actions, '_EXECUTORS', {})
     monkeypatch.setattr(actions, '_load_configured_executors', lambda: None)
 
@@ -75,6 +79,8 @@ class FakeAccountSession:
             self.url = args[0]
             return ok({'url': self.url})
         if command == 'eval':
+            if 'octopus_challenge' in args[0] or 'octopus_traffic' in args[0]:
+                return ok({'result': False})
             # Exactly one fixed boolean predicate; no snapshots or cookie access in onboarding.
             assert 'document.body.innerText.includes(marker)' in args[0]
             assert 'input[type=password]' in args[0]
@@ -269,9 +275,9 @@ def test_malt_style_request_onboarding_and_secret_non_capture(monkeypatch):
                                     created_by='agent:test', url=URL) == tid
     account()
     connector = resources.HumanConnection('new-platform', actor='human', session_factory=FakeAccountSession)
-    captured = connector.session
     assert resources.get('new-platform')['web_account']['session_status'] == 'connection_required'
     assert connector.verify() is True
+    captured = FakeAccountSession.instances[-1]
     assert resources.get('new-platform')['web_account']['session_status'] == 'connected'
     assert tasks.pending_human_requests(BUSINESS) == []
     assert mandates.list_mandates(BUSINESS) == []
@@ -307,18 +313,7 @@ def test_human_public_login_dependencies_never_expand_agent_authority(monkeypatc
     visited = []
 
     class HumanSession(FakeAccountSession):
-        def run(self, command, args=(), **kwargs):
-            if command == 'open':
-                # Only the fake human navigates; exercise the actual proxy's network guard.
-                assert proxy._check(args[0])
-                if args[0] == start:
-                    for url in flow:
-                        assert proxy._check(url), url
-                        visited.append(url)
-                self.url = verified
-                self.commands.append((command, list(args)))
-                return {'success': True, 'data': {}}
-            return super().run(command, args, **kwargs)
+        pass  # Used only by the separate verifier, never to open or control login.
 
     # Capture the real GuardProxy before Session.open is invoked. No upstream connections.
     real_proxy = web_guard.GuardProxy
@@ -331,11 +326,15 @@ def test_human_public_login_dependencies_never_expand_agent_authority(monkeypatc
     with web_guard.session() as state:
         parent_state = state
         connection = resources.HumanConnection(key, actor='human', session_factory=HumanSession)
-        human = connection.session
+        assert connection.session is None
+        for url in flow:
+            assert proxy._check(url), url
+            visited.append(url)  # Simulated manual navigation; no browser automation.
         try:
             assert visited == flow
             assert state.visited == [] and not state.account_read and state.account_domains == ()
             assert connection.verify() is True
+            human = FakeAccountSession.instances[-1]
         finally:
             connection.close()
         assert web_guard.current() is parent_state and not parent_state.account_read
@@ -349,7 +348,7 @@ def test_human_public_login_dependencies_never_expand_agent_authority(monkeypatc
     assert transport.calls == []
     assert {c for c, _ in human.commands} <= {'open', 'get', 'eval'}
     assert all(args == ['url'] for c, args in human.commands if c == 'get')
-    assert [args[0] for c, args in human.commands if c == 'open'] == [start, verified]
+    assert [args[0] for c, args in human.commands if c == 'open'] == [verified]
 
     # A connected account still cannot be used by an agent without a human mandate.
     with pytest.raises(PermissionError):
@@ -442,9 +441,9 @@ def test_human_verification_is_required_after_oauth_and_only_returns_boolean(mon
                 return {'success': True, 'data': {'result': 'true' if failure == 'non-boolean' else False}}
             return super().run(command, args, **kwargs)
     connection = resources.HumanConnection('new-platform', actor='human', session_factory=UnverifiedSession)
-    session = connection.session
     try:
         assert connection.verify() is False
+        session = FakeAccountSession.instances[-1]
     finally:
         connection.close()
     assert resources.get('new-platform')['web_account']['session_status'] == 'expired'

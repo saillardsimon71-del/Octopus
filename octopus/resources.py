@@ -379,6 +379,8 @@ def configure_account(key, *, actor, provider, label, url, domains, businesses, 
     # Preserve a verified session only when the security and verification scope is identical.
     if old and all(old.get(k) == account[k] for k in ('domains', 'verify_url', 'authenticated_text')):
         account['session_status'] = old.get('session_status', 'connection_required')
+    if old.get('browser_kind'):
+        account['browser_kind'] = old['browser_kind']
     _write(key, {'web_account': json.dumps(account, ensure_ascii=False), 'locator': url, 'label': label})
     with tasks._tx() as conn:
         tasks._emit(conn, 'octopus', None, 'resource.account_configured', {'key': key, 'businesses': account['businesses']})
@@ -388,7 +390,11 @@ def configure_account(key, *, actor, provider, label, url, domains, businesses, 
 def account_profile(key):
     import hashlib
     from agents import config
-    return config.DATA_DIR / 'account_profiles' / hashlib.sha256(_normalize_resource_key(key).encode()).hexdigest()[:24]
+    identity = hashlib.sha256(_normalize_resource_key(key).encode()).hexdigest()[:24]
+    account = (get(key) or {}).get('web_account') or {}
+    # Never hand cookies written by another executable to Chrome stable. No import/decryption.
+    suffix = '-stable' if account.get('browser_kind') == 'chrome_stable' else ''
+    return config.DATA_DIR / 'account_profiles' / (identity + suffix)
 
 
 def set_account_session(key, status, *, detail=''):
@@ -448,73 +454,181 @@ def request_account(key, platform, reason, capabilities, business, *, created_by
     return tid
 
 
-class HumanConnection:
-    """Visible human-only browser. No snapshots, cookies, credentials or login text are returned.
+# Only native process handles are retained in memory; no page, input or cookie is inspected.
+_human_processes = {}
 
-    Verification is a boolean DOM predicate, after the human explicitly finishes.
-    Onboarding may use the public Web; configured domains constrain verification and agent
-    work only. Each identity has its own profile. Navigations never create authority.
+
+def stable_chrome_executable():
+    """Installed Windows Google Chrome only. Never fall back to Playwright/CfT or a live profile."""
+    import os
+    import sys
+    if sys.platform != 'win32':
+        raise ResourceError('Connexion humaine : Google Chrome stable installé sous Windows requis')
+    for name in ('PROGRAMFILES', 'PROGRAMFILES(X86)', 'LOCALAPPDATA'):
+        root = os.environ.get(name)
+        candidate = Path(root) / 'Google/Chrome/Application/chrome.exe' if root else None
+        if candidate and candidate.is_file():
+            return str(candidate.resolve())
+    raise ResourceError('Google Chrome stable introuvable ; installez-le puis rouvrez la connexion')
+
+
+def account_profile_busy(key):
+    """Fail closed while the native browser or Chromium's profile lock is present (also after restart)."""
+    import os
+    profile = account_profile(key)
+    process = _human_processes.get(str(profile))
+    if process and process.poll() is None:
+        return True
+    # Windows Chrome holds lockfile without write sharing. Opening it reads no contents.
+    try:
+        fd = os.open(profile / 'lockfile', os.O_WRONLY)
+    except FileNotFoundError:
+        return (profile / 'SingletonLock').exists() or (profile / 'SingletonLock').is_symlink()
+    except OSError:
+        return True
+    else:
+        os.close(fd)
+        return False
+
+
+def account_browser_options(key):
+    account = (get(key) or {}).get('web_account') or {}
+    if account.get('browser_kind') != 'chrome_stable':
+        return {}  # Existing identities keep their backend until explicit human reconnection.
+    if account_profile_busy(key):
+        raise ResourceError('Fermez toutes les fenêtres Chrome de cette identité avant de vérifier ou reprendre')
+    try:
+        executable = stable_chrome_executable()
+    except ResourceError:
+        set_account_session(key, 'unavailable', detail='Chrome stable absent ; session non réutilisable')
+        raise
+    return {'executable_path': executable, 'inherit_extra_args': False}
+
+
+def _launch_human_browser(executable, profile, proxy_url, url):
+    import os
+    import subprocess
+    from agents import agent_browser
+    profile.mkdir(parents=True, exist_ok=True)
+    # Transport protections only, no debugging port, automation flags, injected script or stealth.
+    argv = [executable, '--user-data-dir=' + agent_browser.plain_path(profile), '--new-window',
+            '--no-first-run', '--no-default-browser-check', '--disable-quic',
+            '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
+            '--proxy-server=' + proxy_url, '--proxy-bypass-list=<-loopback>', url]
+    env = {k: v for k, v in os.environ.items() if k.upper() in agent_browser._ENV_ALLOW}
+    return subprocess.Popen(argv, shell=False, env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+class HumanConnection:
+    """Native Chrome stable owned exclusively by the human. No automation during login.
+
+    session_factory is used ONLY for the separate boolean verification after Chrome closes.
+    Public login navigations never become agent authority. Profile reuse is tested, not assumed.
     """
     def __init__(self, key, *, actor, session_factory=None):
         from . import mandates
-        from agents import agent_browser, web_guard
+        from agents import web_guard
         mandates._human(actor)
-        self.resource = get(key)
         self.key = key
+        self.resource = get(key)
         account = (self.resource or {}).get('web_account') or {}
         if not account or not account['enabled']:
             raise ResourceError('configurez et activez le compte avant la connexion')
+        executable = stable_chrome_executable()
+        if account_profile_busy(key):
+            raise ResourceError('Fermez le navigateur de cette identité avant de reconnecter')
+        account = dict(account, browser_kind='chrome_stable')
+        _write(key, {'web_account': json.dumps(account, ensure_ascii=False)})
+        set_account_session(key, 'connection_required', detail='Chrome stable : connexion humaine requise')
+        if account_profile_busy(key):
+            raise ResourceError('Fermez le navigateur de cette identité avant de reconnecter')
         self.domains = tuple(account['domains'])
-        set_account_session(key, 'connection_required', detail='Connexion humaine en cours')
+        self.session_factory = session_factory
+        self.session = None
+        self.proxy = None
+        set_account_session(key, 'connection_required', detail='Chrome stable humain ouvert ; session non vérifiée')
         def guard(url):
-            # Human-only login needs public redirects, OAuth and assets. This does not
-            # widen the separate authenticated agent Workspace or persist visited domains.
             try:
                 web_guard.classify(url)
                 return True
             except web_guard.BrowseRefused:
                 return False
-        self.proxy = web_guard.GuardProxy(guard).start()
-        self.session = None
         try:
-            factory = session_factory or agent_browser.Session
-            self.session = factory('human-' + account_profile(key).name, proxy_url=self.proxy.url,
-                                   profile_dir=account_profile(key), headed=True)
-            self.session.close()  # stale daemon after restart; human owns this session
-            result = self.session.run('open', [self.resource['locator']])
-            if not result.get('success'):
-                raise ResourceError('connexion navigateur indisponible ; aucun secret lu')
+            self.proxy = web_guard.GuardProxy(guard).start()
+            self.process = _launch_human_browser(executable, account_profile(key), self.proxy.url,
+                                                 self.resource['locator'])
+            _human_processes[str(account_profile(key))] = self.process
+            if self.process.poll() not in (None, 0):
+                raise ResourceError('Chrome stable n’a pas démarré')
         except BaseException:
             self.close()
-            set_account_session(key, 'unavailable', detail='Ouverture navigateur impossible')
-            raise
+            set_account_session(key, 'unavailable', detail='Ouverture Chrome stable impossible ; session non vérifiée')
+            raise ResourceError('Ouverture Chrome stable impossible ; aucun secret lu') from None
 
     def verify(self):
         account = get(self.key)['web_account']
         if not account.get('enabled') or tuple(account['domains']) != self.domains:
             raise ResourceError('configuration modifiée pendant la connexion ; reconnectez')
-        result = self.session.run('open', [account['verify_url']])
-        if not result.get('success'):
-            set_account_session(self.key, 'unavailable', detail='Vérification impossible')
-            return False
-        ok = verify_account_page(self.session, account)
-        set_account_session(self.key, 'connected' if ok else 'expired',
-                            detail='Page authentifiée constatée' if ok else 'Connexion non constatée ; intervention humaine requise')
+        # No command, DOM read or CDP while the native human browser is running.
+        account_browser_options(self.key)
         self.close()
-        if ok:
-            for request in tasks.pending_human_requests():
-                context = json.loads(request.get('context') or '{}')
-                if context.get('key') == self.key and context.get('web_request'):
-                    tasks.answer(request['id'], 'connected')
-        return ok
+        return verify_account_connection(self.key, actor='human', session_factory=self.session_factory)
 
     def close(self):
-        if self.session:
-            self.session.close()
-            self.session = None
-        if getattr(self, 'proxy', None):
+        # Do not kill, automate or take over a human window. Stopping the proxy fails closed.
+        if self.proxy:
             self.proxy.stop()
             self.proxy = None
+
+
+def verify_account_connection(key, *, actor, session_factory=None):
+    """Explicit human completion, also after Workbench restart; strict, boolean-only verifier."""
+    from . import mandates
+    from agents import agent_browser, web_guard
+    mandates._human(actor)
+    account = (get(key) or {}).get('web_account') or {}
+    if not account.get('enabled') or account.get('browser_kind') != 'chrome_stable':
+        raise ResourceError('Ouvrez la connexion Chrome stable avant de vérifier')
+    options = account_browser_options(key)  # Always recheck the native profile lock.
+    def guard(url):
+        from urllib.parse import urlsplit
+        try:
+            web_guard.classify(url)
+            return urlsplit(url).hostname in account['domains']
+        except web_guard.BrowseRefused:
+            return False
+    session = None
+    proxy = web_guard.GuardProxy(guard).start()
+    ok = False
+    try:
+        session = (session_factory or agent_browser.Session)('verify-' + account_profile(key).name,
+            proxy_url=proxy.url, profile_dir=account_profile(key), headed=True, **options)
+        session.close()  # Only this separate verifier's daemon, never the native human browser.
+        result = session.run('open', [account['verify_url']])
+        if result.get('success'):
+            ok = verify_account_page(session, account)
+        set_account_session(key, 'connected' if ok else 'expired', detail=(
+            'Session constatée avec Chrome stable ; recontrôlée à chaque tâche' if ok else
+            'Session non réutilisable ou login requis ; reconnectez ou utilisez API/handoff humain'))
+    except Exception:
+        ok = False
+        set_account_session(key, 'unavailable', detail='Session Chrome stable non vérifiable ; profil verrouillé ou backend incompatible')
+    finally:
+        try:
+            if session:
+                session.close()
+        except Exception:
+            ok = False
+            set_account_session(key, 'unavailable', detail='Vérification non terminée ; backend navigateur indisponible')
+        finally:
+            proxy.stop()
+    if ok:
+        for request in tasks.pending_human_requests():
+            context = json.loads(request.get('context') or '{}')
+            if context.get('key') == key and (context.get('web_request') or context.get('need') == 'captcha'):
+                tasks.answer(request['id'], 'connected')
+    return ok
 
 
 def verify_account_page(session, account):
@@ -522,7 +636,8 @@ def verify_account_page(session, account):
     from urllib.parse import urlsplit
     data = session.run('get', ['url'])
     final = str((data.get('data') or {}).get('url') or '')
-    if urlsplit(final).hostname not in account['domains']:
+    parsed = urlsplit(final)
+    if not data.get('success') or parsed.scheme not in ('http', 'https') or parsed.hostname not in account['domains']:
         return False
     # JSON string escaping, never interpolate into shell or selectors.
     predicate = ("(() => { const marker = " + json.dumps(account['authenticated_text']) + "; "

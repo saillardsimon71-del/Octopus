@@ -7,6 +7,7 @@ of upstream runtime code. The existing params dialect is the sole schema.
 from __future__ import annotations
 
 from . import cancel
+from octopus.browser_workspace import HumanBrowserRequired
 
 
 def technical_refusal(reason: str) -> bool:
@@ -103,7 +104,7 @@ class ToolRegistry(dict):
             return refusal, None
         try:
             return None, self[tool]["fn"](args)
-        except cancel.Cancelled:
+        except (cancel.Cancelled, HumanBrowserRequired):
             raise
         except Exception as exc:
             # Bound exception text before it can enter the model/history.

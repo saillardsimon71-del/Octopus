@@ -75,6 +75,13 @@ _PRE_DISPATCH_RE = re.compile(r"not found|no element|unknown ref|invalid ref|sta
                               r"strict mode|resolved to \d+ elements|no node|could not find", re.IGNORECASE)
 
 
+class HumanBrowserRequired(Exception):
+    """A detected challenge stops the agent before any further interaction or page exposure."""
+    def __init__(self, resource_key=None):
+        self.resource_key = resource_key
+        super().__init__('Challenge navigateur : intervention humaine requise, aucune résolution automatique')
+
+
 class Refused(PermissionError):
     """Refus de politique : aucun effet n'a eu lieu."""
 
@@ -235,9 +242,14 @@ class Workspace:
         headed = setting == "0" or (self.account_mode and setting != "1")
         try:
             self._session = self._session_factory(f"oct-{self.scope.key}", proxy_url=self._proxy.url,
-                                                  profile_dir=profile, headed=headed, download_dir=inbox)
+                                                  profile_dir=profile, headed=headed, download_dir=inbox,
+                                                  **(resources.account_browser_options(self.resource_key)
+                                                     if self.resource_key else {}))
             self._session.close()  # démon périmé d'un processus interrompu : repartir d'un état propre
         except Exception:
+            if self.resource_key and self.account_resource['web_account'].get('browser_kind') == 'chrome_stable':
+                resources.set_account_session(self.resource_key, 'unavailable',
+                    detail='Session Chrome stable indisponible ; vérifier ou reconnecter avant reprise')
             self._proxy.stop()
             self._proxy, self._session = None, None
             raise
@@ -307,6 +319,25 @@ class Workspace:
             raise RuntimeError(agent_browser.redact(str(result.get("error") or "commande échouée"))[:500])
         return result.get("data") or {}
 
+    def _check_challenge(self):
+        # Agent environment ONLY. Two fixed boolean predicates, no credentials or page text returned.
+        traffic = self._read('eval', ["(() => { /* octopus_traffic */ return Boolean(document.body && "
+            "/unusual traffic|trafic exceptionnel/i.test(document.body.innerText)); })()"]).get('result')
+        if traffic is True:
+            raise Refused('source Web inaccessible : protection anti-automation ; utiliser les search providers')
+        challenge = self._read('eval', ["(() => { /* octopus_challenge */ return Boolean("
+            "Array.from(document.querySelectorAll('iframe[src*=captcha],iframe[src*=challenge],#challenge-form'))"
+            ".some(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden') || "
+            "(document.body && /verify you are (?:not a bot|human)|performing security verification|"
+            "security service to protect against malicious bots|montrez-nous que vous|"
+            "confirmez que vous(?: n.êtes pas un robot| êtes humain)|(?:complete|solve|résolvez|validez) (?:the |le |ce )?captcha"
+            "/i.test(document.body.innerText))); })()"]).get('result')
+        if challenge is True:
+            if self.resource_key:
+                resources.set_account_session(self.resource_key, 'connection_required',
+                    detail='Challenge : connexion Chrome stable humaine requise ; aucun contournement')
+            raise HumanBrowserRequired(self.resource_key)
+
     def _check_account(self):
         if not self.resource_key:
             return
@@ -320,6 +351,7 @@ class Workspace:
             raise Refused('session expirée : connexion humaine requise ; aucun contenu de login lu')
 
     def _page_text(self) -> str:
+        self._check_challenge()
         self._check_account()
         try:
             text = agent_browser.redact(str(self._read("get", ["text", "body"]).get("text") or ""))
@@ -328,6 +360,7 @@ class Workspace:
             return ""
 
     def _observe(self, *, full: bool = False) -> dict:
+        self._check_challenge()
         self._check_account()
         data = self._read("snapshot")
         self._refs = {k: v for k, v in (data.get("refs") or {}).items() if isinstance(v, dict)}
@@ -377,11 +410,15 @@ class Workspace:
         """Premier appel autre qu'une navigation : rouvrir la dernière page de la tâche."""
         self._start()
         if self._url:
+            self._check_challenge()
+            self._check_account()
             return
         url = (self._resume or {}).get("checkpoint_url")
         if not url:
             raise Refused("aucune page ouverte : commence par browser_navigate")
         self._open(url)
+        self._check_challenge()
+        self._check_account()
 
     def _open(self, url: str) -> None:
         result = self._cmd("open", [url])
