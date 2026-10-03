@@ -352,10 +352,11 @@ def test_fallback_to_next_free_model_after_failure(transport, providers_up, monk
 def test_flash_fallback_page_inspection_prefers_free_route_over_pinned_flash(
         transport, providers_up, monkeypatch):
     monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+    monkeypatch.setenv("OMNIROUTE_MODEL", "groq/qwen3.8-27b")
     monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
 
     def handler(provider, request):
-        if request["model"] == "auto/best-free":
+        if request["model"] == "groq/qwen3.8-27b":
             return llm.TransportResult(
                 text="page visible",
                 usage=Usage(prompt_tokens=100, completion_tokens=20),
@@ -379,7 +380,7 @@ def test_flash_fallback_page_inspection_prefers_free_route_over_pinned_flash(
 
     assert result.model == "omniroute/auto-free"
     assert result.cost_usd == 0
-    assert transport.models == ["auto/best-free"]
+    assert transport.models == ["groq/qwen3.8-27b"]
 
 
 def test_flash_fallback_uses_deepseek_only_after_free_routes_fail(transport, providers_up, monkeypatch):

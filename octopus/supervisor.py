@@ -73,7 +73,7 @@ FINALITY = "Obtenir, maintenir et améliorer une performance économique réelle
 # Borne l'exécution de ce démarrage. Ne borne pas les stratégies que pursuit peut envisager :
 # la pertinence économique est annotée à part par strategy_separation.
 PURSUIT_TOOLS = frozenset({"search", "browse", "resources_status", "economy_status",
-                           "browser_navigate", "browser_snapshot", "browser_scroll", "browser_back",
+                           "browser_navigate", "browser_snapshot", "browser_screenshot", "browser_scroll", "browser_back",
                            "account_task", "request_account", "create_artifact", "register_channel", "act_on_channel",
                            "browser_click", "browser_type", "browser_select", "browser_check", "browser_press",
                            "browser_verify", "browser_upload"})

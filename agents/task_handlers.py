@@ -42,7 +42,7 @@ def _run(ctx, fn):
         raise WaitingHuman(tasks.request_human(ctx.id, ctx.owner, 'browser.challenge',
             'Challenge navigateur : intervention humaine dans Chrome stable requise. '
             'Aucun contournement ; vérifier la session du compte avant reprise.',
-            context={'key': exc.resource_key, 'need': 'captcha'})) from None
+            context={'key': exc.resource_key, 'need': exc.need})) from None
     finally:
         done.set()
     if ctx.cancelled():

@@ -16,9 +16,16 @@ def test_catalog_injects_omniroute_free_model(monkeypatch):
     assert model["api_model"] == "auto/free"
     assert model["cost_class"] == "free_quota"
     assert model["provider"] == "omniroute"
+    assert 'vision' not in model['capabilities']  # auto/free does not identify a compatible model.
     assert cat.provider("omniroute")["base_url"] == "http://127.0.0.1:20128/v1"
     assert cat.task("podalux.write_job")["candidates"]["zero_cost"][0] == "omniroute/auto-free"
     assert cat.task("web.inspect_page")["candidates"]["zero_cost"][0] == "omniroute/auto-free"
+
+
+def test_explicit_known_vision_route_can_advertise_vision(monkeypatch):
+    monkeypatch.setenv('OMNIROUTE_ENABLED', '1')
+    monkeypatch.setenv('OMNIROUTE_MODEL', 'ollama/qwen3.5-4b')
+    assert 'vision' in catalog.load().model('omniroute/auto-free')['capabilities']
 
 
 def test_devworker_uses_only_dedicated_omniroute_routes(monkeypatch):

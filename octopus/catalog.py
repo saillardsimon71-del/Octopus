@@ -74,6 +74,11 @@ def _overlay_omniroute(raw: dict) -> dict:
     provider_id = "omniroute"
     model_id = "omniroute/auto-free"
     model_name = os.environ.get("OMNIROUTE_MODEL", "auto/best-free").strip() or "auto/best-free"
+    # An automatic pool is not a vision model. Only an explicitly configured route
+    # matching a known multimodal catalog model can attest this capability here.
+    vision_route = any('vision' in model.get('capabilities', [])
+                       and model_name in (key, model.get('api_model'))
+                       for key, model in raw.get('models', {}).items())
     zero_cost_attestation = os.environ.get("OMNIROUTE_ZERO_COST_ATTESTATION", "").strip().lower()
     raw.setdefault("providers", {})[provider_id] = {
         "kind": "cloud",
@@ -90,7 +95,7 @@ def _overlay_omniroute(raw: dict) -> dict:
         "provider": provider_id,
         "api_model": model_name,
         "cost_class": "free_quota",
-        "capabilities": ["json", "vision", "tools", "reasoning_effort"],
+        "capabilities": ["json", "tools", "reasoning_effort"] + (["vision"] if vision_route else []),
         "zero_cost_attestation": zero_cost_attestation,
         "notes": "Modèle virtuel OmniRoute : auto/best-free. La disponibilité et le provider réel dépendent des connexions OmniRoute.",
     }

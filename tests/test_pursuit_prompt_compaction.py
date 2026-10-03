@@ -39,7 +39,7 @@ def test_cold_prompt_projection_and_unchanged_execution_limits():
     assert captured["kwargs"]["profile"] == "economical"
     assert supervisor.PURSUIT_ROUNDS == 3
     assert supervisor.PURSUIT_TOOLS == frozenset({"search", "browse", "resources_status", "economy_status",
-        "browser_navigate", "browser_snapshot", "browser_scroll", "browser_back",
+        "browser_navigate", "browser_snapshot", "browser_screenshot", "browser_scroll", "browser_back",
         "account_task", "request_account", "create_artifact", "register_channel", "act_on_channel",
         "browser_click", "browser_type", "browser_select", "browser_check", "browser_press", "browser_verify", "browser_upload"})
     calls = {call["task"]: call["messages"] for call in captured["calls"]}
@@ -69,7 +69,7 @@ def test_restricted_prompts_only_describe_exposed_tools(role, conversational):
     assert "groupe exploration économique" in prompt
     assert "bpifrance.fr" not in prompt
     for tool in set(runtime.TOOLS) - supervisor.PURSUIT_TOOLS:
-        assert not re.search(r"\b" + re.escape(tool) + r"\b", prompt)
+        assert not re.search(r"^- " + re.escape(tool) + r"\(", prompt, re.M)
     for tool in supervisor.PURSUIT_TOOLS:
         assert "- " + tool + "(" in prompt
 

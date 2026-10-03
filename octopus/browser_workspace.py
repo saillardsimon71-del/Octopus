@@ -77,9 +77,10 @@ _PRE_DISPATCH_RE = re.compile(r"not found|no element|unknown ref|invalid ref|sta
 
 class HumanBrowserRequired(Exception):
     """A detected challenge stops the agent before any further interaction or page exposure."""
-    def __init__(self, resource_key=None):
+    def __init__(self, resource_key=None, *, need='captcha'):
         self.resource_key = resource_key
-        super().__init__('Challenge navigateur : intervention humaine requise, aucune résolution automatique')
+        self.need = need
+        super().__init__('Frontière navigateur : intervention humaine requise, aucune résolution automatique')
 
 
 class Refused(PermissionError):
@@ -178,6 +179,74 @@ def _account_text(text):
                   '[contenu de sécurité masqué]', agent_browser.redact(text))
     # A conservative tradeoff for account observations: typical OTPs never reach the model/journal.
     return re.sub(r'(?<![\w.])\d{4,8}(?![\w.])', '[nombre protégé]', text)
+
+
+IMAGE_MAX_BYTES = 8 * 1024 * 1024
+IMAGE_MAX_PIXELS = 16 * 1024 * 1024
+
+
+def capture_page(session, *, business, scope_key, account, task_id=None, resource_key=None,
+                 full_page=False):
+    """Agent/verifier only. No caller-controlled path, values, cookies or human browser access."""
+    import uuid
+    diagnostic = {}
+    if not resources.verify_account_page(session, account, require_marker=False, diagnostic=diagnostic):
+        raise Refused(diagnostic.get('reason', 'backend_error'))
+    def security_surface():
+        result = session.run('eval', ['(() => { /* octopus_capture_safe */ return Boolean(document.body && '
+            '!/api[ _-]?keys?|secret[ _-]?keys?|access[ _-]?tokens?|recovery (?:codes?|phrase)|'
+            'seed phrase|codes? de récupération|clé secrète|clés? api|setup authenticator|'
+            'verification code|security code|one.time (?:code|password)|code de (?:vérification|sécurité)|'
+            '\\botp\\b|\\b2fa\\b|password\\s*:|mot de passe\\s*:|'
+            'configurer.*authentification/i.test(document.body.innerText)); })()'])
+        if not result.get('success') or (result.get('data') or {}).get('result') is not True:
+            raise Refused('écran de sécurité sensible : capture interdite')
+    security_surface()
+    directory = task_inbox(business, scope_key) / 'screenshots'
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = directory / (uuid.uuid4().hex + '.png')
+    try:
+        result = session.run('screenshot', [str(path), *(['--full'] if full_page else [])])
+        if not result.get('success'):
+            raise Refused('capture indisponible')
+        if path.is_file():
+            path.chmod(0o600)
+        if not _within(path, directory) or not path.is_file() or path.stat().st_size > IMAGE_MAX_BYTES:
+            raise Refused('capture hors espace ou trop volumineuse')
+        # Validate actual bytes/dimensions; a local file path alone is not an image.
+        from PIL import Image
+        with Image.open(path) as im:
+            if im.format != 'PNG' or im.width * im.height > IMAGE_MAX_PIXELS:
+                raise Refused('capture PNG bornée requise')
+            im.verify()
+        # Drop a capture if a login/security boundary appeared during capture.
+        if not resources.verify_account_page(session, account, require_marker=False):
+            raise Refused('frontière authentification apparue pendant la capture')
+        security_surface()
+        return {'path': str(path), 'sha256': _sha256(path), 'bytes': path.stat().st_size,
+                'business': business, 'scope': scope_key, 'task_id': task_id,
+                'resource_key': resource_key, 'at': time.time(), 'full_page': bool(full_page)}
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def image_part(image, *, business, scope_key):
+    """Load trusted capture metadata within the current scope; never persist the returned part."""
+    from agents import deepseek
+    if image.get('business') != business or image.get('scope') != scope_key:
+        raise Refused('capture appartenant à un autre business ou une autre tâche')
+    path = Path(image['path'])
+    directory = task_inbox(business, scope_key) / 'screenshots'
+    if (not _within(path, directory) or not path.is_file() or path.stat().st_size > IMAGE_MAX_BYTES
+            or _sha256(path) != image.get('sha256')):
+        raise Refused('capture absente, déplacée ou modifiée')
+    key = image.get('resource_key')
+    if key:
+        if not mandates.account_authority(business, key, 'read'):
+            raise Refused('lecture de capture compte non mandatée')
+        resources.account_browser_options(key)  # Human login must be closed, including on resume.
+    return deepseek.build_vision_messages([str(path)], '')[0]['content'][1]
 
 
 class Workspace:
@@ -346,9 +415,16 @@ class Workspace:
         if not mandates.account_authority(self.scope.business, self.resource_key, 'read'):
             raise Refused('mandat lecture révoqué ou session indisponible')
         account = resources.get(self.resource_key)['web_account']
-        if not resources.verify_account_page(self._session, account):
-            resources.set_account_session(self.resource_key, 'expired', detail='Page authentifiée non constatée')
-            raise Refused('session expirée : connexion humaine requise ; aucun contenu de login lu')
+        final_url = str(self._read('get', ['url']).get('url') or '')
+        if mandates.SENSITIVE.search(final_url) or agent_browser.contains_secret(final_url):
+            raise Refused('surface sensible du compte réservée à l’humain ; contenu non lu')
+        diagnostic = {}
+        if not resources.verify_account_page(self._session, account, require_marker=False, diagnostic=diagnostic):
+            reason = diagnostic.get('reason', 'backend_error')
+            if reason == 'visible_login_field_present':
+                resources.set_account_session(self.resource_key, 'expired', detail=reason)
+                raise Refused('session expirée : login visible ; connexion humaine requise')
+            raise Refused(reason)
 
     def _page_text(self) -> str:
         self._check_challenge()
@@ -495,10 +571,13 @@ class Workspace:
             (self.scope.business, f"browser:{fingerprint}:%"))]
 
     def _effect(self, kind: str, target_sig: str, command: str, args: list[str], *, expect: str | None,
-                channel_id, delegated_effect=None, preserve_form=False) -> dict:
+                channel_id, delegated_effect=None, preserve_form=False, effect=None) -> dict:
         from agents import cancel
         if mandates.SENSITIVE.search(target_sig + ' ' + self._url):
             raise Refused('action sensible réservée à l’humain')
+        declared = effect
+        if declared is not None and declared not in ('contact', 'publish', 'edit'):
+            raise Refused('effet déclaré : contact, publish ou edit requis')
         if re.search(r'publ|post|share|partag', target_sig, re.I):
             effect = 'publish'
         elif re.search(r'save|enregistr|modifier|update|edit', target_sig, re.I):
@@ -507,6 +586,10 @@ class Workspace:
             effect = 'contact'
         else:
             effect = 'unknown'  # only a legacy explicit channel can authorize an unknown control
+        if declared:
+            if effect != 'unknown' and effect != declared:
+                raise Refused('effet déclaré incompatible avec le contrôle ; mandat correspondant requis')
+            effect = declared
         if delegated_effect is not None:
             effect = delegated_effect
         channel = self._channel(channel_id, effect)
@@ -643,7 +726,7 @@ class Workspace:
         with tasks._tx() as conn:
             actions._set(conn, action_id, self.scope.business, status, **fields)
 
-    def _edit(self, kind: str, ref: str, value_for_digest, command: str, args: list[str], channel_id) -> dict:
+    def _edit(self, kind: str, ref: str, value_for_digest, command: str, args: list[str], channel_id, effect=None) -> dict:
         """Modification locale d'un formulaire : autorisée par le canal, enregistrée dans l'empreinte
         de la page ; sur un compte une éventuelle autosauvegarde est aussi journalisée."""
         target, info = self._target(ref)
@@ -654,7 +737,7 @@ class Workspace:
             # Account edits may autosave. Treat typing/select/check as real journaled effects.
             if kind == 'check' and re.search(r'accept|agree|terms|conditions', name, re.I):
                 raise Refused('acceptation de conditions réservée à l’humain')
-            effect = self._form_effect(name)
+            effect = self._form_effect(name, effect)
             self._typed.setdefault(_page_key(self._url), {})[f"{info.get('role')}:{name}"] = _digest([kind, value_for_digest])
             result = self._effect(kind, f"{info.get('role')}:{name}", command, [target, *args],
                                   expect=None, channel_id=channel_id, delegated_effect=effect, preserve_form=True)
@@ -668,9 +751,15 @@ class Workspace:
         self._typed.setdefault(_page_key(self._url), {})[sig] = _digest([kind, value_for_digest])
         return self._observe()
 
-    def _form_effect(self, name):
+    def _form_effect(self, name, declared=None):
+        if declared is not None and declared not in ('contact', 'publish', 'edit'):
+            raise Refused('effet déclaré : contact, publish ou edit requis')
         if re.search(r'profil|bio\b|headline|nom\b|name\b|website|site web', name + ' ' + self._url, re.I):
+            if declared and declared != 'edit':
+                raise Refused('modification du profil : mandat edit requis')
             return 'edit'
+        if declared:
+            return declared
         labels = ' '.join(str(v.get('name') or '') for v in self._refs.values() if v.get('role') == 'button')
         if re.search(r'publi|post|share', labels, re.I):
             return 'publish'
@@ -738,44 +827,62 @@ class Workspace:
         self._ensure_page()
         return self._observe(full=bool(full))
 
-    def click(self, ref: str, expect: str | None = None, channel_id=None) -> dict:
+    def screenshot(self, full_page: bool = False) -> dict:
+        self._ensure_page()
+        self._check_challenge()
+        self._check_account()
+        # Recheck final URL, not the last commanded URL, before rendering a potentially redirected page.
+        url = str(self._read('get', ['url']).get('url') or '')
+        if not self._guard(url) or mandates.SENSITIVE.search(url):
+            raise Refused('surface de capture hors périmètre ou sensible')
+        account = (resources.get(self.resource_key)['web_account'] if self.resource_key else
+                   {'domains': [urlsplit(url).hostname]})
+        image = capture_page(self._session, business=self.scope.business, scope_key=self.scope.key,
+                             task_id=self.scope.task_id, resource_key=self.resource_key,
+                             account=account, full_page=full_page)
+        view = {'ok': True, 'url': self._safe_url(url), 'image': image, 'source': web_guard.UNTRUSTED_NOTE}
+        if self.scope.task_id:
+            tasks.save_step(self.scope.task_id, 'browser.capture:' + image['sha256'], image)
+        return view
+
+    def click(self, ref: str, expect: str | None = None, channel_id=None, effect=None) -> dict:
         self._ensure_page()
         target, info = self._target(ref)
         role, name = str(info.get("role") or ""), str(info.get("name") or "")
-        if role == "link" and not _RISKY_LINK_RE.search(name) and channel_id in (None, "") and not expect:
+        if role == "link" and not _RISKY_LINK_RE.search(name) and channel_id in (None, "") and not expect and not effect:
             result = self._cmd("click", [target])  # simple navigation : lecture
             if not result.get("success"):
                 return {"ok": False, "error": agent_browser.redact(str(result.get("error") or ""))[:300]}
             self._settle_page()
             return self._observe()
-        return self._effect("click", f"{role}:{name}", "click", [target], expect=expect, channel_id=channel_id)
+        return self._effect("click", f"{role}:{name}", "click", [target], expect=expect, channel_id=channel_id, effect=effect)
 
-    def type(self, ref: str, text: str, channel_id=None) -> dict:
+    def type(self, ref: str, text: str, channel_id=None, effect=None) -> dict:
         self._ensure_page()
         text = str(text or "")
         if agent_browser.contains_secret(text):
             raise Refused("saisie d'un secret refusée (anti-exfiltration)")
-        return self._edit("type", ref, text, "fill", [text], channel_id)
+        return self._edit("type", ref, text, "fill", [text], channel_id, effect)
 
-    def select(self, ref: str, value: str, channel_id=None) -> dict:
+    def select(self, ref: str, value: str, channel_id=None, effect=None) -> dict:
         self._ensure_page()
-        return self._edit("select", ref, str(value), "select", [str(value)], channel_id)
+        return self._edit("select", ref, str(value), "select", [str(value)], channel_id, effect)
 
-    def check(self, ref: str, channel_id=None) -> dict:
+    def check(self, ref: str, channel_id=None, effect=None) -> dict:
         self._ensure_page()
-        return self._edit("check", ref, True, "check", [], channel_id)
+        return self._edit("check", ref, True, "check", [], channel_id, effect)
 
-    def press(self, key: str, expect: str | None = None, channel_id=None) -> dict:
+    def press(self, key: str, expect: str | None = None, channel_id=None, effect=None) -> dict:
         self._ensure_page()
         key = str(key or "").strip()
         if not key or len(key) > 40:
             raise Refused("touche invalide")
-        if key in READ_SAFE_KEYS and not expect:
+        if key in READ_SAFE_KEYS and not expect and not effect:
             result = self._cmd("press", [key])
             if not result.get("success"):
                 return {"ok": False, "error": agent_browser.redact(str(result.get("error") or ""))[:300]}
             return self._observe()
-        return self._effect("press", f"key:{key}", "press", [key], expect=expect, channel_id=channel_id)
+        return self._effect("press", f"key:{key}", "press", [key], expect=expect, channel_id=channel_id, effect=effect)
 
     def scroll(self, direction: str = "down") -> dict:
         self._ensure_page()
@@ -791,10 +898,25 @@ class Workspace:
         self._settle_page()
         return self._observe()
 
-    def verify(self, text: str, action_id=None) -> dict:
+    def verify(self, text: str = '', action_id=None, state=None) -> dict:
         """Constat sur la page réelle. Avec une action à effet non vérifiée, la marque `verified`
         seulement si le texte est présent maintenant et absent avant l'action."""
         self._ensure_page()
+        if state is not None:
+            if state not in ('authenticated', 'unauthenticated', 'challenge', 'uncertain'):
+                raise Refused('état sémantique invalide')
+            if action_id is not None or text:
+                raise Refused('état de session et preuve d’action doivent rester séparés')
+            if state in ('challenge', 'unauthenticated'):
+                if self.resource_key:
+                    resources.set_account_session(self.resource_key,
+                        'connection_required' if state == 'challenge' else 'expired',
+                        detail='semantic_' + state,
+                        verification={'method': 'semantic_observation', 'state': state,
+                                      'business': self.scope.business, 'task_id': self.scope.task_id})
+                raise HumanBrowserRequired(self.resource_key, need='captcha' if state == 'challenge' else 'login')
+            return {'ok': True, 'state': state, 'method': 'semantic_observation',
+                    'note': 'interprétation du modèle, aucune nouvelle autorité ; poursuis les observations si uncertain'}
         text = str(text or "").strip()
         if not text:
             raise Refused("text requis : ce qui doit être visible sur la page")
@@ -896,7 +1018,7 @@ class Workspace:
         files.append({"file": name, "sha256": digest, "bytes": size, "url": url, "at": time.time()})
         tasks.save_step(self.scope.task_id, FILES_KEY, files)
 
-    def upload(self, ref: str, filename: str, channel_id=None) -> dict:
+    def upload(self, ref: str, filename: str, channel_id=None, effect=None) -> dict:
         self._ensure_page()
         path = outbox_dir(self.scope.business) / _safe_filename(filename)
         if not _within(path, outbox_dir(self.scope.business)) or not path.is_file():
@@ -905,7 +1027,7 @@ class Workspace:
         if path.stat().st_size > UPLOAD_MAX_BYTES:
             raise Refused("fichier trop volumineux")
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        return self._edit("upload", ref, digest, "upload", [str(path)], channel_id)
+        return self._edit("upload", ref, digest, "upload", [str(path)], channel_id, effect)
 
 
 def _row_task(row) -> int | None:

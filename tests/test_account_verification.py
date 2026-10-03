@@ -173,10 +173,14 @@ def test_visible_auth_fields_refuse_even_with_marker(node, clock, monkeypatch, t
 
 
 def test_missing_marker_is_insufficient_proof_not_session_loss(node, clock, monkeypatch, tmp_path):
+    def semantic(session, account, key, diagnostic):
+        diagnostic['reason'] = 'semantic_uncertain'
+        return False, {'method': 'semantic_observation', 'state': 'uncertain'}
+    monkeypatch.setattr(resources, '_semantic_account_page', semantic)
     session = DomSession(node, clock, hydrate_at=100.)
     ok, resource = verify_existing(monkeypatch, tmp_path, session)
-    assert not ok and resource['web_account']['session_status'] == 'expired'
-    assert resource['last_check_detail'] == 'authenticated_marker_missing'
+    assert not ok and resource['web_account']['session_status'] == 'connection_required'
+    assert resource['last_check_detail'] == 'semantic_uncertain'
     assert clock.now == pytest.approx(10.) and max(clock.sleeps) <= .3
     assert sum(c == 'open' for c, _, _ in session.commands) == 1
 
