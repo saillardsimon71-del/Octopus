@@ -129,13 +129,25 @@ def normalize_openrouter(payload, fetched_at):
             caps.append("reasoning")
         methods.append("text")
         mid = "openrouter/" + slug
+        reasoning = {}
+        advertised = entry.get("reasoning")
+        if isinstance(advertised, dict):
+            for key in ("mandatory", "default_enabled", "supports_max_tokens"):
+                if isinstance(advertised.get(key), bool):
+                    reasoning[key] = advertised[key]
+            efforts = advertised.get("supported_efforts", ())
+            if efforts is None or (isinstance(efforts, list) and all(isinstance(v, str) and
+                    v in {"max", "xhigh", "high", "medium", "low", "minimal", "none"} for v in efforts)):
+                reasoning["supported_efforts"] = efforts
+            if isinstance(advertised.get("default_effort"), str):
+                reasoning["default_effort"] = advertised["default_effort"]
         model = {"provider": "openrouter", "api_model": slug, "canonical_slug": canonical,
             "name": entry.get("name") if isinstance(entry.get("name"), str) else slug,
             "cost_class": "free_quota", "free_verified": True,
             "pricing": {k: str(v) for k, v in prices.items()}, "context_length": context,
             "input_modalities": sorted(set(inputs)), "output_modalities": sorted(set(outputs)),
             "supported_parameters": sorted(set(parameters)), "capabilities": caps,
-            "structured_methods": methods, "source": OPENROUTER_SOURCE, "fetched_at": fetched_at,
+            "structured_methods": methods, "reasoning": reasoning, "source": OPENROUTER_SOURCE, "fetched_at": fetched_at,
             "evidence_identity": mid + "@" + canonical}
         if mid in models and model != models[mid]:
             duplicates.add(mid)
@@ -168,7 +180,8 @@ def _read_discovery(path):
         entries = [{"id": m["api_model"], "canonical_slug": m["canonical_slug"],
             "name": m["name"], "pricing": m["pricing"], "context_length": m["context_length"],
             "architecture": {"input_modalities": m["input_modalities"], "output_modalities": m["output_modalities"]},
-            "supported_parameters": m["supported_parameters"]} for m in saved["models"].values()]
+            "supported_parameters": m["supported_parameters"], "reasoning": m.get("reasoning", {})}
+                   for m in saved["models"].values()]
         return {"fetched_at": fetched, "models": normalize_openrouter({"data": entries}, fetched)}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None

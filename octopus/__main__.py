@@ -70,7 +70,8 @@ def cmd_models(args) -> int:
             continue
         ok, why = llm.provider_status(model["provider"], cat.provider(model["provider"]))
         proof = llm.browser_quality(model)
-        qualification = 'qualified' if proof['eligible'] else 'unqualified' if proof.get('samples') else 'not-benchmarked'
+        qualification = ('qualified' if proof['eligible'] else 'incomplete' if proof.get('incomplete')
+                         else 'unqualified' if proof.get('samples') else 'not-benchmarked')
         print(f"{model_id} {model['cost_class']} text={'text' in model.get('output_modalities', ['text'])} "
               f"vision={'vision' in capabilities} tools={'tools' in capabilities} json={'json' in capabilities} "
               f"context={model.get('context_length', 'unknown')} "

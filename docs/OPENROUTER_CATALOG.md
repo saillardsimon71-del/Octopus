@@ -152,6 +152,42 @@ calls, tokens, latence et coût. Le résumé affiche les objectifs terminés et
 ou null si aucun n'est terminé. CSV, matrice, `llm_calls` et `bench_results`
 restent dans les composants existants ; pas de nouvelle DB ni ledger.
 
+### Interruptions de transport et raisonnement browser
+
+Un 429 peut déclencher un seul retry du même appel, avec les mêmes messages,
+le même modèle et la même trajectoire. Le cooldown annoncé est respecté si
+son délai est fini et inférieur ou égal à 60 secondes. Un délai supérieur
+interrompt la suite sans attendre ni raccourcir le cooldown. Chaque transport
+consomme le plafond initial, alternatives structurées et retry inclus ; aucun
+retry SDK n'est activé. `transport_requests_upper_bound` inclut cette possibilité
+et reste borné par `max_requests`.
+
+Une erreur persistante, un candidat inéligible ou un backend indisponible produit
+`INCOMPLETE_INFRA` et arrête la suite. Les scénarios suivants sont exportés
+`NOT_RUN`, avec scores absents, sans ajout de faux essais au journal. Les réponses
+JSON ou enveloppes d'action invalides restent des échecs cognitifs. Les résultats
+exportés distinguent `evaluated`, `failed`, `incomplete_infra` et `not_run`.
+
+Le schéma SQLite historique exige des nombres pour `passed` et `score` : les
+lignes d'interruption conservent ces champs techniques à zéro mais portent
+`checks.benchmark_incomplete=true` et leur statut explicite. La qualification
+les exclut du score cognitif et reste refusée pour cette tentative interrompue.
+Les anciennes lignes `RateLimitError`/`NoEligibleModel`, notamment le run 58,
+sont également exclues, sans modifier l'historique ni réutiliser une ancienne
+qualification. Le score est inconnu si aucun scénario n'a été évalué.
+
+Les métadonnées de raisonnement OpenRouter sont conservées et revalidées dans
+le cache. Pour `browser.bench_step` et `browser.react_step`, la gateway choisit
+`reasoning.effort=low` uniquement si cet effort est annoncé, ou si
+`supported_efforts=null` indique que tous les efforts sont acceptés. Une liste
+absente ou incompatible ne déclenche aucun réglage inventé. Le benchmark et le
+contrôleur utilisent la même politique, journalisée avec l'appel. Les autres
+tâches gardent leur défaut. Ce réglage répond à une observation réelle : sous
+le défaut `xhigh`, Qwen a consommé 1 190 à 1 200 tokens de raisonnement dans
+trois réponses limitées à 1 200 tokens, sans JSON exploitable. Le contrat des
+efforts et le budget partagé sont décrits dans la
+[documentation OpenRouter](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
+
 ## Audit final : 32 réponses
 
 | # | Réponse |
