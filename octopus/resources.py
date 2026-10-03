@@ -451,13 +451,13 @@ def request_account(key, platform, reason, capabilities, business, *, created_by
 class HumanConnection:
     """Visible human-only browser. No snapshots, cookies, credentials or login text are returned.
 
-    Verification is a boolean DOM predicate, after the human explicitly finishes. Network
-    scope comes solely from human-configured domains; each identity has its own profile.
+    Verification is a boolean DOM predicate, after the human explicitly finishes.
+    Onboarding may use the public Web; configured domains constrain verification and agent
+    work only. Each identity has its own profile. Navigations never create authority.
     """
     def __init__(self, key, *, actor, session_factory=None):
         from . import mandates
         from agents import agent_browser, web_guard
-        from urllib.parse import urlsplit
         mandates._human(actor)
         self.resource = get(key)
         self.key = key
@@ -467,10 +467,11 @@ class HumanConnection:
         self.domains = tuple(account['domains'])
         set_account_session(key, 'connection_required', detail='Connexion humaine en cours')
         def guard(url):
-            # Even the human browser has no private-network access or implicit domains.
+            # Human-only login needs public redirects, OAuth and assets. This does not
+            # widen the separate authenticated agent Workspace or persist visited domains.
             try:
                 web_guard.classify(url)
-                return urlsplit(url).hostname in self.domains
+                return True
             except web_guard.BrowseRefused:
                 return False
         self.proxy = web_guard.GuardProxy(guard).start()

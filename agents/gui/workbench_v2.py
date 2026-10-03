@@ -750,13 +750,13 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         window.geometry('680x700')
         panel = ctk.CTkScrollableFrame(window)
         panel.pack(fill='both', expand=True, padx=16, pady=16)
-        self._line(panel, 'Définissez les domaines nécessaires (connexion, site et dépendances). Seuls ces domaines seront accessibles. Choisissez un texte visible uniquement après connexion, par exemple « Déconnexion » sur votre tableau de bord.', COLORS['muted'])
+        self._line(panel, 'Les domaines définissent le périmètre des tâches OCTOPUS après connexion. La connexion humaine peut utiliser le Web public, ses CDN et OAuth sans les ajouter ici. Choisissez un texte visible uniquement après connexion, par exemple « Déconnexion » sur votre tableau de bord.', COLORS['muted'])
         values = [
             ('key', 'Identifiant unique', key or ''),
             ('provider', 'Plateforme', a.get('provider') or request.get('platform') or ''),
             ('label', 'Nom lisible', (row or {}).get('label') or ''),
             ('url', 'URL de connexion HTTPS', (row or {}).get('locator') or request.get('url') or ''),
-            ('domains', 'Domaines autorisés, séparés par virgules', ','.join(a.get('domains', []) or [urlsplit(url).hostname or ''])),
+            ('domains', 'Domaines autorisés aux tâches OCTOPUS, séparés par virgules', ','.join(a.get('domains', []) or [urlsplit(url).hostname or ''])),
             ('businesses', 'Identifiants des activités autorisées, séparés par virgules', ','.join(a.get('businesses', []) or ([current_business] if current_business != DEFAULT_BUSINESS_ID else []))),
             ('verify_url', 'URL de la page après connexion', url),
             ('authenticated_text', 'Texte visible uniquement après connexion', a.get('authenticated_text', ''))]
@@ -788,6 +788,10 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             except Exception as exc:
                 self._hub_error(exc)
         self._secondary(panel, 'Enregistrer et ouvrir la connexion', save)
+        window.transient(self)
+        window.grab_set()
+        window.lift()
+        fields['key'].focus_set()
 
     def _mandate_form(self, previous=None):
         if self._readonly or self.selected_business_id == DEFAULT_BUSINESS_ID:
@@ -828,6 +832,10 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             except Exception as exc:
                 self._hub_error(exc)
         self._secondary(panel, 'Accorder jusqu’à révocation', save)
+        window.transient(self)
+        window.grab_set()
+        window.lift()
+        label.focus_set()
 
     def _open_account(self, key):
         if self._readonly:

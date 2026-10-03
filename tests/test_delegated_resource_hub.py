@@ -284,6 +284,187 @@ def test_malt_style_request_onboarding_and_secret_non_capture(monkeypatch):
     assert resources.get('new-platform')['web_account']['dedicated']
 
 
+def test_human_public_login_dependencies_never_expand_agent_authority(monkeypatch, transport, providers_up):
+    import ipaddress
+    import socket
+    import requests
+    from agents import agent_browser
+    from octopus import llm
+    from octopus.pricing import Usage
+
+    monkeypatch.setattr(requests.sessions.Session, 'request', lambda *a, **k: pytest.fail('real HTTP'))
+    monkeypatch.setattr(socket.socket, 'connect', lambda *a, **k: pytest.fail('real network'))
+    monkeypatch.setattr(web_guard, '_resolved_ips', lambda _: [ipaddress.ip_address('8.8.8.8')])
+    key = 'generic-account'
+    start, verified = 'https://account.example/login', 'https://account.example/dashboard'
+    flow = ['https://login.example/signin', 'https://static.cdn.example/style.css',
+            'https://oauth.example/authorize', 'http://redirect.example/return', verified]
+    resources.configure_account(key, actor='human', provider='Unknown', label='Compte', url=start,
+        domains=['account.example'], businesses=[BUSINESS], verify_url=verified,
+        authenticated_text='Déconnexion')
+    before = resources.get(key)['web_account'].copy()
+    parent_state = web_guard.BrowseState()
+    visited = []
+
+    class HumanSession(FakeAccountSession):
+        def run(self, command, args=(), **kwargs):
+            if command == 'open':
+                # Only the fake human navigates; exercise the actual proxy's network guard.
+                assert proxy._check(args[0])
+                if args[0] == start:
+                    for url in flow:
+                        assert proxy._check(url), url
+                        visited.append(url)
+                self.url = verified
+                self.commands.append((command, list(args)))
+                return {'success': True, 'data': {}}
+            return super().run(command, args, **kwargs)
+
+    # Capture the real GuardProxy before Session.open is invoked. No upstream connections.
+    real_proxy = web_guard.GuardProxy
+    proxy = None
+    def capture_proxy(*a, **k):
+        nonlocal proxy
+        proxy = real_proxy(*a, **k)
+        return proxy
+    monkeypatch.setattr(web_guard, 'GuardProxy', capture_proxy)
+    with web_guard.session() as state:
+        parent_state = state
+        connection = resources.HumanConnection(key, actor='human', session_factory=HumanSession)
+        human = connection.session
+        try:
+            assert visited == flow
+            assert state.visited == [] and not state.account_read and state.account_domains == ()
+            assert connection.verify() is True
+        finally:
+            connection.close()
+        assert web_guard.current() is parent_state and not parent_state.account_read
+    configured = resources.get(key)['web_account']
+    assert configured['domains'] == before['domains'] == ['account.example']
+    assert configured['businesses'] == before['businesses'] == [BUSINESS]
+    assert mandates.list_mandates(BUSINESS) == []
+    assert not journal.query('SELECT * FROM channel_authority')
+    assert not journal.query('SELECT * FROM economic_channels')
+    assert not journal.query('SELECT * FROM channel_actions')
+    assert transport.calls == []
+    assert {c for c, _ in human.commands} <= {'open', 'get', 'eval'}
+    assert all(args == ['url'] for c, args in human.commands if c == 'get')
+    assert [args[0] for c, args in human.commands if c == 'open'] == [start, verified]
+
+    # A connected account still cannot be used by an agent without a human mandate.
+    with pytest.raises(PermissionError):
+        resources.account_task(BUSINESS, key, 'Observer le compte')
+    mandates.grant(BUSINESS, 'Lecture simulée', 'owned_account', ['read'], actor='human', resource_keys=[key])
+    monkeypatch.setattr(agent_browser, 'Session', FakeAccountSession)
+    calls = 0
+    def respond(provider, request):
+        nonlocal calls
+        content = json.dumps(request['messages'], ensure_ascii=False)
+        assert FakeAccountSession.secret not in content
+        if request['max_tokens'] == 700:
+            output = {'tasks': [{'role': 'SOUT', 'task': 'Lire le compte et constater le périmètre'}]}
+        elif request['max_tokens'] == 500:
+            output = [
+                {'tool': 'browser_navigate', 'args': {'url': verified}},
+                {'tool': 'browser_navigate', 'args': {'url': flow[2]}},
+                {'final': 'Lecture du compte ; navigation OAuth refusée'}][calls]
+            if calls == 2:
+                assert 'refus' in content.lower()
+            calls += 1
+        else:
+            assert request['max_tokens'] == 4000
+            output = {'rapport': 'Compte observé ; OAuth reste inaccessible à la tâche agent.'}
+        return llm.TransportResult(json.dumps(output), Usage(prompt_tokens=20, completion_tokens=20),
+            request['model'], resolved_provider='OfflineFake', provider_cost_usd=0.)
+    transport.handler = respond
+    before_instances = len(FakeAccountSession.instances)
+    result = resources.account_task(BUSINESS, key, 'Lire le compte et tester le périmètre')
+    assert result['status'] == 'done' and calls == 3
+    task = tasks.get(result['task_id'])
+    assert task['kind'] == 'resources.account_work' and task['input']['browser_resource_key'] == key
+    agents = FakeAccountSession.instances[before_instances:]
+    assert len(agents) == 1
+    assert [args[0] for c, args in agents[0].commands if c == 'open'] == [verified]
+    assert resources.get(key)['web_account']['domains'] == ['account.example']
+    # Workspace may register a read channel, but never creates action access from login.
+    assert all(r['access'] != 'act' for r in journal.query('SELECT * FROM economic_channels'))
+    for table in ('resources', 'events', 'tasks', 'human_requests', 'task_steps', 'llm_calls'):
+        persisted = str([dict(r) for r in journal.query('SELECT * FROM ' + table)])
+        assert FakeAccountSession.secret not in persisted
+        assert not any(url in persisted for url in flow[:2])
+
+
+@pytest.mark.parametrize('url', [
+    'http://localhost/', 'http://api.localhost/', 'http://router.local/',
+    'http://127.0.0.1/', 'http://[::1]/', 'http://192.168.1.1/', 'http://10.0.0.1/',
+    'http://172.16.0.1/', 'http://169.254.169.254/', 'http://[::ffff:127.0.0.1]/',
+    'http://127.1/', 'http://2130706433/', 'https://private-dns.example/',
+    'file:///etc/passwd', 'javascript:alert(1)', 'data:text/html,login', 'ftp://public.example/',
+    'https://optimizationguide-pa.googleapis.com/'])
+def test_human_onboarding_still_blocks_unsafe_network_and_browser_services(monkeypatch, url):
+    import ipaddress
+    original = web_guard._resolved_ips
+    def resolve(host):
+        if host == 'private-dns.example':
+            return [ipaddress.ip_address('8.8.8.8'), ipaddress.ip_address('10.0.0.1')]
+        if host.endswith('.example'):
+            return [ipaddress.ip_address('8.8.8.8')]
+        return original(host)
+    monkeypatch.setattr(web_guard, '_resolved_ips', resolve)
+    account()
+    connection = resources.HumanConnection('new-platform', actor='human', session_factory=FakeAccountSession)
+    try:
+        assert not connection.proxy._check(url)
+        assert not connection.proxy.allow_private('127.0.0.1', 80)
+        # DNS rebinding remains refused at the actual connection boundary, too.
+        monkeypatch.setattr(web_guard.socket, 'getaddrinfo', lambda *a, **k: [(2, 1, 6, '', ('10.0.0.1', 443))])
+        with pytest.raises(web_guard.BrowseRefused):
+            connection.proxy._connect('public.example', 443)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize('failure', ['foreign-domain', 'marker-absent', 'password', 'otp', 'non-boolean'])
+def test_human_verification_is_required_after_oauth_and_only_returns_boolean(monkeypatch, failure):
+    account()
+    class UnverifiedSession(FakeAccountSession):
+        def run(self, command, args=(), **kwargs):
+            if command == 'get':
+                assert args == ['url']
+                return {'success': True, 'data': {'url': 'https://oauth.example/callback' if failure == 'foreign-domain' else URL}}
+            if command == 'eval':
+                predicate = args[0]
+                assert 'input[type=password],input[autocomplete=one-time-code]' in predicate
+                assert 'document.body.innerText.includes(marker)' in predicate
+                assert json.dumps('Déconnexion') in predicate
+                assert 'cookie' not in predicate and '.value' not in predicate
+                # The browser predicate reports only success/failure, never credential values.
+                return {'success': True, 'data': {'result': 'true' if failure == 'non-boolean' else False}}
+            return super().run(command, args, **kwargs)
+    connection = resources.HumanConnection('new-platform', actor='human', session_factory=UnverifiedSession)
+    session = connection.session
+    try:
+        assert connection.verify() is False
+    finally:
+        connection.close()
+    assert resources.get('new-platform')['web_account']['session_status'] == 'expired'
+    assert not mandates.list_mandates(BUSINESS)
+    assert not journal.query('SELECT * FROM economic_channels')
+    if failure == 'foreign-domain':
+        assert not any(c == 'eval' for c, _ in session.commands)
+
+
+def test_account_configuration_requires_authenticated_marker_and_scoped_verify_url():
+    args = dict(actor='human', provider='Unknown', label='Compte', url=URL,
+                domains=['new-platform.example'], businesses=[BUSINESS])
+    with pytest.raises(resources.ResourceError):
+        resources.configure_account('unverified', **args, authenticated_text='')
+    with pytest.raises(resources.ResourceError):
+        resources.configure_account('unverified', **args, authenticated_text='Déconnexion',
+                                    verify_url='https://oauth.example/callback')
+    assert resources.get('unverified') is None
+
+
 def test_expired_disabled_and_other_ownership(monkeypatch):
     account(ownership='other')
     resources.set_account_session('new-platform', 'connected')
