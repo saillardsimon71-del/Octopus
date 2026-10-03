@@ -599,30 +599,35 @@ def verify_account_connection(key, *, actor, session_factory=None):
         except web_guard.BrowseRefused:
             return False
     session = None
-    proxy = web_guard.GuardProxy(guard).start()
+    proxy = None
     ok = False
     try:
+        proxy = web_guard.GuardProxy(guard).start()
         session = (session_factory or agent_browser.Session)('verify-' + account_profile(key).name,
             proxy_url=proxy.url, profile_dir=account_profile(key), headed=True, **options)
         session.close()  # Only this separate verifier's daemon, never the native human browser.
         result = session.run('open', [account['verify_url']])
+        diagnostic = {'reason': 'backend_error'}
         if result.get('success'):
-            ok = verify_account_page(session, account)
-        set_account_session(key, 'connected' if ok else 'expired', detail=(
-            'Session constatée avec Chrome stable ; recontrôlée à chaque tâche' if ok else
-            'Session non réutilisable ou login requis ; reconnectez ou utilisez API/handoff humain'))
+            ok = verify_account_page(session, account, timeout_s=10., diagnostic=diagnostic)
+        reason = diagnostic['reason']
+        status = ('connected' if ok else 'connection_required' if reason == 'challenge_detected'
+                  else 'unavailable' if reason == 'backend_error' else 'expired')
+        set_account_session(key, status, detail=(
+            'Session constatée avec Chrome stable ; recontrôlée à chaque tâche' if ok else reason))
     except Exception:
         ok = False
-        set_account_session(key, 'unavailable', detail='Session Chrome stable non vérifiable ; profil verrouillé ou backend incompatible')
+        set_account_session(key, 'unavailable', detail='backend_error')
     finally:
         try:
             if session:
                 session.close()
         except Exception:
             ok = False
-            set_account_session(key, 'unavailable', detail='Vérification non terminée ; backend navigateur indisponible')
+            set_account_session(key, 'unavailable', detail='backend_error')
         finally:
-            proxy.stop()
+            if proxy:
+                proxy.stop()
     if ok:
         for request in tasks.pending_human_requests():
             context = json.loads(request.get('context') or '{}')
@@ -631,21 +636,85 @@ def verify_account_connection(key, *, actor, session_factory=None):
     return ok
 
 
-def verify_account_page(session, account):
-    """Only a boolean crosses the browser boundary, never input values or arbitrary page text."""
+def verify_account_page(session, account, *, timeout_s=0., diagnostic=None):
+    """Boolean-only DOM probes. Post-login may settle; ordinary agent checks stay immediate.
+
+    The optional local diagnostic contains a fixed code, never browser text or an URL.
+    No navigation retry, input value, cookie or snapshot. All probes share the same fixed JS.
+    """
     from urllib.parse import urlsplit
-    data = session.run('get', ['url'])
-    final = str((data.get('data') or {}).get('url') or '')
-    parsed = urlsplit(final)
-    if not data.get('success') or parsed.scheme not in ('http', 'https') or parsed.hostname not in account['domains']:
-        return False
-    # JSON string escaping, never interpolate into shell or selectors.
-    predicate = ("(() => { const marker = " + json.dumps(account['authenticated_text']) + "; "
-                 "return !document.querySelector('input[type=password],input[autocomplete=one-time-code]') "
-                 "&& Boolean(document.body && document.body.innerText.includes(marker)); })()")
-    result = session.run('eval', [predicate])
-    value = (result.get('data') or {}).get('result')
-    return bool(result.get('success') and value is True)
+    deadline = time.monotonic() + timeout_s
+    def finish(ok, reason):
+        if diagnostic is not None:
+            diagnostic['reason'] = reason
+        return bool(ok)
+
+    # Read visibility/layout only. Hidden modal/SPA fields cannot invalidate an authenticated page.
+    common = ("(() => { const marker = " + json.dumps(account['authenticated_text']) + "; "
+        "const visible = el => { "
+        "if (el.disabled || el.matches(':disabled') || el.closest('[inert]')) return false; "
+        "const rect = el.getBoundingClientRect(); "
+        "if (!el.getClientRects().length || rect.width <= 0 || rect.height <= 0) return false; "
+        "for (let node = el; node; node = node.parentElement) { "
+        "const style = getComputedStyle(node); "
+        "if (style.display === 'none' || style.visibility === 'hidden' || "
+        "style.visibility === 'collapse' || Number(style.opacity) === 0) return false; } "
+        "return true; }; "
+        "const login = Array.from(document.querySelectorAll("
+        "'input[type=password],input[autocomplete=one-time-code]')).some(visible); "
+        "const challenge = Array.from(document.querySelectorAll("
+        "'iframe[src*=captcha],iframe[src*=challenge],#challenge-form')).some(visible) || "
+        "Boolean(document.body && /verify you are (?:not a bot|human)|performing security verification|"
+        "security service to protect against malicious bots|montrez-nous que vous|"
+        "confirmez que vous(?: n.êtes pas un robot| êtes humain)|"
+        "(?:complete|solve|résolvez|validez) (?:the |le |ce )?captcha|"
+        "unusual traffic|trafic exceptionnel/i.test(document.body.innerText)); "
+        "const authenticated = Boolean(document.body && document.body.innerText.includes(marker)); ")
+
+    def run(command, args):
+        # Each read is bounded by the remaining settle budget. Immediate agent checks retain
+        # their normal backend timeout, without sleeps or repeated probes.
+        remaining = deadline - time.monotonic()
+        if timeout_s and remaining <= 0:
+            raise TimeoutError('verify_timeout')
+        options = {'timeout': remaining} if timeout_s else {}
+        result = session.run(command, args, **options)
+        if not result.get('success'):
+            raise RuntimeError('backend_error')  # Never copy backend/page error text.
+        return result.get('data') or {}
+
+    def domain_matches():
+        final = urlsplit(str(run('get', ['url']).get('url') or ''))
+        return final.scheme in ('http', 'https') and final.hostname in account['domains']
+
+    def probe(expression):
+        value = run('eval', [common + 'return Boolean(' + expression + '); })()']).get('result')
+        if not isinstance(value, bool):
+            raise RuntimeError('backend_error')
+        return value
+
+    marker_missing = None
+    try:
+        while True:
+            if timeout_s and time.monotonic() >= deadline:
+                return finish(False, 'authenticated_marker_missing' if marker_missing else 'verify_timeout')
+            if not domain_matches():
+                return finish(False, 'verify_domain_mismatch')
+            # The success test is atomic inside the DOM, never a marker-only success.
+            if probe('!login && !challenge && authenticated'):
+                # Recheck the final domain if a navigation happened during rendering.
+                matches = domain_matches()
+                return finish(matches, 'authenticated' if matches else 'verify_domain_mismatch')
+            if probe('challenge'):
+                return finish(False, 'challenge_detected')
+            if probe('login'):
+                return finish(False, 'visible_login_field_present')
+            marker_missing = not probe('authenticated')
+            if not timeout_s or time.monotonic() >= deadline:
+                return finish(False, 'authenticated_marker_missing' if marker_missing else 'verify_timeout')
+            time.sleep(min(.3, max(0., deadline - time.monotonic())))
+    except Exception:
+        return finish(False, 'verify_timeout' if timeout_s and time.monotonic() >= deadline else 'backend_error')
 
 
 def account_task(business, key, goal, *, parent_id=None):

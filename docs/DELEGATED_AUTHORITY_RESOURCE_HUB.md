@@ -217,8 +217,9 @@ Ne pas supprimer un verrou pour forcer une reprise.
 
 Après « J’ai terminé » et fermeture, un vérificateur distinct utilise agent-browser avec
 **le même Chrome stable installé** et le profil dédié, sous garde stricte des domaines.
-Il ouvre `verify_url`, contrôle le domaine final puis exécute le seul prédicat booléen
-repère authentifié + absence de password/OTP standard. Aucun snapshot, texte libre,
+Il ouvre `verify_url`, contrôle le domaine final puis exécute les prédicats booléens fixes
+repère authentifié + absence de password/OTP visibles + absence de challenge. La vérification
+post-login laisse au rendu une attente bornée de 10 secondes. Aucun snapshot, texte libre,
 input.value ou cookie n’est demandé. Un profil incompatible, un backend absent, une
 connexion non reconnue ou une fermeture ambiguë reste expiré/indisponible. Cette
 vérification n’accorde aucun mandat, business, canal act ni droit financier. Elle peut
@@ -279,3 +280,49 @@ modèle actuel (profil par ressource). Ne pas retarder le smoke pour cet import.
 Sources primaires : [Chrome 136 et remote debugging](https://developer.chrome.com/blog/remote-debugging-port),
 [App-Bound Encryption Windows, code Chromium](https://github.com/chromium/chromium/blob/main/chrome/browser/os_crypt/app_bound_encryption_provider_win.cc),
 [verrou de profil Windows, code Chromium](https://chromium.googlesource.com/chromium/src/+/master/chrome/browser/process_singleton_win.cc).
+
+
+## Correction du faux négatif après le smoke #131
+
+Le smoke Windows rapporté par l’opérateur a rouvert Fiverr authentifié dans le vérificateur
+séparé, puis enregistré `expired`. Cette observation prouve la réutilisation du profil pour
+ce compte et ce parcours ; l’échec booléen ne prouve donc pas une perte de session.
+Le code #131 évaluait immédiatement le marqueur et refusait tout input password/OTP,
+même caché. Hydratation tardive et formulaires cachés sont deux causes possibles ; leur
+part exacte sur la page réelle n’a pas été observée par ce chantier hors compte réel.
+
+Après l’unique ouverture de `verify_url`, la vérification post-login peut réévaluer pendant
+**10 secondes maximum**, avec une pause de **300 ms** entre essais. Le budget restant borne
+chaque commande de lecture. Aucun retry de navigation, reconnect, snapshot, cookie,
+input.value ou texte de compte ne traverse cette frontière. Le navigateur renvoie uniquement
+des booléens issus de JS fixe. Le domaine est vérifié avant le DOM et à nouveau après succès.
+Un champ password/OTP doit avoir une surface affichée, ne pas être désactivé/inert et ne pas
+être caché par display/visibility/opacity de lui-même ou d’un ancêtre. Un marqueur absent au
+premier instant est attendu ; un marqueur jamais constaté reste une vérification négative.
+Un champ de login visible ou un challenge constaté arrête immédiatement cette attente.
+
+En cas d’échec, `last_check_detail` conserve seulement un code sans contenu sensible :
+
+| Code | État | Constat |
+| --- | --- | --- |
+| `verify_domain_mismatch` | expired | Domaine final hors périmètre |
+| `authenticated_marker_missing` | expired | Preuve définie par l’humain jamais constatée |
+| `visible_login_field_present` | expired | Password/OTP affiché et utilisable |
+| `challenge_detected` | connection_required | Intervention humaine requise, aucun bypass |
+| `verify_timeout` | expired | Budget de lecture atteint sans preuve suffisante |
+| `backend_error` | unavailable | Backend non exploitable ou réponse non booléenne |
+
+Ces états négatifs expriment une absence de preuve, pas un diagnostic certain de cookies
+perdus. Aucun texte de page, URL avec query/fragment, donnée de formulaire ou erreur brute
+du backend n’est persisté dans ces diagnostics. La réponse Workbench n’affirme plus que
+la session est non réutilisable. Les contrôles ordinaires des tâches agent conservent leur
+vérification immédiate ; `_guard()`, mandats, canaux, profils et schéma sont inchangés.
+
+Prochain smoke, **sur le même DataRoot et le profil déjà connecté** : arrêter Workbench/run,
+charger le head de `fix/account-verification-settle`, relancer avec exactement les mêmes
+arguments `-DataRoot` et Python. Dans Paramètres, cliquer directement **J’ai terminé — vérifier**,
+sans « Ouvrir la connexion », sans recréer le compte, sans importer/copier/supprimer le profil
+et sans modifier les domaines/mandats. Conserver `verify_url` et le marqueur actuels pour
+ce premier essai. Attendre le résultat, examiner `last_check_ok` et `last_check_detail`.
+Un marqueur effectivement apparu doit donner connecté ; sinon le code distingue la frontière
+humaine, le manque de preuve et l’erreur technique. Aucune action économique dans ce smoke.

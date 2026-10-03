@@ -33,6 +33,10 @@ class Verifier:
         data = {}
         if command == 'get': data = {'url': URL, 'title': 'Compte'}
         if command == 'eval':
+            if args[0].endswith('return Boolean(challenge); })()'):
+                return {'success': True, 'data': {'result': self.challenge}}
+            if args[0].endswith('return Boolean(login); })()'):
+                return {'success': True, 'data': {'result': False}}
             data = {'result': self.traffic if 'octopus_traffic' in args[0] else
                 self.challenge if 'octopus_challenge' in args[0] else self.logged_in}
         if command == 'snapshot': data = {'origin': URL, 'snapshot': 'Compte Déconnexion', 'refs': {}}
@@ -41,6 +45,9 @@ class Verifier:
 
 @pytest.fixture
 def native(monkeypatch, tmp_path):
+    clock = SimpleNamespace(now=0.)
+    monkeypatch.setattr(resources, 'time', SimpleNamespace(time=resources.time.time,
+        monotonic=lambda: clock.now, sleep=lambda seconds: setattr(clock, 'now', clock.now + seconds)))
     executable = tmp_path / 'Google/Chrome/Application/chrome.exe'
     executable.parent.mkdir(parents=True)
     executable.write_bytes(b'fake executable')
@@ -75,9 +82,9 @@ def test_native_login_has_no_automation_and_finish_waits_for_close(native, monke
         assert verifier.kwargs['executable_path'] == str(executable)
         assert verifier.kwargs['profile_dir'] == launches[0][1]
         assert verifier.kwargs['inherit_extra_args'] is False
-        assert [c for c, _ in verifier.commands] == ['open', 'get', 'eval']
+        assert [c for c, _ in verifier.commands] == ['open', 'get', 'eval', 'get']
         assert verifier.commands[0][1] == [URL]
-        assert '.value' not in verifier.commands[-1][1][0] and 'cookie' not in verifier.commands[-1][1][0]
+        assert '.value' not in verifier.commands[-2][1][0] and 'cookie' not in verifier.commands[-2][1][0]
         assert resources.get('account')['web_account']['domains'] == ['account.example']
         assert not mandates.list_mandates('b2b') and not journal.query('SELECT * FROM economic_channels')
         assert transport.calls == []

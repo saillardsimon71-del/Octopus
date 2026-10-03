@@ -861,7 +861,7 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             if connection:
                 self._human_connections.pop(key, None)
                 connection.close()
-            return 'Compte connecté. Accordez un mandat puis reprenez l’activité.' if ok else 'Session non réutilisable ou vérification impossible. Voir l’état du compte ; reconnectez ou utilisez un handoff humain.'
+            return 'Compte connecté. Accordez un mandat puis reprenez l’activité.' if ok else ('Connexion non confirmée : ' + resources.get(key)['last_check_detail'] + '. Cela ne prouve pas une perte de session.')
         self._hub_background(work)
 
     def _hub_background(self, work):
