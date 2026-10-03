@@ -22,6 +22,7 @@ from octopus import browser_workspace, journal, llm
 
 from . import cancel, config, db, deepseek, web_guard
 from .tool_registry import ToolRegistry, technical_refusal
+from octopus.browser_workspace import HumanBrowserRequired
 
 _ROLE: contextvars.ContextVar[str] = contextvars.ContextVar("podalux_role", default="RUNTIME")
 _SEARCHES: contextvars.ContextVar[dict | None] = contextvars.ContextVar("podalux_searches", default=None)
@@ -317,6 +318,8 @@ _BROWSE_BLOCK_MARKERS = (
     "403 error",
     "request blocked",
     "captcha",
+    "unusual traffic",
+    "trafic exceptionnel",
     "chrome-error://",
     "err_blocked_by_client",
     "blocked by chromium",
@@ -1527,6 +1530,8 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
                 result = {"refused": True, "tool": tool, "reason": refusal}
                 db.post(role, f"refus outil {tool} : {refusal}")
             result_str = _tool_result_view(tool, result)
+        except HumanBrowserRequired:
+            raise
         except cancel.Cancelled:
             status = "timeout" if cancel.timed_out() else "cancelled"
             db.post(role, "durée maximale atteinte" if status == "timeout" else "arrêt demandé par l'humain")

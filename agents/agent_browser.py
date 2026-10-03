@@ -275,15 +275,21 @@ class Session:
     """Une session agent-browser nommée (un démon, un Chromium, des refs @eN stables)."""
 
     def __init__(self, name: str, *, proxy_url: str, profile_dir: Path | None = None, headed: bool = False,
-                 download_dir: Path | None = None, extra_args: tuple[str, ...] = ()):
-        self.binary, self.chromium = require_backend()
+                 download_dir: Path | None = None, extra_args: tuple[str, ...] = (),
+                 executable_path: str | None = None, inherit_extra_args: bool = True):
+        if executable_path is None:
+            self.binary, self.chromium = require_backend()
+        else:
+            self.binary, self.chromium = find_binary(), executable_path
+            if not self.binary or not Path(executable_path).is_file():
+                raise BackendUnavailable("backend compte Chrome stable indisponible ; aucun repli CfT")
         self.name = re.sub(r"[^A-Za-z0-9_-]", "_", name)[:40]
         self.proxy_url = proxy_url
         self.profile_dir = profile_dir
         self.headed = headed
         self.download_dir = download_dir
         self.extra_args = tuple(extra_args) + tuple(
-            a.strip() for a in os.environ.get("OCTOPUS_BROWSER_ARGS", "").split(",") if a.strip())
+            a.strip() for a in (os.environ.get("OCTOPUS_BROWSER_ARGS", "") if inherit_extra_args else "").split(",") if a.strip())
         self.work_dir = os.path.join(_socket_root(), self.name)
         os.makedirs(self.work_dir, mode=0o700, exist_ok=True)
         self._opened = False

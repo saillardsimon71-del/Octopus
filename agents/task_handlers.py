@@ -9,6 +9,7 @@ import re
 import threading
 
 from octopus import journal
+from octopus.browser_workspace import HumanBrowserRequired
 from octopus.worker import TaskCancelled, handler
 
 from . import db
@@ -35,6 +36,13 @@ def _run(ctx, fn):
     done = _bridge_cancel(ctx)
     try:
         result = fn()
+    except HumanBrowserRequired as exc:
+        from octopus.worker import WaitingHuman
+        from octopus import tasks
+        raise WaitingHuman(tasks.request_human(ctx.id, ctx.owner, 'browser.challenge',
+            'Challenge navigateur : intervention humaine dans Chrome stable requise. '
+            'Aucun contournement ; vérifier la session du compte avant reprise.',
+            context={'key': exc.resource_key, 'need': 'captcha'})) from None
     finally:
         done.set()
     if ctx.cancelled():
@@ -217,6 +225,8 @@ _BROWSE_BLOCK_MARKERS = (
     "403 error",
     "request blocked",
     "captcha",
+    "unusual traffic",
+    "trafic exceptionnel",
     "chrome-error://",
 )
 

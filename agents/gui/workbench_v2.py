@@ -848,21 +848,20 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             if previous:
                 previous.close()
             self._human_connections[key] = resources.HumanConnection(key, actor='human')
-            return 'Navigateur ouvert. Terminez la connexion puis cliquez sur « J’ai terminé — vérifier ».'
+            return 'Chrome stable ouvert, contrôlé par vous seul. Terminez puis fermez ses fenêtres avant « J’ai terminé — vérifier ».'
         self._hub_background(work)
 
     def _verify_account(self, key):
         if self._readonly:
             return
         def work():
-            connection = getattr(self, '_human_connections', {}).pop(key, None)
-            if not connection:
-                return 'Ouvrez la connexion avant de vérifier.'
-            try:
-                ok = connection.verify()
-            finally:
+            from octopus import resources
+            connection = getattr(self, '_human_connections', {}).get(key)
+            ok = connection.verify() if connection else resources.verify_account_connection(key, actor='human')
+            if connection:
+                self._human_connections.pop(key, None)
                 connection.close()
-            return 'Compte connecté. Accordez un mandat puis reprenez l’activité.' if ok else 'Session non constatée : reconnectez-vous.'
+            return 'Compte connecté. Accordez un mandat puis reprenez l’activité.' if ok else 'Session non réutilisable ou vérification impossible. Voir l’état du compte ; reconnectez ou utilisez un handoff humain.'
         self._hub_background(work)
 
     def _hub_background(self, work):
