@@ -22,6 +22,16 @@ from agents import agent_browser, web_guard
 MAX_STEPS = 12
 
 
+class RequestBudget:
+    def __init__(self, maximum):
+        self.maximum, self.used = maximum, 0
+
+    def reserve(self):
+        if self.used >= self.maximum:
+            raise llm.RequestLimitExceeded('browser benchmark request ceiling reached')
+        self.used += 1
+
+
 class Fixture:
     def __init__(self, scenario):
         if scenario not in llm.BROWSER_SCENARIOS:
@@ -133,7 +143,7 @@ def local_workspace(fixture):
             os.environ[bw.LAB_ORIGINS_ENV] = previous
 
 
-def trajectory(model_id, fixture, space, *, decide=None):
+def trajectory(model_id, fixture, space, *, decide=None, request_budget=None):
     """Every next action is model-authored; tests may supply a fake, never a quality claim."""
     from agents.runtime import TOOLS, _tool_result_view
     from agents.tool_registry import ToolRegistry
@@ -153,9 +163,13 @@ def trajectory(model_id, fixture, space, *, decide=None):
     for i in range(MAX_STEPS):
         if decide is None:
             c = llm.complete('browser.bench_step', messages, agent='BROWSER_BENCH', business='browser-benchmark',
-                pin_model=model_id, profile='bench', json_mode=True, max_tokens=1200, validate=llm.parse_json)
+                pin_model=model_id, profile='bench', json_mode=True, max_tokens=1200, validate=llm.parse_json,
+                before_request=request_budget.reserve if request_budget else None)
             action = c.data
-            identity = llm.browser_identity(catalog.load().model(model_id), c.resolved_model) if c.resolved_model else None
+            identity = None
+            if c.resolved_model:
+                identity = ('browser.model:' + c.justification['evidence_identity'] if c.provider == 'openrouter'
+                            else llm.browser_identity(catalog.load().model(model_id), c.resolved_model))
             identities.add(identity)
             call_ids.append(c.call_id)
         else:
@@ -208,12 +222,15 @@ def trajectory(model_id, fixture, space, *, decide=None):
         'trace': records, 'final': final}
 
 
-def run(models, *, repeats=2, allow_paid=False, max_cost_usd=.05, out_dir=None, log=print):
+def run(models, *, repeats=2, allow_paid=False, max_cost_usd=.05, max_requests=240, out_dir=None, log=print):
     if not math.isfinite(max_cost_usd) or max_cost_usd < 0:
         raise ValueError('max_cost_usd must be finite and nonnegative')
     if repeats < 1 or repeats > 5:
         raise ValueError('repeats: 1..5')
-    agent_browser.require_backend()  # Fail BEFORE any model call if local browser cannot run.
+    if isinstance(max_requests, bool) or not isinstance(max_requests, int) or max_requests < 1:
+        raise ValueError('max_requests must be a positive integer')
+    if not models or len(models) != len(set(models)):
+        raise ValueError('explicit nonempty shortlist without duplicates required')
     cat = catalog.load()
     rows, skipped = [], {}
     runnable = []
@@ -225,27 +242,50 @@ def run(models, *, repeats=2, allow_paid=False, max_cost_usd=.05, out_dir=None, 
             skipped[mid] = 'paid evaluation requires --allow-paid'
         else:
             runnable.append(mid)
+    preflight = {'models': runnable, 'scenarios': len(llm.BROWSER_SCENARIOS), 'repeats': repeats,
+        'trajectories': len(runnable) * len(llm.BROWSER_SCENARIOS) * repeats,
+        'step_requests_upper_bound': len(runnable) * len(llm.BROWSER_SCENARIOS) * repeats * MAX_STEPS,
+        'structured_requests_upper_bound': sum(len(llm._structured_methods(cat.model(mid), True, None, None))
+            for mid in runnable) * len(llm.BROWSER_SCENARIOS) * repeats * MAX_STEPS,
+        'max_requests': max_requests, 'max_cost_usd': max_cost_usd}
+    log('Preflight: ' + json.dumps(preflight))
+    agent_browser.require_backend()
+    budget = RequestBudget(max_requests)
+    stopped = False
     with journal.run('browser-benchmark', 'bench', label='browser-v1', budget_usd=max_cost_usd, profile='bench') as ctx:
         for mid in runnable:
+            if stopped:
+                break
             for scenario in sorted(llm.BROWSER_SCENARIOS):
+                if stopped:
+                    break
                 for rep in range(repeats):
                     started = time.monotonic()
                     first = journal.query('SELECT COALESCE(MAX(id),0) id FROM llm_calls')[0]['id']
                     outcome, error = None, None
                     try:
                         with Fixture(scenario) as fixture, local_workspace(fixture) as space:
-                            outcome = trajectory(mid, fixture, space)
+                            outcome = trajectory(mid, fixture, space, request_budget=budget)
+                    except llm.RequestLimitExceeded:
+                        stopped, error = True, 'request ceiling reached; benchmark incomplete'
+                    except llm.BudgetExceeded:
+                        stopped, error = True, 'cost ceiling reached; benchmark incomplete'
                     except Exception as exc:
                         error = type(exc).__name__  # No provider echo or image bytes in benchmark error.
                     calls = journal.query('SELECT * FROM llm_calls WHERE id>? AND run_id=?', (first, ctx.id))
                     identities = outcome['identities'] if outcome else set()
                     identity = next(iter(identities)) if len(identities) == 1 and None not in identities else None
+                    if not outcome:
+                        identity = llm.browser_identity(cat.model(mid))
                     passed = bool(outcome and outcome['passed'] and identity)
                     row = {'ts': time.time(), 'bench_run_id': ctx.id, 'suite': 'octopus.browser_bench',
                         'task': llm.BROWSER_BENCH_TASK, 'item': scenario, 'model': identity or 'browser.unresolved:' + mid,
                         'repeat': rep, 'prompt_version': llm.BROWSER_BENCH_VERSION, 'passed': int(passed),
                         'score': outcome['score'] if outcome and identity else 0., 'value': None,
                         'checks': json.dumps({**(outcome['checks'] if outcome else {}), 'requested_model': mid,
+                            'benchmark_incomplete': stopped, 'calls': len(calls),
+                            'prompt_tokens': sum(c['prompt_tokens'] or 0 for c in calls),
+                            'completion_tokens': sum(c['completion_tokens'] or 0 for c in calls),
                             'trajectory': [{k: v for k, v in st.items() if k != 'result'} for st in outcome['trace']] if outcome else [],
                             'resolved': [{'model': c['resolved_model'], 'provider': c['resolved_provider']} for c in calls]}, ensure_ascii=False),
                         'latency_ms': int((time.monotonic() - started) * 1000),
@@ -255,6 +295,8 @@ def run(models, *, repeats=2, allow_paid=False, max_cost_usd=.05, out_dir=None, 
                     journal.record_bench_result(row)
                     rows.append(row)
                     log(f'{mid} {scenario} {rep}: {"PASS" if passed else "FAIL"} ; {len(calls)} calls ; {row["cost_usd"]:.6f} USD')
+                    if stopped:
+                        break
         run_id = ctx.id
     # Existing CSV output helper; identity keys are deliberately not virtual catalog aliases.
     files = bench.write_outputs([], rows, Path(out_dir) if out_dir else paths.data_dir() / 'bench' / str(run_id))
@@ -265,4 +307,5 @@ def run(models, *, repeats=2, allow_paid=False, max_cost_usd=.05, out_dir=None, 
         cost = sum(r['cost_usd'] for r in group)
         summaries.append({'identity': identity, 'trajectories': len(group), 'completed': completed,
             'cost_usd': cost, 'cost_per_completed_objective_usd': cost / completed if completed else None})
-    return {'bench_run_id': run_id, 'rows': rows, 'summaries': summaries, 'skipped': skipped, 'files': files}
+    return {'bench_run_id': run_id, 'rows': rows, 'summaries': summaries, 'skipped': skipped, 'files': files,
+        'preflight': preflight, 'requests_used': budget.used, 'incomplete': stopped}

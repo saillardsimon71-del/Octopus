@@ -194,11 +194,10 @@ def test_devworker_strict_schema_builds_structured_output_request():
     }
 
 
-def test_devworker_groq_uses_tool_call_with_local_validation(monkeypatch):
+def test_devworker_openrouter_uses_tool_call_with_local_validation(monkeypatch):
     from octopus import catalog, dev_worker, llm
 
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
-    model = catalog.load().model("omniroute/devworker-groq")
+    model = catalog.load().model("openrouter/fixture/text-gamma:free")
     request = llm._build_request(
         model,
         [{"role": "user", "content": "next"}],
@@ -207,6 +206,7 @@ def test_devworker_groq_uses_tool_call_with_local_validation(monkeypatch):
         None,
         dev_worker.DEV_ACTION_SCHEMA,
         tool_schemas=dev_worker.DEV_ACTION_TOOLS,
+        structured_method="tool_call",
     )
 
     assert "response_format" not in request
@@ -222,16 +222,15 @@ def test_devworker_groq_uses_tool_call_with_local_validation(monkeypatch):
     search = request["tools"][1]["function"]["parameters"]
     assert search["required"] == ["query"]
     assert search["properties"]["path"] == {"type": ["string", "null"]}
-    assert request["reasoning_effort"] == "low"
 
 
-def test_devworker_uses_direct_groq_route_with_tools(
+def test_devworker_uses_openrouter_route_with_tools(
         monkeypatch, providers_up, transport):
     from octopus import dev_worker, llm
 
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
-    monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
 
+    from browser_evidence import prove
+    prove("development.step", "openrouter/fixture/text-gamma:free")
     def reply(provider, request):
         assert request["tools"] == dev_worker.DEV_ACTION_TOOLS
         assert request["tool_choice"] == "required"
@@ -239,8 +238,8 @@ def test_devworker_uses_direct_groq_route_with_tools(
             text='{"action":"search","query":"needle"}',
             usage=llm.Usage(prompt_tokens=10, completion_tokens=5),
             requested_model=request["model"],
-            resolved_model="groq/openai/gpt-oss-120b",
-            resolved_provider="groq",
+            resolved_model=request["model"],
+            resolved_provider="fixture",
             provider_cost_usd=0.0,
         )
 
@@ -255,7 +254,7 @@ def test_devworker_uses_direct_groq_route_with_tools(
         validate=dev_worker._parse_action,
     )
 
-    assert transport.models == ["groq/openai/gpt-oss-120b"]
+    assert transport.models == ["fixture/text-gamma:free"]
     assert completion.data == {
         "action": "search", "path": None, "query": "needle", "patch": None, "message": None,
     }
@@ -358,6 +357,7 @@ def test_devworker_retries_two_bounded_provider_rate_limits(tmp_path, monkeypatc
 
     monkeypatch.setattr(dev_worker.llm, "complete", complete)
     monkeypatch.setattr(dev_worker, "_sleep", sleeps.append)
+    monkeypatch.setattr(dev_worker, "_wait_for_llm_slot", lambda previous: 0)
     monkeypatch.setattr(
         dev_worker, "_tool",
         lambda action, worktree, tests, tests_passed: ("fake-commit", True, "fake-commit"),
@@ -378,7 +378,7 @@ def test_devworker_retries_two_bounded_provider_rate_limits(tmp_path, monkeypatc
     assert any(event["type"] == "development.rate_limited" for event in tasks.events(task_id=task_id))
 
 
-def test_devworker_extracts_observed_groq_retry_delay():
+def test_devworker_extracts_observed_retry_delay():
     from octopus import dev_worker
 
     RateLimitError = type("RateLimitError", (Exception,), {})
@@ -389,11 +389,10 @@ def test_devworker_extracts_observed_groq_retry_delay():
     assert dev_worker._rate_limit_delay(RuntimeError("Please try again in 1s.")) is None
 
 
-def test_devworker_paces_omniroute_step_starts(monkeypatch):
+def test_devworker_paces_step_starts(monkeypatch):
     from octopus import dev_worker
 
     sleeps = []
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
     monkeypatch.setattr(dev_worker.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(dev_worker, "_sleep", sleeps.append)
 
@@ -402,9 +401,8 @@ def test_devworker_paces_omniroute_step_starts(monkeypatch):
     assert sleeps == [8.0]
     assert started == 108.0
 
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "0")
-    assert dev_worker._wait_for_llm_slot(95.0) == 100.0
-    assert sleeps == [8.0]
+    assert dev_worker._wait_for_llm_slot(95.0) == 108.0
+    assert sleeps == [8.0, 8.0]
 
 
 def test_devworker_retries_one_malformed_provider_tool_call(tmp_path, monkeypatch):

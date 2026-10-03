@@ -7,8 +7,6 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,20 +22,6 @@ class Check:
     blocking: bool = True
 
 
-def _http_ok(url: str, api_key: str = "", timeout: float = 3.0) -> tuple[bool, str]:
-    headers = {"Accept": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(url, headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            return 200 <= response.status < 300, f"HTTP {response.status}"
-    except urllib.error.HTTPError as exc:
-        return False, f"HTTP {exc.code}"
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return False, f"injoignable ({type(exc).__name__})"
-
-
 def _chromium_executable() -> str | None:
     try:
         from playwright.sync_api import sync_playwright
@@ -49,7 +33,6 @@ def _chromium_executable() -> str | None:
 
 def run_checks() -> list[Check]:
     checks: list[Check] = []
-    omni_enabled = os.environ.get("OMNIROUTE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 
     controller = Path(sys.executable)
     checks.append(Check("Python contrôle", controller.exists(), str(controller),
@@ -83,25 +66,21 @@ def run_checks() -> list[Check]:
     checks.append(Check("Verrou de production", holder is None, f"pris par {holder}" if holder else "libre",
                         "un cycle tourne déjà ; l'arrêter avant un nouveau cycle", blocking=False))
 
-    if omni_enabled:
-        base = os.environ.get("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1").rstrip("/")
-        key = os.environ.get("OMNIROUTE_API_KEY", "").strip()
-        checks.append(Check("Clé OmniRoute", bool(key), "présente" if key else "absente",
-                            "définir OMNIROUTE_API_KEY dans l'environnement utilisateur Windows"))
-        if key:
-            ok, detail = _http_ok(f"{base}/models", key)
-            checks.append(Check("OmniRoute", ok, f"{base} · {detail}",
-                                "démarrer Docker/OmniRoute et vérifier son endpoint /models"))
-        else:
-            checks.append(Check("OmniRoute", False, f"{base} · clé absente",
-                                "définir OMNIROUTE_API_KEY puis relancer le terminal"))
-    else:
-        checks.append(Check("OmniRoute", True, "désactivé par OMNIROUTE_ENABLED=0", blocking=False))
-
-    deepseek_key = bool(config.api_key())
-    deepseek_required = (not omni_enabled) or os.environ.get("OCTOPUS_PROFILE", "").strip() == "legacy"
-    checks.append(Check("Clé DeepSeek", deepseek_key, "présente" if deepseek_key else "absente",
-                        "DEEPSEEK_API_KEY uniquement si OmniRoute est désactivé/legacy",
+    from octopus import catalog, llm
+    cat = catalog.load()
+    state = cat.raw["openrouter_catalog"]
+    key = bool(llm.secret("OPENROUTER_API_KEY"))
+    checks.append(Check("Cle OpenRouter", key, "presente" if key else "absente",
+                        "definir OPENROUTER_API_KEY dans l'environnement utilisateur Windows"))
+    checks.append(Check("Catalogue OpenRouter", state["count"] > 0,
+        f"{state['count']} modeles gratuits ; {state['state']} ; age_s={state['age_s']}"
+        + (" ; " + state["refresh_error"] if state["refresh_error"] else ""),
+        "python -m octopus models --refresh"))
+    profile = os.environ.get("OCTOPUS_PROFILE") or cat.default_profile
+    deepseek_required = "paid" in cat.profile(profile).get("allowed_cost_classes", [])
+    deepseek_key = bool(llm.secret("DEEPSEEK_API_KEY"))
+    checks.append(Check("Cle DeepSeek", deepseek_key, "presente" if deepseek_key else "absente",
+                        "DEEPSEEK_API_KEY pour un profil payant explicitement autorise",
                         blocking=deepseek_required))
 
     if shutil.which("git"):

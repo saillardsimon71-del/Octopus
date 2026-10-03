@@ -222,13 +222,13 @@ def test_images_imply_vision_capability_and_skip_text_only_model(configured, tra
     cat = catalog.load()
     raw = copy.deepcopy(cat.raw)
     raw['profiles']['low_cost']['require_evidence'] = False
-    raw['tasks']['agent.react_step']['candidates']['low_cost'] = ['groq/gpt-oss-120b', 'ollama/qwen3.5-4b']
+    raw['tasks']['agent.react_step']['candidates']['low_cost'] = ['openrouter/fixture/text-gamma:free', 'openrouter/fixture/vision-alpha:free']
     monkeypatch.setattr(catalog, 'load', lambda: catalog.Catalog(raw=raw, path=cat.path))
     transport.reply('{"state":"authenticated"}')
     messages = [{'role': 'user', 'content': [{'type': 'text', 'text': 'Observe'},
         {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,offline'}}]}]
     result = llm.complete('agent.react_step', messages, profile='low_cost', json_mode=True)
-    assert result.model == 'ollama/qwen3.5-4b'
+    assert result.model == 'openrouter/fixture/vision-alpha:free'
     assert len(transport.calls) == 1
     assert transport.calls[0][1]['messages'] == messages
 
@@ -281,7 +281,7 @@ def test_text_only_pin_refuses_image_before_transport(configured, transport):
     with pytest.raises(llm.NoEligibleModel):
         llm.complete('agent.react_step', [{'role': 'user', 'content': [
             {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,offline'}}]}],
-            profile='legacy', pin_model='groq/gpt-oss-120b')
+            profile='legacy', pin_model='openrouter/fixture/text-gamma:free')
     assert transport.calls == []
 
 

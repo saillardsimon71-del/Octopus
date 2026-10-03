@@ -1,9 +1,9 @@
-# Installation locale OCTOPUS — Windows cloud-first
+# Installation locale OCTOPUS - Windows cloud-first
 
 > **Statut 19/09/2026 :** ce runbook décrit le control-plane Windows et le renderer RunPod historique.  
 > La nouvelle couche Salad/GPU.ai + disjoncteur financier est documentée dans [COMPUTE_GPU.md](COMPUTE_GPU.md) et n'est pas encore imposée à tous les chemins vidéo. Ne confondre ni le renderer RunPod existant, ni WanGP local, ni le nouveau compute broker.
 
-Cette configuration garde le poste local léger : **contrôle OCTOPUS + GUI + navigateur + OmniRoute**. Les modèles vidéo lourds, MiniMax H3, Remotion/FFmpeg et le TTS cloud s'exécutent hors de la machine quand `PODALUX_VIDEO_RENDERER=cloud`.
+Cette configuration garde le poste local léger : **contrôle OCTOPUS + GUI + navigateur + OpenRouter/DeepSeek**. Les modèles vidéo lourds, MiniMax H3, Remotion/FFmpeg et le TTS cloud s'exécutent hors de la machine quand `PODALUX_VIDEO_RENDERER=cloud`.
 
 ## 0. Bootstrap recommandé
 
@@ -14,7 +14,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\setup-local.ps1
 ```
 
-Le script est idempotent : il crée `.venv` si nécessaire, installe `requirements-local.txt`, installe Chromium Playwright, prépare les variables non secrètes cloud-first et démarre/réutilise OmniRoute lorsque Docker Desktop est disponible. Il ne stocke aucun secret.
+Le script est idempotent : il crée `.venv` si nécessaire, installe `requirements-local.txt`, installe Chromium Playwright, prépare les variables non secrètes cloud-first. Il ne stocke aucun secret.
 
 ## 1. Préparer Python
 
@@ -35,30 +35,21 @@ python -m playwright install chromium
 
 Le navigateur intégré utilise Chromium Playwright, pas le navigateur Edge personnel. Le profil persistant des comptes est stocké sous `agents/data/browser_profile`.
 
-## 3. Démarrer OmniRoute
+## 3. Configurer les fournisseurs LLM
 
-Docker Desktop doit être démarré. OmniRoute expose actuellement son proxy OpenAI-compatible sous `/v1` sur le port `20128`. Le bind sur `127.0.0.1` évite aussi une exposition réseau locale involontaire.
-
-```powershell
-docker pull diegosouzapw/omniroute:latest
-docker run -d --name omniroute --restart unless-stopped --stop-timeout 40 -p 127.0.0.1:20128:20128 -v omniroute-data:/app/data diegosouzapw/omniroute:latest
-docker ps
-```
-
-Pour OCTOPUS, les valeurs par défaut sont :
+Le mécanisme secret existant lit `OPENROUTER_API_KEY` et `DEEPSEEK_API_KEY`.
+Ne pas mettre ces clés dans Git, les commandes publiées, les logs ou le cache.
+Aucun proxy local ni Docker n'est nécessaire au routage LLM.
 
 ```powershell
-[Environment]::SetEnvironmentVariable("OMNIROUTE_ENABLED", "1", "User")
-[Environment]::SetEnvironmentVariable("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1", "User")
-[Environment]::SetEnvironmentVariable("OMNIROUTE_MODEL", "auto/free", "User")
-[Environment]::SetEnvironmentVariable("OMNIROUTE_API_KEY", "<CLE_RUNTIME>", "User")
+python -m octopus models --refresh
+python -m octopus models --browser-candidates
 ```
 
-OmniRoute documente le modèle `auto` et ses variantes `auto/...`; OCTOPUS conserve `auto/free` pour privilégier le pool gratuit lorsque cette variante est disponible dans l'instance.
-
-La clé ne doit pas être mise dans GitHub, un test, un commit ou un fichier de configuration versionné.
-
-Fermer et rouvrir PowerShell après modification des variables utilisateur.
+Le profil normal est `zero_cost`. Une clé DeepSeek ne donne pas à elle seule
+l'autorisation de payer : le profil et les budgets restent explicites.
+Le catalogue technique ne qualifie pas un contrôleur browser. Suivre
+[le protocole Windows de qualification](OPENROUTER_CATALOG.md).
 
 ## 4. Préparer le rendu vidéo cloud
 
@@ -102,7 +93,8 @@ En cloud-first, le diagnostic doit vérifier :
 - Python de contrôle ;
 - Playwright + Chromium ;
 - SQLite / journal OCTOPUS ;
-- OmniRoute + `/v1/models` ;
+- clé OpenRouter et état du catalogue gratuit ;
+- clé DeepSeek lorsque la politique autorise ses coûts ;
 - identifiants RunPod ;
 - absence de verrou de production gênant.
 
@@ -121,7 +113,7 @@ Le bouton **Worker** lance la file OCTOPUS. La file utilise SQLite avec leases, 
 ## 8. Tests avant le premier cycle
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_omniroute.py tests/test_minimax_h3_cloud.py tests/test_browser_integration.py tests/test_doctor.py tests/test_gateway.py tests/test_cycle_logic.py
+.\.venv\Scripts\python.exe -m pytest -q tests/test_openrouter_catalog.py tests/test_llm_transport.py tests/test_minimax_h3_cloud.py tests/test_browser_integration.py tests/test_doctor.py tests/test_gateway.py tests/test_cycle_logic.py
 ```
 
 Pour les tests de navigateur réel, Chromium doit être installé. Pour un test purement hors-réseau, la suite réseau utilise des doubles d'interception.

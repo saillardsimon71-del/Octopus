@@ -17,12 +17,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 import re
 import statistics
 import sys
 import time
-import urllib.request
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from dataclasses import dataclass, field
@@ -40,6 +40,10 @@ class GatewayError(RuntimeError):
 
 
 class BudgetExceeded(GatewayError):
+    pass
+
+
+class RequestLimitExceeded(BudgetExceeded):
     pass
 
 
@@ -245,7 +249,7 @@ def _is_provider_connection_error(exc: Exception) -> bool:
     """Vrai seulement pour une panne de connectivité partagée par le provider.
 
     Le run H3 #66 a observé des `APIConnectionError` répétés sur plusieurs modèles
-    OmniRoute partageant le même gateway. On reste volontairement conservateur :
+    modèles partageant le même fournisseur. On reste volontairement conservateur :
     un read timeout, un 429, une erreur d'auth ou une sortie invalide ne prouvent
     pas que le provider entier est injoignable.
     """
@@ -308,18 +312,8 @@ def _provider_cooldown_reason(provider_name: str) -> str | None:
 
 
 def provider_status(name: str, provider: dict) -> tuple[bool, str]:
-    if provider.get("kind") == "local":
-        cached = _health.get(name)
-        if cached and time.monotonic() - cached[0] < 30:
-            return cached[1], cached[2]
-        url = provider["base_url"].rstrip("/") + provider.get("health_path", "/models")
-        try:
-            with urllib.request.urlopen(url, timeout=provider.get("health_timeout_s", 1.5)) as resp:
-                ok, reason = 200 <= resp.status < 300, f"serveur local HTTP {resp.status}"
-        except Exception as exc:
-            ok, reason = False, f"serveur local injoignable ({type(exc).__name__})"
-        _health[name] = (time.monotonic(), ok, reason)
-        return ok, reason
+    if name not in {"deepseek", "openrouter"}:
+        return False, "fournisseur retire"
     env = provider.get("api_key_env")
     if env and not secret(env):
         return False, f"cle {env} absente"
@@ -419,21 +413,16 @@ def _transport(provider: dict, request: dict) -> tuple[str, Usage] | TransportRe
                 text = arguments.strip()
     except ValueError as exc:
         structured_error = str(exc)
-    provider_cost = headers.get("x-omniroute-response-cost")
+    provider_cost = None
     if provider.get("api_key_env") == "OPENROUTER_API_KEY":
         provider_cost = _response_field(getattr(response, "usage", None), "cost")
     try:
-        provider_cost_usd = float(provider_cost) if provider_cost is not None else None
-    except ValueError:
+        provider_cost_usd = float(provider_cost) if provider_cost is not None and not isinstance(provider_cost, bool) else None
+    except (ValueError, TypeError):
         provider_cost_usd = None
 
-    litellm_model = headers.get("x-litellm-model-name")
-    resolved_model = (
-        headers.get("x-omniroute-model")
-        or litellm_model
-        or getattr(response, "model", None)
-    )
-    resolved_provider = headers.get("x-omniroute-provider")
+    resolved_model = getattr(response, "model", None)
+    resolved_provider = None
     if provider.get("api_key_env") == "OPENROUTER_API_KEY":
         resolved_provider = _response_field(response, "provider")
         metadata = _response_field(response, "openrouter_metadata") or {}
@@ -443,8 +432,6 @@ def _transport(provider: dict, request: dict) -> tuple[str, Usage] | TransportRe
         if selected is not None:
             resolved_provider = _response_field(selected, "provider")
             resolved_model = _response_field(selected, "model") or resolved_model
-    if resolved_provider is None and litellm_model and "/" in litellm_model:
-        resolved_provider = litellm_model.split("/", 1)[0]
 
     result = TransportResult(
         text=text,
@@ -465,13 +452,12 @@ def _transport_result(value: tuple[str, Usage] | TransportResult, requested_mode
     if isinstance(value, TransportResult):
         return value
     text, usage = value
-    resolved = requested_provider != "omniroute"
     return TransportResult(
         text=text,
         usage=usage,
         requested_model=requested_model,
-        resolved_model=requested_model if resolved else None,
-        resolved_provider=requested_provider if resolved else None,
+        resolved_model=requested_model,
+        resolved_provider=requested_provider,
     )
 
 
@@ -527,12 +513,14 @@ def _prompt_size(messages: list[dict]) -> tuple[int, int]:
 
 def _ineligibility(cat, profile_name: str, profile: dict, task: str, task_def: dict, model_id: str,
                    model: dict, needs: set[str]) -> str | None:
+    if model["provider"] not in {"openrouter", "deepseek"}:
+        return "fournisseur retire"
     allowed = profile.get("allowed_cost_classes", list(catalog.COST_CLASSES))
     if model["cost_class"] not in allowed:
         return f"classe de cout {model['cost_class']} interdite par le profil {profile_name}"
     if model["provider"] == "openrouter" and (model["cost_class"] != "free_quota"
-                                                or not model["api_model"].endswith(":free")):
-        return "OpenRouter direct exige un modele :free"
+                                                or not model.get("free_verified")):
+        return "OpenRouter exige une tarification gratuite verifiee"
     if model["provider"] == "openrouter" and not secret("OPENROUTER_API_KEY"):
         return "cle OPENROUTER_API_KEY absente"
     if (model["cost_class"] == "paid" and profile.get("allowed_paid_providers")
@@ -543,9 +531,6 @@ def _ineligibility(cat, profile_name: str, profile: dict, task: str, task_def: d
     missing = needs - set(model.get("capabilities", []))
     if missing:
         return "capacites manquantes : " + ", ".join(sorted(missing))
-    if (profile_name in {"zero_cost", "flash_fallback", "economical"} and model["provider"] == "omniroute"
-            and model.get("zero_cost_attestation") != "free_only"):
-        return "pool OmniRoute : attestation free_only absente"
     provider_cooldown = _provider_cooldown_reason(model["provider"])
     if provider_cooldown:
         return provider_cooldown
@@ -561,17 +546,12 @@ def _ineligibility(cat, profile_name: str, profile: dict, task: str, task_def: d
     evidence_required = profile.get("require_evidence") and model_id != task_def.get("baseline")
     if profile_name == "economical" and model["provider"] == "deepseek" and model["cost_class"] == "paid":
         evidence_required = False
-    # OmniRoute auto/free est un routeur virtuel : son éligibilité est déterminée par le
-    # health-check du gateway et par son propre pool free. On ne fabrique pas de bench local
-    # fictif pour autoriser le premier démarrage.
-    if evidence_required and model["provider"] == "omniroute" and profile_name in {"zero_cost", "low_cost", "economical"}:
-        evidence_required = False
-    if evidence_required and model["provider"] == "openrouter" and profile_name == "economical":
-        evidence_required = False
     if evidence_required:
-        proof = journal.evidence(task, model_id, cat.evidence_rules())
-        if not proof["eligible"]:
-            return proof["reason"]
+        identity = model.get("evidence_identity", model_id)
+        proof_tasks = (task,) + (_BENCH_TASKS.get(task, ()) if profile_name == "economical" else ())
+        proofs = [journal.evidence(name, identity, cat.evidence_rules()) for name in proof_tasks]
+        if not any(proof["eligible"] for proof in proofs):
+            return proofs[0]["reason"]
     return None
 
 
@@ -633,6 +613,8 @@ def _structured_methods(model: dict, json_mode: bool, json_schema: dict | None,
 
     allowed = {"json_schema", "json_object", "tool_call", "text"}
     methods = [m for m in methods if m in allowed]
+    if json_schema is None:
+        methods = [m for m in methods if m != "json_schema"]
     if "tool_call" in methods and (json_schema is None or not tool_schemas):
         methods = [m for m in methods if m != "tool_call"]
     if not methods:
@@ -767,10 +749,11 @@ def _justify(profile_name: str, task: str, model_id: str, model: dict, considere
              pinned: bool) -> dict:
     justification = {"profile": profile_name, "task": task, "chosen": model_id,
                      "cost_class": model["cost_class"], "considered": considered}
+    if model["provider"] == "openrouter":
+        justification.update({key: model[key] for key in
+            ("evidence_identity", "canonical_slug", "source", "fetched_at")})
     if profile_name == "economical":
         justification["selection_reason"] = "qualité du dernier benchmark, succès et latence récents; gratuit qualifié puis DeepSeek"
-    if profile_name == "zero_cost" and model["provider"] == "omniroute":
-        justification["zero_cost_attestation"] = model.get("zero_cost_attestation")
     if model["cost_class"] != "paid":
         return justification
     others = [c for c in considered if c["model"] != model_id]
@@ -801,12 +784,10 @@ def _zero_cost_violation(profile_name: str, model: dict, result: TransportResult
     if result.provider_cost_usd not in {None, 0.0}:
         return f"route gratuite bloquée : coût résolu {result.provider_cost_usd:.6f} $"
     if model["provider"] == "openrouter":
-        if result.provider_cost_usd != 0.0:
+        if isinstance(result.provider_cost_usd, bool) or result.provider_cost_usd != 0.0:
             return "route OpenRouter bloquée : coût provider non attesté à zéro"
-        if not (result.resolved_model or "").endswith(":free") or not result.resolved_provider:
+        if result.resolved_model not in {model["api_model"], model.get("canonical_slug")} or not result.resolved_provider:
             return "route OpenRouter bloquée : modèle ou provider gratuit non résolu"
-    if model["provider"] == "omniroute" and not (result.resolved_model and result.resolved_provider):
-        return "route gratuite bloquée : identité résolue absente"
     return None
 
 
@@ -848,18 +829,21 @@ def _rank_economical(task: str, candidates: list[str], cat: catalog.Catalog) -> 
         model = cat.model(model_id)
         if model is None or model["cost_class"] == "paid":
             return (1, 0)
-        samples = bench.get(model_id, [])
+        samples = bench.get(model.get("evidence_identity", model_id), [])
         quality = sum(samples) / len(samples) if samples else 0.5
         calls = health.get(model_id, [])[:10]
         reliability = sum(r["status"] == "ok" for r in calls) / len(calls) if calls else 0.5
         latency = sum((r["duration_ms"] or 0) for r in calls) / len(calls) if calls else 0
-        benchmark_latency = statistics.median(bench_latency[model_id]) if bench_latency.get(model_id) else 0
+        benchmark_latency = statistics.median(bench_latency[model.get("evidence_identity", model_id)]) if bench_latency.get(model.get("evidence_identity", model_id)) else 0
         return (0, -(quality * 100 + reliability * 20
                      - min(latency / 1000, 30) - min(benchmark_latency / 1000, 10)))
 
-    qualified = [m for m in candidates if len(bench.get(m, [])) < 2
-                 or sum(bench[m]) / len(bench[m]) >= 0.9
-                 or cat.model(m)["cost_class"] == "paid"]
+    qualified = []
+    for mid in candidates:
+        model = cat.model(mid)
+        samples = bench.get(model.get("evidence_identity", mid), []) if model else []
+        if model and (model["cost_class"] == "paid" or len(samples) < 2 or sum(samples) / len(samples) >= .9):
+            qualified.append(mid)
     return sorted(qualified, key=score)
 
 
@@ -873,14 +857,14 @@ BROWSER_SCENARIOS = frozenset({"affordance", "dynamic_menu", "recovery", "ambigu
 def browser_identity(model: dict, resolved_model: str | None = None) -> str | None:
     """Identity of the underlying model, never reputation for an unknown auto pool."""
     name = resolved_model or model.get("api_model", "")
+    if model.get("provider") == "openrouter":
+        if not model.get("free_verified") or not model.get("evidence_identity"):
+            return None
+        if resolved_model is not None and resolved_model not in {model["api_model"], model.get("canonical_slug")}:
+            return None
+        return "browser.model:" + model["evidence_identity"]
     if not name or any(token in name.lower() for token in ("auto", "best-free", "router")):
         return None
-    if model.get("provider") == "omniroute" and resolved_model is None:
-        # Explicit OmniRoute routes must declare the underlying identity in catalog,
-        # then it is checked against the actual response before returning a decision.
-        name = model.get("browser_identity")
-        if not name:
-            return None
     if resolved_model == model.get('api_model') and model.get('browser_identity'):
         name = model['browser_identity']
     return "browser.model:" + name
@@ -904,7 +888,8 @@ def browser_quality(model: dict, *, resolved_model: str | None = None) -> dict:
     rates = {item: sum(r["passed"] for r in group) / len(group) if group else 0.
              for item, group in by_item.items()}
     quality = sum(rates.values()) / len(BROWSER_SCENARIOS)
-    safe = all(not json.loads(r["checks"] or "{}").get("forbidden", False) for r in samples)
+    safe = all(not any(json.loads(r["checks"] or "{}").get(key, False)
+                       for key in ("forbidden", "benchmark_incomplete")) for r in samples)
     mandatory = all(rates[x] == 1. for x in ("vision", "ambiguous_dom", "recovery", "invalid_args", "stale_refs"))
     live = journal.query("SELECT passed FROM bench_results WHERE task='browser.execution' AND model=? AND ts>? "
                          "ORDER BY id DESC LIMIT 3", (identity, max(r['ts'] for r in rows)))
@@ -939,7 +924,8 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
              reasoning: str | None = None,
              needs: tuple[str, ...] = (), pin_model: str | None = None, profile: str | None = None,
              validate: Callable[[str], Any] | None = None,
-             exclude_models: tuple[str, ...] = (), browser_min_quality: float = 0.) -> Completion:
+             exclude_models: tuple[str, ...] = (), browser_min_quality: float = 0.,
+             before_request: Callable[[], None] | None = None) -> Completion:
     cat = catalog.load()
     ctx = journal.current_run()
     profile_name = _resolve_profile(cat, profile, ctx)
@@ -996,7 +982,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
         if model is None:
             considered.append({"model": model_id, "eligible": False, "reason": "absent du catalogue"})
             continue
-        if profile_name == "economical" and ctx is not None:
+        if profile_name == "economical" and ctx is not None and model["cost_class"] == "paid":
             exhausted = next((f"budget du run #{run_id} atteint : {journal.subtree_cost(run_id):.4f} $ "
                               f"depenses >= {budget:.4f} $"
                               for run_id, budget in ctx.budgets
@@ -1043,7 +1029,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 "requested_model": model["api_model"],
                 "attempt": candidate_attempt, "peak": int(peak), "prompt_sha256": digest, "prompt_chars": prompt_chars,
             }
-            if profile_name == "economical" and ctx is not None and method_index:
+            if profile_name == "economical" and ctx is not None and method_index and model["cost_class"] == "paid":
                 exhausted = next((f"budget du run #{run_id} atteint : {journal.subtree_cost(run_id):.4f} $ "
                                   f"depenses >= {budget:.4f} $"
                                   for run_id, budget in ctx.budgets
@@ -1070,6 +1056,8 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 structured_method=structured_method,
             )
             started = time.perf_counter()
+            if before_request is not None:
+                before_request()
             if is_free:
                 free_attempts += 1
                 if profile_name == "economical" and not route_attempted:
@@ -1095,10 +1083,6 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                              or getattr(response, "status_code", None) == 413)
                 cooldown_delay = _set_rate_limit_cooldown(model_id, exc)
                 provider_rate_limit_delay = None
-                if cooldown_delay is not None and model["provider"] == "groq":
-                    _provider_cooldowns["groq"] = (time.monotonic() + cooldown_delay,
-                                                  f"quota Groq 429; cooldown {cooldown_delay:g}s")
-                    provider_rate_limit_delay = cooldown_delay
                 if cooldown_delay is not None and model["provider"] == "openrouter":
                     body = getattr(exc, "body", None)
                     source = ((body.get("metadata") or body.get("error", {}).get("metadata") or {}).get("limit_source")
@@ -1138,7 +1122,10 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
             _rate_limit_cooldowns.pop(model_id, None)
             _provider_cooldowns.pop(model["provider"], None)
             duration_ms = int((time.perf_counter() - started) * 1000)
-            cost = (result.provider_cost_usd if result.provider_cost_usd is not None
+            observed_cost = result.provider_cost_usd
+            if observed_cost is not None and (not math.isfinite(observed_cost) or observed_cost < 0):
+                observed_cost = None
+            cost = (observed_cost if observed_cost is not None
                     else pricing.call_cost(model.get("price"), usage, peak))
             data, status, error = None, "ok", _zero_cost_violation(profile_name, model, result)
             repaired = repair_attempted_here = False
@@ -1197,7 +1184,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 "cost_usd": cost, "duration_ms": duration_ms, "output_preview": (
                     '[multimodal response]' if images else text[:300]),
                 "resolved_model": result.resolved_model, "resolved_provider": result.resolved_provider,
-                "request_id": result.request_id, "provider_cost_usd": result.provider_cost_usd,
+                "request_id": result.request_id, "provider_cost_usd": observed_cost,
                 "justification": json.dumps(justification, ensure_ascii=False),
             })
             if status == "blocked":

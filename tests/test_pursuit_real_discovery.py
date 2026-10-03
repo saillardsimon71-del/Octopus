@@ -186,7 +186,7 @@ def test_2_niche_history_projection_is_compact_and_attributed(tmp_path):
     assert metrics["goal_chars"] < 3500 and metrics["niche_mentions"] <= 10
     assert metrics["niche_field_chars"] < 800  # Absolute context bound, not a prompt-padding ratio.
     assert metrics["business_signal_focus"] is True and metrics["business_signal_target"] is None
-    captured = json.loads((tmp_path/"capture/capture.json").read_text())
+    captured = json.loads((tmp_path/"capture/capture.json").read_text(encoding='utf-8'))
     assert "conclusion_modèle_non_preuve" in captured["goal"]
     assert metrics["provider_calls"] == 0 and metrics["quality_benchmark"] is False
 

@@ -67,6 +67,10 @@ Monolithe Python, journal SQLite : `strategy`, `tasks`, `worker`, `actions`, `ec
 Un seul ledger. Les preuves sont immuables et rétractables ; les liens réutilisent les objets existants.
 CLI, rapports, logs et revue humaine constituent le chemin d'exploitation prioritaire.
 
+Le routage LLM utilise OpenRouter gratuit découvert par API et DeepSeek direct sous politique
+payante explicite. Découverte, preuve par tâche et qualification browser restent distinctes.
+Voir [le catalogue et le protocole de qualification](docs/OPENROUTER_CATALOG.md).
+
 Les agents/vidéos Podalux, la veille, le Studio et la GUI CustomTkinter restent disponibles.
 Leur extension est gelée jusqu'à un besoin observé. Ils ne sont pas requis pour tenir un pilote.
 `development.task` n'est plus chargé par un worker ordinaire ; l'atelier reste accessible via

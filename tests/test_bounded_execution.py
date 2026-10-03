@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from octopus import catalog, llm
+from octopus.catalog import _fetch_openrouter
 
 
 def test_every_provider_declares_a_finite_timeout_and_bounded_retries(monkeypatch):
@@ -29,7 +30,7 @@ def test_every_provider_declares_a_finite_timeout_and_bounded_retries(monkeypatc
         assert isinstance(timeout, (int, float)) and math.isfinite(timeout) and timeout > 0, name
         retries = provider.get("max_retries")
         assert isinstance(retries, int) and retries >= 0, name
-    assert providers["omniroute"]["timeout_s"] == 120.0, "borne par défaut du gateway partagée"
+    assert providers["openrouter"]["timeout_s"] == 90.0, "borne par défaut du gateway partagée"
 
 
 def test_transport_applies_the_configured_timeout_to_the_client(monkeypatch):
@@ -69,8 +70,7 @@ def test_transport_applies_the_configured_timeout_to_the_client(monkeypatch):
     assert list(llm._clients) == []
 
 
-def test_health_probe_is_bounded_too(monkeypatch):
-    """La sonde de disponibilité ne peut pas bloquer un cycle : borne courte par défaut."""
+def test_catalog_metadata_fetch_is_bounded_too(monkeypatch):
     opened: list[float] = []
 
     class _Response:
@@ -80,16 +80,14 @@ def test_health_probe_is_bounded_too(monkeypatch):
         def __exit__(self, *args):
             return False
 
-        status = 200
+        def read(self, limit):
+            assert limit == catalog.MAX_METADATA_BYTES + 1
+            return b'{"data": []}'
 
     def fake_urlopen(url, timeout=None):
         opened.append(timeout)
         return _Response()
 
-    monkeypatch.setattr(llm.urllib.request, "urlopen", fake_urlopen)
-    llm._health.clear()
-    ok, reason = llm.provider_status("probe", {"kind": "local", "base_url": "http://127.0.0.1:9/v1",
-                                               "health_path": "/models"})
-    llm._health.clear()
-    assert ok is True and "HTTP 200" in reason
-    assert opened == [1.5]
+    monkeypatch.setattr(catalog.urllib.request, "urlopen", fake_urlopen)
+    assert _fetch_openrouter("offline-fixture") == {"data": []}
+    assert opened == [15]

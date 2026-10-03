@@ -562,8 +562,6 @@ def _sleep(seconds: float) -> None:
 
 def _wait_for_llm_slot(previous_started: float) -> float:
     now = time.monotonic()
-    if os.environ.get("OMNIROUTE_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
-        return now
     delay = previous_started + DEV_MIN_LLM_INTERVAL_S - now
     if delay > 0:
         _sleep(delay)

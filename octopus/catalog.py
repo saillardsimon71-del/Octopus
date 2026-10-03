@@ -3,14 +3,26 @@ from __future__ import annotations
 
 import json
 import os
+import copy
+import re
+import tempfile
+import time
+import urllib.request
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from . import paths
 
 COST_CLASSES = ("local", "free_quota", "paid")
 STRUCTURED_METHODS = {"json_schema", "json_object", "tool_call", "text"}
-_cache: dict[str, tuple[float, "Catalog"]] = {}
+_cache = {}
+_refresh_failures = {}
+OPENROUTER_SOURCE = "https://openrouter.ai/api/v1/models"
+CATALOG_TTL_S = 6 * 3600
+CATALOG_MAX_AGE_S = 24 * 3600
+REFRESH_BACKOFF_S = 300
+MAX_METADATA_BYTES = 8 * 1024 * 1024
 
 
 class CatalogError(ValueError):
@@ -24,11 +36,7 @@ class Catalog:
 
     @property
     def default_profile(self) -> str:
-        selected = self.raw.get("default_profile", "legacy")
-        if (selected == "legacy" and _omniroute_enabled()
-                and not os.environ.get("OCTOPUS_PROFILE", "").strip()):
-            return "zero_cost"
-        return selected
+        return self.raw.get("default_profile", "zero_cost")
 
     def provider(self, name: str) -> dict:
         return self.raw["providers"][name]
@@ -56,175 +64,202 @@ class Catalog:
         return self.raw.get("budgets", {}).get("daily_usd")
 
 
-def _omniroute_enabled() -> bool:
-    return os.environ.get("OMNIROUTE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+def _zero_price(value):
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return False
+    try:
+        number = Decimal(str(value))
+        return number.is_finite() and number == 0
+    except InvalidOperation:
+        return False
 
 
-def _overlay_omniroute(raw: dict) -> dict:
-    """Ajoute un modèle virtuel OmniRoute sans modifier le catalogue Git.
-
-    Le gateway est local au sens du déploiement (localhost), mais il requiert une clé et
-    peut transmettre le prompt aux providers qu'il sélectionne. On le traite donc comme
-    un provider HTTP authentifié pour la disponibilité du routage ; `doctor` vérifie réellement
-    son endpoint `/models` avant un cycle.
-    """
-    if not _omniroute_enabled():
-        return raw
-    raw = json.loads(json.dumps(raw))
-    provider_id = "omniroute"
-    model_id = "omniroute/auto-free"
-    model_name = os.environ.get("OMNIROUTE_MODEL", "auto/best-free").strip() or "auto/best-free"
-    # An automatic pool is not a vision model. Only an explicitly configured route
-    # matching a known multimodal catalog model can attest this capability here.
-    vision_route = any('vision' in model.get('capabilities', [])
-                       and model_name in (key, model.get('api_model'))
-                       for key, model in raw.get('models', {}).items())
-    fixed_browser_model = next((model for key, model in raw.get('models', {}).items()
-        if model_name in (key, model.get('api_model')) and model.get('provider') != 'omniroute'), None)
-    zero_cost_attestation = os.environ.get("OMNIROUTE_ZERO_COST_ATTESTATION", "").strip().lower()
-    raw.setdefault("providers", {})[provider_id] = {
-        "kind": "cloud",
-        "base_url": os.environ.get("OMNIROUTE_BASE_URL", "http://127.0.0.1:20128/v1").rstrip("/"),
-        "api_key_env": "OMNIROUTE_API_KEY",
-        "timeout_s": float(os.environ.get("OMNIROUTE_TIMEOUT_S", "120")),
-        "max_retries": 0,
-        "health_path": "/models",
-        "health_timeout_s": 2.0,
-        "data_policy": "Le gateway est local ; le contenu peut ensuite partir vers les providers connectés à OmniRoute. Respecter leurs conditions et quotas.",
-        "sources": ["https://github.com/diegosouzapw/OmniRoute/wiki/Free-Tiers-Guide", "https://github.com/diegosouzapw/OmniRoute/wiki/API-Reference"],
-    }
-    raw.setdefault("models", {})[model_id] = {
-        "provider": provider_id,
-        "api_model": model_name,
-        "cost_class": "free_quota",
-        "capabilities": ["json", "tools", "reasoning_effort"] + (["vision"] if vision_route else []),
-        "zero_cost_attestation": zero_cost_attestation,
-        "notes": "Modèle virtuel OmniRoute : auto/best-free. La disponibilité et le provider réel dépendent des connexions OmniRoute.",
-    }
-
-    if fixed_browser_model:
-        raw['models'][model_id]['browser_identity'] = fixed_browser_model['api_model']
-    devworker_models = {
-        "omniroute/devworker-groq": "groq/openai/gpt-oss-120b",
-    }
-    for dev_model_id, dev_api_model in devworker_models.items():
-        raw.setdefault("models", {})[dev_model_id] = {
-            "provider": provider_id,
-            "api_model": dev_api_model,
-            "cost_class": "free_quota",
-            "capabilities": ["json", "tools", "reasoning_effort"],
-            "zero_cost_attestation": zero_cost_attestation,
-            "notes": "Route DevWorker dediee via LiteLLM, sans fallback cross-provider interne.",
-        }
-    # Dedicated route names are aliases; qualify the configured underlying model.
-    known = raw['models'].get('groq/gpt-oss-120b')
-    if known:
-        raw['models']['omniroute/devworker-groq']['browser_identity'] = known['api_model']
-    raw["models"]["omniroute/devworker-groq"].update({
-        "json_schema_mode": "tool_call",
-        "structured_methods": ["tool_call", "json_object", "text"],
-        "params": {"reasoning_effort": "low"},
-    })
-    free_defaults = {
-        "podalux.select_offer": model_id,
-        "podalux.write_job": model_id,
-        "podalux.qc_vision": model_id,
-        "podalux.arbitrate": model_id,
-        "agent.react_step": "omniroute/devworker-groq",
-        "agent.plan": "omniroute/devworker-groq",
-        "agent.synthesize": "omniroute/devworker-groq",
-        "web.summarize": model_id,
-        "web.inspect_page": model_id,
-        "veille.brief": model_id,
-    }
-    for task_name, selected_model in free_defaults.items():
-        task = raw.setdefault("tasks", {}).setdefault(task_name, {})
-        candidates = task.setdefault("candidates", {})
-        current = list(candidates.get("zero_cost", []))
-        if selected_model not in current:
-            candidates["zero_cost"] = [selected_model, *current]
-        current_low = list(candidates.get("low_cost", []))
-        if selected_model not in current_low:
-            candidates["low_cost"] = [selected_model, *current_low]
-        if "flash_fallback" in candidates:
-            current_flash = list(candidates["flash_fallback"])
-            if selected_model not in current_flash:
-                candidates["flash_fallback"] = [selected_model, *current_flash]
-        if raw.get("profiles", {}).get("zero_cost", {}).get("fallback"):
-            task.setdefault("omniroute_bootstrap_baseline", {})["zero_cost"] = selected_model
-
-    # Les missions agentiques ne doivent pas dépendre d'une seule route Groq.
-    # Garder la route dédiée en premier, puis laisser OmniRoute choisir un autre
-    # modèle gratuit avant de tomber sur les candidats providers du catalogue.
-    for task_name in ("agent.react_step", "agent.plan", "agent.synthesize"):
-        task = raw.setdefault("tasks", {}).setdefault(task_name, {})
-        candidates = task.setdefault("candidates", {})
-        preferred = ["omniroute/devworker-groq", model_id]
-        for profile_name in ("zero_cost", "low_cost", "flash_fallback"):
-            if profile_name not in raw.get("profiles", {}):
-                continue
-            current = list(candidates.get(profile_name, []))
-            if not current and profile_name not in candidates:
-                continue
-            candidates[profile_name] = preferred + [item for item in current if item not in preferred]
-    dev_task = raw.setdefault("tasks", {}).setdefault("development.step", {})
-    dev_candidates = dev_task.setdefault("candidates", {})
-    dedicated = [
-        "omniroute/devworker-groq",
-    ]
-    for profile_name in ("zero_cost", "low_cost"):
-        dev_candidates[profile_name] = list(dedicated)
-
-    if raw.get("profiles", {}).get("zero_cost", {}).get("fallback"):
-        dev_task.setdefault("omniroute_bootstrap_baseline", {})["zero_cost"] = dedicated[0]
-    return raw
+def normalize_openrouter(payload, fetched_at):
+    entries = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(entries, list) or len(entries) > 4096:
+        raise CatalogError("OpenRouter: liste de modeles invalide")
+    models, duplicates, recognized = {}, set(), 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        slug, canonical = entry.get("id"), entry.get("canonical_slug")
+        if (not isinstance(slug, str) or len(slug) > 256
+                or not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._:-]+", slug)
+                or slug.startswith("openrouter/") or not isinstance(canonical, str)
+                or not canonical or len(canonical) > 256):
+            continue
+        prices = entry.get("pricing")
+        if (not isinstance(prices, dict) or not {"prompt", "completion"} <= prices.keys()
+                or not all(isinstance(v, (str, int, float)) and not isinstance(v, bool) for v in prices.values())):
+            continue
+        try:
+            numbers = [Decimal(str(v)) for v in prices.values()]
+        except InvalidOperation:
+            continue
+        if not all(v.is_finite() and v >= 0 for v in numbers):
+            continue
+        architecture = entry.get("architecture")
+        if not isinstance(architecture, dict):
+            continue
+        inputs, outputs = architecture.get("input_modalities"), architecture.get("output_modalities")
+        parameters = entry.get("supported_parameters")
+        context = entry.get("context_length")
+        if (not isinstance(inputs, list) or "text" not in inputs or not all(isinstance(v, str) for v in inputs)
+                or not isinstance(outputs, list) or "text" not in outputs
+                or not all(isinstance(v, str) for v in outputs)
+                or not isinstance(parameters, list) or not all(isinstance(v, str) for v in parameters)
+                or isinstance(context, bool) or not isinstance(context, int) or context <= 0):
+            continue
+        recognized += 1
+        if not all(_zero_price(v) for v in prices.values()):
+            continue
+        caps, methods = [], []
+        if "image" in inputs:
+            caps.append("vision")
+        if "tools" in parameters:
+            caps.append("tools")
+            methods.append("tool_call")
+        if "structured_outputs" in parameters:
+            methods.append("json_schema")
+        if "response_format" in parameters:
+            methods.append("json_object")
+        if methods:
+            caps.append("json")
+        if "reasoning" in parameters or "include_reasoning" in parameters:
+            caps.append("reasoning")
+        methods.append("text")
+        mid = "openrouter/" + slug
+        model = {"provider": "openrouter", "api_model": slug, "canonical_slug": canonical,
+            "name": entry.get("name") if isinstance(entry.get("name"), str) else slug,
+            "cost_class": "free_quota", "free_verified": True,
+            "pricing": {k: str(v) for k, v in prices.items()}, "context_length": context,
+            "input_modalities": sorted(set(inputs)), "output_modalities": sorted(set(outputs)),
+            "supported_parameters": sorted(set(parameters)), "capabilities": caps,
+            "structured_methods": methods, "source": OPENROUTER_SOURCE, "fetched_at": fetched_at,
+            "evidence_identity": mid + "@" + canonical}
+        if mid in models and model != models[mid]:
+            duplicates.add(mid)
+        models[mid] = model
+    if entries and not recognized:
+        raise CatalogError("OpenRouter: aucune tarification exploitable")
+    return {mid: models[mid] for mid in sorted(models) if mid not in duplicates}
 
 
-def load(path: Path | None = None) -> Catalog:
+def _fetch_openrouter(key):
+    request = urllib.request.Request(OPENROUTER_SOURCE, headers={"Authorization": "Bearer " + key})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        body = response.read(MAX_METADATA_BYTES + 1)
+    if len(body) > MAX_METADATA_BYTES:
+        raise CatalogError("OpenRouter: metadonnees trop volumineuses")
+    return json.loads(body)
+
+
+def _read_discovery(path):
+    if not path.exists() or path.stat().st_size > MAX_METADATA_BYTES:
+        return None
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        fetched = saved["fetched_at"]
+        if (saved.get("version") != 1 or saved.get("source") != OPENROUTER_SOURCE
+                or isinstance(fetched, bool) or not isinstance(fetched, (int, float))
+                or not 0 <= time.time() - fetched <= CATALOG_MAX_AGE_S):
+            return None
+        # Revalidate cached fields; never trust a stored free flag or capability list.
+        entries = [{"id": m["api_model"], "canonical_slug": m["canonical_slug"],
+            "name": m["name"], "pricing": m["pricing"], "context_length": m["context_length"],
+            "architecture": {"input_modalities": m["input_modalities"], "output_modalities": m["output_modalities"]},
+            "supported_parameters": m["supported_parameters"]} for m in saved["models"].values()]
+        return {"fetched_at": fetched, "models": normalize_openrouter({"data": entries}, fetched)}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def _write_discovery(path, saved):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=path.name + ".", suffix=".tmp", delete=False) as stream:
+            temporary = stream.name
+            json.dump(saved, stream, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def discover_openrouter(refresh=False):
+    from .llm import secret
+    path = paths.data_dir() / "openrouter-models.json"
+    saved = _read_discovery(path)
+    now = time.time()
+    age = now - saved["fetched_at"] if saved else None
+    failure = _refresh_failures.get(str(path))
+    error = failure[1] if not refresh and failure and now - failure[0] < REFRESH_BACKOFF_S else None
+    should_refresh = refresh or not saved or age >= CATALOG_TTL_S
+    if should_refresh and not error:
+        key = secret("OPENROUTER_API_KEY")
+        if not key:
+            error = "cle OPENROUTER_API_KEY absente"
+        else:
+            try:
+                fetched = time.time()
+                models = normalize_openrouter(_fetch_openrouter(key), fetched)
+                candidate = {"version": 1, "source": OPENROUTER_SOURCE, "fetched_at": fetched, "models": models}
+                _write_discovery(path, candidate)
+                saved, age = candidate, time.time() - fetched
+                _refresh_failures.pop(str(path), None)
+            except Exception as exc:
+                # Exception messages and bodies can echo Authorization. Expose only type/status.
+                status = getattr(exc, "code", None)
+                error = "OpenRouter refresh: " + type(exc).__name__ + (f" HTTP {status}" if isinstance(status, int) else "")
+        if error:
+            _refresh_failures[str(path)] = (now, error)
+    state = "unavailable" if saved is None else "fresh" if age < CATALOG_TTL_S else "stale"
+    return (saved["models"] if saved else {}), {"source": OPENROUTER_SOURCE, "state": state,
+        "age_s": round(age) if age is not None else None, "fetched_at": saved["fetched_at"] if saved else None,
+        "count": len(saved["models"]) if saved else 0, "refresh_error": error,
+        "ttl_s": CATALOG_TTL_S, "max_age_s": CATALOG_MAX_AGE_S}
+
+
+def load(path: Path | None = None, *, refresh=False) -> Catalog:
     p = Path(path) if path else paths.catalog_path()
-    mtime = p.stat().st_mtime
-    cache_key = (f"{p}|omni={_omniroute_enabled()}|model={os.environ.get('OMNIROUTE_MODEL','')}|"
-                 f"base={os.environ.get('OMNIROUTE_BASE_URL','')}|"
-                 f"zero_cost={os.environ.get('OMNIROUTE_ZERO_COST_ATTESTATION','')}")
-    cached = _cache.get(cache_key)
-    if cached and cached[0] == mtime:
-        return cached[1]
-    raw = json.loads(p.read_text(encoding="utf-8"))
-    raw = _overlay_omniroute(raw)
-    # Browser candidates compete across providers; no model name implies competence.
-    # Qualification in llm applies to every profile, including legacy/baseline routes.
+    stamp = p.stat().st_mtime_ns
+    cached = _cache.get(str(p))
+    if cached is None or cached[0] != stamp:
+        cached = (stamp, json.loads(p.read_text(encoding="utf-8")))
+        _cache[str(p)] = cached
+    raw = copy.deepcopy(cached[1])
+    raw["providers"] = {k: v for k, v in raw["providers"].items() if k in {"deepseek", "openrouter"}}
+    raw["models"] = {k: v for k, v in raw["models"].items() if v.get("provider") == "deepseek"}
+    discovered, state = discover_openrouter(refresh)
+    raw["models"].update(discovered)
+    raw["openrouter_catalog"] = state
     raw.setdefault("tasks", {}).setdefault("browser.react_step", {
-        "needs": ["json"], "privacy": "internal", "browser_qualification": "browser-v1", "baseline": "deepseek/flash",
-        "candidates": {profile: [mid for mid, model in raw["models"].items()
-            if model['cost_class'] in policy.get('allowed_cost_classes', COST_CLASSES)]
-            for profile, policy in raw["profiles"].items()},
-    })
-    economical_free = {
-        "agent.react_step": ["omniroute/devworker-groq", "openrouter/dots-3-free", "groq/gpt-oss-120b"],
-        "agent.plan": ["openrouter/dots-3-free", "omniroute/devworker-groq", "groq/gpt-oss-120b"],
-        "agent.synthesize": ["openrouter/dots-3-free", "omniroute/devworker-groq", "groq/gpt-oss-120b"],
-        "agent.decision": ["openrouter/dots-3-free", "omniroute/devworker-groq", "groq/gpt-oss-120b"],
-        "web.summarize": ["openrouter/dots-3-free", "omniroute/devworker-groq", "groq/gpt-oss-120b"],
-        "web.inspect_page": ["openrouter/dots-3-free", "omniroute/devworker-groq", "groq/gpt-oss-120b"],
-    }
+        "needs": ["json"], "privacy": "internal", "browser_qualification": "browser-v1",
+        "baseline": "deepseek/flash", "candidates": {}})
     for name, task in raw.get("tasks", {}).items():
-        candidates = task.setdefault("candidates", {})
-        free = [model_id for model_id in candidates.get("low_cost", candidates.get("zero_cost", []))
-                if raw["models"][model_id]["cost_class"] != "paid"]
-        baseline = task.get("baseline")
-        eligible_baseline = (baseline and (task.get("privacy") != "sensitive"
-                                           or raw["models"][baseline]["cost_class"] == "local"))
-        preferred = [model_id for model_id in economical_free.get(name, []) if model_id in raw["models"]]
-        paid = "deepseek/flash" if name in {"agent.plan", "agent.synthesize"} else baseline
-        if not eligible_baseline:
-            paid = None
-        free_candidates = [] if name == "agent.decision" else (preferred if preferred else free)
-        if name != "browser.react_step":
-            candidates["economical"] = list(dict.fromkeys(free_candidates)) + ([paid] if paid else [])
+        if task.get("baseline") not in raw["models"]:
+            task.pop("baseline", None)
+        needs = set(task.get("needs", []))
+        free = [mid for mid, model in discovered.items() if needs <= set(model["capabilities"])]
+        for profile, policy in raw["profiles"].items():
+            previous = task.setdefault("candidates", {}).get(profile, [])
+            paid = [mid for mid in previous if mid in raw["models"] and raw["models"][mid]["provider"] == "deepseek"]
+            if profile in {"economical", "flash_fallback"} and task.get("baseline"):
+                paid = ["deepseek/flash" if name in {"agent.plan", "agent.synthesize"} else task["baseline"]]
+            if name == "browser.react_step":
+                paid = [mid for mid, model in raw["models"].items() if model["provider"] == "deepseek" and needs <= set(model["capabilities"])]
+            if task.get("privacy") == "sensitive":
+                selected = []
+            else:
+                selected = paid + free if profile == "quality_first" else free + paid
+            task["candidates"][profile] = [mid for mid in selected
+                if raw["models"][mid]["cost_class"] in policy.get("allowed_cost_classes", COST_CLASSES)]
     validate(raw)
-    cat = Catalog(raw=raw, path=p)
-    _cache[cache_key] = (mtime, cat)
-    return cat
+    return Catalog(raw=raw, path=p)
 
 
 def validate(raw: dict) -> None:

@@ -3,7 +3,7 @@
 > **Référence technique historique (v0.2), pas vision courante.** Lire d'abord `../README.md`
 > et `../docs/HANDOFF_WORK.md`. Le chemin principal est `strategy → travail → evidence/ledger
 > → economy outcome → décision humaine`. Les profils et budgets ci-dessous décrivent des
-> compatibilités ; le premier démarrage autonome utilise `economical`.
+> compatibilités ; le profil normal est `zero_cost` et le paiement exige une politique explicite.
 
 Version 0.2. Quatre briques, utilisées par Podalux sans changer ses signatures :
 
@@ -11,7 +11,7 @@ Version 0.2. Quatre briques, utilisées par Podalux sans changer ses signatures 
 |---|---|---|
 | Journal | `journal.py` | SQLite `data/octopus.db` : runs imbriqués (cycle > agent > outil), appels LLM, résultats du banc |
 | Passerelle LLM | `llm.py`, `catalog.py`, `pricing.py` | un seul point d'entrée : choix du modèle par profil, budget vérifié **avant** l'appel, coût à la grille officielle (heures pleines, cache), justification de chaque appel payant |
-| Banc | `bench.py`, `agents/evals.py` | compare code, modèles locaux, gratuits et payants sur les vraies tâches, avec des vérifications déterministes |
+| Banc | `bench.py`, `agents/evals.py` | compare code, modèles OpenRouter gratuits et DeepSeek payants sur les vraies tâches, avec des vérifications déterministes |
 | File de tâches | `tasks.py`, `worker.py` | tâches persistées, ressources exclusives, baux, reprises, annulation, demandes humaines, planifications |
 
 ## Profils (`OCTOPUS_PROFILE`)
@@ -19,9 +19,9 @@ Version 0.2. Quatre briques, utilisées par Podalux sans changer ses signatures 
 | Profil | Comportement |
 |---|---|
 | `legacy` (compatibilité explicite) | modèle imposé par le code, requêtes identiques à l'historique (vérifié par `tests/test_legacy_compat.py`) |
-| `zero_cost` | local et quotas gratuits seulement ; un modèle n'est utilisé que s'il a réussi le banc (5 essais, 90 %, moins de 60 jours) |
-| `economical` | deux essais gratuits au plus, puis DeepSeek seul sous le plafond LLM configuré pour le démarrage autonome |
-| `low_cost` | local et gratuit validés d'abord, payant en dernier recours, dans le budget |
+| `zero_cost` | OpenRouter gratuit seulement ; un modèle n'est utilisé que s'il a réussi le banc (5 essais, 90 %, moins de 60 jours) |
+| `economical` | deux routes et trois requêtes gratuites au plus, puis DeepSeek seul sous le plafond LLM configuré pour le démarrage autonome |
+| `low_cost` | OpenRouter gratuit validé d'abord, payant en dernier recours, dans le budget |
 | `quality_first` | meilleur modèle validé d'abord, repli sur un modèle gratuit si le budget bloque |
 | `bench` | réservé au banc |
 
@@ -37,9 +37,10 @@ Coupe-circuit : l'appel direct historique exige simultanément `OCTOPUS=off` et 
 
 ```
 python -m octopus doctor                     installation, fournisseurs joignables, clés présentes
-python -m octopus models                     catalogue et preuves du banc
+python -m octopus models --refresh           découverte et état du cache
+python -m octopus models --browser-candidates candidats techniques, qualification séparée
 python -m octopus report --days 7 --legacy-db agents/data/podalux.db
-python -m octopus bench --models code,ollama/qwen3.5-2b [--tasks podalux.arbitrate]
+python -m octopus bench --models code --tasks podalux.arbitrate
 python -m octopus bench --models deepseek/flash --allow-paid --max-cost 0.05
 python -m pytest                             tests hors-ligne (aucun appel réseau)
 ```
@@ -94,12 +95,12 @@ Le worker vérifie son bail lors des transitions, du rattachement du run et de l
 
 Ces garanties concernent la persistance OCTOPUS : un bail ne tue pas un processus ni un outil externe. Un crash entre un effet externe et son checkpoint peut encore rejouer cet effet ; les handlers doivent rester coopératifs et utiliser l'idempotence de l'outil lorsqu'elle existe.
 
-## Ajouter un fournisseur ou un modèle
+## Catalogue et qualification
 
-1. `providers` : `base_url` compatible OpenAI, `api_key_env` (jamais la clé elle-même), `kind` `local` ou `cloud`.
-2. `models` : `api_model`, `cost_class` (`local`, `free_quota`, `paid` avec `price`), `capabilities`.
-3. `tasks.<tâche>.candidates.<profil>` : ordre de préférence.
-4. `python -m pytest tests/test_pricing_catalog.py` vérifie la cohérence (capacités, classes de coût autorisées, tâches sensibles locales).
-5. Lancer le banc sur la tâche : sans preuve, le modèle n'est jamais choisi par `zero_cost`, `low_cost` ou `quality_first`.
+Deux fournisseurs actifs : OpenRouter dynamique gratuit et DeepSeek direct.
+Les modèles OpenRouter ne sont pas ajoutés au JSON ni dupliqués dans le code.
+Les tâches déclarent leurs capacités requises, puis la preuve décide de l'éligibilité.
+Le benchmark général ne donne jamais le contrôle du navigateur.
 
-Les quotas et politiques de données du catalogue datent du 16/09/2026 : à revérifier avant usage commercial.
+Lire [le catalogue OpenRouter](../docs/OPENROUTER_CATALOG.md) et
+[la politique de routage](../docs/LLM_ROUTING_POLICY.md).

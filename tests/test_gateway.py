@@ -15,14 +15,7 @@ from octopus.pricing import Usage
 MSG = [{"role": "user", "content": "Ecris le job en JSON."}]
 
 
-def prove(task: str, model: str, passed: int = 5, total: int = 5, age_days: float = 0) -> None:
-    """Simule un banc passe : `passed` reussites sur `total` essais."""
-    with journal.run("octopus", "bench", label="preuve simulee") as ctx:
-        for i in range(total):
-            journal.record_bench_result({
-                "ts": time.time() - age_days * 86400, "bench_run_id": ctx.id, "suite": "t", "task": task,
-                "item": f"i{i}", "model": model, "passed": int(i < passed), "score": 1.0,
-            })
+from browser_evidence import prove
 
 
 def calls() -> list[dict]:
@@ -65,22 +58,20 @@ def test_zero_cost_without_evidence_never_pays(transport, providers_up, monkeypa
     assert calls() == []
 
 
-def test_kilo_auto_free_requires_evidence_before_zero_cost_use(transport, providers_up, monkeypatch):
+def test_openrouter_requires_evidence_before_zero_cost_use(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "0")
 
     with pytest.raises(llm.NoEligibleModel) as err:
         llm.complete("agent.plan", MSG, profile="zero_cost", json_mode=True)
 
     assert transport.calls == []
-    kilo = next(item for item in err.value.considered if item["model"] == "kilo/auto-free")
-    assert "preuve insuffisante" in kilo["reason"]
+    candidate = next(item for item in err.value.considered if item["model"] == "openrouter/fixture/text-gamma:free")
+    assert "preuve insuffisante" in candidate["reason"]
 
 
 def test_structured_bad_request_retries_same_model_as_prompt_json(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "0")
-    prove("podalux.write_job", "ollama/qwen3.5-4b")
+    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
 
     def handler(provider, request):
         if "response_format" in request:
@@ -91,7 +82,7 @@ def test_structured_bad_request_retries_same_model_as_prompt_json(transport, pro
     result = deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG)
 
     assert result == {"titre": "fallback texte"}
-    assert transport.models == ["qwen3.5:4b", "qwen3.5:4b"]
+    assert transport.models == ["fixture/vision-alpha:free", "fixture/vision-alpha:free"]
     assert transport.calls[0][1]["response_format"] == {"type": "json_object"}
     assert "response_format" not in transport.calls[1][1]
     assert [r["status"] for r in calls()] == ["error", "ok"]
@@ -131,8 +122,7 @@ def test_failed_generation_field_is_structured_error():
 
 def test_structured_fallback_keeps_grounding_messages_identical(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "0")
-    prove("podalux.write_job", "ollama/qwen3.5-4b")
+    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
     grounded = [
         {"role": "system", "content": "RÈGLE DE PREUVE: toute inconnue reste inconnue."},
         {"role": "user", "content": "Réponds en JSON."},
@@ -158,15 +148,14 @@ def test_structured_fallback_keeps_grounding_messages_identical(transport, provi
 
 def test_structured_cascade_has_bounded_call_count(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
-    monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
-    providers_up.add("groq")
+    prove("agent.synthesize", "openrouter/fixture/text-gamma:free")
+    prove("agent.synthesize", "openrouter/fixture/vision-alpha:free")
 
     class FailedGeneration(Exception):
         body = {"error": {"message": "Failed to generate JSON", "failed_generation": "x"}}
 
     def handler(provider, request):
-        if request["model"] == "groq/openai/gpt-oss-120b" and "response_format" in request:
+        if request["model"] == "fixture/text-gamma:free" and "response_format" in request:
             return FailedGeneration("400")
         return RuntimeError("route indisponible après cette méthode")
 
@@ -174,73 +163,70 @@ def test_structured_cascade_has_bounded_call_count(transport, providers_up, monk
     with pytest.raises(llm.NoEligibleModel):
         llm.complete("agent.synthesize", MSG, profile="zero_cost", json_mode=True, validate=llm.parse_json)
 
-    # OmniRoute GPT-OSS: json_object puis text. La route auto-free prend ensuite le relais.
-    # Kilo Auto reste ineligible en zero_cost tant qu'il n'a pas de preuve de banc.
     assert transport.models == [
-        "groq/openai/gpt-oss-120b",
-        "groq/openai/gpt-oss-120b",
-        "auto/best-free",
+        "fixture/text-gamma:free",
+        "fixture/text-gamma:free",
+        "fixture/vision-alpha:free",
     ]
 
 
 def test_http_413_skips_same_provider_for_same_prompt_across_calls(transport, providers_up, monkeypatch):
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
-    monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
-    prove("agent.plan", "kilo/auto-free")
+    prove("agent.plan", "openrouter/fixture/text-gamma:free")
 
     class TooLarge(Exception):
         status_code = 413
 
     def handler(provider, request):
         if provider["base_url"].endswith("/v1") and request["model"] in (
-            "groq/openai/gpt-oss-120b", "auto/best-free"
+            "fixture/text-gamma:free", "fixture/vision-alpha:free"
         ):
             return TooLarge("Request too large")
         return ('{"plan": []}', Usage(prompt_tokens=50, completion_tokens=10))
 
     transport.handler = handler
-    assert llm.complete("agent.plan", MSG, profile="zero_cost").text == '{"plan": []}'
+    assert llm.complete("agent.plan", MSG, profile="low_cost").text == '{"plan": []}'
     llm._rate_limit_cooldowns.clear()
     llm._provider_cooldowns.clear()
-    assert llm.complete("agent.plan", MSG, profile="zero_cost").text == '{"plan": []}'
+    assert llm.complete("agent.plan", MSG, profile="low_cost").text == '{"plan": []}'
 
-    assert transport.models.count("groq/openai/gpt-oss-120b") == 1
-    assert "auto/best-free" not in transport.models
+    assert transport.models.count("fixture/text-gamma:free") == 1
+    assert "fixture/vision-alpha:free" not in transport.models
     assert len([row for row in calls() if row["status"] == "request_too_large"]) == 1
 
 
-def test_normal_zero_cost_routes_to_proven_local_model(transport, providers_up, monkeypatch):
+def test_normal_zero_cost_routes_to_proven_free_model(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
     monkeypatch.setattr(deepseek, "_client", lambda: pytest.fail("le mode normal ne doit pas appeler DeepSeek directement"))
-    prove("podalux.write_job", "ollama/qwen3.5-4b")
+    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
     transport.reply('{"titre": "ok"}')
     assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "ok"}
     provider, request = transport.calls[0]
-    assert provider["kind"] == "local"
-    assert request["model"] == "qwen3.5:4b" and request["reasoning_effort"] == "none"
+    assert provider["kind"] == "cloud"
+    assert request["model"] == "fixture/vision-alpha:free"
+    assert request["extra_body"]["provider"]["max_price"] == {"prompt": 0, "completion": 0}
     assert request["response_format"] == {"type": "json_object"}
     (row,) = calls()
-    assert row["cost_class"] == "local" and row["cost_usd"] == 0
+    assert row["cost_class"] == "free_quota" and row["cost_usd"] == 0
     assert "paid_reason" not in json.loads(row["justification"])
     legacy = db._conn().execute("SELECT model, cost_usd FROM costs").fetchone()
-    assert (legacy["model"], legacy["cost_usd"]) == ("ollama/qwen3.5-4b", 0)
+    assert (legacy["model"], legacy["cost_usd"]) == ("openrouter/fixture/vision-alpha:free", 0)
 
 
 def test_insufficient_or_stale_evidence_is_refused(providers_up):
     rules = catalog.load().evidence_rules()
-    prove("podalux.write_job", "ollama/qwen3.5-4b", passed=4, total=4)
-    assert "4 essais < 5" in journal.evidence("podalux.write_job", "ollama/qwen3.5-4b", rules)["reason"]
-    prove("podalux.write_job", "gemini/3.5-flash", passed=8, total=10)
-    assert "80% < 90%" in journal.evidence("podalux.write_job", "gemini/3.5-flash", rules)["reason"]
-    prove("podalux.write_job", "groq/qwen3.8-27b", age_days=61)
-    assert "aucun banc recent" in journal.evidence("podalux.write_job", "groq/qwen3.8-27b", rules)["reason"]
+    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free", passed=4, total=4)
+    assert "4 essais < 5" in journal.evidence("podalux.write_job", catalog.load().model("openrouter/fixture/vision-alpha:free")["evidence_identity"], rules)["reason"]
+    prove("podalux.write_job", "openrouter/fixture/vision-beta:free", passed=8, total=10)
+    assert "80% < 90%" in journal.evidence("podalux.write_job", catalog.load().model("openrouter/fixture/vision-beta:free")["evidence_identity"], rules)["reason"]
+    prove("podalux.write_job", "openrouter/fixture/text-gamma:free", age_days=61)
+    assert "aucun banc recent" in journal.evidence("podalux.write_job", catalog.load().model("openrouter/fixture/text-gamma:free")["evidence_identity"], rules)["reason"]
 
 
 def test_latest_bench_run_wins(providers_up):
     rules = catalog.load().evidence_rules()
-    prove("podalux.write_job", "ollama/qwen3.5-4b", passed=5, total=5)
-    prove("podalux.write_job", "ollama/qwen3.5-4b", passed=0, total=5)  # regression apres changement de prompt
-    assert journal.evidence("podalux.write_job", "ollama/qwen3.5-4b", rules)["eligible"] is False
+    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free", passed=5, total=5)
+    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free", passed=0, total=5)  # regression apres changement de prompt
+    assert journal.evidence("podalux.write_job", catalog.load().model("openrouter/fixture/vision-alpha:free")["evidence_identity"], rules)["eligible"] is False
 
 
 class _FakeRateLimit(Exception):
@@ -269,180 +255,91 @@ def test_run_profile_overrides_ambient_environment(monkeypatch):
 
 
 def test_rate_limited_route_is_skipped_until_cooldown_expires(transport, providers_up, monkeypatch):
-    monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
-    monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
-
-    groq_calls = 0
-
+    for mid in ('openrouter/fixture/vision-alpha:free', 'openrouter/fixture/vision-beta:free'):
+        prove('agent.react_step', mid)
+    attempts = 0
+    class UpstreamLimit(_FakeRateLimit):
+        body = {'metadata': {'limit_source': 'upstream_provider_shared_pool'}}
     def handler(provider, request):
-        nonlocal groq_calls
-        if request["model"] == "groq/openai/gpt-oss-120b":
-            groq_calls += 1
-            if groq_calls == 1:
-                return _FakeRateLimit(60)
-            return llm.TransportResult(
-                text='{"ok": "groq"}',
-                usage=Usage(prompt_tokens=20, completion_tokens=5),
-                requested_model=request["model"],
-                resolved_model="openai/gpt-oss-120b",
-                resolved_provider="groq",
-                provider_cost_usd=0.0,
-            )
-        if request["model"] == "auto/best-free":
-            return llm.TransportResult(
-                text='{"ok": "auto"}',
-                usage=Usage(prompt_tokens=20, completion_tokens=5),
-                requested_model=request["model"],
-                resolved_model="free/fallback-model",
-                resolved_provider="free-provider",
-                provider_cost_usd=0.0,
-            )
-        raise AssertionError(f"modele inattendu : {request['model']}")
-
+        nonlocal attempts
+        if request['model'] == 'fixture/vision-alpha:free':
+            attempts += 1
+            if attempts == 1:
+                return UpstreamLimit(60)
+        return ('{"ok":true}', Usage(prompt_tokens=20, completion_tokens=5))
     transport.handler = handler
-
-    first = llm.complete("agent.react_step", MSG, profile="zero_cost",
-                         json_mode=True, validate=llm.parse_json)
-    assert first.model == "omniroute/auto-free"
-    assert transport.models == [
-        "groq/openai/gpt-oss-120b",
-        "auto/best-free",
-    ]
-    assert "omniroute/devworker-groq" in llm._rate_limit_cooldowns
-
-    second = llm.complete("agent.react_step", MSG, profile="zero_cost",
-                          json_mode=True, validate=llm.parse_json)
-    assert second.model == "omniroute/auto-free"
-    assert transport.models == [
-        "groq/openai/gpt-oss-120b",
-        "auto/best-free",
-        "auto/best-free",
-    ]
-
-    # Expiration simulée : la route redevient candidate et peut réussir.
-    _, reason = llm._rate_limit_cooldowns["omniroute/devworker-groq"]
-    llm._rate_limit_cooldowns["omniroute/devworker-groq"] = (time.monotonic() - 1, reason)
-
-    third = llm.complete("agent.react_step", MSG, profile="zero_cost",
-                         json_mode=True, validate=llm.parse_json)
-    assert third.model == "omniroute/devworker-groq"
-    assert transport.models[-1] == "groq/openai/gpt-oss-120b"
-    assert "omniroute/devworker-groq" not in llm._rate_limit_cooldowns
-
+    first = llm.complete('agent.react_step', MSG, profile='zero_cost', json_mode=True)
+    second = llm.complete('agent.react_step', MSG, profile='zero_cost', json_mode=True)
+    assert first.model == second.model == 'openrouter/fixture/vision-beta:free'
+    assert transport.models == ['fixture/vision-alpha:free', 'fixture/vision-beta:free', 'fixture/vision-beta:free']
+    mid = 'openrouter/fixture/vision-alpha:free'
+    _, reason = llm._rate_limit_cooldowns[mid]
+    llm._rate_limit_cooldowns[mid] = (time.monotonic() - 1, reason)
+    third = llm.complete('agent.react_step', MSG, profile='zero_cost', json_mode=True)
+    assert third.model == mid and mid not in llm._rate_limit_cooldowns
     rows = calls()
-    assert rows[0]["status"] == "error"
-    assert json.loads(rows[0]["justification"])["rate_limit_cooldown_s"] == pytest.approx(60)
-    skipped = json.loads(rows[2]["justification"])["considered"][0]
-    assert skipped["model"] == "omniroute/devworker-groq"
-    assert "429 rate limit; cooldown" in skipped["reason"]
-    assert len(rows) == 4  # aucune ligne réseau créée pour la route sautée pendant cooldown
+    assert len(rows) == 4 and rows[0]['status'] == 'error'
+    assert json.loads(rows[0]['justification'])['rate_limit_cooldown_s'] == pytest.approx(60)
+    skipped = next(r for r in json.loads(rows[2]['justification'])['considered'] if r['model'] == mid)
+    assert '429 rate limit; cooldown' in skipped['reason']
 
 
 def test_fallback_to_next_free_model_after_failure(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    prove("podalux.write_job", "ollama/qwen3.5-4b")
-    prove("podalux.write_job", "gemini/3.5-flash")
-    transport.handler = by_model({"qwen3.5:4b": ConnectionError("ollama arrete"), "gemini-3.5-flash": '{"titre": "g"}'})
+    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
+    prove("podalux.write_job", "openrouter/fixture/vision-beta:free")
+    transport.handler = by_model({"fixture/vision-alpha:free": TimeoutError("modèle indisponible"), "fixture/vision-beta:free": '{"titre": "g"}'})
     assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "g"}
     assert [c["status"] for c in calls()] == ["error", "ok"]
-    assert [c["attempt"] for c in calls()] == [1, 2]
+    assert calls()[1]["attempt"] == calls()[0]["attempt"] + 1
 
 
-def test_flash_fallback_page_inspection_prefers_free_route_over_pinned_flash(
-        transport, providers_up, monkeypatch):
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
-    monkeypatch.setenv("OMNIROUTE_MODEL", "groq/qwen3.8-27b")
-    monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
-
+def test_flash_fallback_page_inspection_prefers_free_route_over_pinned_flash(transport, providers_up):
     def handler(provider, request):
-        if request["model"] == "groq/qwen3.8-27b":
-            return llm.TransportResult(
-                text="page visible",
-                usage=Usage(prompt_tokens=100, completion_tokens=20),
-                requested_model=request["model"],
-                resolved_model="free/vision-model",
-                resolved_provider="free-provider",
-                provider_cost_usd=0.0,
-            )
-        if request["model"] == "deepseek-flash":
-            pytest.fail("DeepSeek ne doit pas être appelé tant que la route gratuite réussit")
-        raise AssertionError(f"modele inattendu : {request['model']}")
-
+        assert request['model'] == 'fixture/vision-alpha:free'
+        return ('page visible', Usage(prompt_tokens=100, completion_tokens=20))
     transport.handler = handler
-    result = llm.complete(
-        "web.inspect_page",
-        [{"role": "user", "content": "Décris la capture."}],
-        profile="flash_fallback",
-        pin_model="deepseek/flash",
-        needs=("vision",),
-    )
-
-    assert result.model == "omniroute/auto-free"
-    assert result.cost_usd == 0
-    assert transport.models == ["groq/qwen3.8-27b"]
+    result = llm.complete('web.inspect_page', MSG, profile='flash_fallback',
+                          pin_model='deepseek/flash', needs=('vision',))
+    assert result.model == 'openrouter/fixture/vision-alpha:free' and result.cost_usd == 0
+    assert transport.models == ['fixture/vision-alpha:free']
 
 
-def test_flash_fallback_uses_deepseek_only_after_free_routes_fail(transport, providers_up, monkeypatch):
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
-    monkeypatch.setenv("OMNIROUTE_ZERO_COST_ATTESTATION", "free_only")
-    providers_up.update({"groq", "ollama"})
-
+def test_flash_fallback_uses_deepseek_only_after_free_routes_fail(transport, providers_up):
     class RateLimited(Exception):
         status_code = 429
-        response = type("Response", (), {"status_code": 429, "headers": {"retry-after": "60"}})()
-
-    def handler(provider, request):
-        if request["model"] == "groq/openai/gpt-oss-120b":
-            return RateLimited("429 rate limit reached")
-        if request["model"] == "auto/best-free":
-            return RuntimeError("auto free indisponible")
-        if request["model"] == "kilo-auto/free":
-            return ("pas du json", Usage(prompt_tokens=40, completion_tokens=20))
-        if request["model"] == "deepseek-flash":
-            return ('{"ok": "deepseek"}', Usage(prompt_tokens=400, completion_tokens=100))
-        raise AssertionError(f"modele inattendu : {request['model']}")
-
-    transport.handler = handler
-    result = llm.complete("agent.react_step", MSG, profile="flash_fallback",
-                          json_mode=True, validate=llm.parse_json)
-
-    assert result.model == "deepseek/flash"
-    assert result.data == {"ok": "deepseek"}
-    assert transport.models == [
-        "groq/openai/gpt-oss-120b",
-        "auto/best-free",
-        "kilo-auto/free",
-        "deepseek-flash",
-    ]
-    assert result.cost_usd > 0
-    assert all(row["model"] != "deepseek/v4-pro" for row in calls())
+        response = type('Response', (), {'status_code': 429, 'headers': {'retry-after': '60'}})()
+    transport.handler = lambda provider, request: (RateLimited('429 rate limit reached')
+        if request['model'].endswith(':free') else ('{"ok":"deepseek"}', Usage(prompt_tokens=400, completion_tokens=100)))
+    result = llm.complete('agent.react_step', MSG, profile='flash_fallback', json_mode=True, validate=llm.parse_json)
+    assert result.model == 'deepseek/flash' and result.data == {'ok':'deepseek'}
+    assert transport.models == ['fixture/text-delta:free', 'deepseek-flash']
+    assert 'quota OpenRouter' in llm._provider_cooldown_reason('openrouter')
+    assert result.cost_usd > 0 and all(row['model'] != 'deepseek/v4-pro' for row in calls())
 
 
 def test_low_cost_pays_only_when_alternatives_are_ineligible(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "low_cost")
-    providers_up.add("ollama")
     transport.reply('{"titre": "ok"}')
     deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG)
     assert transport.models == ["deepseek-flash"]  # reference du banc : pas de preuve exigee
     just = json.loads(calls()[0]["justification"])
     assert just["paid_reason"] == "alternatives_ineligible"
-    assert "serveur" in just["explanation"] or "coupe par le test" in just["explanation"]
     assert "preuve insuffisante" in just["explanation"]
 
 
 def test_low_cost_paid_fallback_after_free_failure_is_explained(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "low_cost")
-    prove("podalux.write_job", "ollama/qwen3.5-4b")
-    transport.handler = by_model({"qwen3.5:4b": ConnectionError("down"), "deepseek-flash": '{"titre": "p"}'})
+    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
+    transport.handler = by_model({"fixture/vision-alpha:free": ConnectionError("down"), "deepseek-flash": '{"titre": "p"}'})
     deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG)
     just = json.loads(calls()[-1]["justification"])
     assert just["paid_reason"] == "fallback_after_failure" and "ConnectionError" in just["explanation"]
 
 
 def test_invalid_output_falls_back(transport, providers_up):
-    prove("podalux.write_job", "ollama/qwen3.5-4b")
-    transport.handler = by_model({"qwen3.5:4b": "pas du json", "deepseek-flash": '{"titre": "p"}'})
+    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
+    transport.handler = by_model({"fixture/vision-alpha:free": "pas du json", "deepseek-flash": '{"titre": "p"}'})
     c = llm.complete("podalux.write_job", MSG, profile="low_cost", json_mode=True, validate=llm.parse_json)
     assert c.model == "deepseek/flash" and c.data == {"titre": "p"}
     assert [r["status"] for r in calls()] == ["invalid", "invalid", "ok"]
@@ -450,28 +347,28 @@ def test_invalid_output_falls_back(transport, providers_up):
 
 def test_call_json_invalid_output_falls_back_between_free_models(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    prove("podalux.write_job", "ollama/qwen3.5-4b")
-    prove("podalux.write_job", "gemini/3.5-flash")
-    transport.handler = by_model({"qwen3.5:4b": "pas du json", "gemini-3.5-flash": '{"titre": "g"}'})
+    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
+    prove("podalux.write_job", "openrouter/fixture/vision-beta:free")
+    transport.handler = by_model({"fixture/vision-alpha:free": "pas du json", "fixture/vision-beta:free": '{"titre": "g"}'})
 
     assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "g"}
-    assert transport.models == ["qwen3.5:4b", "qwen3.5:4b", "gemini-3.5-flash"]
+    assert transport.models == ["fixture/vision-alpha:free", "fixture/vision-alpha:free", "fixture/vision-beta:free"]
     assert [r["status"] for r in calls()] == ["invalid", "invalid", "ok"]
 
 
 def test_vision_invalid_verdict_falls_back_between_free_models(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    prove("podalux.qc_vision", "ollama/qwen3.5-4b")
-    prove("podalux.qc_vision", "gemini/3.5-flash")
+    prove("podalux.qc_vision", "openrouter/fixture/vision-alpha:free")
+    prove("podalux.qc_vision", "openrouter/fixture/vision-beta:free")
     valid = {axis: 1 for axis in ag.AXES}
     transport.handler = by_model({
-        "qwen3.5:4b": json.dumps({**valid, "hook": 40}),
-        "gemini-3.5-flash": json.dumps(valid),
+        "fixture/vision-alpha:free": json.dumps({**valid, "hook": 40}),
+        "fixture/vision-beta:free": json.dumps(valid),
     })
 
     result = deepseek.vision("GROWTH", "qc_vision", [], "narration", "prompt", validate=ag.validate_verdict)
     assert result["hook"] == 1
-    assert transport.models == ["qwen3.5:4b", "gemini-3.5-flash"]
+    assert transport.models == ["fixture/vision-alpha:free", "fixture/vision-beta:free"]
     assert [r["status"] for r in calls()] == ["invalid", "ok"]
 
 
@@ -488,7 +385,6 @@ def test_missing_capability_is_refused(transport, providers_up):
 
 
 def test_sensitive_task_stays_local_outside_legacy(transport, providers_up):
-    providers_up.add("ollama")
     with pytest.raises(llm.NoEligibleModel):
         llm.complete("web.describe_page", MSG, profile="quality_first", pin_model="deepseek/flash")
     assert transport.calls == []
@@ -499,19 +395,19 @@ def test_unknown_profile_is_an_error():
         llm.complete("podalux.write_job", MSG, profile="turbo")
 
 
-def test_omniroute_becomes_default_when_enabled(monkeypatch):
-    monkeypatch.delenv("OCTOPUS_PROFILE", raising=False)
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
+def test_zero_cost_is_default_with_two_active_providers(monkeypatch):
+    monkeypatch.delenv('OCTOPUS_PROFILE', raising=False)
     cat = catalog.load()
-    assert cat.default_profile == "zero_cost"
-    assert cat.model("omniroute/auto-free")["api_model"] == "auto/best-free"  # auto/free n'existe pas dans OmniRoute
-    assert cat.task("podalux.write_job")["candidates"]["zero_cost"][0] == "omniroute/auto-free"
+    assert cat.default_profile == 'zero_cost'
+    assert set(cat.raw['providers']) == {'openrouter', 'deepseek'}
+    assert all(cat.model(mid)['cost_class'] == 'free_quota'
+               for mid in cat.task('podalux.write_job')['candidates']['zero_cost'])
 
 
-def test_explicit_legacy_still_overrides_omniroute_default(monkeypatch):
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
-    monkeypatch.setenv("OCTOPUS_PROFILE", "legacy")
-    assert catalog.load().default_profile == "legacy"
+def test_explicit_legacy_overrides_default(monkeypatch):
+    monkeypatch.setenv('OCTOPUS_PROFILE', 'legacy')
+    assert catalog.load().default_profile == 'zero_cost'
+    assert llm._resolve_profile(catalog.load(), None, None) == 'legacy'
 
 
 def test_legacy_wrapper_uses_catalog_default_profile(transport, providers_up, monkeypatch, tmp_path):
@@ -520,37 +416,25 @@ def test_legacy_wrapper_uses_catalog_default_profile(transport, providers_up, mo
     path = tmp_path / "catalog.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     monkeypatch.setenv("OCTOPUS_CATALOG", str(path))
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "0")
     monkeypatch.delenv("OCTOPUS_PROFILE", raising=False)
-    prove("podalux.write_job", "ollama/qwen3.5-4b")
+    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
     transport.reply('{"titre": "local"}')
 
     assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "local"}
-    assert transport.models == ["qwen3.5:4b"]
+    assert transport.models == ["fixture/vision-alpha:free"]
     assert calls()[0]["profile"] == "zero_cost"
 
 
-def test_orbit_mission_tasks_keep_their_gateway_contract(monkeypatch):
-    monkeypatch.setenv("OMNIROUTE_ENABLED", "1")
-    monkeypatch.delenv("OCTOPUS_PROFILE", raising=False)
+def test_orbit_mission_tasks_keep_their_gateway_contract():
     cat = catalog.load()
-    assert cat.legacy_task("ORBIT", "planification") == "agent.plan"
-    assert cat.legacy_task("ORBIT", "synthese") == "agent.synthesize"
-    assert cat.legacy_task("ORBIT", "action") == "agent.react_step"
-    assert cat.task("agent.plan")["candidates"]["zero_cost"][:2] == [
-        "omniroute/devworker-groq",
-        "omniroute/auto-free",
-    ]
-    assert cat.task("agent.synthesize")["candidates"]["zero_cost"][:2] == [
-        "omniroute/devworker-groq",
-        "omniroute/auto-free",
-    ]
-    assert cat.model("omniroute/devworker-groq")["structured_methods"] == ["tool_call", "json_object", "text"]
-    assert cat.model("kilo/auto-free")["structured_methods"] == ["tool_call", "text"]
-    assert cat.model("kilo/ling-3.0-flash-vl-free") is None
+    assert cat.legacy_task('ORBIT', 'planification') == 'agent.plan'
+    assert cat.legacy_task('ORBIT', 'synthese') == 'agent.synthesize'
+    assert cat.legacy_task('ORBIT', 'action') == 'agent.react_step'
+    for task in ('agent.plan', 'agent.synthesize'):
+        candidates = cat.task(task)['candidates']['zero_cost']
+        assert candidates and all(mid.startswith('openrouter/') for mid in candidates)
+    assert cat.model('openrouter/fixture/text-gamma:free')['structured_methods'] == ['tool_call', 'json_object', 'text']
 
-
-# --- budgets -------------------------------------------------------------------------------
 
 def test_run_budget_blocks_before_the_call(transport):
     transport.reply()
@@ -594,12 +478,12 @@ def test_daily_budget(transport, tmp_path, monkeypatch):
         deepseek.call_json("SOUT", "action", config.MODEL_FLASH, MSG)
 
 
-def test_local_calls_ignore_budgets(transport, providers_up):
-    prove("podalux.write_job", "ollama/qwen3.5-4b")
+def test_free_calls_ignore_budgets(transport, providers_up):
+    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
     transport.reply('{"a": 1}')
     with journal.run("podalux", "video_cycle", budget_usd=0.0):
         c = llm.complete("podalux.write_job", MSG, profile="zero_cost", json_mode=True)
-    assert c.cost_usd == 0 and c.model == "ollama/qwen3.5-4b"
+    assert c.cost_usd == 0 and c.model == "openrouter/fixture/vision-alpha:free"
 
 
 # --- coupe-circuit -------------------------------------------------------------------------
@@ -634,12 +518,12 @@ def test_octopus_off_alone_refuses_direct_legacy(transport, monkeypatch):
 def test_legacy_opt_in_alone_does_not_bypass_gateway(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_ALLOW_LEGACY_DIRECT", "1")
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    prove("podalux.write_job", "ollama/qwen3.5-4b")
+    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
     transport.reply('{"titre": "local"}')
     monkeypatch.setattr(deepseek, "_client", lambda: pytest.fail("opt-in seul ne doit pas appeler DeepSeek"))
 
     assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "local"}
-    assert transport.models == ["qwen3.5:4b"]
+    assert transport.models == ["fixture/vision-alpha:free"]
 
 
 def test_double_opt_in_restores_direct_legacy_calls(transport, monkeypatch, tmp_path):
@@ -657,26 +541,29 @@ def test_double_opt_in_restores_direct_legacy_calls(transport, monkeypatch, tmp_
     assert cost == pytest.approx(config.PRICES[config.MODEL_FLASH]["in"])
 
 
-def test_budget_block_falls_back_to_free_model(transport, providers_up):
-    prove("podalux.write_job", "gemini/3.5-flash")
-    transport.reply('{"a": 1}')
-    with journal.run("podalux", "video_cycle", budget_usd=0.0):
-        c = llm.complete("podalux.write_job", MSG, profile="quality_first", json_mode=True)
-    assert c.model == "gemini/3.5-flash" and transport.models == ["gemini-3.5-flash"]
-    assert [r["status"] for r in calls()] == ["blocked", "ok"]
+def test_budget_block_falls_back_to_free_model(transport, providers_up, monkeypatch):
+    prove('podalux.write_job', 'openrouter/fixture/vision-beta:free')
+    cat = catalog.load()
+    cat.task('podalux.write_job')['candidates']['quality_first'] = ['deepseek/flash', 'openrouter/fixture/vision-beta:free']
+    monkeypatch.setattr(catalog, 'load', lambda: cat)
+    transport.reply('{"a":1}')
+    with journal.run('podalux', 'video_cycle', budget_usd=0.):
+        c = llm.complete('podalux.write_job', MSG, profile='quality_first', json_mode=True)
+    assert c.model == 'openrouter/fixture/vision-beta:free' and transport.models == ['fixture/vision-beta:free']
+    assert [r['status'] for r in calls()] == ['blocked', 'ok']
 
 
 def test_budget_block_without_alternative_raises_budget_exceeded(transport, providers_up):
     transport.reply('{"a": 1}')
     with journal.run("podalux", "video_cycle", budget_usd=0.0):
-        with pytest.raises(llm.BudgetExceeded, match="gemini/3.5-flash : preuve insuffisante"):
+        with pytest.raises(llm.BudgetExceeded, match="openrouter/fixture/vision-beta:free : preuve insuffisante"):
             llm.complete("podalux.write_job", MSG, profile="quality_first", json_mode=True)
     assert transport.calls == []
 
 
 
 def test_zero_ceiling_allows_proven_free_calls_but_blocks_paid(transport, providers_up):
-    prove("podalux.write_job", "ollama/qwen3.5-4b")
+    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
     transport.reply('{"ok": true}')
     with journal.run("atelier", "task", budget_usd=0):
         out = llm.complete("podalux.write_job", MSG, profile="zero_cost", json_mode=True)
@@ -717,32 +604,28 @@ def test_explicit_paid_profile_shares_two_dollar_ceiling_without_external_allowa
 
 
 def test_economical_uses_eligible_free_route_without_paid_cost(transport, providers_up):
-    prove("agent.react_step", "groq/gpt-oss-120b")
-    transport.handler = by_model({"openai/gpt-oss-120b": '{"final":"ok"}'})
+    prove("agent.react_step", "openrouter/fixture/text-gamma:free")
+    transport.handler = by_model({"fixture/text-gamma:free": '{"final":"ok"}'})
     result = llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
                           validate=llm.parse_json)
-    assert result.model == "groq/gpt-oss-120b"
+    assert result.model == "openrouter/fixture/text-gamma:free"
     assert result.cost_usd == 0
-    assert transport.models == ["openai/gpt-oss-120b"]
+    assert transport.models == ["fixture/text-gamma:free"]
     assert calls()[0]["cost_class"] == "free_quota"
 
 
 def test_economical_bounds_free_attempts_then_uses_deepseek(transport, providers_up):
-    prove("podalux.select_offer", "ollama/qwen3.5-2b")
-    prove("podalux.select_offer", "groq/gpt-oss-120b")
-    prove("podalux.select_offer", "gemini/3.5-flash-lite")
-    transport.handler = by_model({"qwen3.5:2b": "pas du JSON",
-                                  "openai/gpt-oss-120b": TimeoutError("quota"),
-                                  "deepseek-flash": '{"ok":true}'})
-    result = llm.complete("podalux.select_offer", MSG, profile="economical", json_mode=True,
-                          validate=llm.parse_json)
-    assert result.model == "deepseek/flash"
-    assert transport.models == ["qwen3.5:2b", "openai/gpt-oss-120b", "deepseek-flash"]
-    assert [row["status"] for row in calls()] == ["invalid", "error", "ok"]
-    assert "limite d'essais gratuits" in result.justification["explanation"]
-    assert result.justification["paid_reason"] == "fallback_after_failure"
-    assert all(row["cost_usd"] == 0 for row in calls()[:2])
-    assert calls()[-1]["provider"] == "deepseek" and calls()[-1]["cost_usd"] > 0
+    for mid in ('text-delta', 'text-gamma', 'vision-alpha'):
+        prove('podalux.select_offer', 'openrouter/fixture/'+mid+':free')
+    transport.handler = by_model({'fixture/text-delta:free':'pas du JSON',
+        'fixture/text-gamma:free':TimeoutError('quota'), 'deepseek-flash':'{"ok":true}'})
+    result = llm.complete('podalux.select_offer', MSG, profile='economical', json_mode=True, validate=llm.parse_json)
+    assert result.model == 'deepseek/flash'
+    assert transport.models == ['fixture/text-delta:free', 'fixture/text-gamma:free', 'deepseek-flash']
+    assert [row['status'] for row in calls()] == ['invalid', 'error', 'ok']
+    assert "limite d'essais gratuits" in result.justification['explanation']
+    assert result.justification['paid_reason'] == 'fallback_after_failure'
+    assert all(row['cost_usd'] == 0 for row in calls()[:2]) and calls()[-1]['cost_usd'] > 0
 
 
 def test_economical_goes_directly_to_deepseek_without_eligible_free_model(transport, providers_up):
@@ -757,13 +640,13 @@ def test_economical_goes_directly_to_deepseek_without_eligible_free_model(transp
 
 
 def test_economical_invalid_free_json_falls_back_once_to_deepseek(transport, providers_up):
-    prove("agent.react_step", "groq/gpt-oss-120b")
-    transport.handler = by_model({"openai/gpt-oss-120b": "invalide",
+    prove("agent.react_step", "openrouter/fixture/text-gamma:free")
+    transport.handler = by_model({"fixture/text-gamma:free": "invalide",
                                   "deepseek-flash": '{"final":"ok"}'})
     result = llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
                           validate=llm.parse_json)
     assert result.model == "deepseek/flash"
-    assert transport.models == ["openai/gpt-oss-120b", "deepseek-flash"]
+    assert transport.models == ["fixture/text-gamma:free", "deepseek-flash"]
     assert [row["status"] for row in calls()] == ["invalid", "ok"]
 
 
@@ -785,15 +668,15 @@ def test_economical_repairs_control_character_without_another_provider_call(tran
 
 
 def test_economical_failed_single_repair_falls_back_without_second_repair(transport, providers_up):
-    prove("agent.react_step", "groq/gpt-oss-120b")
-    transport.handler = by_model({"openai/gpt-oss-120b": '{"final":"line\nbreak" "other":1}',
+    prove("agent.react_step", "openrouter/fixture/text-gamma:free")
+    transport.handler = by_model({"fixture/text-gamma:free": '{"final":"line\nbreak" "other":1}',
                                   "deepseek-flash": '{"final":"line\nbreak" "other":1}'})
 
     with pytest.raises(llm.InvalidOutput):
         llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
                      validate=llm.parse_json)
 
-    assert transport.models == ["openai/gpt-oss-120b"] * 2 + ["deepseek-flash"] * 2
+    assert transport.models == ["fixture/text-gamma:free"] * 2 + ["deepseek-flash"] * 2
     rows = calls()
     assert [row["status"] for row in rows] == ["invalid"] * 4
     assert json.loads(rows[0]["justification"])["json_repair_attempted"] is True
@@ -964,7 +847,7 @@ def test_legacy_syntax_method_fallback_remains_unchanged(transport, providers_up
 @pytest.mark.parametrize("arguments", ["", "[]", '{"query":"prix","extra":1}', '{"query":42}', "{}"])
 def test_economical_invalid_tool_arguments_try_structured_alternative(transport, providers_up, arguments):
     from types import SimpleNamespace
-    prove("agent.react_step", "groq/gpt-oss-120b")
+    prove("agent.react_step", "openrouter/fixture/text-gamma:free")
     schema = {"type": "object", "properties": {"query": {"type": "string"}},
               "required": ["query"], "additionalProperties": False}
     tool = {"type": "function", "function": {"name": "search", "parameters": schema}}
@@ -981,7 +864,7 @@ def test_economical_invalid_tool_arguments_try_structured_alternative(transport,
                           tool_schemas=[tool], validate=llm.parse_json)
 
     assert result.data["args"]["query"] == "prix"
-    assert transport.models == ["openai/gpt-oss-120b"] * 2
+    assert transport.models == ["fixture/text-gamma:free"] * 2
     assert transport.calls[0][1]["tool_choice"] == "required"
     assert transport.calls[1][1]["response_format"] == {"type": "json_object"}
     assert [row["status"] for row in calls()] == ["error", "ok"]
@@ -1074,8 +957,8 @@ def test_economical_deepseek_structured_400_uses_one_text_alternative(transport,
 
 def test_economical_invalid_plan_contract_falls_back_to_deepseek(transport, providers_up):
     from agents import runtime
-    prove("agent.plan", "groq/gpt-oss-120b")
-    transport.handler = by_model({"openai/gpt-oss-120b": '{"tasks":"invalid"}',
+    prove("agent.plan", "openrouter/fixture/text-gamma:free")
+    transport.handler = by_model({"fixture/text-gamma:free": '{"tasks":"invalid"}',
                                   "deepseek-flash": '{"tasks":[]}'})
     result = llm.complete("agent.plan", MSG, profile="economical", json_mode=True,
                           validate=lambda text: runtime._validate_plan_contract(llm.parse_json(text)))
@@ -1101,18 +984,16 @@ def test_economical_never_journals_a_key_echoed_by_provider(transport, providers
     assert "[redacted]" in calls()[-1]["error"]
 
 
-def test_economical_stops_all_calls_when_run_budget_consumed(transport, providers_up):
-    prove("agent.react_step", "groq/gpt-oss-120b")
+def test_economical_allows_free_calls_when_paid_budget_consumed(transport, providers_up):
+    prove("agent.react_step", "openrouter/fixture/text-gamma:free")
     transport.reply('{"ok":true}')
     with journal.run("octopus", "mission", budget_usd=0.01, profile="economical") as ctx:
         journal.record_llm_call({"ts": time.time(), "run_id": ctx.id, "root_run_id": ctx.root_id,
                                  "business": "octopus", "task": "agent.plan", "model": "deepseek/v4-pro",
                                  "provider": "deepseek", "profile": "economical", "cost_class": "paid",
                                  "status": "ok", "cost_usd": 0.01})
-        with pytest.raises(llm.BudgetExceeded, match="budget du run"):
-            llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
-                         validate=llm.parse_json)
-    assert transport.calls == []
+        result = llm.complete("agent.react_step", MSG, profile="economical", json_mode=True, validate=llm.parse_json)
+    assert result.cost_usd == 0 and transport.models == ["fixture/text-gamma:free"]
 
 
 def test_resumed_run_keeps_llm_spend_for_budget_gate(transport, providers_up):

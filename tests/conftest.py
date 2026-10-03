@@ -29,7 +29,7 @@ os.environ["OMNIROUTE_ENABLED"] = "0"
 sys.path.insert(0, str(PROJECT))
 
 from agents import config, db  # noqa: E402
-from octopus import llm, pricing  # noqa: E402
+from octopus import catalog, llm, pricing  # noqa: E402
 from octopus.pricing import Usage  # noqa: E402
 
 REAL_IS_PEAK = pricing.is_peak  # les tests de la passerelle figent les heures creuses
@@ -61,6 +61,9 @@ class FakeTransport:
         out = self.handler(provider, request)
         if isinstance(out, BaseException):
             raise out
+        if isinstance(out, tuple) and provider.get('api_key_env') == 'OPENROUTER_API_KEY':
+            return llm.TransportResult(out[0], out[1], request['model'], request['model'],
+                                       'offline-fixture', provider_cost_usd=0.)
         return out
 
     @property
@@ -83,6 +86,17 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("OCTOPUS_HOME", str(root))
     monkeypatch.setenv("OCTOPUS_DB", str(tmp_path / "octopus.db"))
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "offline-fixture")
+    metadata = []
+    for slug, vision, tools in [('vision-alpha', True, False), ('vision-beta', True, False),
+                               ('text-delta', False, False), ('text-gamma', False, True)]:
+        metadata.append({'id': 'fixture/' + slug + ':free', 'canonical_slug': 'fixture/' + slug + '-v1',
+            'name': slug, 'pricing': {'prompt': '0', 'completion': '0'}, 'context_length': 32768,
+            'architecture': {'input_modalities': ['text', 'image'] if vision else ['text'],
+                             'output_modalities': ['text']},
+            'supported_parameters': ['response_format'] + (['tools', 'reasoning'] if tools else [])})
+    monkeypatch.setattr(catalog, '_fetch_openrouter', lambda key: copy.deepcopy({'data': metadata}))
+    catalog._refresh_failures.clear()
     for var in ("OCTOPUS", "OCTOPUS_ALLOW_LEGACY_DIRECT", "OCTOPUS_ALLOW_LEGACY_RUNPOD", "OCTOPUS_PROFILE",
                 "OCTOPUS_CATALOG", "OMNIROUTE_ENABLED", "OMNIROUTE_MODEL", "OMNIROUTE_BASE_URL",
                 "OMNIROUTE_API_KEY", "OMNIROUTE_TIMEOUT_S", "OMNIROUTE_ZERO_COST_ATTESTATION",

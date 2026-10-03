@@ -4,6 +4,16 @@ import time
 from octopus import catalog, journal, llm
 
 
+def prove(task, mid, *, passed=5, total=5, age_days=0):
+    model = catalog.load().model(mid)
+    identity = model.get('evidence_identity', mid) if model else mid
+    with journal.run('test', 'bench') as ctx:
+        for i in range(total):
+            journal.record_bench_result({'ts': time.time() - age_days * 86400,
+                'bench_run_id': ctx.id, 'suite': 'offline-fixtures', 'task': task, 'item': str(i),
+                'model': identity, 'passed': int(i < passed), 'score': 1. if i < passed else 0.})
+
+
 def qualify(mid, *, fail=(), age=0, run_id=None, identity=None):
     cat = catalog.load()
     identity = identity or llm.browser_identity(cat.model(mid))
