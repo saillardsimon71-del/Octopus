@@ -1,5 +1,9 @@
 # Autorité déléguée persistante et hub de ressources
 
+Audit historique de #126. Les permissions par effet, classifications commerciales et gates
+décrites ci-dessous ne pilotent plus le runtime courant. Voir [NATURAL_RUNTIME.md](NATURAL_RUNTIME.md)
+pour l'autorité d'une ressource confiée, les deux frontières humaines et les invariants conservés.
+
 Base exacte : PR draft #126, `31477e263544ac0c67663c6aa800533678ff70df`.
 Branche : `feat/delegated-resource-hub`. Aucun merge.
 

@@ -99,10 +99,10 @@ def call(agent: str, task: str, model: str, messages: list[dict],
 def call_json(agent: str, task: str, model: str, messages: list[dict],
               max_tokens: int = 2000, reasoning: str | None = None,
               validate: Callable[[dict], Any] | None = None, *, cognitive_task=None,
-              exclude_models=(), browser_min_quality=0., completion_meta=None) -> dict:
+              exclude_models=(), browser_min_quality=0., completion_meta=None, parse=None) -> dict:
     """Appel texte, parse un objet JSON (tolérant aux balises)."""
     return _complete(agent, task, model, messages, max_tokens, reasoning, json_mode=True,
-                     validate=_json_validator(validate), cognitive_task=cognitive_task,
+                     validate=parse or _json_validator(validate), cognitive_task=cognitive_task,
                      exclude_models=exclude_models, browser_min_quality=browser_min_quality,
                      completion_meta=completion_meta)
 

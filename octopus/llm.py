@@ -898,13 +898,9 @@ def browser_quality(model: dict, *, resolved_model: str | None = None) -> dict:
                        for key in ("forbidden", "benchmark_incomplete")) for r in attempted)
     safe = safe and len(samples) == len(attempted)
     mandatory = all(rates[x] == 1. for x in ("vision", "ambiguous_dom", "recovery", "invalid_args", "stale_refs"))
-    live = journal.query("SELECT passed FROM bench_results WHERE task='browser.execution' AND model=? AND ts>? "
-                         "ORDER BY id DESC LIMIT 3", (identity, max(r['ts'] for r in rows)))
-    # Only operationally measured stagnation contributes here, not API/JSON success.
-    live_block = len(live) >= 2 and sum(r['passed'] for r in live) == 0
-    eligible = coverage and quality is not None and quality >= .9 and mandatory and safe and not live_block
+    eligible = coverage and quality is not None and quality >= .9 and mandatory and safe
     return {"eligible": eligible, "quality": quality, "identity": identity, "samples": len(samples),
-            "coverage": coverage, "bench_run_id": latest, "live_stagnations": len(live),
+            "coverage": coverage, "bench_run_id": latest,
             "incomplete": len(samples) != len(attempted), "attempted": len(attempted),
             "reason": "browser: 10 scénarios, >=90%, recovery/refs/arguments/vision réussis" if eligible
                       else "browser: évaluation interrompue ; qualification non acquise" if len(samples) != len(attempted)
@@ -941,6 +937,8 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
     prof = cat.profile(profile_name)
     task_def = cat.task(task)
     need = set(task_def.get("needs", [])) | set(needs) | ({"json"} if json_mode or json_schema is not None else set())
+    if task in {'browser.bench_step', 'browser.react_step'} and json_schema is None:
+        need.discard('json')
     business_name = business or (ctx.business if ctx else "")
     pinned = bool(pin_model and prof.get("honor_pins"))
     if pinned:
@@ -1020,7 +1018,9 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
             provider["max_retries"] = 0
             if profile_name == "economical" and model["cost_class"] == "paid":
                 provider["timeout_s"] = min(provider.get("timeout_s", 90), prof["paid_timeout_s"])
-        methods = _structured_methods(model, json_mode, json_schema, tool_schemas)
+        methods = (['text'] if task in {'browser.bench_step', 'browser.react_step'} and json_schema is None
+            and 'json' not in model.get('capabilities', []) else
+            _structured_methods(model, json_mode, json_schema, tool_schemas))
         if profile_name == "economical":
             methods = methods[:2]
 
@@ -1183,6 +1183,8 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
             if task == "browser.react_step":
                 justification["browser_qualification"] = browser_quality(model)
                 justification["selection_reason"] = "compétence browser démontrée puis coût minimal ; identité résolue contrôlée"
+            if isinstance(data, dict) and data.get('_protocol'):
+                justification['protocol_status'] = data['_protocol']
             if repair_attempted_here:
                 justification["json_repair_attempted"] = True
             if repaired:
@@ -1195,12 +1197,13 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 _provider_cooldowns["openrouter"] = (time.monotonic() + delay,
                                                      f"route gratuite non attestée; cooldown {delay:g}s")
                 justification["provider_safety_cooldown_s"] = delay
+            from agents import agent_browser
             call_id = journal.record_llm_call({
                 **base, "status": status, "error": error, "prompt_tokens": usage.prompt_tokens,
                 "cache_hit_tokens": usage.cache_hit_tokens, "cache_miss_tokens": usage.cache_miss_tokens,
                 "completion_tokens": usage.completion_tokens, "reasoning_tokens": usage.reasoning_tokens,
                 "cost_usd": cost, "duration_ms": duration_ms, "output_preview": (
-                    '[multimodal response]' if images else text[:300]),
+                    '[multimodal response]' if images else agent_browser.redact(text[:300])),
                 "resolved_model": result.resolved_model, "resolved_provider": result.resolved_provider,
                 "request_id": result.request_id, "provider_cost_usd": observed_cost,
                 "justification": json.dumps(justification, ensure_ascii=False),

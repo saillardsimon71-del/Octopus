@@ -161,7 +161,7 @@ def propose(business: str, channel_id: int, action: str, payload: dict | None = 
         channel = dict(channel)
         effect = {'send': 'contact', 'submit': 'contact', 'publish': 'publish', 'edit': 'edit'}.get(action)
         authority = mandates.authorize(channel, effect, description=action,
-                                       financial=bool(spend_amount) and channel['access'] != 'act')
+                                       financial=bool(spend_amount))
         reason = None
         if authority.get("mandate_id"):
             tasks._emit(conn, business, None, "action.mandate", {"action_id": action_id, "mandate_id": authority["mandate_id"]})
@@ -196,7 +196,7 @@ def propose(business: str, channel_id: int, action: str, payload: dict | None = 
         # Re-read live authority immediately before dispatch (revocation/session expiry).
         live = journal.query('SELECT * FROM economic_channels WHERE id=? AND business=?', (channel_id, business))
         if not live or not mandates.authorize(dict(live[0]), effect, description=action,
-                                              financial=bool(spend_amount) and channel['access'] != 'act')['allowed']:
+                                              financial=bool(spend_amount))['allowed']:
             raise StrategyError('autorité révoquée avant exécution')
         result = _EXECUTORS[(channel["kind"], action)][0](channel, payload or {})
         source = str(result.get("source_ref") or "").strip()

@@ -92,7 +92,6 @@ def test_unknown_pool_never_executes_in_bench(transport, providers_up):
 
 
 @pytest.mark.parametrize('tool,args', [
-    ('browser_click', {'ref':'e1','effect':'navigate'}),
     ('browser_click', {'ref':'e1','channel_id':'symbol'}),
     ('browser_snapshot', {'full':'true'}),
     ('browser_screenshot', {'full_page':1}),
@@ -154,37 +153,38 @@ def runtime_fake(monkeypatch, transport, pages, action_fn):
     return calls
 
 
-def test_escalation_retains_full_history_and_does_not_reset_browser(monkeypatch, transport, providers_up):
+def test_stagnation_retains_controller_history_and_session(monkeypatch, transport, providers_up):
     state={'clicked':0}
     def page(tool,args):
         if tool=='browser_click': state['clicked']+=1
         return {'ok':True,'url':'https://x.test/','snapshot':'Account visible [ref=e1]'}
     def action(request,n):
-        if request['model']=='fixture/vision-alpha:free': return {'tool':'browser_click','args':{'ref':'e1'}}
+        if n <= 4: return {'tool':'browser_click','args':{'ref':'e1'}}
         return {'final':'observed', 'objective_status':'completed','missing':[], 'evidence':[{'step':1,'quote':'Account visible'}]}
     calls=runtime_fake(monkeypatch, transport,page,action)
     checkpoints=[]
     with journal.run('a','task',profile='economical'):
         result=runtime.run_agent('SOUT','read',max_steps=6,allowed_tools={'browser_click'},checkpoint=lambda steps: checkpoints.append(copy.deepcopy(steps)))
     assert result['execution_status']=='completed'
-    assert calls[-1]['model']=='deepseek-flash'
-    assert state['clicked']==3
+    assert calls[-1]['model']=='fixture/vision-alpha:free'
+    assert state['clicked']==4
     assert len(calls[-1]['messages'])>=8
-    assert len(result['steps'])==3 and result['steps'][-1]['browser_controller']['escalation']
-    assert sum(st['browser_controller'].get('escalation',False) for st in result['steps'])==1
+    assert len(result['steps'])==4
+    assert not any(st['browser_controller'].get('escalation') for st in result['steps'])
     assert checkpoints
 
 
-def test_second_controller_stagnation_stops(monkeypatch, transport, providers_up):
+def test_repeated_observations_keep_explicit_step_bound(monkeypatch, transport, providers_up):
     calls=runtime_fake(monkeypatch,transport,lambda *_:{'ok':True,'url':'https://x.test/','snapshot':'same'},
                        lambda *_:{'tool':'browser_snapshot','args':{}})
     with journal.run('a','test',profile='economical'):
         result=runtime.run_agent('SOUT','read',max_steps=6,allowed_tools={'browser_snapshot'})
-    assert result['execution_status']=='stagnated'
+    assert result['execution_status']=='step_limit'
+    assert len(result['steps']) == 6
     assert len(calls)<12
 
 
-def test_progress_extends_soft_bound_but_hard_ceiling_remains(monkeypatch, transport, providers_up):
+def test_novelty_does_not_change_explicit_step_bound(monkeypatch, transport, providers_up):
     n={'value':0}
     def pages(*_):
         n['value']+=1
@@ -192,12 +192,12 @@ def test_progress_extends_soft_bound_but_hard_ceiling_remains(monkeypatch, trans
     runtime_fake(monkeypatch,transport,pages,lambda *_:{'tool':'browser_snapshot','args':{}})
     with journal.run('a','test',profile='economical'):
         result=runtime.run_agent('SOUT','many screens',max_steps=6,allowed_tools={'browser_snapshot'})
-    assert len(result['steps'])==18 and result['execution_status']=='step_limit'
+    assert len(result['steps'])==6 and result['execution_status']=='step_limit'
 
 
 def test_invalid_args_are_observations_then_corrected(monkeypatch,transport,providers_up):
     qualify('deepseek/flash')
-    actions=iter([{'tool':'browser_click','args':{'ref':'e1','effect':'navigate'}},
+    actions=iter([{'tool':'browser_click','args':{'ref':'stale'}},
                   {'tool':'browser_snapshot','args':{}},
                   {'final':'report','objective_status':'completed','missing':[], 'evidence':[{'step':2,'quote':'useful'}]}])
     transport.handler=lambda *a:(json.dumps(next(actions)),Usage())
@@ -210,22 +210,22 @@ def test_invalid_args_are_observations_then_corrected(monkeypatch,transport,prov
     assert not journal.query('SELECT * FROM human_requests')
 
 
-def test_browser_final_requires_grounding_and_acknowledges_missing():
+def test_browser_report_is_a_model_claim_with_runtime_provenance():
     steps=[{'step':1,'result_data':{'ok':True,'snapshot':'Welcome to account'}}]
-    assert runtime._browser_final({'final':'Everything healthy'},steps)['execution_status']=='incomplete'
+    assert runtime._browser_final({'final':'Everything healthy'},steps)['objective_completion_nature']=='model_claim'
     assert runtime._browser_final({'final':'Balance 999','objective_status':'completed','missing':[],
-        'evidence':[{'step':1,'quote':'Balance 999'}]},steps)['execution_status']=='incomplete'
+        'evidence':[{'step':1,'quote':'Balance 999'}]},steps)['browser_evidence'][0]['observation_sha256']
     out=runtime._browser_final({'final':'Healthy','objective_status':'completed','missing':['orders'],
         'evidence':[{'step':1,'quote':'Welcome'}]},steps)
-    assert out['execution_status']=='incomplete' and 'Healthy' not in out['final']
+    assert out['final']=='Healthy' and out['missing']==['orders']
 
 
-def test_escalation_resume_keeps_exclusions_and_does_not_replay_effect(monkeypatch,transport,providers_up):
+def test_resume_keeps_history_without_activating_legacy_escalation(monkeypatch,transport,providers_up):
     qualify('openrouter/fixture/vision-alpha:free',fail=('sufficient_dom',));qualify('deepseek/flash')
     saved=[{'step':1,'tool':'browser_click','args':{'ref':'e1'},'result_data':{'ok':True,'url':'https://x.test/','snapshot':'Existing evidence'},
             'result':'Existing evidence','browser_controller':{'escalation':True,'excluded_models':['openrouter/fixture/vision-alpha:free'],'min_quality':.9}}]
     def respond(provider,request):
-        assert request['model']=='deepseek-flash'
+        assert request['model']=='fixture/vision-alpha:free'
         assert 'Existing evidence' in json.dumps(request['messages'])
         return json.dumps({'final':'grounded','objective_status':'completed','missing':[], 'evidence':[{'step':1,'quote':'Existing evidence'}]}),Usage()
     transport.handler=respond
@@ -304,7 +304,7 @@ def test_malformed_navigation_args_remain_recoverable_observations(monkeypatch, 
     with journal.run('a', 'test', profile='low_cost'):
         out = runtime.run_agent('SOUT', 'read', allowed_tools={'browser_navigate', 'browser_snapshot'})
     assert out['execution_status'] == 'completed'
-    assert out['steps'][0]['browser_controller']['schema_error']
+    assert out['steps'][0]['browser_controller']['failure_layer'] in {'PROTOCOL', 'TOOL'}
     assert not journal.query('SELECT * FROM human_requests')
 
 
@@ -313,8 +313,8 @@ def test_unknown_tools_count_toward_stagnation_and_are_traced(transport, provide
     transport.handler = lambda *_: (json.dumps({'tool': 'browser_invented', 'args': {}}), Usage())
     with journal.run('a', 'test', profile='low_cost'):
         out = runtime.run_agent('SOUT', 'read', allowed_tools={'browser_snapshot'})
-    assert out['execution_status'] == 'browser_unqualified'
-    assert len(out['steps']) == 2
+    assert out['execution_status'] == 'step_limit'
+    assert len(out['steps']) == 10
     assert out['steps'][-1]['browser_controller']['stagnation'] == 'repeated_errors'
     assert out['steps'][-1]['browser_controller']['tool'] == '[unknown tool]'
     assert not journal.query('SELECT * FROM human_requests')

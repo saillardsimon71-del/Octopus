@@ -2,6 +2,8 @@
 
 Audit historique de la PR #134. Le catalogue, les fournisseurs et le protocole
 courants sont décrits dans [OPENROUTER_CATALOG.md](OPENROUTER_CATALOG.md).
+Les anciens contrats de preuve, escalades et permissions par effet ci-dessous sont historiques ;
+le protocole courant est décrit dans [NATURAL_RUNTIME.md](NATURAL_RUNTIME.md).
 
 Base exacte : `78c1641d803a0c3d9cdeca93e8123b41f588c968`.
 

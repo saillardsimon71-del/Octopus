@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextvars
 import copy
+import hashlib
 import json
 import math
 import re
@@ -730,9 +731,7 @@ def _resources_status(args):
     from octopus import resources
     rows = resources.list_resources(capability=args.get("capability"), state=args.get("state"),
                                     business=_run_business(), include_global=True)
-    from octopus import mandates
-    return {"mandates": mandates.list_mandates(_run_business(), active=True),
-            "overview": resources.overview(business=_run_business()),
+    return {"overview": resources.overview(business=_run_business()),
             "resources": [{k: r[k] for k in ("key", "kind", "label", "state", "access", "capabilities",
                                              "needs", "last_check_detail", "business", "web_account")} for r in rows[:40]]}
 
@@ -816,8 +815,6 @@ def _browser_tool(method: str, **fixed):
 
 # Espace de travail navigateur (backend Hermes agent-browser + Chromium, politiques OCTOPUS) :
 # observer -> décider -> agir -> vérifier. Les refs @eN viennent du dernier snapshot.
-_BROWSER_ACT = ("exige un canal actif avec accès act accordé par l'humain pour ce site "
-                "(channel_id optionnel si un seul) ; ")
 def _agnes_probe(args):
     from octopus import agnes as _agnes
     base = str(args.get("base_url") or _agnes.DEFAULT_URL)
@@ -1026,19 +1023,15 @@ TOOLS.update({
                            "viewport par défaut, full_page optionnel. Complète le DOM lorsque utile ; "
                            "ne confère aucune permission, jamais pendant login/OTP/challenge humain",
                            "params": {"full_page": "bool?"}, "fn": _browser_tool("screenshot")},
-    "browser_click": {"desc": "clique l'élément @eN. Un lien simple = navigation libre ; un bouton/validation "
-                      "= action à effet : effect=contact|publish|edit décrit l’effet voulu sous mandat ; " + _BROWSER_ACT + "expect = court texte qui n'apparaîtra qu'après "
-                      "l'effet (vérification réelle, reprise sans double envoi)",
+    "browser_click": {"desc": "clique l'élément @eN puis observe la page ; expect optionnel vérifie un texte nouveau après l'action",
                       "params": {"ref": "str", "expect": "str?", "channel_id": "int?", "effect": "str?"}, "fn": _browser_tool("click")},
-    "browser_type": {"desc": "remplit le champ @eN (efface puis saisit) ; " + _BROWSER_ACT +
-                     "effect=contact|publish|edit pour le formulaire compte ; jamais de mot de passe, secret ni moyen de paiement",
+    "browser_type": {"desc": "remplit le champ @eN (efface puis saisit) puis observe la page",
                      "params": {"ref": "str", "text": "str", "channel_id": "int?", "effect": "str?"}, "fn": _browser_tool("type")},
-    "browser_select": {"desc": "choisit une option (libellé ou valeur) dans la liste @eN ; " + _BROWSER_ACT,
+    "browser_select": {"desc": "choisit une option (libellé ou valeur) dans la liste @eN puis observe la page",
                        "params": {"ref": "str", "value": "str", "channel_id": "int?", "effect": "str?"}, "fn": _browser_tool("select")},
-    "browser_check": {"desc": "coche la case @eN ; " + _BROWSER_ACT,
+    "browser_check": {"desc": "coche la case @eN puis observe la page",
                       "params": {"ref": "str", "channel_id": "int?", "effect": "str?"}, "fn": _browser_tool("check")},
-    "browser_press": {"desc": "appuie sur une touche (Tab, Escape, flèches : libres ; Enter et autres = action "
-                      "à effet : " + _BROWSER_ACT + "expect comme browser_click)",
+    "browser_press": {"desc": "appuie sur une touche puis observe la page ; expect optionnel comme browser_click",
                       "params": {"key": "str", "expect": "str?", "channel_id": "int?", "effect": "str?"}, "fn": _browser_tool("press")},
     "browser_scroll": {"desc": "fait défiler la page (up/down/left/right) puis l'observe",
                        "params": {"direction": "str?"}, "fn": _browser_tool("scroll")},
@@ -1050,8 +1043,8 @@ TOOLS.update({
                        "params": {"text": "str?", "action_id": "int?", "state": "str?"}, "fn": _browser_tool("verify")},
     "browser_download": {"desc": "télécharge le fichier du lien @eN dans l'espace de la tâche (filename sans chemin)",
                          "params": {"ref": "str", "filename": "str"}, "fn": _browser_tool("download")},
-    "browser_upload": {"desc": "joint au champ fichier @eN un fichier préparé dans la boîte d'envoi du business ; "
-                       + _BROWSER_ACT, "params": {"ref": "str", "filename": "str", "channel_id": "int?", "effect": "str?"},
+    "browser_upload": {"desc": "joint au champ fichier @eN un fichier préparé dans la boîte d'envoi du business",
+                       "params": {"ref": "str", "filename": "str", "channel_id": "int?", "effect": "str?"},
                        "fn": _browser_tool("upload")},
     "agnes_probe": {"desc": "Vérifie que le service Agnes local (http://127.0.0.1:8765) répond ; optionnel, ne bloque pas",
                     "params": {"base_url": "str?"}, "fn": _agnes_probe},
@@ -1334,15 +1327,6 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
     described_tools = allowed_tools if allowed_tools is not None else set(TOOLS) - {'account_task', 'request_account', 'create_artifact'}
     browser_details = browser_controller or bool(allowed_tools and allowed_tools <= BROWSER_TOOLS)
     tool_text = tools_desc(described_tools, legacy_search=legacy_search, browser_details=browser_details)
-    if allowed_tools is not None:
-        tool_text = tool_text.replace(_BROWSER_ACT,
-            "exige un mandat actif couvrant la cible et l’effet, ou un accès act humain explicite ; ")
-    if allowed_tools is not None and 'resources_status' in allowed_tools and run is not None:
-        from octopus import mandates
-        active_authority = mandates.list_mandates(run.business, active=True)
-        tool_text += "\nAutorité humaine active pour cette activité : " + json.dumps([
-            {k: m[k] for k in ('id', 'target', 'effects', 'resource_keys')} for m in active_authority], ensure_ascii=False)
-        tool_text += "\nLes handlers vérifient le mandat à chaque effet. Consulte resources_status pour l’état des comptes. Une action couverte ne demande pas de nouvelle permission."
     if allowed_tools is not None and "browse" in allowed_tools:
         tool_text = tool_text.replace(TOOLS["browse"]["desc"],
                                       "consulte une page Web et renvoie le contenu réellement acquis")
@@ -1389,8 +1373,9 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
             f"Outils disponibles :\n{tool_text}\n\n"
             f"{freshness_context}"
             f"{proof_rule}"
-            "Réponds TOUJOURS en JSON : soit {\"tool\": \"<nom>\", \"args\": {...}} pour agir, "
-            "soit {\"final\": \"<ta réponse à l'humain>\"}."
+            "Pour agir : JSON {\"tool\":\"nom\", ...paramètres}. Tu peux conclure par un rapport en texte libre. "
+            "Les ressources confiées permettent les opérations ordinaires. Paiement, engagement financier "
+            "et création de compte exigent un humain ; protège les secrets."
         )
         first_user = f"Message de l'humain : {goal}"
         done_label = "réponse"
@@ -1406,8 +1391,9 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
             f"Outils disponibles :\n{tool_text}\n\n"
             f"{freshness_context}"
             f"{proof_rule}"
-            "Réponds TOUJOURS en JSON : soit {\"tool\": \"<nom>\", \"args\": {...}} pour agir, "
-            "soit {\"final\": \"<réponse>\"} quand l'objectif est atteint."
+            "Pour agir : JSON {\"tool\":\"nom\", ...paramètres}. Tu peux conclure par un rapport en texte libre. "
+            "Les ressources confiées permettent les opérations ordinaires. Paiement, engagement financier "
+            "et création de compte exigent un humain ; protège les secrets."
         )
         first_user = f"Objectif : {goal}"
         done_label = "objectif atteint"
@@ -1486,38 +1472,16 @@ def _browser_prompt_messages(context):
     return messages
 
 
-_BROWSER_FINAL_CONTRACT = (
-    '\nPour conclure une trajectoire browser : {"final":"rapport", "objective_status":"completed|incomplete", '
-    '"missing":["données ou objectifs restant inconnus"], "evidence":[{"step":1,"quote":"extrait littéral observé"}]}.'
-    ' Une interprétation d’image peut citer {"step":n,"image_sha256":"hash de capture"} et reste une inférence.'
-    ' Une page ouverte ou une session connectée ne suffit pas à établir tous les éléments demandés.'
-    ' Si les éléments demandés manquent, conclus incomplete. Aucune métrique inventée.'
-)
-
-
 def _browser_final(decision, steps):
-    evidence = []
-    for item in decision.get('evidence', []) if isinstance(decision.get('evidence'), list) else []:
-        if not isinstance(item, dict) or type(item.get('step')) is not int:
-            continue
-        step = next((s for s in steps if s.get('step') == item['step']), {})
-        data = step.get('result_data') or {}
-        if not isinstance(data, dict) or data.get('refused') or data.get('ok') is False:
-            continue
-        quote = item.get('quote')
-        if isinstance(quote, str) and quote.strip() and quote in str(data.get('snapshot') or ''):
-            evidence.append({'step': item['step'], 'quote': quote[:1000], 'nature': 'observed'})
-        elif item.get('image_sha256') and item['image_sha256'] == (data.get('image') or {}).get('sha256'):
-            evidence.append({'step': item['step'], 'image_sha256': item['image_sha256'], 'nature': 'inferred'})
-    missing = decision.get('missing')
-    complete = decision.get('objective_status') == 'completed' and isinstance(missing, list) and not missing and bool(evidence)
-    status = 'completed' if complete else 'incomplete'
-    facts = '\n'.join('Observation étape ' + str(e['step']) + ': ' + e['quote'] for e in evidence if 'quote' in e)
-    report = ('Conclusion du modèle (inférence) : ' + str(decision.get('final', '')) if complete else
-              'MISSION INCOMPLÈTE — les éléments demandés ne sont pas tous établis ; données manquantes inconnues.')
-    return {'final': report + ('\n' + facts if facts else ''), 'execution_status': status,
+    evidence = [{'step': step['step'], 'url': data.get('url'),
+                 'observation_sha256': hashlib.sha256(str(data.get('snapshot') or '').encode()).hexdigest(),
+                 **({'image_sha256': data['image']['sha256']} if data.get('image') else {})}
+                for step in steps for data in [step.get('result_data')]
+                if isinstance(data, dict) and data.get('ok') and not data.get('refused')]
+    return {'final': str(decision['final']),
+            'execution_status': 'incomplete' if decision.get('objective_status') == 'incomplete' else 'completed',
             'browser_evidence': evidence, 'objective_completion_nature': 'model_claim',
-            'missing': missing if isinstance(missing, list) else ['completion contract absent']}
+            'missing': decision.get('missing', [])}
 
 
 def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
@@ -1531,7 +1495,7 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
     steps = list(resume_steps or [])
     for step in steps:
         context.append({"role": "assistant", "content": json.dumps(
-            {"tool": step.get("tool"), "args": step.get("args") or {}}, ensure_ascii=False)[:600]})
+            {"tool": step.get("tool"), "args": step.get("args") or {}}, ensure_ascii=False)})
         context.append({"role": "user", "content": "Observation déjà acquise, ne pas répéter : " +
                         str(step.get("result") or ""),
                         **({'_browser_image': step['result_data']['image']} if step.get('tool') == 'browser_screenshot'
@@ -1542,19 +1506,10 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
     lockstep_selection = None
     browser_mode = bool(allowed_tools and allowed_tools <= BROWSER_TOOLS) or any(
         str(step.get('tool') or '').startswith('browser_') for step in steps)
-    if browser_mode:
-        context[0]['content'] += _BROWSER_FINAL_CONTRACT
     trajectory = browser_workspace.BrowserTrajectory(steps)
-    soft_limit = max_steps
-    hard_limit = min(24, max_steps + 12) if browser_mode else max_steps
+    hard_limit = max_steps
     while len(steps) < hard_limit:
         i = len(steps)
-        if browser_mode and i >= soft_limit:
-            recent = [st.get('browser_controller', {}) for st in steps[-4:]]
-            if sum(bool(st.get('progress')) for st in recent) >= 2 or any(st.get('escalation') for st in recent):
-                soft_limit = min(hard_limit, soft_limit + 4)
-            else:
-                break
         if cancel.requested():
             status = "timeout" if cancel.timed_out() else "cancelled"
             db.post(role, "durée maximale atteinte" if status == "timeout" else "arrêt demandé par l'humain")
@@ -1573,42 +1528,46 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         else:
             try:
                 economical = journal.current_run() and journal.current_run().profile == "economical"
-                prompt_context = _react_prompt_context(context, steps) if economical and not browser_mode else context + [
-                    {"role": "user", "content": "Choisis ta prochaine action (JSON)."}]
+                prompt_context = _react_prompt_context(context, steps) if economical and not browser_mode else context
                 controller_meta = {}
                 browser_options = {'cognitive_task': 'browser.react_step',
-                    'exclude_models': tuple(trajectory.excluded), 'browser_min_quality': trajectory.min_quality,
                     'completion_meta': controller_meta} if browser_mode else {}
                 provider_messages = _browser_prompt_messages(prompt_context)
                 r = deepseek.call_json(role, "action", MODEL, provider_messages,
                     max_tokens=1200 if browser_mode else 500 if economical else 2000,
-                    validate=(_validate_action_contract if journal.current_run()
-                              and journal.current_run().profile == "economical" else None), **browser_options)
+                    parse=TOOLS.parse_action, **browser_options)
             except llm.GatewayError as exc:
                 error = f"{type(exc).__name__}: {exc}"[:1500]
                 browser_workspace.record_controller_trace({'step': i + 1, 'status': 'controller_unavailable',
-                    'escalations': trajectory.escalations, 'error_class': type(exc).__name__}) if browser_mode else None
+                    'failure_layer': 'TEMPORARY_UNAVAILABLE' if isinstance(exc, llm.NoEligibleModel) else 'PROVIDER',
+                    'error_class': type(exc).__name__}) if browser_mode else None
                 return {"role": role, "steps": steps, "final": "MISSION INCOMPLÈTE — contrôleur browser indisponible" if browser_mode else "(LLM indisponible)",
                         "execution_status": "browser_unqualified" if browser_mode else "llm_unavailable", "execution_error": error}
+        if '_protocol' not in r:
+            r = TOOLS.parse_action(r)
+        protocol_status = r.pop('_protocol', 'immediate')
+        protocol_error = r.pop('_protocol_error', None)
         if not browser_mode and str(r.get('tool') or '').startswith('browser_'):
             browser_mode = True
-            context[0]['content'] = build_prompts(role, goal, conversational, allowed_tools, browser_controller=True)[0] + _BROWSER_FINAL_CONTRACT
-            hard_limit = min(24, max_steps + 12)
+            context[0]['content'] = build_prompts(role, goal, conversational, allowed_tools, browser_controller=True)[0]
             controller_meta = {}
             try:
                 prompt_context = context
                 provider_messages = _browser_prompt_messages(context)
                 r = deepseek.call_json(role, 'action', MODEL, provider_messages,
-                    max_tokens=1200, validate=_validate_action_contract, cognitive_task='browser.react_step',
-                    exclude_models=tuple(trajectory.excluded), browser_min_quality=trajectory.min_quality,
+                    max_tokens=1200, parse=TOOLS.parse_action, cognitive_task='browser.react_step',
                     completion_meta=controller_meta)
+                if '_protocol' not in r:
+                    r = TOOLS.parse_action(r)
+                protocol_status = r.pop('_protocol', 'immediate')
+                protocol_error = r.pop('_protocol_error', None)
             except llm.GatewayError as exc:
                 return {'role': role, 'steps': steps, 'final': 'MISSION INCOMPLÈTE — contrôleur browser non qualifié',
                         'execution_status': 'browser_unqualified', 'execution_error': str(exc)[:1500]}
         if "final" in r:
             if browser_mode:
                 final_trace = {**controller_meta, 'step': i + 1, 'tool': None, 'status': 'model_final',
-                               'escalations': trajectory.escalations, 'total_steps': len(steps)}
+                               'protocol_status': protocol_status, 'total_steps': len(steps)}
                 browser_workspace.record_controller_trace(final_trace)
                 checked = _browser_final(r, steps)
                 return {"role": role, "steps": steps, **checked}
@@ -1619,8 +1578,8 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         args = {} if raw_args is None else raw_args
         # L'action choisie entre dans l'historique : sans elle, le modèle ne voyait que les résultats
         # et relançait les mêmes requêtes (audit M2).
-        context.append({"role": "assistant", "content": json.dumps(r, ensure_ascii=False)[:600]})
-        if (not isinstance(tool, str) or tool not in TOOLS) and not browser_mode:
+        context.append({"role": "assistant", "content": json.dumps(r, ensure_ascii=False)})
+        if not protocol_error and (not isinstance(tool, str) or tool not in TOOLS) and not browser_mode:
             context.append({"role": "user", "content": f"outil inconnu : {tool}. Disponibles : {list(TOOLS)}"})
             steps.append({"step": i + 1, "tool": tool, "result": "inconnu"})
             if checkpoint:
@@ -1629,14 +1588,18 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
 
         refusal, result = None, None
         try:
-            if not isinstance(tool, str):
+            if protocol_error:
+                refusal = protocol_error
+                tool = '[unparsed action]'
+            elif not isinstance(tool, str):
                 refusal = 'invalid_tool_arguments: tool must be a declared name'
                 tool = '[invalid tool]'
             else:
                 refusal, result = TOOLS.dispatch(tool, args, allowed_tools)
             if refusal is not None:
                 result = {"ok": False, "refused": True, "tool": tool, "reason": refusal,
-                          **({'error_code': 'invalid_tool_arguments'} if technical_refusal(refusal) else {})}
+                          **({'error_code': protocol_status} if protocol_error else
+                             {'error_code': 'invalid_tool_arguments'} if technical_refusal(refusal) else {})}
                 db.post(role, f"refus outil {tool} : {refusal}")
             result_str = _tool_result_view(tool, result)
         except HumanBrowserRequired:
@@ -1693,12 +1656,8 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         repeat = repeat + 1 if sig == last_sig else 0
         last_sig = sig
         if repeat >= 2:
-            recovery = "Change d'approche"
-            if allowed_tools is None or "ask_human" in allowed_tools:
-                recovery += ", demande à l'humain (ask_human)"
-            recovery += ", ou réponds avec « final »."
             context.append({"role": "user", "content":
-                            "Tu répètes la même action sans progrès (ex. CAPTCHA/échec). " + recovery})
+                            "La même action a donné le même résultat plusieurs fois. Choisis la suite à partir des observations."})
             repeat = 0
         if refusal is None:
             db.post(role, f"action {tool} {json.dumps(browser_workspace.trace_args(args) if str(tool).startswith('browser_') else args, ensure_ascii=False)[:90]}")
@@ -1706,7 +1665,7 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
                         **({'_browser_image': result['image']} if tool == 'browser_screenshot'
                            and isinstance(result, dict) and result.get('image') and not result.get('refused') else {})})
         # Le résultat structuré reste intact ; result n'est qu'une vue de prompt bornée.
-        step_record = {"step": i + 1, "tool": tool, "result": result_str}
+        step_record = {"step": i + 1, "tool": tool, "result": result_str, 'protocol_status': protocol_status}
         if checkpoint or browser_mode:
             step_record["args"] = browser_workspace.trace_args(args) if str(tool).startswith('browser_') else args
         if tool in {"search", "browse"} or str(tool).startswith("browser_"):
@@ -1746,30 +1705,17 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
                 'validated_args': browser_workspace.trace_args(args),
                 'schema_error': bool(isinstance(result, dict) and result.get('error_code') == 'invalid_tool_arguments'),
                 'screenshot_used': bool(llm._prompt_size(provider_messages)[1]) if not forced_lockstep else False,
-                'escalations': trajectory.escalations, 'soft_limit': soft_limit, 'hard_limit': hard_limit}
+                'protocol_status': protocol_status, 'hard_limit': hard_limit,
+                'failure_layer': 'FORMAT' if protocol_status == 'format' else 'PROTOCOL' if protocol_error
+                    else 'TOOL' if not observation['tool_ok'] else None}
             if observation['stagnation']:
-                if trajectory.escalations >= 1:
-                    trace['stop_reason'] = 'stagnation_after_escalation'
-                else:
-                    trajectory.escalations += 1
-                    trajectory.excluded.add(controller_meta.get('model', ''))
-                    trajectory.min_quality = (controller_meta.get('qualification') or {}).get('quality', 0.)
-                    trajectory.reset_detection()
-                    trace.update(escalation=True, excluded_models=sorted(trajectory.excluded),
-                                 min_quality=trajectory.min_quality, escalations=trajectory.escalations)
-                    context.append({'role': 'user', 'content': 'Non-progression détectée : ' + observation['stagnation'] +
-                        '. Contrôleur remplacé par un candidat mieux qualifié. Même tâche, historique complet et browser conservés. '
-                        'Les refs proviennent de la dernière observation ; réobserve si la page a changé. '
-                        'Un effet ambigu exige une réconciliation, jamais une répétition.'})
-                    soft_limit = min(hard_limit, max(soft_limit, i + 5))
+                context.append({'role': 'user', 'content': 'La dernière action ne montre aucun progrès. '
+                    'Choisis la suite à partir des observations ; un effet inconnu ne doit pas être répété.'})
             step_record['browser_controller'] = trace
             browser_workspace.record_controller_trace(trace)
         steps.append(step_record)
         if checkpoint:
             checkpoint(steps)
-        if browser_mode and trace.get('stop_reason'):
-            return {'role': role, 'steps': steps, 'final': 'MISSION INCOMPLÈTE — stagnation après escalade',
-                    'execution_status': 'stagnated'}
     return {"role": role, "steps": steps, "final": "MISSION INCOMPLÈTE — limite d’étapes" if browser_mode else "(max steps atteint)", "execution_status": "step_limit"}
 
 
@@ -1861,11 +1807,7 @@ def _validate_synthesis_contract(data: dict, determination: bool) -> dict:
 
 
 def _validate_action_contract(data: dict) -> dict:
-    if isinstance(data.get("final"), str) and data["final"].strip():
-        return data
-    if data.get("tool") in TOOLS and isinstance(data.get("args", {}), dict):
-        return data
-    raise ValueError("action : final ou outil et arguments valides requis")
+    return TOOLS.parse_action(data)
 
 
 MAX_PLAN_TASKS = 5

@@ -181,7 +181,7 @@ def test_model_selects_full_mandated_sequence_and_visual_confirmation(configured
     # Repeated terminal effects remain idempotent.
     assert space.click('@e3', effect='contact', expect='Résultat @e3')['already_done']
     assert len(page.effects) == 3
-    mandates.revoke('a', mid, actor='human')
+    resources.disable_account('account', actor='human')
     with pytest.raises(bw.Refused): space.type('@e1', 'autre', effect='edit')
     space.close()
 
@@ -192,7 +192,7 @@ def test_capture_references_cannot_cross_business_task_or_revocation(configured,
     image = space.screenshot()['image']
     for business, scope in [('b', space.scope.key), ('a', 'other-task')]:
         with pytest.raises(bw.Refused): bw.image_part(image, business=business, scope_key=scope)
-    mandates.revoke('a', mid, actor='human')
+    resources.disable_account('account', actor='human')
     with pytest.raises(bw.Refused): bw.image_part(image, business='a', scope_key=space.scope.key)
     space.close()
 
@@ -338,16 +338,16 @@ def test_read_mandate_allows_observed_disclosure_and_navigation_expectation(conf
         assert space.click('e1')['ok']
         assert space.click('e2',expect='page ouverte')['ok']
         assert not journal.query('SELECT * FROM channel_actions')
-        mandates.revoke('a',mid,actor='human')
+        resources.disable_account('account',actor='human')
         assert bw.call_on(space,'click',ref='e1')['refused']
     finally: space.close()
 
 
-def test_sensitive_disclosure_cannot_be_downgraded_to_read(configured,monkeypatch):
+def test_finance_menu_can_be_observed_without_committing_money(configured,monkeypatch):
     space,page,_=authorized_space(monkeypatch)
     try:
         space.navigate(URL)
         space._refs['e9']={'role':'button','name':'Payments','expanded':False,'haspopup':'menu'}
-        assert bw.call_on(space,'click',ref='e9')['refused']
-        assert not journal.query('SELECT * FROM channel_actions')
+        assert bw.call_on(space,'click',ref='e9')['ok']
+        assert not journal.query('SELECT * FROM spend_requests')
     finally: space.close()

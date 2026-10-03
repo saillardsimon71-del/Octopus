@@ -897,7 +897,7 @@ def test_history_contains_the_actions(monkeypatch, web):
     runtime.run_agent("SOUT", "veille", max_steps=3)
     second_call = seen[1]
     roles = [m["role"] for m in second_call]
-    assert roles == ["system", "user", "assistant", "user", "user"]
+    assert roles == ["system", "user", "assistant", "user"]
     assert json.loads(second_call[2]["content"]) == {"tool": "search", "args": {"query": "relance"}}
 
 

@@ -3,6 +3,7 @@ import copy
 from concurrent.futures import ThreadPoolExecutor
 import json
 import re
+import subprocess
 from types import SimpleNamespace
 import queue
 
@@ -63,7 +64,13 @@ def test_forced_id_collision_preserves_existing_file(monkeypatch):
 def test_registry_symlink_cannot_escape_dataroot(isolated, tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
-    (isolated / "businesses").symlink_to(outside, target_is_directory=True)
+    try:
+        (isolated / "businesses").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        if getattr(exc, 'winerror', None) != 1314:
+            raise
+        subprocess.run(['cmd', '/c', 'mklink', '/J', str(isolated / 'businesses'), str(outside)],
+                       check=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
     with pytest.raises(ValueError, match="DataRoot"):
         activity()
     assert list(outside.iterdir()) == []

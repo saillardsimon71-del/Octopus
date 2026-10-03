@@ -115,6 +115,39 @@ def test_d_structured_public_block_does_not_create_human_boundary(monkeypatch):
     no_effects()
 
 
+@pytest.mark.parametrize('permission', ['Paiement : intervention humaine requise.',
+    'Créer un compte : intervention humaine requise.', 'Autoriser une dépense de 10 EUR',
+    'Authorize spend of 10 EUR', 'Engagement financier de 10 EUR',
+    "L'opérateur doit fournir un accès manuel à cette page puis payer 10 EUR"])
+def test_public_source_failure_preserves_distinct_human_boundary(monkeypatch, permission):
+    _, acquired = evidence_case()
+    acquired[0]['steps'][0]['result_data']['page'].update(blocked=True, error='remote block', http_status=403)
+    result = {'rapport': 'Source indisponible', 'execution_status': 'completed', 'results': acquired,
+              'determination': {'action': 'request_permission', 'reason': permission,
+                                'permission': permission, 'next_goal': ''}}
+    monkeypatch.setattr(runtime, 'run_mission', lambda *a, **k: copy.deepcopy(result))
+    oid = supervisor.start_pursuit()
+    supervisor.run_pursuit(oid)
+    assert tasks.pending_human_requests('octopus')
+    assert not journal.query('SELECT id FROM channel_actions')
+
+
+@pytest.mark.parametrize('permission', ['Paiement : intervention humaine requise.',
+    'Créer un compte : intervention humaine requise.', 'Autoriser une dépense de 10 EUR',
+    'Authorize spend of 10 EUR', 'Engagement financier de 10 EUR',
+    "L'opérateur doit fournir un accès manuel à cette page puis payer 10 EUR"])
+def test_old_source_failure_request_keeps_distinct_human_boundary(permission):
+    from test_pursuit_recovery import old_waiting_request
+    oid, tid, _, memo = old_waiting_request(reason=permission, permission=permission)
+    _, acquired = evidence_case()
+    acquired[0]['steps'][0]['result_data']['page'].update(blocked=True, error='remote block', http_status=403)
+    memo['results'] = acquired
+    tasks.save_step(tid, 'determination', memo)
+    supervisor.start_pursuit(objective_id=oid)
+    assert tasks.get(tid)['status'] == 'waiting_human'
+    assert tasks.pending_human_requests('octopus')
+
+
 def test_h_technical_failure_never_overrides_real_execution_refusal(monkeypatch):
     _, acquired = evidence_case()
     acquired[0]["steps"][0]["result_data"]["page"].update(blocked=True, error="remote block", http_status=403)

@@ -41,10 +41,14 @@ class _NoRegistry:
     """Remplace `winreg` : aucune variable utilisateur Windows n'est lisible pendant les tests."""
 
     HKEY_CURRENT_USER = None
+    HKEY_LOCAL_MACHINE = None
 
     @staticmethod
     def OpenKey(*_args, **_kwargs):
-        raise OSError("registre Windows neutralise pendant les tests")
+        raise FileNotFoundError("registre Windows neutralise pendant les tests")
+
+    OpenKeyEx = OpenKey
+    QueryValueEx = OpenKey
 
 
 class FakeTransport:

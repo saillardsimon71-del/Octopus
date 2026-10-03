@@ -67,7 +67,7 @@ def test_executed_action_produces_observed_evidence_for_the_experiment():
     assert economy.evaluate_experiment(B, experiment)["verdict"] == "supports"
 
 
-def test_paid_action_needs_an_allowance_and_failures_release_the_spend():
+def test_paid_action_requires_human_even_with_a_legacy_channel_and_allowance():
     channel = _channel()
     economy.update_channel(B, channel, actor="human", status="active", access="act")
     actions.register_executor("marketplace", "boost", lambda c, p: (_ for _ in ()).throw(TimeoutError("API lente")),
@@ -75,10 +75,11 @@ def test_paid_action_needs_an_allowance_and_failures_release_the_spend():
     undeclared = actions.propose(B, channel, "boost", {}, requested_by="agent:GROWTH")
     assert undeclared["status"] == "blocked" and "coût" in undeclared["reason"]
     blocked = actions.propose(B, channel, "boost", {}, requested_by="agent:GROWTH", spend_amount=5, spend_currency="EUR")
-    assert blocked["status"] == "blocked" and "dépense" in blocked["reason"]
+    assert blocked["status"] == "blocked" and "intervention humaine" in blocked["reason"]
     economy.grant_allowance(B, 5, "EUR", granted_by="human", rationale="boost")
     failed = actions.propose(B, channel, "boost", {}, requested_by="agent:GROWTH", spend_amount=5, spend_currency="EUR")
-    assert failed["status"] == "failed" and "TimeoutError" in failed["reason"]
+    assert failed["status"] == "blocked" and "intervention humaine" in failed["reason"]
+    assert not journal.query('SELECT * FROM spend_requests')
     assert economy.authorize_spend(B, 5, "EUR", "réutilisable", requested_by="human")["status"] == "authorized"
     actions.register_executor("marketplace", "silent", lambda c, p: {"observation": "ok"}, cost_class="local")
     assert actions.propose(B, channel, "silent", {}, requested_by="agent:GROWTH")["status"] == "failed"

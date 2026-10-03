@@ -1,8 +1,4 @@
-"""Human authority above concrete channels. No economic ranking and no implied rights.
-
-Channel access=act remains an explicit legacy grant. Derived authority never writes act;
-its live mandate, business, connected resource and concrete effect are checked each time.
-"""
+"""Resource scope and the two human action boundaries; historical grants remain readable."""
 from __future__ import annotations
 
 import json
@@ -14,17 +10,17 @@ from . import journal, strategy, tasks
 
 EFFECTS = frozenset({'read', 'contact', 'publish', 'edit'})
 TARGETS = frozenset({'public_business', 'owned_account'})
-# Security boundary, not a commercial/platform taxonomy. Fail closed for these effects.
-SENSITIVE = re.compile(
+SECRET_SURFACE = re.compile(
     r'password|mot de passe|passcode|\botp\b|\b2fa\b|captcha|secret|api.?key|'
+    r'security|sécurité|securite', re.I)
+IDENTITY_DELETION = re.compile(r'\b(?:delete|close|supprimer|fermer)\b.{0,20}\b(?:account|compte)\b', re.I)
+SENSITIVE = re.compile(
     r'pay(?:ment|out)?\b|paiement|payer|rembours|refund|withdraw|retrait|transf|'
     r'bank|bancair|\biban\b|\bcvv\b|\bcvc\b|card number|numéro de carte|billing|checkout|'
-    r'buy\b|achet|advert|publicité|abonn|subscri|security|sécurité|securite|'
-    r'delet|supprim|remove|contract|contrat|signature|sign up|signup|register|inscri|'
-    r'accept.*(?:terms|conditions)|accepte.*conditions', re.I)
-BUSINESS_SIGNALS = re.compile(r'\b(?:entreprise|société|societe|siret|siren|business|company|'
-                              r'professionnel|professional|services|devis)\b', re.I)
-CONTACT_SIGNALS = re.compile(r'contact|nous écrire|nous ecrire|get in touch', re.I)
+    r'\bbuy\b|achet|\bsubscribe\b|paid subscription|abonn.*pay|\bsign\b.*contract|\bsigner\b.*contrat|'
+    r'accept.*(?:paid|contract)|place.*order|sign up|signup|\bregister\b|'
+    r'cré(?:er|ation).*compte|cr(?:eer|eation).*compte|create.*account|nouveau compte|'
+    r's[\x27\u2019 ]?inscrire|/registration\b|/inscription\b', re.I)
 
 
 def _human(actor):
@@ -51,8 +47,6 @@ def grant(business, label, target, effects, *, actor, resource_keys=(), replaces
     keys = sorted(set(resource_keys))
     if target not in TARGETS or not effects or set(effects) - EFFECTS:
         raise ValueError('cible ou effets du mandat invalides')
-    if target == 'public_business' and effects != ['contact']:
-        raise ValueError('le périmètre public professionnel couvre uniquement le contact sans dépense')
     if target == 'owned_account' and not keys:
         raise ValueError('sélectionnez des ressources ou * (comptes explicitement ouverts à cette activité)')
     with tasks._tx() as conn:
@@ -84,7 +78,7 @@ def revoke(business, mandate_id, *, actor):
 
 def covering(business, target, effect, resource_key=None):
     for m in list_mandates(business, active=True):
-        if m['target'] == target and effect in m['effects']:
+        if m['target'] == target:
             if target == 'public_business' or resource_key in m['resource_keys'] or '*' in m['resource_keys']:
                 return m
     return None
@@ -97,16 +91,14 @@ def account_authority(business, resource_key, effect):
     if (not account or not account.get('enabled') or account.get('session_status') != 'connected'
             or business not in account.get('businesses', [])):
         return None
-    if effect != 'read' and account.get('ownership') not in ('operator', 'business'):
-        return None
-    return covering(business, 'owned_account', effect, resource_key)
+    return {'resource_key': resource_key, 'business': business}
 
 
 def qualify_public(channel_id, business, *, source_url, observed_text):
     """Called with actually acquired public text, never model-supplied classification.
 
-    A public page's labels qualify a contact endpoint within the human's broad mandate.
-    They cannot create a mandate. This is deliberately conservative, not identity verification.
+    Matching observed provenance binds an endpoint within the human's resource scope.
+    It cannot create a scope or verify the identity of a recipient.
     """
     if not covering(business, 'public_business', 'contact'):
         return False
@@ -117,14 +109,10 @@ def qualify_public(channel_id, business, *, source_url, observed_text):
     src, loc = urlsplit(source_url), urlsplit(ch['locator'] or '')
     if src.scheme != 'https' or src.username or src.password or not src.hostname:
         return False
-    if not BUSINESS_SIGNALS.search(observed_text) or not CONTACT_SIGNALS.search(observed_text):
-        return False
     if ch['kind'] == 'email':
         email = str(ch['locator'] or '').removeprefix('mailto:').lower()
         local, sep, domain = email.partition('@')
-        if (not sep or domain != src.hostname.lower() or local not in
-                ('contact', 'info', 'hello', 'bonjour', 'commercial', 'sales', 'support')
-                or email not in observed_text.lower()):
+        if not sep or domain != src.hostname.lower() or email not in observed_text.lower():
             return False
     elif ch['kind'] in ('website', 'browser_form'):
         if loc.scheme != 'https' or loc.netloc != src.netloc or loc.path != src.path:
@@ -159,10 +147,8 @@ def bind_account(channel_id, business, resource_key):
 
 
 def authorize(channel, effect, *, description='', financial=False):
-    if financial or SENSITIVE.search(description):
-        return {'allowed': False, 'reason': 'action sensible réservée à une autorisation humaine distincte'}
-    if channel['status'] == 'active' and channel['access'] == 'act':
-        return {'allowed': True, 'mandate_id': None}
+    if financial or SENSITIVE.search(description) or SECRET_SURFACE.search(description):
+        return {'allowed': False, 'reason': 'Paiement, engagement financier ou création de compte : intervention humaine requise.'}
     rows = journal.query('SELECT * FROM channel_authority WHERE channel_id=? AND business=?',
                          (channel['id'], channel['business']))
     if not rows:
@@ -171,9 +157,9 @@ def authorize(channel, effect, *, description='', financial=False):
     if binding['target'] == 'owned_account':
         mandate = account_authority(channel['business'], binding['resource_key'], effect)
     else:
-        mandate = covering(channel['business'], 'public_business', effect) if effect == 'contact' else None
+        mandate = covering(channel['business'], 'public_business', effect)
     return {'allowed': channel['status'] == 'active' and mandate is not None,
-            'mandate_id': mandate['id'] if mandate else None, 'resource_key': binding.get('resource_key')}
+            'mandate_id': mandate.get('id') if mandate else None, 'resource_key': binding.get('resource_key')}
 
 
 def replace(business, mandate_id, label, target, effects, *, actor, resource_keys=()):

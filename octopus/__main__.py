@@ -66,7 +66,7 @@ def cmd_models(args) -> int:
         print(state['refresh_error'])
     for model_id, model in cat.raw["models"].items():
         capabilities = set(model.get('capabilities', []))
-        if args.browser_candidates and not {'vision', 'json'} <= capabilities:
+        if args.browser_candidates and 'vision' not in capabilities:
             continue
         ok, why = llm.provider_status(model["provider"], cat.provider(model["provider"]))
         proof = llm.browser_quality(model)
@@ -484,7 +484,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-cost", type=float, default=0.05, help="plafond du banc en USD (defaut 0.05)")
     p = sub.add_parser("models", help="catalogue, disponibilite et preuves")
     p.add_argument("--refresh", action="store_true", help="rafraichir les metadonnees OpenRouter")
-    p.add_argument("--browser-candidates", action="store_true", help="candidats TECHNICAL vision/JSON et qualification distincte")
+    p.add_argument("--browser-candidates", action="store_true", help="candidats TECHNICAL vision et qualification distincte")
     sub.add_parser("doctor", help="verification de l'installation")
     p = sub.add_parser("worker", help="execute les taches de la file")
     p.add_argument("--once", action="store_true", help="une seule tache puis sortie")

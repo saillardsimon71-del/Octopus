@@ -121,11 +121,12 @@ explicite. Aucun n'exempte `browser.react_step` de sa preuve browser.
 DeepSeek, les pins, les baselines et les profils bench/legacy. Les dix scénarios
 doivent être couverts, le score moyen atteindre 90 %, les cinq scénarios critiques
 réussir intégralement, les preuves avoir moins de 14 jours et la suite être complète.
-Les échecs de stagnation en exécution restent distincts de la santé du transport.
+La stagnation en exécution est une observation journalisée, sans score cognitif automatique.
+Le protocole browser accepte une action claire ou un rapport libre ; JSON natif n'est pas requis.
 Le benchmark `browser.bench_step` est l'amorçage explicite sur des pages locales.
 Les pools `openrouter/free` et routes automatiques de l'ancien catalogue sont exclus.
 
-`models --browser-candidates` filtre vision et JSON et affiche `TECHNICAL`, avec
+`models --browser-candidates` filtre vision et affiche `TECHNICAL`, avec
 `browser=not-benchmarked`, `unqualified` ou `qualified` séparément. La disponibilité
 signifie clé présente et candidat catalogué ; elle ne prouve ni quota disponible
 ni compétence. Source, nombre, âge du cache et dernière erreur sont visibles.
@@ -165,7 +166,8 @@ et reste borné par `max_requests`.
 Une erreur persistante, un candidat inéligible ou un backend indisponible produit
 `INCOMPLETE_INFRA` et arrête la suite. Les scénarios suivants sont exportés
 `NOT_RUN`, avec scores absents, sans ajout de faux essais au journal. Les réponses
-JSON ou enveloppes d'action invalides restent des échecs cognitifs. Les résultats
+Un format illisible ou une action ambiguë deviennent des observations FORMAT/PROTOCOL
+récupérables. L'objectif non atteint reste distinct d'une panne du runtime. Les résultats
 exportés distinguent `evaluated`, `failed`, `incomplete_infra` et `not_run`.
 
 Le schéma SQLite historique exige des nombres pour `passed` et `score` : les
@@ -304,7 +306,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Refresh catalogue échoué : arrêter' }
 
 3. Vérifier Flash, V4 Pro et les gratuits OpenRouter présents, aucun ancien
    fournisseur. Ne pas ouvrir Fiverr. Choisir **un seul** candidat gratuit fixe
-   dans la liste TECHNICAL vision/JSON pour cette première évaluation. Ne pas
+   dans la liste TECHNICAL vision pour cette première évaluation. Ne pas
    sélectionner tous les modèles et ne pas utiliser un pool. Saisir son ID exact
    imprimé par le CLI ; le modèle choisi devra lui-même acquérir sa preuve.
 

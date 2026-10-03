@@ -678,7 +678,7 @@ def _semantic_account_page(session, account, key, diagnostic):
         if not result.get('success'):
             raise ResourceError('backend_error')
         url = str((result.get('data') or {}).get('url') or '')
-        if mandates.SENSITIVE.search(url) or agent_browser.contains_secret(url):
+        if mandates.SECRET_SURFACE.search(url) or agent_browser.contains_secret(url):
             raise ResourceError('sensitive_surface')
         web_guard.classify(url)
         return urlsplit(url)._replace(query='', fragment='').geturl()
@@ -717,23 +717,14 @@ def _semantic_account_page(session, account, key, diagnostic):
                     'cost_usd': completion.cost_usd, 'qualification': completion.justification.get('browser_qualification'),
                     'selection_reason': completion.justification.get('selection_reason'), 'tool': tool,
                     'validated_args': bw.trace_args(args), 'screenshot_used': bool(llm._prompt_size(messages)[1]),
-                    'controller_scope': 'account.verify', 'escalations': trajectory.escalations}
+                    'controller_scope': 'account.verify', 'failure_layer': None if observation.get('ok') else 'TOOL'}
                 if tool == 'browser_verify' and args.get('state') != 'uncertain':
                     trace['stagnation'] = None  # Terminal interpretation, not an unfinished trajectory.
-                if trace['stagnation'] and trajectory.escalations == 0:
-                    trajectory.escalations = 1
-                    trajectory.excluded.add(completion.model)
-                    trajectory.min_quality = (completion.justification.get('browser_qualification') or {}).get('quality', 0.)
-                    trajectory.reset_detection()
-                    trace.update(escalation=True, excluded_models=sorted(trajectory.excluded),
-                                 min_quality=trajectory.min_quality, escalations=1)
                 bw.record_controller_trace(trace)
-                return bool(trace['stagnation'] and not trace.get('escalation'))
-            for i in range(6):  # Bounded verifier, same session/conversation during one escalation.
+            for i in range(6):
                 safe()
                 completion = llm.complete('browser.react_step', messages, business=business, agent='account.verify',
-                    max_tokens=1200, json_mode=True, validate=validate, exclude_models=tuple(trajectory.excluded),
-                    browser_min_quality=trajectory.min_quality)
+                    max_tokens=1200, json_mode=True, validate=validate)
                 response = completion.data
                 messages.append({'role': 'assistant', 'content': json.dumps(response)})
                 state = response.get('state')
@@ -745,8 +736,7 @@ def _semantic_account_page(session, account, key, diagnostic):
                     return state == 'authenticated', {'method': 'semantic_observation', 'state': state,
                         'run_id': run.id, 'business': business, 'resource_key': key, 'evidence': evidence}
                 if state == 'uncertain':
-                    if trace_decision(completion, i + 1, 'browser_verify', {'state': state}, {'ok': True}):
-                        break
+                    trace_decision(completion, i + 1, 'browser_verify', {'state': state}, {'ok': True})
                     messages.append({'role': 'user', 'content': 'Choisis une observation de lecture supplémentaire '
                                      'si elle peut lever l’incertitude ; aucune nouvelle autorité.'})
                     continue
@@ -756,7 +746,7 @@ def _semantic_account_page(session, account, key, diagnostic):
                     parsed = urlsplit(url)
                     if (parsed.hostname not in account['domains'] or parsed.query or parsed.fragment
                             or parsed.username or parsed.password or agent_browser.contains_secret(url)
-                            or mandates.SENSITIVE.search(url)):
+                            or mandates.SECRET_SURFACE.search(url)):
                         raise ResourceError('verify_domain_mismatch')
                     web_guard.classify(url)
                     if not session.run('open', [url]).get('success'):
@@ -772,12 +762,10 @@ def _semantic_account_page(session, account, key, diagnostic):
                     # Verifier reads are explicitly authorized by human completion, before any mandate.
                     part = bw.image_part(image, business=business, scope_key=scope_key)
                     messages.append({'role': 'user', 'content': [{'type': 'text', 'text': web_guard.UNTRUSTED_NOTE}, part]})
-                    if trace_decision(completion, i + 1, tool, args, {'ok': True, 'url': safe(), 'image': image}):
-                        break
+                    trace_decision(completion, i + 1, tool, args, {'ok': True, 'url': safe(), 'image': image})
                     continue
                 messages.append({'role': 'user', 'content': json.dumps(observation, ensure_ascii=False)})
-                if trace_decision(completion, i + 1, tool, args, observation):
-                    break
+                trace_decision(completion, i + 1, tool, args, observation)
             diagnostic['reason'] = 'semantic_uncertain'
             return False, {'method': 'semantic_observation', 'state': 'uncertain', 'run_id': run.id,
                            'business': business, 'resource_key': key, 'evidence': evidence}
@@ -785,7 +773,7 @@ def _semantic_account_page(session, account, key, diagnostic):
         safe_reasons = {'verify_domain_mismatch', 'sensitive_surface', 'visible_login_field_present',
                         'challenge_detected', 'backend_error'}
         if isinstance(exc, llm.NoEligibleModel):
-            diagnostic['reason'] = 'semantic_uncertain' if evidence and 'trajectory' in locals() and trajectory.escalations else 'semantic_browser_unqualified'
+            diagnostic['reason'] = 'semantic_browser_unqualified'
         elif isinstance(exc, ResourceError) and str(exc) in safe_reasons:
             diagnostic['reason'] = str(exc)
         elif diagnostic.get('reason') == 'authenticated':

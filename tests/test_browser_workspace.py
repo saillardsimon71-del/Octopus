@@ -57,6 +57,8 @@ class FakeSession:
         if command == "close":
             self.closed += 1
             return ok({"closed": True})
+        if command == 'eval' and 'octopus_commit_boundary' in args[0]:
+            return ok({'result': False})
         if command == "open":
             self.path = args[0][len(ORIGIN):] or "/"
             return ok({"url": args[0], "title": self._page()[0]})
@@ -145,13 +147,13 @@ def _rows() -> list[dict]:
 
 # --- permissions ----------------------------------------------------------------------------
 
-def test_reading_is_free_but_editing_requires_a_human_act_channel_for_this_site():
+def test_untrusted_page_cannot_mutate_without_a_resource_for_this_business():
     space = _space()
     view = space.navigate(ORIGIN + "/")
     assert view["ok"] and "Formulaire de contact" in view["snapshot"]
     assert "ListMarker" not in view["snapshot"]  # bruit élagué
     assert space.click(_ref(space, "Formulaire de contact"))["url"] == ORIGIN + "/form"  # lien = lecture
-    with pytest.raises(bw.Refused, match="accès 'act' accordé par l'humain"):
+    with pytest.raises(bw.Refused, match="aucune ressource opérationnelle"):
         space.type(_ref(space, "Nom"), "Alice")
     _channel(access="observe")
     _channel("https://autre-site.example/")
@@ -159,7 +161,7 @@ def test_reading_is_free_but_editing_requires_a_human_act_channel_for_this_site(
     with pytest.raises(bw.Refused):
         space.type(_ref(space, "Nom"), "Alice")
     discovered = _channel(status="discovered")
-    with pytest.raises(bw.Refused, match=f"canal #{discovered}"):
+    with pytest.raises(bw.Refused, match="contexte de la page actuelle"):
         space.type(_ref(space, "Nom"), "Alice", channel_id=discovered)
     granted = _channel()
     assert space.type(_ref(space, "Nom"), "Alice")["ok"]
