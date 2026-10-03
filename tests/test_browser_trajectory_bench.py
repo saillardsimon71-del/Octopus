@@ -220,6 +220,165 @@ def test_live_stagnation_is_separate_from_provider_health_and_rerun_can_restore(
     assert llm.browser_quality(catalog.load().model('deepseek/flash'))['eligible']
 
 
+@pytest.mark.parametrize('failure', [llm.NoEligibleModel, TimeoutError])
+def test_unavailable_candidate_stops_without_cognitive_failures(failure, monkeypatch, tmp_path):
+    mid = 'openrouter/fixture/vision-alpha:free'
+    qualify(mid)
+    monkeypatch.setattr(agent_browser, 'require_backend', lambda: None)
+    monkeypatch.setattr(bb, 'local_workspace', lambda fixture: contextlib.nullcontext(None))
+    def fail(*args, **kwargs):
+        if failure is llm.NoEligibleModel:
+            raise failure('browser.bench_step', 'bench', [{'model': mid, 'reason': 'cooldown'}])
+        raise failure('offline provider')
+    monkeypatch.setattr(bb, 'trajectory', fail)
+    result = bb.run([mid], max_cost_usd=0, out_dir=tmp_path, log=lambda line: None)
+    assert result['incomplete'] and len(result['rows']) == 1
+    assert result['not_run'] == 19
+    assert result['rows'][0]['status'] == 'INCOMPLETE_INFRA'
+    assert result['summaries'][0]['evaluated'] == 0
+    assert result['summaries'][0]['failed'] == 0
+    import csv
+    with Path(result['files'][0]).open(encoding='utf-8', newline='') as fh:
+        exported = list(csv.DictReader(fh))
+    assert len(exported) == 20
+    assert sum(r['status'] == 'NOT_RUN' for r in exported) == 19
+    assert all(r['score'] == '' for r in exported)
+    assert len(journal.query('SELECT * FROM bench_results WHERE bench_run_id=?', (result['bench_run_id'],))) == 1
+    proof = llm.browser_quality(catalog.load().model(mid))
+    assert not proof['eligible'] and proof['quality'] is None
+
+
+@pytest.mark.parametrize('image_request', [False, True])
+def test_429_retries_same_decision_once_then_stops(image_request, monkeypatch, transport, providers_up, tmp_path):
+    mid = 'openrouter/fixture/vision-alpha:free'
+    monkeypatch.setattr(agent_browser, 'require_backend', lambda: None)
+    original = bb.local_workspace
+    def workspace(fixture):
+        monkeypatch.setattr(agent_browser, 'Session', lambda *a, **k: FixtureSession(fixture))
+        return original(fixture)
+    monkeypatch.setattr(bb, 'local_workspace', workspace)
+    clock = {'elapsed': 0.}
+    real_mono, real_wall = bb.time.monotonic, bb.time.time
+    monkeypatch.setattr(bb.time, 'monotonic', lambda: real_mono() + clock['elapsed'])
+    monkeypatch.setattr(bb.time, 'time', lambda: real_wall() + clock['elapsed'])
+    monkeypatch.setattr(bb.time, 'sleep', lambda delay: clock.update(elapsed=clock['elapsed'] + delay))
+    class RateLimitError(Exception):
+        status_code = 429
+        body = {'error': {'metadata': {'limit_source': 'upstream_provider_shared_pool'}}}
+    def respond(provider, request):
+        if image_request and len(transport.calls) == 1:
+            return json.dumps({'tool': 'browser_navigate', 'args': {'url': request['messages'][1]['content'].split('Start at ')[1]}}), Usage()
+        if image_request and len(transport.calls) == 2:
+            return json.dumps({'tool': 'browser_screenshot', 'args': {}}), Usage()
+        return RateLimitError('429 rate limit')
+    transport.handler = respond
+    result = bb.run([mid], max_cost_usd=0, out_dir=tmp_path, log=lambda line: None)
+    assert result['incomplete'] and result['not_run'] == 19
+    assert result['requests_used'] == (4 if image_request else 2)
+    assert len(result['rows']) == 1 and result['rows'][0]['status'] == 'INCOMPLETE_INFRA'
+    assert 30 <= clock['elapsed'] <= 60
+    assert transport.calls[-2][1]['messages'] == transport.calls[-1][1]['messages']
+    assert result['summaries'][0]['evaluated'] == 0
+    assert not llm.browser_quality(catalog.load().model(mid))['eligible']
+
+
+def test_legacy_rate_limit_run_is_not_a_cognitive_zero():
+    mid = 'openrouter/fixture/vision-alpha:free'
+    identity = qualify(mid)
+    with journal.run('browser-benchmark', 'bench') as ctx:
+        for item in sorted(llm.BROWSER_SCENARIOS):
+            journal.record_bench_result({'ts': bb.time.time(), 'bench_run_id': ctx.id,
+                'suite': 'octopus.browser_bench', 'task': llm.BROWSER_BENCH_TASK, 'item': item,
+                'model': identity, 'prompt_version': llm.BROWSER_BENCH_VERSION,
+                'passed': 0, 'score': 0., 'error': 'RateLimitError' if item == 'affordance' else 'NoEligibleModel'})
+    proof = llm.browser_quality(catalog.load().model(mid))
+    assert not proof['eligible'] and proof['quality'] is None
+
+
+def test_single_429_resumes_the_existing_trajectory(monkeypatch, transport, providers_up):
+    mid = 'openrouter/fixture/vision-alpha:free'
+    clock = {'elapsed': 0.}
+    real_mono, real_wall = bb.time.monotonic, bb.time.time
+    monkeypatch.setattr(bb.time, 'monotonic', lambda: real_mono() + clock['elapsed'])
+    monkeypatch.setattr(bb.time, 'time', lambda: real_wall() + clock['elapsed'])
+    monkeypatch.setattr(bb.time, 'sleep', lambda delay: clock.update(elapsed=clock['elapsed'] + delay))
+    class RateLimitError(Exception):
+        status_code = 429
+    with bb.Fixture('sufficient_dom') as fixture:
+        monkeypatch.setattr(agent_browser, 'Session', lambda *a, **k: FixtureSession(fixture))
+        with bb.local_workspace(fixture) as space, journal.run('browser-benchmark', 'bench'):
+            choose = simulated_decider(fixture, space, [])
+            def respond(provider, request):
+                if len(transport.calls) == 1:
+                    return RateLimitError('429 rate limit')
+                return json.dumps(choose(request['messages'])), Usage()
+            transport.handler = respond
+            budget = bb.RequestBudget(5)
+            outcome = bb.trajectory(mid, fixture, space, request_budget=budget, log=lambda line: None)
+    assert outcome['passed'] and budget.used == 5
+    assert [r['tool'] for r in outcome['trace']].count('browser_navigate') == 1
+    assert transport.calls[0][1]['messages'] == transport.calls[1][1]['messages']
+
+
+@pytest.mark.parametrize('request_limit,retry_after', [(1, '30'), (240, '120')])
+def test_429_retry_respects_request_and_wait_limits(request_limit, retry_after, monkeypatch, transport, providers_up, tmp_path):
+    from types import SimpleNamespace
+    mid = 'openrouter/fixture/vision-alpha:free'
+    monkeypatch.setattr(agent_browser, 'require_backend', lambda: None)
+    monkeypatch.setattr(bb, 'local_workspace', lambda fixture: contextlib.nullcontext(None))
+    monkeypatch.setattr(bb.time, 'sleep', lambda delay: pytest.fail('retry must not wait'))
+    class RateLimitError(Exception):
+        status_code = 429
+        response = SimpleNamespace(headers={'retry-after': retry_after})
+    transport.handler = lambda provider, request: RateLimitError('429 rate limit')
+    result = bb.run([mid], max_requests=request_limit, max_cost_usd=0, out_dir=tmp_path, log=lambda line: None)
+    assert result['incomplete'] and result['requests_used'] == 1 and result['not_run'] == 19
+
+
+def test_invalid_json_is_a_cognitive_failure(monkeypatch, transport, providers_up, tmp_path):
+    mid = 'openrouter/fixture/vision-alpha:free'
+    monkeypatch.setattr(agent_browser, 'require_backend', lambda: None)
+    monkeypatch.setattr(bb, 'local_workspace', lambda fixture: contextlib.nullcontext(None))
+    transport.reply('not json')
+    result = bb.run([mid], max_cost_usd=0, out_dir=tmp_path, log=lambda line: None)
+    assert not result['incomplete'] and result['not_run'] == 0
+    assert result['summaries'][0]['evaluated'] == result['summaries'][0]['failed'] == 20
+
+
+@pytest.mark.parametrize('action', [{'tool': ['browser_navigate'], 'args': {}}, {'tool': 'browser_click', 'args': []}])
+def test_invalid_action_envelope_is_cognitive(action, monkeypatch, transport, providers_up, tmp_path):
+    mid = 'openrouter/fixture/vision-alpha:free'
+    monkeypatch.setattr(agent_browser, 'require_backend', lambda: None)
+    monkeypatch.setattr(bb, 'local_workspace', lambda fixture: contextlib.nullcontext(None))
+    transport.reply(json.dumps(action))
+    result = bb.run([mid], max_cost_usd=0, out_dir=tmp_path, log=lambda line: None)
+    assert not result['incomplete'] and result['summaries'][0]['failed'] == 20
+
+
+def test_recovered_429_does_not_retry_later_cognitive_failure(monkeypatch, transport, providers_up):
+    mid = 'openrouter/fixture/vision-alpha:free'
+    clock = {'elapsed': 0.}
+    real_mono, real_wall = bb.time.monotonic, bb.time.time
+    monkeypatch.setattr(bb.time, 'monotonic', lambda: real_mono() + clock['elapsed'])
+    monkeypatch.setattr(bb.time, 'time', lambda: real_wall() + clock['elapsed'])
+    monkeypatch.setattr(bb.time, 'sleep', lambda delay: clock.update(elapsed=clock['elapsed'] + delay))
+    class RateLimitError(Exception):
+        status_code = 429
+    with bb.Fixture('sufficient_dom') as fixture:
+        monkeypatch.setattr(agent_browser, 'Session', lambda *a, **k: FixtureSession(fixture))
+        with bb.local_workspace(fixture) as space, journal.run('browser-benchmark', 'bench'):
+            def respond(provider, request):
+                if len(transport.calls) == 1:
+                    return RateLimitError('429 rate limit')
+                if len(transport.calls) == 2:
+                    return json.dumps({'tool': 'browser_navigate', 'args': {'url': fixture.start_url}}), Usage()
+                return 'not json', Usage()
+            transport.handler = respond
+            with pytest.raises(llm.InvalidOutput):
+                bb.trajectory(mid, fixture, space, request_budget=bb.RequestBudget(8), log=lambda line: None)
+    assert clock['elapsed'] == 30 and len(transport.calls) == 4
+
+
 def test_multimodal_escalation_delivers_real_png_and_keeps_capture_history(monkeypatch,transport,providers_up):
     qualify('openrouter/fixture/vision-alpha:free',fail=('sufficient_dom',))
     qualify('deepseek/flash')

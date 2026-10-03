@@ -35,6 +35,29 @@ def test_metadata_and_identity_are_observed(monkeypatch):
     assert model['evidence_identity'] == MID + '@vendor/arbitrary-20261003'
 
 
+@pytest.mark.parametrize('task', ['browser.bench_step', 'browser.react_step'])
+@pytest.mark.parametrize('efforts,want', [(['xhigh', 'medium', 'low'], 'low'), (['high'], None), (None, 'low')])
+def test_browser_reasoning_uses_supported_low_effort(task, efforts, want, monkeypatch, transport, providers_up):
+    install(monkeypatch, entry(reasoning={'mandatory': False, 'default_enabled': True,
+                                         'supported_efforts': efforts, 'default_effort': 'xhigh'}))
+    qualify(MID)
+    model = catalog.load().model(MID)  # Exercise the persisted catalog as well.
+    assert model['reasoning']['supported_efforts'] == efforts
+    transport.reply('{"final":"observed"}')
+    result = llm.complete(task, [{'role': 'user', 'content': 'Observe'}],
+                          profile='bench', pin_model=MID, json_mode=True, validate=llm.parse_json)
+    sent = transport.calls[-1][1]['extra_body'].get('reasoning', {}).get('effort')
+    assert sent == want
+    assert result.justification.get('reasoning') == ({'effort': want} if want else None)
+
+
+def test_nonbrowser_reasoning_defaults_are_preserved(monkeypatch, transport, providers_up):
+    install(monkeypatch, entry(reasoning={'supported_efforts': ['high', 'low']}))
+    transport.reply()
+    llm.complete('octopus.json', [], profile='bench', pin_model=MID, json_mode=True, validate=llm.parse_json)
+    assert 'reasoning' not in transport.calls[-1][1]['extra_body']
+
+
 @pytest.mark.parametrize('field,value', [
     ('pricing', {'prompt': '0.01', 'completion': '0'}),
     ('pricing', {'prompt': '0', 'completion': '0', 'request': '0.001'}),

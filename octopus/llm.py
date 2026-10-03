@@ -702,6 +702,8 @@ def _build_request(model: dict, messages: list[dict], max_tokens: int, json_mode
     for key, value in copy.deepcopy(model.get("params", {})).items():
         request.setdefault(key, value)
     if model.get("provider") == "openrouter":
+        if reasoning and "reasoning" in capabilities:
+            request.setdefault("extra_body", {}).setdefault("reasoning", {"effort": reasoning})
         request.setdefault("extra_body", {}).setdefault("provider", {})["max_price"] = {
             "prompt": 0, "completion": 0,
         }
@@ -882,23 +884,30 @@ def browser_quality(model: dict, *, resolved_model: str | None = None) -> dict:
                 "reason": "browser: qualification absente ; lancer browser benchmark sur fixtures locales"}
     # Last completed/attempted suite wins: a failed rerun cannot fall back to old glory.
     latest = rows[0]["bench_run_id"]
-    samples = [r for r in rows if r["bench_run_id"] == latest and r["item"] in BROWSER_SCENARIOS]
+    attempted = [r for r in rows if r["bench_run_id"] == latest and r["item"] in BROWSER_SCENARIOS]
+    infra_errors = {"RateLimitError", "NoEligibleModel", "APIConnectionError", "APITimeoutError", "TimeoutError"}
+    samples = [r for r in attempted if not json.loads(r["checks"] or "{}").get("benchmark_incomplete")
+               and r["error"] not in infra_errors]
     by_item = {item: [r for r in samples if r["item"] == item] for item in BROWSER_SCENARIOS}
     coverage = all(by_item.values())
     rates = {item: sum(r["passed"] for r in group) / len(group) if group else 0.
              for item, group in by_item.items()}
-    quality = sum(rates.values()) / len(BROWSER_SCENARIOS)
+    measured = [rates[item] for item, group in by_item.items() if group]
+    quality = sum(measured) / len(measured) if measured else None
     safe = all(not any(json.loads(r["checks"] or "{}").get(key, False)
-                       for key in ("forbidden", "benchmark_incomplete")) for r in samples)
+                       for key in ("forbidden", "benchmark_incomplete")) for r in attempted)
+    safe = safe and len(samples) == len(attempted)
     mandatory = all(rates[x] == 1. for x in ("vision", "ambiguous_dom", "recovery", "invalid_args", "stale_refs"))
     live = journal.query("SELECT passed FROM bench_results WHERE task='browser.execution' AND model=? AND ts>? "
                          "ORDER BY id DESC LIMIT 3", (identity, max(r['ts'] for r in rows)))
     # Only operationally measured stagnation contributes here, not API/JSON success.
     live_block = len(live) >= 2 and sum(r['passed'] for r in live) == 0
-    eligible = coverage and quality >= .9 and mandatory and safe and not live_block
+    eligible = coverage and quality is not None and quality >= .9 and mandatory and safe and not live_block
     return {"eligible": eligible, "quality": quality, "identity": identity, "samples": len(samples),
             "coverage": coverage, "bench_run_id": latest, "live_stagnations": len(live),
+            "incomplete": len(samples) != len(attempted), "attempted": len(attempted),
             "reason": "browser: 10 scénarios, >=90%, recovery/refs/arguments/vision réussis" if eligible
+                      else "browser: évaluation interrompue ; qualification non acquise" if len(samples) != len(attempted)
                       else "browser: seuil ou couverture insuffisant"}
 
 
@@ -1051,8 +1060,13 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 last_error = BudgetExceeded(block)
                 break
 
+            route_reasoning = reasoning
+            if route_reasoning is None and task in {"browser.bench_step", "browser.react_step"}:
+                efforts = model.get("reasoning", {}).get("supported_efforts", ())
+                if efforts is None or "low" in efforts:
+                    route_reasoning = "low"
             request = _build_request(
-                model, messages, max_tokens, json_mode, reasoning, json_schema, tool_schemas,
+                model, messages, max_tokens, json_mode, route_reasoning, json_schema, tool_schemas,
                 structured_method=structured_method,
             )
             started = time.perf_counter()
@@ -1095,6 +1109,8 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 considered.append({"model": model_id, "eligible": True, "reason": failure})
                 justification = _justify(profile_name, task, model_id, model, considered, pinned)
                 justification["structured_method"] = structured_method
+                if request.get("extra_body", {}).get("reasoning"):
+                    justification["reasoning"] = request["extra_body"]["reasoning"]
                 if cooldown_delay is not None:
                     justification["rate_limit_cooldown_s"] = cooldown_delay
                 if provider_rate_limit_delay is not None:
@@ -1162,6 +1178,8 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
             justification = _justify(profile_name, task, model_id, model,
                                      considered + [{"model": model_id, "eligible": True, "reason": "choisi"}], pinned)
             justification["structured_method"] = structured_method
+            if request.get("extra_body", {}).get("reasoning"):
+                justification["reasoning"] = request["extra_body"]["reasoning"]
             if task == "browser.react_step":
                 justification["browser_qualification"] = browser_quality(model)
                 justification["selection_reason"] = "compétence browser démontrée puis coût minimal ; identité résolue contrôlée"
