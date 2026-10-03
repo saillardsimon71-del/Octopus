@@ -19,6 +19,9 @@ URL = 'https://new-platform.example/dashboard'
 
 @pytest.fixture(autouse=True)
 def no_external_executors(monkeypatch):
+    clock = SimpleNamespace(now=0.)
+    monkeypatch.setattr(resources, 'time', SimpleNamespace(time=resources.time.time,
+        monotonic=lambda: clock.now, sleep=lambda seconds: setattr(clock, 'now', clock.now + seconds)))
     monkeypatch.setattr(resources, 'stable_chrome_executable', lambda: '/fake/installed/Google/Chrome/chrome.exe')
     monkeypatch.setattr(resources, '_human_processes', {})
     monkeypatch.setattr(resources, '_launch_human_browser', lambda *a: SimpleNamespace(poll=lambda: 0))
@@ -81,7 +84,9 @@ class FakeAccountSession:
         if command == 'eval':
             if 'octopus_challenge' in args[0] or 'octopus_traffic' in args[0]:
                 return ok({'result': False})
-            # Exactly one fixed boolean predicate; no snapshots or cookie access in onboarding.
+            # Fixed boolean probes only; no snapshot, cookie or field-value access.
+            if args[0].endswith('return Boolean(challenge); })()') or args[0].endswith('return Boolean(login); })()'):
+                return ok({'result': False})
             assert 'document.body.innerText.includes(marker)' in args[0]
             assert 'input[type=password]' in args[0]
             return ok({'result': self.logged_in})
@@ -438,7 +443,9 @@ def test_human_verification_is_required_after_oauth_and_only_returns_boolean(mon
                 assert json.dumps('Déconnexion') in predicate
                 assert 'cookie' not in predicate and '.value' not in predicate
                 # The browser predicate reports only success/failure, never credential values.
-                return {'success': True, 'data': {'result': 'true' if failure == 'non-boolean' else False}}
+                value = 'true' if failure == 'non-boolean' else bool(
+                    failure in ('password', 'otp') and predicate.endswith('return Boolean(login); })()'))
+                return {'success': True, 'data': {'result': value}}
             return super().run(command, args, **kwargs)
     connection = resources.HumanConnection('new-platform', actor='human', session_factory=UnverifiedSession)
     try:
@@ -446,7 +453,11 @@ def test_human_verification_is_required_after_oauth_and_only_returns_boolean(mon
         session = FakeAccountSession.instances[-1]
     finally:
         connection.close()
-    assert resources.get('new-platform')['web_account']['session_status'] == 'expired'
+    assert resources.get('new-platform')['web_account']['session_status'] == ('unavailable' if failure == 'non-boolean' else 'expired')
+    assert resources.get('new-platform')['last_check_detail'] == {
+        'foreign-domain': 'verify_domain_mismatch', 'marker-absent': 'authenticated_marker_missing',
+        'password': 'visible_login_field_present', 'otp': 'visible_login_field_present',
+        'non-boolean': 'backend_error'}[failure]
     assert not mandates.list_mandates(BUSINESS)
     assert not journal.query('SELECT * FROM economic_channels')
     if failure == 'foreign-domain':
