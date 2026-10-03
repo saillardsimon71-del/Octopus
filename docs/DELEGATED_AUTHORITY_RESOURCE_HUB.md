@@ -53,12 +53,20 @@ Les trois niveaux sont donc distincts : stratégie libre, délégation humaine d
 ### Connexion humaine une fois
 
 1. Ajouter/configurer une ressource dans Paramètres, ou accepter une demande de compte.
-2. Définir les domaines autorisés, les business et un repère présent **uniquement** sur la page authentifiée.
+2. Définir les domaines autorisés **aux tâches OCTOPUS après connexion**, les business et un repère présent **uniquement** sur la page authentifiée. Les CDN et fournisseurs OAuth du login humain n'ont pas à être ajoutés.
 3. Ouvrir la connexion : Chromium visible utilise le profil de cette identité.
 4. L'humain remplit login, mot de passe, CAPTCHA, OTP et conditions. Aucun outil agent n'est actif dans ce navigateur humain.
 5. Cliquer « J’ai terminé — vérifier ». Une évaluation DOM fixe renvoie seulement un booléen : domaine attendu, repère présent, absence de champ password/OTP standard. Aucun snapshot, contenu de formulaire, cookie ou mot de passe n'est récupéré par ce parcours.
 6. La session devient `connected` si cette vérification réussit ; sinon `expired`/`unavailable`. Les demandes correspondantes sont répondues avec la seule valeur structurée `connected`.
 7. Accorder un mandat puis reprendre l'activité depuis Workbench.
+
+Le navigateur humain d'onboarding peut contacter le Web public nécessaire au login
+(redirections, OAuth, scripts et assets), via le GuardProxy conservé. HTTP/HTTPS seulement,
+localhost/réseaux privés refusés, contrôle DNS à la connexion et protections des services
+du navigateur conservés. Aucun domaine visité n'est ajouté au compte, mandat ou canal.
+La vérification revient à `verify_url`, exige le domaine configuré et le repère authentifié,
+et refuse les champs password/OTP standard ; seule la réponse booléenne est récupérée.
+Le navigateur agent authentifié conserve sa garde stricte sur les domaines configurés.
 
 Les cookies et sessions demeurent dans le profil Chromium persistant, hors journal et contexte LLM. « Aucun secret dans le registre » ne signifie pas « aucun cookie sur le disque » : le navigateur conserve précisément la session demandée. Les anciens cookies du profil partagé ne sont pas importés automatiquement dans les nouvelles identités.
 

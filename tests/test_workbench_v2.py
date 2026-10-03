@@ -14,6 +14,56 @@ from agents.gui.workbench_v2_data import mission_state, read_snapshot
 from octopus import agnes, agnes_production, economy, journal, strategy, supervisor
 
 
+@pytest.mark.parametrize('form', ['_account_form', '_mandate_form'])
+def test_hub_dialogs_use_modal_parent_focus_and_foreground(monkeypatch, form):
+    """Tk primitive wiring, offline/headless; the real Windows smoke checks native rendering."""
+    from types import SimpleNamespace
+    from agents.gui import workbench_v2 as gui
+    windows, entries, calls, texts = [], [], [], []
+
+    class Widget:
+        def __init__(self, parent=None, **kwargs):
+            self.parent, self.value = parent, ''
+        def title(self, value): self.title_text = value
+        def geometry(self, value): pass
+        def pack(self, **kwargs): pass
+        def insert(self, index, value): self.value = value
+        def get(self): return self.value
+        def set(self, value): self.value = value
+        def transient(self, parent): calls.append(('transient', self, parent))
+        def grab_set(self): calls.append(('grab', self))
+        def lift(self): calls.append(('lift', self))
+        def focus_set(self): calls.append(('focus', self))
+    def window(parent):
+        w = Widget(parent)
+        windows.append(w)
+        return w
+    def entry(parent, **kwargs):
+        w = Widget(parent, **kwargs)
+        entries.append(w)
+        return w
+    monkeypatch.setattr(gui.ctk, 'CTkToplevel', window)
+    monkeypatch.setattr(gui.ctk, 'CTkEntry', entry)
+    for name in ('CTkScrollableFrame', 'CTkFrame', 'CTkOptionMenu', 'CTkCheckBox'):
+        monkeypatch.setattr(gui.ctk, name, Widget)
+    monkeypatch.setattr(gui.ctk, 'BooleanVar', lambda value: SimpleNamespace(get=lambda: value))
+    app = SimpleNamespace(_readonly=False, selected_business_id='digital_b2b',
+        _line=lambda parent, text, *a, **k: texts.append(text),
+        _secondary=lambda *a, **k: None)
+    before = [dict(r) for r in journal.query('SELECT * FROM events')]
+    getattr(gui.WorkbenchV2, form)(app)
+    assert len(windows) == 1 and entries
+    assert calls == [('transient', windows[0], app), ('grab', windows[0]),
+                     ('lift', windows[0]), ('focus', entries[0])]
+    if form == '_account_form':
+        assert any('Domaines autorisés aux tâches OCTOPUS' in text for text in texts)
+        assert any('CDN et OAuth sans les ajouter ici' in text for text in texts)
+    assert [dict(r) for r in journal.query('SELECT * FROM events')] == before
+    app._readonly = True
+    getattr(gui.WorkbenchV2, form)(app)
+    assert len(windows) == 1  # Consultation never opens a writable dialog.
+
+
 def test_snapshot_is_read_only_and_task_done_does_not_close_objective(monkeypatch):
     channel = economy.add_channel("octopus", "agnes_video", "Agnes local", created_by="human",
                                   locator="http://127.0.0.1:8765", capabilities=["agnes_submit"])
