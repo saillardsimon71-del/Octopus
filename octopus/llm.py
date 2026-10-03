@@ -881,6 +881,17 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
     if profile_name == "economical":
         candidates = _rank_economical(task, candidates, cat)
     prompt_chars, images = _prompt_size(messages)
+    if images:
+        need.add("vision")
+        # Reuse this task's configured free alternatives, never widen its paid policy.
+        # Economical text preferences may otherwise hide a compatible local/free route.
+        if not pinned:
+            free_vision = [m for m in task_def.get("candidates", {}).get("zero_cost", [])
+                           if cat.model(m) and "vision" in cat.model(m).get("capabilities", [])
+                           and cat.model(m)["cost_class"] != "paid"]
+            candidates = list(dict.fromkeys([m for m in candidates if cat.model(m)
+                and cat.model(m)["cost_class"] != "paid"] + free_vision +
+                [m for m in candidates if not cat.model(m) or cat.model(m)["cost_class"] == "paid"]))
     digest = hashlib.sha256(json.dumps(messages, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     considered: list[dict] = []
     last_error: Exception | None = None
@@ -992,7 +1003,11 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 structured_error = str(exc)
             except Exception as exc:
                 method_name = structured_method or "none"
-                failure = f"echec [{method_name}] : {type(exc).__name__}: {_safe_error(exc, provider)}"
+                # Some providers echo the whole multimodal request in error bodies.
+                # Neither journal nor a caller's recovery checkpoint may receive image bytes.
+                safe_exc = RuntimeError(type(exc).__name__ + ': image request failed') if images else exc
+                failure = f"echec [{method_name}] : {type(exc).__name__}: " + (
+                    'image request failed' if images else _safe_error(exc, provider))
                 response = getattr(exc, "response", None)
                 too_large = (getattr(exc, "status_code", None) == 413
                              or getattr(response, "status_code", None) == 413)
@@ -1023,7 +1038,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 journal.record_llm_call({**base, "status": "request_too_large" if too_large else "error", "error": failure,
                                          "duration_ms": int((time.perf_counter() - started) * 1000),
                                          "justification": json.dumps(justification, ensure_ascii=False)})
-                last_error = exc
+                last_error = safe_exc
                 if too_large:
                     oversized_providers.add(model["provider"])
                     break
@@ -1031,9 +1046,11 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                         and _structured_method_error(exc)):
                     continue
                 if profile_name == "economical" and model["cost_class"] == "paid":
-                    raise NoEligibleModel(task, profile_name, considered, exc) from exc
+                    raise NoEligibleModel(task, profile_name, considered, safe_exc) from None
                 if prof.get("fallback") and candidate_attempt < len(candidates):
                     break
+                if images:
+                    raise safe_exc from None
                 raise
 
             _rate_limit_cooldowns.pop(model_id, None)
@@ -1066,6 +1083,8 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                                 json_syntax_error = isinstance(repair_exc, json.JSONDecodeError)
                             else:
                                 text, status, error, repaired = fixed, "ok", None, True
+            if images and status == 'invalid':
+                error = 'sortie multimodale invalide'  # Validator/provider errors may echo image content.
             justification = _justify(profile_name, task, model_id, model,
                                      considered + [{"model": model_id, "eligible": True, "reason": "choisi"}], pinned)
             justification["structured_method"] = structured_method
@@ -1085,7 +1104,8 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 **base, "status": status, "error": error, "prompt_tokens": usage.prompt_tokens,
                 "cache_hit_tokens": usage.cache_hit_tokens, "cache_miss_tokens": usage.cache_miss_tokens,
                 "completion_tokens": usage.completion_tokens, "reasoning_tokens": usage.reasoning_tokens,
-                "cost_usd": cost, "duration_ms": duration_ms, "output_preview": text[:300],
+                "cost_usd": cost, "duration_ms": duration_ms, "output_preview": (
+                    '[multimodal response]' if images else text[:300]),
                 "resolved_model": result.resolved_model, "resolved_provider": result.resolved_provider,
                 "request_id": result.request_id, "provider_cost_usd": result.provider_cost_usd,
                 "justification": json.dumps(justification, ensure_ascii=False),

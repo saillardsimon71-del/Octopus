@@ -99,8 +99,9 @@ def build_vision_messages(frames: list[str], prompt: str) -> list[dict]:
     content: list[dict] = [{"type": "text", "text": prompt}]
     for f in frames:
         b = base64.b64encode(Path(f).read_bytes()).decode()
+        mime = "image/png" if Path(f).suffix.lower() == ".png" else "image/jpeg"
         content.append({"type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b}", "detail": "low"}})
+                        "image_url": {"url": f"data:{mime};base64,{b}", "detail": "low"}})
     return [{"role": "user", "content": content}]
 
 

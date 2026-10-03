@@ -759,7 +759,7 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             ('domains', 'Domaines autorisés aux tâches OCTOPUS, séparés par virgules', ','.join(a.get('domains', []) or [urlsplit(url).hostname or ''])),
             ('businesses', 'Identifiants des activités autorisées, séparés par virgules', ','.join(a.get('businesses', []) or ([current_business] if current_business != DEFAULT_BUSINESS_ID else []))),
             ('verify_url', 'URL de la page après connexion', url),
-            ('authenticated_text', 'Texte visible uniquement après connexion', a.get('authenticated_text', ''))]
+            ('authenticated_text', 'Indice de connexion (optionnel)', a.get('authenticated_text', ''))]
         fields = {}
         for name, label, value in values:
             self._line(panel, label, pady=(7, 2))

@@ -1022,30 +1022,36 @@ TOOLS.update({
                          "params": {"url": "str"}, "fn": _browser_tool("navigate")},
     "browser_snapshot": {"desc": "observe la page courante (refs @eN à jour) ; full=true pour l'arbre complet",
                          "params": {"full": "bool?"}, "fn": _browser_tool("snapshot")},
+    "browser_screenshot": {"desc": "voit le rendu réel via une image transmise à un modèle vision ; "
+                           "viewport par défaut, full_page optionnel. Complète le DOM lorsque utile ; "
+                           "ne confère aucune permission, jamais pendant login/OTP/challenge humain",
+                           "params": {"full_page": "bool?"}, "fn": _browser_tool("screenshot")},
     "browser_click": {"desc": "clique l'élément @eN. Un lien simple = navigation libre ; un bouton/validation "
-                      "= action à effet : " + _BROWSER_ACT + "expect = court texte qui n'apparaîtra qu'après "
+                      "= action à effet : effect=contact|publish|edit décrit l’effet voulu sous mandat ; " + _BROWSER_ACT + "expect = court texte qui n'apparaîtra qu'après "
                       "l'effet (vérification réelle, reprise sans double envoi)",
-                      "params": {"ref": "str", "expect": "str?", "channel_id": "int?"}, "fn": _browser_tool("click")},
+                      "params": {"ref": "str", "expect": "str?", "channel_id": "int?", "effect": "str?"}, "fn": _browser_tool("click")},
     "browser_type": {"desc": "remplit le champ @eN (efface puis saisit) ; " + _BROWSER_ACT +
-                     "jamais de mot de passe, secret ni moyen de paiement",
-                     "params": {"ref": "str", "text": "str", "channel_id": "int?"}, "fn": _browser_tool("type")},
+                     "effect=contact|publish|edit pour le formulaire compte ; jamais de mot de passe, secret ni moyen de paiement",
+                     "params": {"ref": "str", "text": "str", "channel_id": "int?", "effect": "str?"}, "fn": _browser_tool("type")},
     "browser_select": {"desc": "choisit une option (libellé ou valeur) dans la liste @eN ; " + _BROWSER_ACT,
-                       "params": {"ref": "str", "value": "str", "channel_id": "int?"}, "fn": _browser_tool("select")},
+                       "params": {"ref": "str", "value": "str", "channel_id": "int?", "effect": "str?"}, "fn": _browser_tool("select")},
     "browser_check": {"desc": "coche la case @eN ; " + _BROWSER_ACT,
-                      "params": {"ref": "str", "channel_id": "int?"}, "fn": _browser_tool("check")},
+                      "params": {"ref": "str", "channel_id": "int?", "effect": "str?"}, "fn": _browser_tool("check")},
     "browser_press": {"desc": "appuie sur une touche (Tab, Escape, flèches : libres ; Enter et autres = action "
                       "à effet : " + _BROWSER_ACT + "expect comme browser_click)",
-                      "params": {"key": "str", "expect": "str?", "channel_id": "int?"}, "fn": _browser_tool("press")},
+                      "params": {"key": "str", "expect": "str?", "channel_id": "int?", "effect": "str?"}, "fn": _browser_tool("press")},
     "browser_scroll": {"desc": "fait défiler la page (up/down/left/right) puis l'observe",
                        "params": {"direction": "str?"}, "fn": _browser_tool("scroll")},
     "browser_back": {"desc": "revient à la page précédente", "params": {}, "fn": _browser_tool("back")},
-    "browser_verify": {"desc": "constate sur la page réelle qu'un texte est visible ; avec une action à effet non "
+    "browser_verify": {"desc": "state=authenticated|unauthenticated|challenge|uncertain rapporte ton interprétation "
+                       "de session (challenge/login suspendent ; uncertain permet de continuer à observer). "
+                       "Ou constate sur la page réelle qu'un texte est visible ; avec une action à effet non "
                        "vérifiée ou ambiguë (action_id), la marque vérifiée si ce texte n'était pas là avant elle",
-                       "params": {"text": "str", "action_id": "int?"}, "fn": _browser_tool("verify")},
+                       "params": {"text": "str?", "action_id": "int?", "state": "str?"}, "fn": _browser_tool("verify")},
     "browser_download": {"desc": "télécharge le fichier du lien @eN dans l'espace de la tâche (filename sans chemin)",
                          "params": {"ref": "str", "filename": "str"}, "fn": _browser_tool("download")},
     "browser_upload": {"desc": "joint au champ fichier @eN un fichier préparé dans la boîte d'envoi du business ; "
-                       + _BROWSER_ACT, "params": {"ref": "str", "filename": "str", "channel_id": "int?"},
+                       + _BROWSER_ACT, "params": {"ref": "str", "filename": "str", "channel_id": "int?", "effect": "str?"},
                        "fn": _browser_tool("upload")},
     "agnes_probe": {"desc": "Vérifie que le service Agnes local (http://127.0.0.1:8765) répond ; optionnel, ne bloque pas",
                     "params": {"base_url": "str?"}, "fn": _agnes_probe},
@@ -1460,6 +1466,25 @@ def _react_prompt_context(context: list[dict], steps: list[dict]) -> list[dict]:
     return context[:2] + summary + context[-4:]
 
 
+def _browser_prompt_messages(context):
+    """Images exist in provider requests only; checkpoints/context keep scoped references."""
+    if not any(entry.get('_browser_image') for entry in context):
+        return context
+    scope = browser_workspace.current_scope()
+    messages = []
+    for entry in context:
+        message = {k: v for k, v in entry.items() if k != '_browser_image'}
+        if entry.get('_browser_image'):
+            try:
+                part = browser_workspace.image_part(entry['_browser_image'], business=scope.business,
+                                                    scope_key=scope.key)
+                message['content'] = [{'type': 'text', 'text': str(message['content'])}, part]
+            except PermissionError:
+                message['content'] = str(message['content']) + '\nCapture indisponible ou lecture non autorisée.'
+        messages.append(message)
+    return messages
+
+
 def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
                allowed_tools: set[str] | None = None, *,
                search_browse_lockstep: bool = False,
@@ -1473,7 +1498,9 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         context.append({"role": "assistant", "content": json.dumps(
             {"tool": step.get("tool"), "args": step.get("args") or {}}, ensure_ascii=False)[:600]})
         context.append({"role": "user", "content": "Observation déjà acquise, ne pas répéter : " +
-                        str(step.get("result") or "")})
+                        str(step.get("result") or ""),
+                        **({'_browser_image': step['result_data']['image']} if step.get('tool') == 'browser_screenshot'
+                           and isinstance(step.get('result_data'), dict) and step['result_data'].get('image') else {})})
     last_sig = None
     repeat = 0
     lockstep_url = None
@@ -1499,7 +1526,7 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
                 economical = journal.current_run() and journal.current_run().profile == "economical"
                 prompt_context = _react_prompt_context(context, steps) if economical else context + [
                     {"role": "user", "content": "Choisis ta prochaine action (JSON)."}]
-                r = deepseek.call_json(role, "action", MODEL, prompt_context,
+                r = deepseek.call_json(role, "action", MODEL, _browser_prompt_messages(prompt_context),
                     max_tokens=500 if economical else 2000,
                     validate=(_validate_action_contract if journal.current_run()
                               and journal.current_run().profile == "economical" else None))
@@ -1588,7 +1615,9 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
             repeat = 0
         if refusal is None:
             db.post(role, f"action {tool} {json.dumps(args, ensure_ascii=False)[:90]}")
-        context.append({"role": "user", "content": f"Résultat de {tool} : {result_str}"})
+        context.append({"role": "user", "content": f"Résultat de {tool} : {result_str}",
+                        **({'_browser_image': result['image']} if tool == 'browser_screenshot'
+                           and isinstance(result, dict) and result.get('image') and not result.get('refused') else {})})
         # Le résultat structuré reste intact ; result n'est qu'une vue de prompt bornée.
         step_record = {"step": i + 1, "tool": tool, "result": result_str}
         if checkpoint:
@@ -1731,7 +1760,7 @@ MAX_PLAN_TASKS = 5
 # Le but est la continuité de travail : une URL/source déjà trouvée doit rester exploitable même
 # si l'agent amont termine sur son budget d'étapes avant d'avoir produit un final détaillé.
 _HANDOFF_TOOLS = {"search", "browse", "record_observation", "economy_status", "resources_status",
-                  "browser_navigate", "browser_snapshot", "browser_verify", "browser_download"}
+                  "browser_navigate", "browser_snapshot", "browser_screenshot", "browser_verify", "browser_download"}
 
 
 def _handoff_payload(result: dict) -> dict:

@@ -82,10 +82,14 @@ class FakeAccountSession:
             self.url = args[0]
             return ok({'url': self.url})
         if command == 'eval':
+            if args[0].endswith('return Boolean(!login && !challenge); })()'):
+                return ok({'result': self.logged_in})
             if 'octopus_challenge' in args[0] or 'octopus_traffic' in args[0]:
                 return ok({'result': False})
             # Fixed boolean probes only; no snapshot, cookie or field-value access.
-            if args[0].endswith('return Boolean(challenge); })()') or args[0].endswith('return Boolean(login); })()'):
+            if args[0].endswith('return Boolean(login); })()'):
+                return ok({'result': not self.logged_in})
+            if args[0].endswith('return Boolean(challenge); })()'):
                 return ok({'result': False})
             assert 'document.body.innerText.includes(marker)' in args[0]
             assert 'input[type=password]' in args[0]
@@ -464,15 +468,14 @@ def test_human_verification_is_required_after_oauth_and_only_returns_boolean(mon
         assert not any(c == 'eval' for c, _ in session.commands)
 
 
-def test_account_configuration_requires_authenticated_marker_and_scoped_verify_url():
+def test_account_configuration_accepts_optional_hint_but_requires_scoped_verify_url():
     args = dict(actor='human', provider='Unknown', label='Compte', url=URL,
                 domains=['new-platform.example'], businesses=[BUSINESS])
-    with pytest.raises(resources.ResourceError):
-        resources.configure_account('unverified', **args, authenticated_text='')
+    assert resources.configure_account('unverified', **args)['web_account']['authenticated_text'] == ''
     with pytest.raises(resources.ResourceError):
         resources.configure_account('unverified', **args, authenticated_text='Déconnexion',
                                     verify_url='https://oauth.example/callback')
-    assert resources.get('unverified') is None
+    assert resources.get('unverified')['web_account']['verify_url'] == URL
 
 
 def test_expired_disabled_and_other_ownership(monkeypatch):

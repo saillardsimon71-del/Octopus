@@ -27,6 +27,8 @@ def technical_refusal(reason: str) -> bool:
         "sortie structurée invalide", "HTTP 429", "429", "cooldown",
         "TimeoutError:", "ConnectionError:",
         "provider temporairement indisponible", "navigateur indisponible :",
+        "capture indisponible", "capture PNG bornée requise", "backend_error",
+        "effet déclaré :", "état sémantique invalide", "état de session et preuve d’action",
     )) or (reason.startswith("argument ") and " : type attendu " in reason)
 
 
