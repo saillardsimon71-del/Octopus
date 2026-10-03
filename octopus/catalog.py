@@ -79,6 +79,8 @@ def _overlay_omniroute(raw: dict) -> dict:
     vision_route = any('vision' in model.get('capabilities', [])
                        and model_name in (key, model.get('api_model'))
                        for key, model in raw.get('models', {}).items())
+    fixed_browser_model = next((model for key, model in raw.get('models', {}).items()
+        if model_name in (key, model.get('api_model')) and model.get('provider') != 'omniroute'), None)
     zero_cost_attestation = os.environ.get("OMNIROUTE_ZERO_COST_ATTESTATION", "").strip().lower()
     raw.setdefault("providers", {})[provider_id] = {
         "kind": "cloud",
@@ -100,6 +102,8 @@ def _overlay_omniroute(raw: dict) -> dict:
         "notes": "Modèle virtuel OmniRoute : auto/best-free. La disponibilité et le provider réel dépendent des connexions OmniRoute.",
     }
 
+    if fixed_browser_model:
+        raw['models'][model_id]['browser_identity'] = fixed_browser_model['api_model']
     devworker_models = {
         "omniroute/devworker-groq": "groq/openai/gpt-oss-120b",
     }
@@ -112,6 +116,10 @@ def _overlay_omniroute(raw: dict) -> dict:
             "zero_cost_attestation": zero_cost_attestation,
             "notes": "Route DevWorker dediee via LiteLLM, sans fallback cross-provider interne.",
         }
+    # Dedicated route names are aliases; qualify the configured underlying model.
+    known = raw['models'].get('groq/gpt-oss-120b')
+    if known:
+        raw['models']['omniroute/devworker-groq']['browser_identity'] = known['api_model']
     raw["models"]["omniroute/devworker-groq"].update({
         "json_schema_mode": "tool_call",
         "structured_methods": ["tool_call", "json_object", "text"],
@@ -183,6 +191,14 @@ def load(path: Path | None = None) -> Catalog:
         return cached[1]
     raw = json.loads(p.read_text(encoding="utf-8"))
     raw = _overlay_omniroute(raw)
+    # Browser candidates compete across providers; no model name implies competence.
+    # Qualification in llm applies to every profile, including legacy/baseline routes.
+    raw.setdefault("tasks", {}).setdefault("browser.react_step", {
+        "needs": ["json"], "privacy": "internal", "browser_qualification": "browser-v1", "baseline": "deepseek/flash",
+        "candidates": {profile: [mid for mid, model in raw["models"].items()
+            if model['cost_class'] in policy.get('allowed_cost_classes', COST_CLASSES)]
+            for profile, policy in raw["profiles"].items()},
+    })
     economical_free = {
         "agent.react_step": ["omniroute/devworker-groq", "openrouter/dots-3-free", "groq/gpt-oss-120b"],
         "agent.plan": ["openrouter/dots-3-free", "omniroute/devworker-groq", "groq/gpt-oss-120b"],
@@ -203,7 +219,8 @@ def load(path: Path | None = None) -> Catalog:
         if not eligible_baseline:
             paid = None
         free_candidates = [] if name == "agent.decision" else (preferred if preferred else free)
-        candidates["economical"] = list(dict.fromkeys(free_candidates)) + ([paid] if paid else [])
+        if name != "browser.react_step":
+            candidates["economical"] = list(dict.fromkeys(free_candidates)) + ([paid] if paid else [])
     validate(raw)
     cat = Catalog(raw=raw, path=p)
     _cache[cache_key] = (mtime, cat)

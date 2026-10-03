@@ -148,7 +148,7 @@ def account_work(ctx):
     if not mandates.account_authority(ctx.business, key, 'read'):
         raise PermissionError('lecture compte non mandatée ou session indisponible')
     # Caller-owned input is rebuilt, even if somebody manually enqueued an unsafe task.
-    ctx.input['allowed_tools'] = ['browser_navigate', 'browser_snapshot', 'browser_scroll', 'browser_back',
+    ctx.input['allowed_tools'] = ['browser_navigate', 'browser_snapshot', 'browser_screenshot', 'browser_scroll', 'browser_back',
                                  'browser_click', 'browser_type', 'browser_select', 'browser_check',
                                  'browser_press', 'browser_verify', 'browser_upload']
     ctx.input['browser_public_only'] = False

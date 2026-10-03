@@ -68,6 +68,8 @@ def configured(monkeypatch, tmp_path, providers_up):
     resources._write('account', {'web_account': json.dumps(dict(account, browser_kind='chrome_stable'))})
     monkeypatch.setattr(resources, 'account_browser_options', lambda key: {})
     monkeypatch.setattr(web_guard, '_resolved_ips', lambda host: [ipaddress.ip_address('8.8.8.8')])
+    from browser_evidence import qualify
+    qualify('deepseek/flash')
     # Gateway uses the configured economical policy; availability/evidence are simulated only.
     monkeypatch.setattr(journal, 'evidence', lambda *a: {'eligible': True, 'reason': 'offline fixture'})
     return resources.get('account')['web_account']
@@ -156,13 +158,15 @@ def authorized_space(monkeypatch):
 
 
 def test_model_selects_full_mandated_sequence_and_visual_confirmation(configured, transport, monkeypatch):
+    from browser_evidence import qualify
+    qualify('deepseek/flash')
     space, page, mid = authorized_space(monkeypatch)
     fake_reply(transport, [
         {'tool': 'browser_navigate', 'args': {'url': URL}},
         {'tool': 'browser_type', 'args': {'ref': '@e1', 'text': 'Contenu révisé', 'effect': 'edit'}},
         {'tool': 'browser_click', 'args': {'ref': '@e2', 'effect': 'publish', 'expect': 'Résultat @e2'}},
         {'tool': 'browser_click', 'args': {'ref': '@e3', 'effect': 'contact', 'expect': 'Résultat @e3'}},
-        {'tool': 'browser_screenshot', 'args': {}}, {'final': 'Résultat visuel constaté'}])
+        {'tool': 'browser_screenshot', 'args': {}}, {'final': 'Résultat constaté', 'objective_status': 'completed', 'missing': [], 'evidence': [{'step': 4, 'quote': 'Résultat @e3'}]}])
     with journal.run('a', 'test', profile='legacy'):
         result = runtime._run_agent('ORBIT', 'Choisis les actions utiles au compte', 8, False,
             allowed_tools={'browser_navigate', 'browser_type', 'browser_click', 'browser_screenshot'})
@@ -310,3 +314,40 @@ def test_real_pre_capture_js_refuses_rendered_secrets(configured, monkeypatch, l
     with pytest.raises(bw.Refused): space.screenshot()
     assert not any(c == 'screenshot' for c, _ in page.commands)
     space.close()
+
+
+def test_read_mandate_allows_observed_disclosure_and_navigation_expectation(configured, monkeypatch):
+    resources.set_account_session('account','connected')
+    mid=mandates.grant('a','Lecture seule','owned_account',['read'],actor='human',resource_keys=['account'])
+    tid=tasks.enqueue('a','resources.account_work',{'browser_resource_key':'account'})
+    class Menu(Page):
+        def __init__(self):
+            super().__init__()
+            self.refs={'e1':{'role':'button','name':'Utilisateur','expanded':False,'haspopup':'menu'},
+                       'e2':{'role':'link','name':'Orders'}}
+        def run(self,command,args=(),**kwargs):
+            if command=='click':
+                self.commands.append((command,list(args)))
+                self.text='Compte opérationnel — commandes observées'
+                return {'success':True,'data':{}}
+            return super().run(command,args,**kwargs)
+    page=Menu()
+    space=bw.Workspace(bw.Scope('t'+str(tid),'a',tid),web_guard.BrowseState(),session_factory=lambda *a,**k:page)
+    try:
+        space.navigate(URL)
+        assert space.click('e1')['ok']
+        assert space.click('e2',expect='page ouverte')['ok']
+        assert not journal.query('SELECT * FROM channel_actions')
+        mandates.revoke('a',mid,actor='human')
+        assert bw.call_on(space,'click',ref='e1')['refused']
+    finally: space.close()
+
+
+def test_sensitive_disclosure_cannot_be_downgraded_to_read(configured,monkeypatch):
+    space,page,_=authorized_space(monkeypatch)
+    try:
+        space.navigate(URL)
+        space._refs['e9']={'role':'button','name':'Payments','expanded':False,'haspopup':'menu'}
+        assert bw.call_on(space,'click',ref='e9')['refused']
+        assert not journal.query('SELECT * FROM channel_actions')
+    finally: space.close()

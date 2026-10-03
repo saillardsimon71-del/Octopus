@@ -62,8 +62,8 @@ READ_SAFE_KEYS = frozenset({"Tab", "Shift+Tab", "Escape", "ArrowUp", "ArrowDown"
 _REF_RE = re.compile(r"^@?(e\d+)$")
 # Un lien est une navigation (lecture) sauf si son libellé annonce un effet.
 _RISKY_LINK_RE = re.compile(
-    r"supprim|delete|remove|envoy|send|publi|payer|pay\b|paiement|achet|buy|checkout|confirm|valid|submit|"
-    r"soumet|abonn|subscri|désinscri|desinscri|unsubscri|annul|cancel|command|order|accept|invit|partag|share|"
+    r"supprim|delete|remove|envoy|send|publi|payer|pay(?:ment|out)?s?\b|paiement|achet|buy|checkout|confirm|valid|submit|"
+    r"soumet|abonn|subscri|désinscri|desinscri|unsubscri|annul|cancel|place.*order|order\s+now|pass.*command|accept|invit|partag|share|"
     r"like|follow|suivre|sign|logout|déconnex|deconnex|retirer|withdraw|transf", re.IGNORECASE)
 # Champs réservés à l'humain : identifiants, second facteur, paiement.
 _HUMAN_ONLY_FIELD_RE = re.compile(
@@ -460,7 +460,7 @@ class Workspace:
         self._checkpoint()
         blocked = self._proxy.blocked[-5:] if self._proxy else []
         view = {"ok": True, "url": self._safe_url(url), "title": agent_browser.redact(title),
-                "snapshot": snapshot, "refs": len(self._refs), "source": web_guard.UNTRUSTED_NOTE}
+                "snapshot": snapshot, "refs": len(self._refs), "elements": self._element_metadata(), "source": web_guard.UNTRUSTED_NOTE}
         if blocked:
             view["blocked_requests"] = [self._safe_url(u) for u in blocked]
             self._proxy.blocked.clear()
@@ -469,6 +469,46 @@ class Workspace:
             self._resume_reported = True
         self._qualify_page(view)
         return view
+
+    def _element_metadata(self):
+        """Only allowlisted observed attributes. No arbitrary JS, values, HTML or secrets."""
+        requests = []
+        for ref, info in list(self._refs.items())[:40]:
+            if not re.fullmatch(r'e[0-9]+', ref):
+                continue
+            attrs = ['href'] if info.get('role') == 'link' else (
+                ['aria-expanded', 'aria-haspopup', 'disabled', 'aria-checked'] if info.get('role') == 'button' else [])
+            requests.extend((ref, attr) for attr in attrs)
+        if requests:
+            try:
+                rows = self._read('batch', [f"get attr @{ref} {attr}" for ref, attr in requests], timeout=10).get('results', [])
+                if isinstance(rows, list) and len(rows) == len(requests):
+                    for (ref, attr), row in zip(requests, rows):
+                        data = row.get('result') or row.get('data') or {}
+                        value = data.get('value', data.get('attribute')) if isinstance(data, dict) else None
+                        if value is None or not row.get('success'):
+                            continue
+                        if attr == 'href':
+                            from urllib.parse import urljoin
+                            href = urljoin(self._url, str(value))
+                            parts = urlsplit(href)
+                            if parts.scheme in ('http', 'https') and not parts.username and not parts.password and not agent_browser.contains_secret(href):
+                                self._refs[ref]['href'] = self._safe_url(href)
+                        elif attr in ('aria-expanded', 'disabled', 'aria-checked'):
+                            self._refs[ref][{'aria-expanded': 'expanded', 'aria-checked': 'checked'}.get(attr, attr)] = str(value).lower() == 'true' or attr == 'disabled'
+                        elif str(value) in ('true', 'menu', 'listbox', 'dialog', 'tree', 'grid'):
+                            self._refs[ref]['haspopup'] = str(value)
+            except (RuntimeError, ValueError, TypeError):
+                pass  # Older backend: original accessibility snapshot remains usable.
+        metadata = []
+        for ref, info in self._refs.items():
+            entry = {'ref': '@' + ref}
+            for key in ('role', 'name', 'href', 'expanded', 'disabled', 'checked', 'haspopup'):
+                if key in info:
+                    value = info[key]
+                    entry[key] = (_account_text(agent_browser.redact(str(value)))[:300] if isinstance(value, str) else value)
+            metadata.append(entry)
+        return metadata[:40]
 
     def _safe_url(self, url):
         if self.resource_key:
@@ -849,7 +889,11 @@ class Workspace:
         self._ensure_page()
         target, info = self._target(ref)
         role, name = str(info.get("role") or ""), str(info.get("name") or "")
-        if role == "link" and not _RISKY_LINK_RE.search(name) and channel_id in (None, "") and not expect and not effect:
+        # Observed disclosure controls open local UI; this is an affordance boundary,
+        # not a choice of destination/action. Sensitive/effect controls remain guarded.
+        disclosure = role == 'button' and isinstance(info.get('expanded'), bool) and info.get('haspopup') in ('true', 'menu', 'listbox')
+        read_control = (role == 'link' or disclosure) and not _RISKY_LINK_RE.search(name) and not mandates.SENSITIVE.search(name)
+        if read_control and channel_id in (None, "") and not effect:
             result = self._cmd("click", [target])  # simple navigation : lecture
             if not result.get("success"):
                 return {"ok": False, "error": agent_browser.redact(str(result.get("error") or ""))[:300]}
@@ -1233,3 +1277,126 @@ def call_on(space: Workspace, method: str, **kwargs) -> dict:
         result = {"ok": False, "error": agent_browser.redact(str(exc))[:500]}
     space.observe(method, result)
     return result
+
+
+def trace_args(args):
+    """Allowlist; form contents, filenames and arbitrary model-supplied extras are never logged."""
+    out = {}
+    if not isinstance(args, dict):
+        return out
+    for key in ('ref', 'effect', 'full', 'full_page', 'direction', 'state', 'action_id', 'channel_id'):
+        value = args.get(key)
+        if key == 'ref' and (not isinstance(value, str) or not re.fullmatch(r'@?e[0-9]+', value)):
+            value = '[invalid ref]' if value is not None else None
+        if key == 'effect' and value not in (None, 'contact', 'publish', 'edit'):
+            value = '[invalid effect]'
+        if key == 'direction' and value not in (None, 'up', 'down', 'left', 'right'):
+            value = '[invalid direction]'
+        if key == 'state' and value not in (None, 'authenticated', 'unauthenticated', 'challenge', 'uncertain'):
+            value = '[invalid state]'
+        if key in ('channel_id', 'action_id') and value is not None and type(value) is not int:
+            value = '[invalid type]'
+        if value is not None:
+            out[key] = agent_browser.redact(str(value))[:80] if isinstance(value, str) else value if type(value) in (int, bool) else '[invalid type]'
+    if 'url' in args and isinstance(args['url'], str):
+        out['url'] = trace_url(args['url'])
+    if 'text' in args:
+        out['text'] = '[omitted]'
+    if 'expect' in args:
+        out['expect'] = '[omitted]'
+    if 'key' in args:
+        out['key'] = args['key'] if args['key'] in ('Tab', 'Escape', 'Enter', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight') else '[omitted]'
+    return out
+
+
+def trace_url(url):
+    try:
+        parts = urlsplit(str(url))
+        if agent_browser.contains_secret(str(url)):
+            return '[redacted]'
+        return agent_browser.redact(f'{parts.scheme}://{parts.hostname or ""}{":" + str(parts.port) if parts.port else ""}{parts.path}')[:500]
+    except ValueError:
+        return '[invalid URL]'
+
+
+class BrowserTrajectory:
+    """Observation novelty is a bounded continuation signal, never proof of goal completion."""
+    def __init__(self, steps=()):
+        self.states, self.actions = [], []
+        self.url = ''
+        self.observation = None
+        self.no_progress = 0
+        self.errors = 0
+        self.novel = 0
+        self.escalations = 0
+        self.excluded = set()
+        self.min_quality = 0.
+        self.observed_urls = set()
+        self.action_start = self.state_start = 0
+        for step in steps:
+            trace = step.get('browser_controller') or {}
+            self.record(step.get('tool', ''), step.get('args') or {}, step.get('result_data') or {})
+            if trace.get('escalation'):
+                self.escalations += 1
+                self.excluded.update(trace.get('excluded_models') or [])
+                self.min_quality = max(self.min_quality, trace.get('min_quality', 0.))
+                self.reset_detection()
+
+    def reset_detection(self):
+        self.no_progress = self.errors = 0
+        self.action_start, self.state_start = len(self.actions), len(self.states)
+
+    def record(self, tool, args, result):
+        before_url, before_hash = self.url, self.observation
+        safe_args = args if isinstance(args, dict) else {}
+        url_provenance = ('observed_or_historical' if isinstance(safe_args.get('url'), str) and safe_args['url'] in self.observed_urls else
+                          'model_supplied_unobserved') if tool == 'browser_navigate' and isinstance(args, dict) else None
+        result = result if isinstance(result, dict) else {}
+        error = bool(result.get('refused') or result.get('error') or result.get('ok') is False)
+        self.errors = self.errors + 1 if error else 0
+        if not error and result.get('url'):
+            self.url = trace_url(result['url'])
+        observed = any(k in result for k in ('snapshot', 'image'))
+        if observed and not error:
+            if result.get('url'):
+                self.observed_urls.add(result['url'])
+            for element in result.get('elements') or []:
+                if isinstance(element, dict) and element.get('href'):
+                    self.observed_urls.add(element['href'])
+            image = result.get('image') or {}
+            # Ref churn alone is not information/progress.
+            payload = [self.url, re.sub(r'@?e[0-9]+', '@ref', str(result.get('snapshot') or '')),
+                       image.get('sha256') if isinstance(image, dict) else None]
+            self.observation = _digest(payload)
+        new = bool(observed and not error and self.observation not in self.states)
+        self.novel += int(new)
+        self.no_progress = 0 if new else self.no_progress + 1
+        if self.observation:
+            self.states.append(self.observation)
+        sig = _digest([tool, trace_args(args)])
+        self.actions.append(sig)
+        repeated = len(self.actions) - self.action_start >= 3 and len(set(self.actions[-3:])) == 1 and not new
+        cycle = len(self.states) - self.state_start >= 4 and self.states[-4] == self.states[-2] and self.states[-3] == self.states[-1] and self.states[-1] != self.states[-2]
+        reason = ('repeated_errors' if self.errors >= 2 else 'repeated_action' if repeated else
+                  'navigation_cycle' if cycle else 'no_new_observation' if self.no_progress >= 3 else None)
+        return {'url_before': before_url, 'url_after': self.url, 'observation_before': before_hash,
+                'observation_after': self.observation, 'progress': new, 'stagnation': reason,
+                'tool_ok': not error, 'url_provenance': url_provenance, 'screenshot_requested': tool == 'browser_screenshot'}
+
+
+def record_controller_trace(trace):
+    scope = current_scope()
+    # This event contains no prompt, raw observation, form content or image bytes.
+    tasks.emit(scope.business, scope.task_id, 'browser.controller', trace)
+    identity = (trace.get('qualification') or {}).get('identity')
+    if trace.get('stagnation') and identity:
+        run = journal.current_run()
+        item = f"{scope.key}:{run.id if run else 'local'}:{trace.get('step')}"
+        if not journal.query("SELECT id FROM bench_results WHERE task='browser.execution' AND model=? AND item=?", (identity, item)):
+            journal.record_bench_result({'ts': time.time(), 'bench_run_id': run.id if run else None,
+                'suite': 'browser.live', 'task': 'browser.execution', 'item': item, 'model': identity,
+                'prompt_version': 'browser-v1', 'passed': 0, 'score': 0.,
+                'checks': json.dumps({'stagnation': trace['stagnation'], 'step': trace.get('step')}),
+                'llm_call_id': trace.get('call_id'), 'output_preview': 'measured non-progression'})
+    if scope.task_id:
+        tasks.save_step(scope.task_id, 'browser.controller', trace)

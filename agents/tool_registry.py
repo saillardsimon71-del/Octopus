@@ -6,6 +6,9 @@ of upstream runtime code. The existing params dialect is the sole schema.
 """
 from __future__ import annotations
 
+import re
+from urllib.parse import urlsplit
+
 from . import cancel
 from octopus.browser_workspace import HumanBrowserRequired
 
@@ -17,6 +20,7 @@ def technical_refusal(reason: str) -> bool:
     refusal. Unknown refusals remain human boundaries in the supervisor.
     """
     return reason.startswith((
+        "invalid_tool_arguments:",
         "argument obligatoire manquant :", "args doit être un objet", "outil inconnu :",
         "hôte local refusé :", "adresse locale ou privée refusée :", "adresse privée refusée :",
         "hôte non résolvable :", "URL sans hôte", "schéma refusé :",
@@ -55,7 +59,7 @@ class ToolRegistry(dict):
     listing an entry grants no authority to execute an external action.
     """
 
-    def describe(self, allowed_tools: set[str] | None = None, *, legacy_search: bool = False) -> str:
+    def describe(self, allowed_tools: set[str] | None = None, *, legacy_search: bool = False, browser_details: bool = False) -> str:
         items = self.items() if allowed_tools is None else (
             (name, spec) for name, spec in self.items() if name in allowed_tools
         )
@@ -64,13 +68,40 @@ class ToolRegistry(dict):
             if legacy_search and name == "search":
                 lines.append("- search(query) : recherche web (liens)")
             else:
-                lines.append(f"- {name}({', '.join(spec['params'])}) : {spec['desc']}")
+                params = spec['params']
+                if name.startswith('browser_') and browser_details:
+                    # Workspace resolves the active account/business channel deterministically.
+                    params = {k: v for k, v in params.items() if k != 'channel_id'}
+                    labels = [f"{k}: {v}" for k, v in params.items()]
+                    lines.append(f"- {name}({', '.join(labels)}) : {spec['desc'].replace('(channel_id optionnel si un seul)', '(canal dérivé du workspace)')}")
+                else:
+                    lines.append(f"- {name}({', '.join(params)}) : {spec['desc']}")
         return "\n".join(lines)
 
     def validate(self, tool: str, args) -> str | None:
         """Validation structurelle minimale des paramètres déclarés dans le registre."""
         if not isinstance(args, dict):
             return f"args doit être un objet, reçu {type(args).__name__}"
+        if tool.startswith('browser_'):
+            unexpected = set(args) - set(self[tool]['params'])
+            if unexpected:
+                return "invalid_tool_arguments: unknown parameters; use only declared schema fields"
+            for key, values in {'effect': ('contact', 'publish', 'edit'),
+                    'direction': ('up', 'down', 'left', 'right'),
+                    'state': ('authenticated', 'unauthenticated', 'challenge', 'uncertain')}.items():
+                if key in args and args[key] is not None and args[key] not in values:
+                    return f"invalid_tool_arguments: {key} must be one of {'|'.join(values)} or omitted"
+            if 'ref' in args and (not isinstance(args['ref'], str) or not re.fullmatch(r'@?e[0-9]+', args['ref'])):
+                return "invalid_tool_arguments: ref must match @eN from latest observation"
+            if 'url' in args:
+                try:
+                    parts = urlsplit(args['url'])
+                    valid = parts.scheme in ('http', 'https') and bool(parts.hostname) and not parts.username and not parts.password
+                    parts.port  # validates malformed/out-of-range ports
+                except (TypeError, ValueError):
+                    valid = False
+                if not valid:
+                    return "invalid_tool_arguments: url must be an absolute HTTP(S) URL without credentials"
         for name, declared in self[tool]["params"].items():
             declared = str(declared)
             variants = declared.split("|")
@@ -83,7 +114,7 @@ class ToolRegistry(dict):
             value = args[name]
             if not any(_matches_tool_type(value, token) for token in clean):
                 expected = "|".join(clean)
-                return f"argument {name} : type attendu {expected}, reçu {type(value).__name__}"
+                return ("invalid_tool_arguments: " if tool.startswith('browser_') else "") + f"argument {name} : type attendu {expected}, reçu {type(value).__name__}"
         return None
 
     def normalize_allowed(self, allowed_tools) -> set[str] | None:

@@ -159,7 +159,8 @@ def test_invalid_source_changes_to_public_alternative_without_human(monkeypatch,
             return {"ok": False, "refused": True, "reason": refusal}
         return {"ok": True, "url": kwargs["url"], "snapshot": "Observation publique datée"}
 
-    monkeypatch.setattr(deepseek, "call_json", model)
+    from browser_evidence import adapt_decider
+    monkeypatch.setattr(deepseek, "call_json", adapt_decider(model))
     monkeypatch.setattr(browser_workspace, "call", navigate)
     oid = supervisor.start_pursuit()
     supervisor.run_pursuit(oid)
@@ -364,7 +365,8 @@ def test_synthesis_retry_reuses_raw_collection_and_only_repeats_synthesis(monkey
         sources.append(args)
         return {"ok": True, "text": "Preuve brute conservée", "url": "https://public.example"}
 
-    monkeypatch.setattr(deepseek, "call_json", model)
+    from browser_evidence import adapt_decider
+    monkeypatch.setattr(deepseek, "call_json", adapt_decider(model))
     monkeypatch.setitem(runtime.TOOLS["search"], "fn", source)
     oid = supervisor.start_pursuit()
     supervisor.run_pursuit(oid)
@@ -393,7 +395,8 @@ def test_generic_supervisor_synthesis_retry_also_reuses_collection(monkeypatch):
         sources.append(args)
         return {"ok": True, "text": "Observation publique conservée"}
 
-    monkeypatch.setattr(deepseek, "call_json", model)
+    from browser_evidence import adapt_decider
+    monkeypatch.setattr(deepseek, "call_json", adapt_decider(model))
     monkeypatch.setitem(runtime.TOOLS["search"], "fn", search)
     worker.load_handlers(["octopus.builtin_handlers"])
     oid = strategy.create("objective", BUSINESS, "Étude publique", created_by="human", statement="Étudier une piste")
@@ -434,7 +437,8 @@ def test_crash_after_observation_resumes_partial_step_without_duplicate_collecti
         sources.append(args)
         return {"ok": True, "text": "Observation avant crash"}
 
-    monkeypatch.setattr(deepseek, "call_json", model)
+    from browser_evidence import adapt_decider
+    monkeypatch.setattr(deepseek, "call_json", adapt_decider(model))
     monkeypatch.setitem(runtime.TOOLS["search"], "fn", source)
     oid = supervisor.start_pursuit()
     first = supervisor.work_tasks(BUSINESS, oid)[0]
@@ -489,7 +493,7 @@ def test_real_gateway_supervisor_path_recovers_without_live_provider(monkeypatch
             text = '{"tasks":'
         elif request["max_tokens"] == 700:
             text = json.dumps({"tasks": [{"role": "SOUT", "task": "Observer une source publique"}]})
-        elif request["max_tokens"] == 500:
+        elif request["max_tokens"] in (500,1200):
             text = json.dumps({"final": "Observation publique acquise"} if searches else {
                 "tool": "search", "args": {"query": "demande publique"}})
         else:
@@ -519,6 +523,8 @@ def test_real_gateway_supervisor_path_recovers_without_live_provider(monkeypatch
 def test_paused_degraded_pursuit_resumes_only_synthesis_with_real_gateway_and_fake_transport(
         monkeypatch, transport, providers_up, checkpoint_present):
     """Same isolated DataRoot, real gateway/worker, simulated Web and provider only."""
+    from browser_evidence import qualify
+    qualify('deepseek/flash')
     monkeypatch.setattr(supervisor, "PURSUIT_SIGNAL_TARGET", 1)
     from agents import agent_browser
 
@@ -535,11 +541,11 @@ def test_paused_degraded_pursuit_resumes_only_synthesis_with_real_gateway_and_fa
             stages.append("plan")
             assert not resumed, "La reprise ne doit pas replanifier la collecte terminée"
             text = json.dumps({"tasks": [{"role": "SOUT", "task": "Observer deux sources publiques de demandes"}]})
-        elif request["max_tokens"] == 500:
+        elif request["max_tokens"] in (500,1200):
             stages.append("agent")
             assert not resumed, "La reprise ne doit pas relancer le sous-agent terminé"
             answer = ({"tool": "browser_navigate", "args": {"url": sources[len(navigations)]}}
-                      if len(navigations) < len(sources) else {"final": "Deux observations publiques conservées"})
+                      if len(navigations) < len(sources) else {"final": "Deux observations publiques conservées", "objective_status":"completed", "missing":[], "evidence":[{"step":2,"quote":"Observation Web fixture sourcée"}]})
             text = json.dumps(answer)
         else:
             stages.append("synthesis")
@@ -567,14 +573,14 @@ def test_paused_degraded_pursuit_resumes_only_synthesis_with_real_gateway_and_fa
     assert all(work["status"] == "done_degraded" for work in works)
     assert all(work["output"]["execution_status"] == "synthesis_unavailable" for work in works)
     assert strategy.get("objective", oid, BUSINESS)["status"] == "paused"
-    assert stages.count("plan") == 1 and stages.count("agent") == 3 and stages.count("synthesis") == 6
+    assert stages.count("plan") == 1 and stages.count("agent") == 4 and stages.count("synthesis") == 6
     assert navigations == sources
     last = works[-1]
     observations = copy.deepcopy(last["output"]["results"])
     assert tasks.step_value(last["id"], "pursuit.progress")["collect_complete"] is True
     before_calls = [dict(row) for row in journal.query("SELECT * FROM llm_calls ORDER BY id")]
     before_cost = read_snapshot(BUSINESS)["token_cost_usd"]
-    assert before_cost == pytest.approx(.010)
+    assert before_cost == pytest.approx(.011)
     assert [row["status"] for row in before_calls][-6:] == ["invalid"] * 6
     assert all("JSONDecodeError" in row["error"] for row in before_calls[-6:])
     if not checkpoint_present:
@@ -591,7 +597,7 @@ def test_paused_degraded_pursuit_resumes_only_synthesis_with_real_gateway_and_fa
     assert current["status"] == "done" and current["output"]["synthesis_status"] == "validated"
     assert current["output"]["results"] == observations
     assert tasks.get(last["id"])["output"]["results"] == observations
-    assert navigations == sources and stages.count("plan") == 1 and stages.count("agent") == 3
+    assert navigations == sources and stages.count("plan") == 1 and stages.count("agent") == 4
     assert len(transport.calls) == request_count + 2
     retry_requests = [request for _, request in transport.calls[request_count:]]
     assert all(request["max_tokens"] == 4000 for request in retry_requests)

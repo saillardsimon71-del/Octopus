@@ -102,7 +102,8 @@ def _offline_cycle(monkeypatch, history, *, native_runtime=False, transport=None
 
         transport.handler = respond
     elif native_runtime:
-        monkeypatch.setattr(deepseek, "call_json", model)
+        from browser_evidence import adapt_decider
+        monkeypatch.setattr(deepseek, "call_json", adapt_decider(model))
     monkeypatch.setattr(supervisor, "pursuit_strategy_effect",
                         lambda *_: pytest.fail("Substitution/exécution de stratégie"))
     monkeypatch.setattr(acquisition, "start_acquisition",

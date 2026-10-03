@@ -276,11 +276,13 @@ def test_real_account_task_runtime_captcha_propagates_without_synthesis(native, 
     monkeypatch.setattr(Verifier, 'challenge', True)
     monkeypatch.setattr(agent_browser, 'Session', Verifier)
     def response(provider, request):
-        assert request['max_tokens'] in (700, 500)  # No synthesis after the boundary.
+        assert request['max_tokens'] in (700, 500, 1200)  # No synthesis after the boundary.
         output = {'tasks': [{'role': 'SOUT', 'task': 'Observer le compte'}]} if request['max_tokens'] == 700 else {
             'tool': 'browser_navigate', 'args': {'url': URL}}
         return llm.TransportResult(json.dumps(output), Usage(prompt_tokens=10, completion_tokens=10),
-            request['model'], resolved_provider='OfflineFake', provider_cost_usd=0.)
+            request['model'], resolved_model=request['model'], resolved_provider='OfflineFake', provider_cost_usd=0.)
+    from browser_evidence import qualify
+    qualify('deepseek/flash')
     transport.handler = response
     result = resources.account_task('b2b', 'account', 'Observer le compte')
     assert result['status'] == 'waiting_human' and len(transport.calls) == 2

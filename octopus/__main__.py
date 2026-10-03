@@ -439,6 +439,12 @@ def cmd_browser(args) -> int:
             print(json.dumps(result, ensure_ascii=False, indent=1))
             return 0 if result.get("ok") else 1
         return 0
+    if args.browser_cmd == "benchmark":
+        from . import browser_bench
+        result = browser_bench.run([m.strip() for m in args.models.split(',') if m.strip()],
+            repeats=args.repeats, allow_paid=args.allow_paid, max_cost_usd=args.max_cost)
+        print(json.dumps(result, ensure_ascii=False, indent=1))
+        return 0 if result['rows'] and all(r['passed'] for r in result['rows']) else 1
     if args.browser_cmd == "actions":
         rows = browser_workspace.list_actions(args.business, status=args.status, task_id=args.task)
         for r in rows:
@@ -579,6 +585,11 @@ def main(argv: list[str] | None = None) -> int:
     bsub = p.add_subparsers(dest="browser_cmd", required=True)
     x = bsub.add_parser("doctor", help="backend installé ? (--smoke : ouvre une vraie page locale)")
     x.add_argument("--smoke", action="store_true")
+    x = bsub.add_parser("benchmark", help="qualifier les modèles sur dix trajectoires locales ; aucun compte réel")
+    x.add_argument("--models", required=True)
+    x.add_argument("--repeats", type=int, default=2)
+    x.add_argument("--allow-paid", action="store_true")
+    x.add_argument("--max-cost", type=float, default=.05)
     x = bsub.add_parser("actions", help="actions navigateur à effet et leur état")
     x.add_argument("business")
     x.add_argument("--status", default=None)
