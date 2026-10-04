@@ -700,11 +700,10 @@ class WorkbenchV2(EntrepreneurialWorkbench):
                        (' · Désactivé' if account and not account.get('enabled') else '') +
                        ' · ' + account.get('ownership', 'À définir') +
                        (' · Dédié à OCTOPUS' if account.get('dedicated') else ''), padx=18, pady=2)
-            self._line(card, 'Activités autorisées : ' + (', '.join(account.get('businesses', [])) or 'Aucune') +
-                       '\nCapacités constatées : ' + (', '.join(row.get('capabilities', [])) or 'Non constatées') +
+            self._line(card, 'Capacités déclarées : ' + (', '.join(row.get('capabilities', [])) or 'Non déclarées') +
                        '\nDernière vérification : ' + _date(row.get('last_check_at')), COLORS['muted'], padx=18, pady=2)
             related = [m for m in self._snapshot.get('mandates', []) if m['status'] == 'active'
-                       and m['target'] == 'owned_account' and m['business'] in account.get('businesses', [])
+                       and m['target'] == 'owned_account'
                        and (row['key'] in json.loads(m['resource_keys']) or '*' in json.loads(m['resource_keys']))]
             self._line(card, 'Mandats : ' + (' ; '.join(m['label'] for m in related) or 'Aucun dans ce contexte'),
                        COLORS['muted'], padx=18, pady=2)
@@ -756,54 +755,91 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         request = (request or {}).get('web_request') or {}
         url = a.get('verify_url') or request.get('url') or (row or {}).get('locator') or ''
         from urllib.parse import urlsplit
-        current_business = business or self.selected_business_id
+        services = resources.account_services()
         window = ctk.CTkToplevel(self)
-        window.title('Configurer une ressource — aucun mot de passe')
-        window.geometry('680x700')
+        window.title('Modifier le compte' if key else 'Ajouter un compte')
+        window.geometry('620x460')
         panel = ctk.CTkScrollableFrame(window)
         panel.pack(fill='both', expand=True, padx=16, pady=16)
-        self._line(panel, 'Les domaines définissent le périmètre des tâches OCTOPUS après connexion. La connexion humaine peut utiliser le Web public, ses CDN et OAuth sans les ajouter ici. Choisissez un texte visible uniquement après connexion, par exemple « Déconnexion » sur votre tableau de bord.', COLORS['muted'])
+        self._line(panel, 'Service', pady=(7, 2))
+        advanced_used = [False]
+        fields = {}
+        def select_service(choice):
+            data = services[choice]
+            for name in ('provider', 'url', 'domains', 'verify_url', 'authenticated_text'):
+                value = data.get(name, data.get('url', '') if name == 'verify_url' else '')
+                if name == 'domains':
+                    value = ','.join(value)
+                fields[name].delete(0, 'end')
+                fields[name].insert(0, value)
+        service = ctk.CTkOptionMenu(panel, values=list(services), command=select_service)
+        service.set(next((name for name, data in services.items() if data['provider'] == a.get('provider')),
+                         request.get('platform') if request.get('platform') in services else 'Autre' if key else 'TikTok'))
+        service.pack(fill='x')
+        self._line(panel, 'Nom (facultatif)', pady=(10, 2))
+        fields['label'] = ctk.CTkEntry(panel, height=30)
+        fields['label'].insert(0, (row or {}).get('label') or '')
+        fields['label'].pack(fill='x')
+        advanced = ctk.CTkFrame(panel)
+        self._line(advanced, 'Les domaines définissent le périmètre des tâches OCTOPUS après connexion. La connexion humaine peut utiliser le Web public, ses CDN et OAuth sans les ajouter ici.', COLORS['muted'])
+        defaults = services[service.get()]
         values = [
             ('key', 'Identifiant unique', key or ''),
-            ('provider', 'Plateforme', a.get('provider') or request.get('platform') or ''),
-            ('label', 'Nom lisible', (row or {}).get('label') or ''),
-            ('url', 'URL de connexion HTTPS', (row or {}).get('locator') or request.get('url') or ''),
-            ('domains', 'Domaines autorisés aux tâches OCTOPUS, séparés par virgules', ','.join(a.get('domains', []) or [urlsplit(url).hostname or ''])),
-            ('businesses', 'Identifiants des activités autorisées, séparés par virgules', ','.join(a.get('businesses', []) or ([current_business] if current_business != DEFAULT_BUSINESS_ID else []))),
-            ('verify_url', 'URL de la page après connexion', url),
+            ('provider', 'Plateforme', a.get('provider') or request.get('platform') or defaults['provider']),
+            ('url', 'URL de connexion HTTPS', (row or {}).get('locator') or request.get('url') or defaults['url']),
+            ('domains', 'Domaines autorisés aux tâches OCTOPUS, séparés par virgules', ','.join(a.get('domains') or ([urlsplit(url).hostname] if url else defaults['domains']))),
+            ('verify_url', 'URL de la page après connexion', url or defaults['url']),
             ('authenticated_text', 'Indice de connexion (optionnel)', a.get('authenticated_text', ''))]
-        fields = {}
         for name, label, value in values:
-            self._line(panel, label, pady=(7, 2))
-            field = ctk.CTkEntry(panel, height=30)
+            self._line(advanced, label, pady=(7, 2))
+            field = ctk.CTkEntry(advanced, height=30)
             field.insert(0, value)
             field.pack(fill='x')
             fields[name] = field
-        self._line(panel, 'Propriétaire', pady=(7, 2))
-        owner = ctk.CTkOptionMenu(panel, values=['operator', 'business', 'other'])
+        self._line(advanced, 'Propriétaire', pady=(7, 2))
+        owner = ctk.CTkOptionMenu(advanced, values=['operator', 'business', 'other'])
         owner.set(a.get('ownership', 'operator'))
         owner.pack(anchor='w')
         dedicated = ctk.BooleanVar(value=a.get('dedicated', False))
-        ctk.CTkCheckBox(panel, text='Compte dédié aux activités OCTOPUS', variable=dedicated).pack(anchor='w', pady=8)
+        ctk.CTkCheckBox(advanced, text='Compte dédié à OCTOPUS', variable=dedicated).pack(anchor='w', pady=8)
+        enabled = ctk.BooleanVar(value=a.get('enabled', True))
+        ctk.CTkCheckBox(advanced, text='Compte activé', variable=enabled).pack(anchor='w', pady=8)
+        def toggle_advanced():
+            advanced_used[0] = True
+            if advanced.winfo_manager():
+                advanced.pack_forget()
+            else:
+                advanced.pack(fill='x', pady=8, before=save_button)
+        self._secondary(panel, 'Paramètres avancés', toggle_advanced)
         def save():
             try:
-                data = {name: f.get().strip() for name, f in fields.items()}
-                resource_key = data.pop('key')
-                if key and resource_key != key:
-                    raise ValueError('La clé d’une ressource existante ne peut pas changer')
-                data['domains'] = [d.strip() for d in data['domains'].split(',') if d.strip()]
-                data['businesses'] = [b.strip() for b in data['businesses'].split(',') if b.strip()]
-                resources.configure_account(resource_key, actor='human', ownership=owner.get(), dedicated=dedicated.get(), **data)
+                data = {}
+                if key or advanced_used[0] or service.get() == 'Autre':
+                    data = {name: f.get().strip() for name, f in fields.items() if name != 'label'}
+                    resource_key = data.pop('key')
+                    if key and resource_key != key:
+                        raise ValueError('La clé existante ne peut pas changer')
+                    data['domains'] = [d.strip() for d in data['domains'].split(',') if d.strip()]
+                    data.update(ownership=owner.get(), dedicated=dedicated.get(), enabled=enabled.get())
+                    if resource_key and not key:
+                        data['key'] = resource_key
+                label = fields['label'].get().strip() or (row or {}).get('label') or service.get()
+                if key:
+                    resources.configure_account(key, actor='human', label=label, **data)
+                    resource_key = key
+                else:
+                    resource_key = resources.add_account(service.get(), actor='human', label=label, **data)['key']
                 window.destroy()
                 self._load_snapshot()
-                self._open_account(resource_key)
+                if not key:
+                    self._open_account(resource_key)
             except Exception as exc:
                 self._hub_error(exc)
-        self._secondary(panel, 'Enregistrer et ouvrir la connexion', save)
+        save_button = self._secondary(panel, 'Enregistrer' if key else 'Ajouter et connecter', save)
         window.transient(self)
         window.grab_set()
         window.lift()
-        fields['key'].focus_set()
+        fields['label'].focus_set()
 
     def _mandate_form(self, previous=None):
         if self._readonly or self.selected_business_id == DEFAULT_BUSINESS_ID:
@@ -824,13 +860,13 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         target = ctk.CTkOptionMenu(panel, values=['public_business', 'owned_account'])
         target.set(previous['target'] if previous else 'public_business')
         target.pack(anchor='w')
-        self._line(panel, 'public_business : contact professionnel public sans dépense.\nowned_account : comptes connectés explicitement ouverts à cette activité.', COLORS['muted'])
+        self._line(panel, 'public_business : contact professionnel public sans dépense.\nowned_account : comptes globaux sélectionnés dans le mandat.', COLORS['muted'])
         selected = set(json.loads(previous['effects'])) if previous else {'contact'}
         checks = {}
         for effect, title in [('read', 'Lire les comptes'), ('contact', 'Contacter / répondre'), ('publish', 'Publier'), ('edit', 'Modifier profils / contenus')]:
             checks[effect] = ctk.BooleanVar(value=effect in selected)
             ctk.CTkCheckBox(panel, text=title, variable=checks[effect]).pack(anchor='w', pady=4)
-        self._line(panel, 'Comptes : identifiants séparés par virgules ; * = comptes ouverts à cette activité', COLORS['muted'])
+        self._line(panel, 'Comptes : identifiants séparés par virgules ; * = comptes globaux', COLORS['muted'])
         keys = ctk.CTkEntry(panel)
         keys.insert(0, ','.join(json.loads(previous['resource_keys'])) if previous else '*')
         keys.pack(fill='x')

@@ -3,14 +3,14 @@
   "mandate_proposal": {
     "target": "owned_account",
     "effects": ["read", "contact", "edit", "publish"],
-    "resource_keys": ["outlook-pro", "netlify-sitequivend", "linkedin-b2b", "tiktok-b2b"],
+    "resource_keys": ["ovh-mail-pro", "netlify-sitequivend", "linkedin-b2b", "tiktok-b2b"],
     "label": "Opérations B2B, démos, audits, prototypes et contenus sans finance/sécurité/contrat",
     "state": "proposal_only"
   },
   "accounts": [
-    {"key": "outlook-pro", "provider": "Outlook", "label": "Outlook pro - simon@sitequivend.fr",
-     "url": "https://outlook.office.com/mail/", "domains": ["outlook.office.com", "outlook.office365.com"],
-     "verify_url": "https://outlook.office.com/mail/", "ownership": "operator", "dedicated": true},
+    {"key": "ovh-mail-pro", "provider": "OVHcloud Mail", "label": "Mail pro - simon@sitequivend.fr",
+     "url": "https://mail.ovh.net/roundcube/", "domains": ["mail.ovh.net"],
+     "verify_url": "https://mail.ovh.net/roundcube/", "ownership": "operator", "dedicated": true},
     {"key": "netlify-sitequivend", "provider": "Netlify", "label": "Netlify - sitequivend.fr",
      "url": "https://app.netlify.com/", "domains": ["app.netlify.com"],
      "verify_url": "https://app.netlify.com/", "ownership": "operator", "dedicated": false},

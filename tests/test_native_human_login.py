@@ -171,7 +171,8 @@ def test_no_fabricated_session_when_reuse_fails(native, monkeypatch, failure):
     if failure == 'missing-stable':
         def missing(): raise resources.ResourceError('stable absent')
         monkeypatch.setattr(resources, 'stable_chrome_executable', missing)
-        with pytest.raises(resources.ResourceError): connection.verify()
+        assert connection.verify() is False
+        assert resources.get('account')['last_check_detail'] == 'backend_unavailable'
     else:
         connection.session_factory = factory
         assert not connection.verify()

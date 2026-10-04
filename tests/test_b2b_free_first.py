@@ -89,12 +89,14 @@ def test_public_mandate_does_not_cover_other_effects():
     assert not mandates.covering('b2b', 'public_business', 'publish')
 
 
-def test_account_inventory_hides_other_activity():
+def test_account_inventory_is_global_without_implicit_authority():
     resources.configure_account('old', actor='human', provider='Old', label='Old',
                                 url='https://old.example/', domains=['old.example'], businesses=['other'])
     with journal.run('b2b', 'fixture'):
         result = runtime._resources_status({})
-    assert not result['resources']
+    assert [r['key'] for r in result['resources']] == ['old']
+    assert not mandates.account_authority('b2b', 'old', 'read')
+    assert not mandates.account_authority('other', 'old', 'read')
 
 
 def test_skills_are_metadata_and_preserve_authority():

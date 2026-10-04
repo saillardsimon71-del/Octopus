@@ -356,7 +356,7 @@ def test_human_public_login_dependencies_never_expand_agent_authority(monkeypatc
         assert web_guard.current() is parent_state and not parent_state.account_read
     configured = resources.get(key)['web_account']
     assert configured['domains'] == before['domains'] == ['account.example']
-    assert configured['businesses'] == before['businesses'] == [BUSINESS]
+    assert 'businesses' not in configured and 'businesses' not in before
     assert mandates.list_mandates(BUSINESS) == []
     assert not journal.query('SELECT * FROM channel_authority')
     assert not journal.query('SELECT * FROM economic_channels')

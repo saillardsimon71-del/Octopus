@@ -114,6 +114,8 @@ def read_snapshot(business: str = "all", *, check_health: bool = False) -> dict:
         if 'resources' in present:
             for raw in connection.execute('SELECT * FROM resources ORDER BY label'):
                 item = dict(raw)
+                if item['state'] == 'retired':
+                    continue
                 item['web_account'] = json.loads(item.get('web_account') or '{}')
                 item['capabilities'] = json.loads(item.get('capabilities') or '[]')
                 if item['kind'] in {'web_account', 'website', 'domain'} or item['web_account']:

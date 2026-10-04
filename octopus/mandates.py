@@ -50,7 +50,7 @@ def grant(business, label, target, effects, *, actor, resource_keys=(), replaces
     if target not in TARGETS or not effects or set(effects) - EFFECTS:
         raise ValueError('cible ou effets du mandat invalides')
     if target == 'owned_account' and not keys:
-        raise ValueError('sélectionnez des ressources ou * (comptes explicitement ouverts à cette activité)')
+        raise ValueError('sélectionnez des ressources ou * (comptes globaux)')
     with tasks._tx() as conn:
         if replaces is not None and not conn.execute('SELECT id FROM operational_mandates WHERE id=? AND business=?',
                                                       (int(replaces), business)).fetchone():
@@ -90,8 +90,7 @@ def account_authority(business, resource_key, effect):
     from . import resources
     resource = resources.get(resource_key)
     account = (resource or {}).get('web_account') or {}
-    if (not account or not account.get('enabled') or account.get('session_status') != 'connected'
-            or business not in account.get('businesses', [])):
+    if not account or not account.get('enabled') or account.get('session_status') != 'connected':
         return None
     return covering(business, 'owned_account', effect, resource_key)
 
@@ -132,13 +131,13 @@ def qualify_public(channel_id, business, *, source_url, observed_text):
 
 
 def bind_account(channel_id, business, resource_key):
-    # The resource is human-configured; the model cannot assign ownership or businesses.
+    # Human-configured resource; the action and its mandate retain their activity.
     from . import resources
     r = resources.get(resource_key)
     a = (r or {}).get('web_account') or {}
     rows = journal.query('SELECT locator FROM economic_channels WHERE id=? AND business=?', (channel_id, business))
-    if not a or business not in a.get('businesses', []) or not rows:
-        raise PermissionError('ressource non ouverte à cette activité')
+    if not a or not rows:
+        raise PermissionError('compte ou canal inconnu')
     if urlsplit(rows[0]['locator']).hostname not in a['domains']:
         raise PermissionError('canal hors des domaines de la ressource')
     with tasks._tx() as conn:

@@ -110,9 +110,10 @@ def find_binary() -> str | None:
     explicit = os.environ.get("OCTOPUS_AGENT_BROWSER", "").strip()
     if explicit:
         return explicit if Path(explicit).is_file() else None
-    local = install_dir() / binary_name()
-    if local.is_file():
-        return str(local)
+    for directory in (install_dir(), config.PROJECT_ROOT / 'agents/data/bin'):
+        local = directory / binary_name()
+        if local.is_file():
+            return str(local)
     return shutil.which("agent-browser")
 
 

@@ -4,20 +4,30 @@
 quatre comptes, site public et proposition de mandat. Elle utilise les ressources,
 comptes et mandats existants. Une déclaration ne connecte rien et ne confère aucun droit.
 
-Dans Workbench, sélectionner l'activité puis ouvrir **Paramètres**.
+Dans Workbench, ouvrir **Paramètres**. Les comptes sont globaux : aucun rattachement
+à une activité n'est demandé. Le LLM voit les ressources et choisit celles qui lui sont utiles ;
+les actions conservent leur activité et exigent toujours le mandat correspondant.
 
-1. Pour Outlook, Netlify, LinkedIn et TikTok, choisir **Ouvrir la connexion**.
+**Ajouter un compte** demande seulement **Service** et **Nom (facultatif)**, puis
+**Ajouter et connecter**. L'identifiant est généré. `octopus/config/web_accounts.json`
+fournit les URL/domaines/providers des services connus. **Paramètres avancés** conserve
+les réglages techniques et permet de configurer un autre service. Modifier une fiche
+ne relance pas automatiquement la connexion.
+
+1. Pour OVH Mail (Roundcube), Netlify, LinkedIn et TikTok, choisir **Ouvrir la connexion**.
    Chrome stable utilise un profil propre à cette ressource. L'humain réalise login,
    OAuth, 2FA et éventuel captcha. OCTOPUS ne reçoit pas les secrets.
 2. Fermer les fenêtres Chrome de cette connexion, puis choisir **J'ai terminé - vérifier**.
    La vérification doit constater un compte connecté. Un refus ou une session expirée
-   demande une intervention humaine ; aucune protection n'est contournée.
-3. Vérifier le bon compte Outlook, le site Netlify concerné et les profils sociaux dédiés.
+   demande une intervention humaine ; aucune protection n'est contournée. Une erreur
+   du backend ou un timeout ne prouvent jamais l'expiration : le profil et la dernière
+   preuve sont préservés, l'accès agent reste bloqué jusqu'à une vérification réussie.
+3. Vérifier simon@sitequivend.fr sur Roundcube, le site Netlify concerné et les profils sociaux dédiés.
    Modifier la fiche si nécessaire, notamment l'URL de vérification et les domaines.
    Le site public est déclaré séparément ; son administration passe par Netlify.
 4. Choisir **Accorder un mandat**, cible `owned_account`, puis les effets
    `read`, `contact`, `edit`, `publish`. Sélectionner explicitement les clés
-   `outlook-pro,netlify-sitequivend,linkedin-b2b,tiktok-b2b`.
+   `ovh-mail-pro,netlify-sitequivend,linkedin-b2b,tiktok-b2b`.
    Le mandat proposé couvre opérations B2B, contenu, démos, maquettes, audits et prototypes.
    Il reste révocable. Aucune réponse libre dans Humain ne l'accorde à elle seule.
 
