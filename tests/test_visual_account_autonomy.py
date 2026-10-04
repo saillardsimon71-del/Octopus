@@ -63,7 +63,7 @@ class Page:
 @pytest.fixture
 def configured(monkeypatch, tmp_path, providers_up):
     resources.configure_account('account', actor='human', provider='Unknown', label='Compte générique',
-        url=URL, domains=['account.example'], businesses=['a'], authenticated_text='')
+        url=URL, domains=['account.example'], authenticated_text='')
     account = resources.get('account')['web_account']
     resources._write('account', {'web_account': json.dumps(dict(account, browser_kind='chrome_stable'))})
     monkeypatch.setattr(resources, 'account_browser_options', lambda key: {})
@@ -116,7 +116,7 @@ def test_uncertain_can_choose_image_then_interpret_render_only(configured, trans
         assert im.getpixel((0, 0)) == (0, 128, 0)  # Actual rendered information reached the gateway.
     account = resources.get('account')['web_account']
     assert account['verification']['evidence'][-1]['kind'] == 'capture'
-    assert account['verification']['evidence'][-1]['business'] == 'a'
+    assert account['verification']['evidence'][-1]['business'] == 'octopus'
     for table in ('resources', 'events', 'task_steps', 'llm_calls'):
         assert 'base64,' not in str([dict(row) for row in journal.query('SELECT * FROM ' + table)])
 
@@ -310,7 +310,7 @@ def test_images_imply_vision_capability_and_skip_text_only_model(configured, tra
 
 
 def test_human_login_lock_blocks_verifier_before_any_observation(configured, transport, monkeypatch):
-    monkeypatch.setattr(resources, 'account_browser_options', lambda key: (_ for _ in ()).throw(resources.ResourceError('Fermez Chrome')))
+    monkeypatch.setattr(resources, 'account_profile_busy', lambda key: True)
     page = Page()
     with pytest.raises(resources.ResourceError):
         resources.verify_account_connection('account', actor='human', session_factory=lambda *a, **k: page)
