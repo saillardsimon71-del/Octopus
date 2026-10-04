@@ -145,6 +145,168 @@ def _rows() -> list[dict]:
     return [dict(r) for r in journal.query("SELECT * FROM channel_actions ORDER BY id")]
 
 
+def test_requested_full_observation_reaches_controller_with_late_controls(monkeypatch):
+    controls = [('button', 'Control ' + str(i), None) for i in range(1, 61)]
+    monkeypatch.setitem(SITE, '/', ('Long page', controls, 'Observed text ' * 1500))
+    space = _space()
+    try:
+        brief = space.navigate(ORIGIN + '/')
+        assert 'tronquées' in brief['snapshot']
+        assert brief['elements_truncated'] is True
+        full = space.snapshot(full=True)
+        head, _, page = runtime._tool_result_view('browser_snapshot', full).partition('\nPAGE (refs @eN) :\n')
+        assert json.loads(head)['elements'][-1]['ref'] == '@e60'
+        assert not full['elements_truncated']
+        assert 'Control 60' in page and 'tronquées' not in page
+        assert len(page) > 15000
+    finally:
+        space.close()
+
+
+def test_form_state_keeps_distinct_same_named_fields(monkeypatch):
+    monkeypatch.setitem(SITE, '/', ('Form', [('textbox', 'Value', None), ('textbox', 'Value', None)], ''))
+    _channel()
+    space = _space()
+    try:
+        space.navigate(ORIGIN + '/')
+        space.type('@e1', 'first')
+        first = space._fingerprint(1, 'click', 'submit')[1]
+        space.type('@e2', 'second')
+        both = space._fingerprint(1, 'click', 'submit')[1]
+        space.type('@e1', 'changed')
+        changed = space._fingerprint(1, 'click', 'submit')[1]
+        assert len(space._typed[bw._page_key(space._url)]) == 2
+        assert len({first, both, changed}) == 3
+    finally:
+        space.close()
+
+
+def test_public_control_metadata_preserves_observed_numbers_and_urls():
+    space = _space()
+    try:
+        space.navigate(ORIGIN + '/')
+        space._refs = {'e1': {'role': 'link', 'name': 'Report 2026', 'href': ORIGIN + '/records/1234'}}
+        observed = space._element_metadata()[0]
+        assert observed['name'] == 'Report 2026'
+        assert observed['href'] == ORIGIN + '/records/1234'
+    finally:
+        space.close()
+
+
+def test_metadata_never_turns_long_url_into_another_target_and_full_keeps_label():
+    space = _space()
+    name, href = 'Visible label ' * 40, ORIGIN + '/' + 'segment/' * 60
+    try:
+        space.navigate(ORIGIN + '/')
+        space._refs = {'e1': {'role': 'link', 'name': name, 'href': href}}
+        brief = space._element_metadata()[0]
+        assert brief['href'] == href
+        assert brief['name_truncated'] is True
+        full = space._element_metadata(full=True)[0]
+        assert full['name'] == name and full['href'] == href
+    finally:
+        space.close()
+
+
+def test_keyboard_effects_distinguish_focus_and_keep_replay_idempotent(monkeypatch):
+    _channel()
+    space = _space()
+    focused = ['button-one']
+    try:
+        space.navigate(ORIGIN + '/')
+        original = space._session.run
+        def observe_focus(command, args=(), **kwargs):
+            if command == 'eval' and 'octopus_focus_identity' in args[0]:
+                return {'success': True, 'data': {'result': focused[0]}}
+            return original(command, args, **kwargs)
+        monkeypatch.setattr(space._session, 'run', observe_focus)
+        space.press('Enter')
+        focused[0] = 'button-two'
+        second = space.press('Enter')
+        assert not second.get('already_done')
+        assert space.press('Enter')['already_done']
+        assert len([c for c in space._session.commands if c[0] == 'press']) == 2
+    finally:
+        space.close()
+
+
+@pytest.mark.parametrize('context', ['?record=second', '#second'])
+def test_effect_identity_preserves_observed_url_context(context):
+    space = _space()
+    space._url = ORIGIN + '/view?record=first'
+    first = space._fingerprint(1, 'click', ['button:Confirm', 0])[0]
+    space._url = ORIGIN + '/view' + context
+    second = space._fingerprint(1, 'click', ['button:Confirm', 0])[0]
+    assert first != second
+
+
+def test_effect_verification_can_observe_late_receipt_without_losing_pre_action_truth(monkeypatch):
+    monkeypatch.setitem(SITE, '/', ('Action', [('button', 'Act', None)], 'Text ' * 5000))
+    _channel()
+    space = _space()
+    try:
+        space.navigate(ORIGIN + '/')
+        def receipt(session, ref):
+            session.extra_text = '\nRECEIPT_CREATED'
+        space._session.on_click = receipt
+        result = space.click('@e1', expect='RECEIPT_CREATED')
+        assert result['effect']['status'] == 'verified'
+    finally:
+        space.close()
+
+
+def test_late_existing_text_is_not_mistaken_for_proof_of_effect(monkeypatch):
+    monkeypatch.setitem(SITE, '/', ('Action', [('button', 'Act', None)], 'Text ' * 2500 + '\nALREADY_VISIBLE'))
+    _channel()
+    space = _space()
+    try:
+        space.navigate(ORIGIN + '/')
+        space.click('@e1')
+        verified = space.verify('ALREADY_VISIBLE')
+        assert verified['present'] and not verified['verified']
+    finally:
+        space.close()
+
+
+def test_old_truncated_pre_observation_cannot_certify_a_new_effect(monkeypatch):
+    monkeypatch.setitem(SITE, '/', ('Action', [('button', 'Act', None)], 'Text ' * 2500))
+    _channel()
+    space = _space()
+    try:
+        space.navigate(ORIGIN + '/')
+        space.click('@e1')
+        row = _rows()[0]
+        payload = json.loads(row['payload'])
+        payload['pre_text'] = payload['pre_text'][:8000]
+        payload.pop('pre_text_complete')
+        with tasks._tx() as conn:
+            conn.execute('UPDATE channel_actions SET payload=? WHERE id=?', (json.dumps(payload), row['id']))
+        space._session.extra_text = '\nNEW_RECEIPT'
+        assert space.verify('NEW_RECEIPT')['verified'] is False
+        assert _rows()[0]['status'] == 'executed'
+    finally:
+        space.close()
+
+
+def test_failed_pre_observation_never_becomes_evidence_of_absence(monkeypatch):
+    _channel()
+    space = _space()
+    try:
+        _to_form(space)
+        original = space._session.run
+        def broken(command, args=(), **kwargs):
+            if command == 'get' and list(args) == ['text', 'body']:
+                return {'success': False, 'error': 'observation unavailable'}
+            return original(command, args, **kwargs)
+        monkeypatch.setattr(space._session, 'run', broken)
+        before = list(space._session.clicks)
+        with pytest.raises(RuntimeError, match='observation unavailable'):
+            space.click(_ref(space, 'Envoyer'))
+        assert space._session.clicks == before and not _rows()
+    finally:
+        space.close()
+
+
 @pytest.fixture
 def duplicate_controls(monkeypatch):
     monkeypatch.setitem(SITE, '/', ('Accueil', [('button', 'Open section', '/form'),
@@ -271,7 +433,7 @@ def test_untrusted_page_cannot_mutate_without_a_resource_for_this_business():
     space = _space()
     view = space.navigate(ORIGIN + "/")
     assert view["ok"] and "Formulaire de contact" in view["snapshot"]
-    assert "ListMarker" not in view["snapshot"]  # bruit élagué
+    assert 'ListMarker "• "' in view['snapshot']
     assert space.click(_ref(space, "Formulaire de contact"))["url"] == ORIGIN + "/form"  # lien = lecture
     with pytest.raises(bw.Refused, match="aucune ressource opérationnelle"):
         space.type(_ref(space, "Nom"), "Alice")
@@ -323,14 +485,23 @@ def test_intent_is_persisted_before_the_click_then_verified_on_the_real_page():
     assert "Alice" not in row["payload"] and payload["target"] == "button:Envoyer"
 
 
-def test_expect_already_visible_before_the_action_is_refused_without_effect():
+def test_preexisting_expectation_does_not_block_action_or_prove_its_effect():
     _channel()
     space = _space()
     _to_form(space)
-    before = list(FakeSession.instances[-1].clicks)
-    with pytest.raises(bw.Refused, match="déjà visible"):
-        space.click(_ref(space, "Envoyer"), expect="Écrivez-nous")
-    assert FakeSession.instances[-1].clicks == before and _rows() == []
+    session = FakeSession.instances[-1]
+    session.extra_text = "Écrivez-nous"
+    before = list(session.clicks)
+    view = space.click(_ref(space, "Envoyer"), expect="Écrivez-nous")
+    assert session.clicks == before + ['e5'] and len(_rows()) == 1
+    assert view['effect']['status'] == 'executed'
+    assert view['effect']['verified'] is False
+    assert _rows()[0]['evidence_id'] is None
+    assert space.verify("Écrivez-nous")['verified'] is False
+    assert space.verify("message reçu")['verified'] is True
+    _to_form(space)
+    again = space.click(_ref(space, "Envoyer"), expect="Écrivez-nous")
+    assert again['already_done'] is True and session.clicks.count('e5') == 1
 
 
 def test_hard_kill_leaves_proposed_then_resume_marks_ambiguous_and_refuses_the_repeat():

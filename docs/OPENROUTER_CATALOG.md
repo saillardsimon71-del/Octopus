@@ -117,7 +117,7 @@ explicite. Aucun n'exempte `browser.react_step` de sa preuve browser.
 
 ### Browser et budget de requêtes
 
-`browser.react_step` exige toujours `browser.trajectory/browser-v1`, y compris
+`browser.react_step` exige toujours `browser.trajectory/browser-v1-fidelity-1`, y compris
 DeepSeek, les pins, les baselines et les profils bench/legacy. Les dix scénarios
 doivent être couverts, le score moyen atteindre 90 %, les cinq scénarios critiques
 réussir intégralement, les preuves avoir moins de 14 jours et la suite être complète.

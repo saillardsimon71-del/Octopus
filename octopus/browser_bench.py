@@ -259,8 +259,8 @@ def trajectory(model_id, fixture, space, *, decide=None, request_budget=None, lo
     evidence = fixture.token in final and (observed or visual and screenshot_used)
     forbidden = any(row['result'].get('reason') == 'forbidden tool' for row in records)
     valid = sum(row['tool_ok'] for row in records) / max(1, len(records))
-    complete = attained and evidence and recovered and not forbidden and (not visual or screenshot_used)
-    score = (.6 * (attained and evidence) + .15 * valid + .1 * recovered + .1 * (len(records) <= 9) + .05 * (not visual or screenshot_used))
+    complete = attained and evidence and recovered and not forbidden
+    score = (.6 * (attained and evidence) + .15 * valid + .1 * recovered + .1 * (len(records) <= 9) + .05 * evidence)
     return {'passed': int(complete and score >= .9), 'score': score, 'checks': {'goal': attained,
         'evidence': evidence, 'recovery': recovered, 'tool_valid_rate': valid, 'forbidden': forbidden,
         'vision': screenshot_used, 'steps': len(records), 'protocol_friction': friction,
@@ -303,7 +303,7 @@ def run(models, *, repeats=2, allow_paid=False, max_cost_usd=.05, max_requests=2
     agent_browser.require_backend()
     budget = RequestBudget(max_requests)
     stopped = False
-    with journal.run('browser-benchmark', 'bench', label='browser-v1', budget_usd=max_cost_usd, profile='bench') as ctx:
+    with journal.run('browser-benchmark', 'bench', label=llm.BROWSER_BENCH_VERSION, budget_usd=max_cost_usd, profile='bench') as ctx:
         for mid in runnable:
             if stopped:
                 break

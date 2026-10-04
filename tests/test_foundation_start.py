@@ -322,7 +322,7 @@ def test_real_hermes_observation_is_visible_in_workbench(monkeypatch):
                 return {"tool": "browser_navigate", "args": {"url": origin}}
             assert "Demande locale de traduction" in json.dumps(messages, ensure_ascii=False)
             return {"final": "Demande locale observée dans le laboratoire, pas un revenu."}
-        if stage == "synthese":
+        if stage in ("synthese", "determination"):
             assert "Demande locale de traduction" in json.dumps(messages, ensure_ascii=False)
             return result()
         raise AssertionError(stage)

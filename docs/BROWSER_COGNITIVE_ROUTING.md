@@ -154,14 +154,14 @@ Les seuls contrôles scriptés sont la vérité de fixture, l'injection d'erreur
 le score. Plusieurs chemins peuvent réussir ; aucune séquence exacte imposée.
 
 Score : 0,60 objectif atteint + code correctement rapporté ; 0,15 taux d'outils
-valides ; 0,10 récupération ; 0,10 efficacité (au plus 9 actions) ; 0,05 perception
-visuelle lorsqu'elle est nécessaire. Au plus 12 décisions, arrêt après cinq
-observations sans nouveauté. Pour passer : score >= 0,90 ET objectif, preuve,
-récupération, absence d'outil interdit, capture effective dans les deux scénarios
-visuels. Demander une capture lorsque le DOM suffit n'est pas sanctionné en soi.
+valides ; 0,10 récupération ; 0,10 efficacité (au plus 9 actions) ; 0,05 preuve
+observée. Au plus 12 décisions, arrêt après cinq observations sans nouveauté.
+Pour passer : score >= 0,90 ET objectif, preuve, récupération, absence d'outil interdit.
+La capture reste un choix du contrôleur. Une exploration DOM peut lever l'ambiguïté
+sans capture ; le scénario vision conserve un code accessible uniquement dans les pixels.
 Le code du canvas doit figurer dans le rapport : une image jointe seule ne suffit pas.
 
-Persistance : `bench_results`, task `browser.trajectory`, version `browser-v1`,
+Persistance : `bench_results`, task `browser.trajectory`, version `browser-v1-fidelity-1`,
 clé `browser.model:<identité sous-jacente>`, run/item/répétition/score/checks/coût.
 Le runner produit les CSV et matrices existants et `cost_per_completed_objective_usd` ;
 sans objectif achevé cette valeur est inconnue (`None`), pas zéro.
@@ -174,6 +174,19 @@ vision/DOM ambigu/recovery/invalid_args/stale_refs, aucun outil interdit.
 Deux stagnations mesurées récentes après cette suite bloquent la qualification ;
 un nouveau benchmark peut la rétablir. Aucun `status=ok` ne crée de preuve browser.
 Les tests ne préchargent des preuves synthétiques que dans leurs bases temporaires.
+
+Les anciennes lignes `browser-v1` restent lisibles et ne qualifient pas la nouvelle
+mesure. Les seuils et les dix fixtures restent identiques. La vue du prompt conserve
+le snapshot acquis et des métadonnées JSON complètes. L'observation courte indique
+sa troncature ; `browser_snapshot(full=true)` expose tout l'arbre et tous les contrôles
+observés, avec les mêmes protections de secrets et de périmètre.
+L'identité des effets distingue les champs de même nom, le contrôle clavier focalisé
+(le formulaire pour une soumission Enter), et le contexte query/fragment de l'URL
+sous forme de digest. Les anciennes identités ambiguës restent conservatrices.
+La preuve préalable interne conserve tout le texte acquis et masqué. Une coupe de
+journal historique ne permet pas de déduire qu'un texte était absent avant l'effet.
+Les symboles de statut, unités et marqueurs de listes restent présents dans le DOM
+observé ; le runtime ne les classe plus comme bruit.
 
 ## Continuation, erreurs et honnêteté
 

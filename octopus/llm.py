@@ -851,7 +851,7 @@ def _rank_economical(task: str, candidates: list[str], cat: catalog.Catalog) -> 
 
 # Multi-step fixture evidence is independent of JSON/API health. No baseline exemption.
 BROWSER_BENCH_TASK = "browser.trajectory"
-BROWSER_BENCH_VERSION = "browser-v1"
+BROWSER_BENCH_VERSION = "browser-v1-fidelity-1"
 BROWSER_SCENARIOS = frozenset({"affordance", "dynamic_menu", "recovery", "ambiguous_dom",
     "sufficient_dom", "stale_refs", "invalid_args", "multi_screen", "language_layout", "vision"})
 

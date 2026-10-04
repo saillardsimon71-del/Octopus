@@ -157,6 +157,82 @@ def authorized_space(monkeypatch):
     return space, page, mid
 
 
+def test_same_named_account_fields_autosave_independently(configured, monkeypatch):
+    space, page, _ = authorized_space(monkeypatch)
+    page.refs = {'e1': {'role': 'textbox', 'name': 'Content'},
+                 'e2': {'role': 'textbox', 'name': 'Content'}}
+    try:
+        space.navigate(URL)
+        space.type('@e1', 'same value')
+        second = space.type('@e2', 'same value')
+        assert not second.get('already_done')
+        assert page.effects == [('fill', ['@e1', 'same value']), ('fill', ['@e2', 'same value'])]
+        assert space.type('@e2', 'same value')['already_done']
+        assert len(page.effects) == 2
+    finally:
+        space.close()
+
+
+def test_account_edit_identity_survives_ref_renumbering(configured, monkeypatch):
+    space, page, _ = authorized_space(monkeypatch)
+    controls = [{'role': 'textbox', 'name': 'Content'}, {'role': 'textbox', 'name': 'Content'}]
+    page.refs = dict(zip(('e1', 'e2'), controls))
+    try:
+        space.navigate(URL)
+        space.type('@e1', 'value')
+        page.refs = {'e3': {'role': 'link', 'name': 'Help'}, **dict(zip(('e20', 'e21'), controls))}
+        space.snapshot()
+        assert space.type('@e20', 'value')['already_done']
+        assert len(page.effects) == 1
+    finally:
+        space.close()
+
+
+def test_duplicate_field_crash_recovery_never_repeats_autosave(configured, monkeypatch):
+    space, page, _ = authorized_space(monkeypatch)
+    page.refs = {'e1': {'role': 'textbox', 'name': 'Content'}, 'e2': {'role': 'textbox', 'name': 'Content'}}
+    class Crash(BaseException): pass
+    original = page.run
+    def crash(command, *args, **kwargs):
+        result = original(command, *args, **kwargs)
+        if command == 'fill': raise Crash()
+        return result
+    try:
+        space.navigate(URL)
+        page.run = crash
+        with pytest.raises(Crash): space.type('@e1', 'value')
+    finally:
+        space.close()
+    page.run = original
+    resumed = bw.Workspace(space.scope, web_guard.BrowseState(), session_factory=lambda *a, **k: page)
+    try:
+        resumed.snapshot()
+        with pytest.raises(bw.Refused, match='résultat inconnu'):
+            resumed.type('@e1', 'value')
+        assert len(page.effects) == 1
+        assert journal.query('SELECT status FROM channel_actions')[0]['status'] == 'ambiguous'
+    finally:
+        resumed.close()
+
+
+def test_legacy_duplicate_field_effect_is_not_reinterpreted(configured, monkeypatch):
+    space, page, _ = authorized_space(monkeypatch)
+    page.refs = {'e1': {'role': 'textbox', 'name': 'Content'}, 'e2': {'role': 'textbox', 'name': 'Content'}}
+    try:
+        space.navigate(URL)
+        space.type('@e1', 'value')
+        row = journal.query('SELECT id,payload FROM channel_actions')[0]
+        payload = json.loads(row['payload'])
+        payload.pop('target_identity')
+        with tasks._tx() as conn:
+            conn.execute('UPDATE channel_actions SET payload=? WHERE id=?', (json.dumps(payload), row['id']))
+        with pytest.raises(bw.Refused, match='ancienne saisie'):
+            space.type('@e2', 'value')
+        assert len(page.effects) == 1
+    finally:
+        space.close()
+
+
 def test_model_selects_full_mandated_sequence_and_visual_confirmation(configured, transport, monkeypatch):
     from browser_evidence import qualify
     qualify('deepseek/flash')

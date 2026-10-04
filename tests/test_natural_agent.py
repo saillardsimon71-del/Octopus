@@ -43,6 +43,21 @@ def test_one_clear_action_executes_once(registry, response):
 
 
 @pytest.mark.parametrize('response', [
+    '{"tool":"browser_click","args":{"ref":"@e7"}}'
+    '{"tool":"browser_click","ref":"@e7"}',
+    '{"tool":"BROWSER_CLICK","ref":"e7"} {"action":{"tool":"click","ref":7}}',
+    '{"tool":"browser_type","ref":"@e7","text":"hello"}'
+    '{"tool":"browser_type","args":{"text":"hello","ref":"@e7"}}',
+])
+def test_repeated_representations_of_one_action_execute_once(registry, response):
+    tools, effects = registry
+    action = tools.parse_action(response)
+    assert action['_protocol'] == 'normalized'
+    assert tools.dispatch(action['tool'], action['args'])[0] is None
+    assert len(effects) == 1
+
+
+@pytest.mark.parametrize('response', [
     '{"tool":"browser_click","ref":"@e1"} {"tool":"browser_click","ref":"@e2"}',
     {'tool': 'browser_click', 'ref': '@e2', 'args': {'ref': '@e1'}},
     {'tool': 'browser_click', 'args': {'ref': ['@e1', '@e2']}},
@@ -51,6 +66,9 @@ def test_one_clear_action_executes_once(registry, response):
     {'tool': 'browser_click', 'action': 'browser_type', 'ref': '@e1'},
     '{"tool":"browser_click","ref":"@e1","ref":"@e2"}',
     "{'tool':'browser_click','ref':'@e1','ref':'@e2'}",
+    '{"tool":"browser_type","ref":"@e7","text":"hello"}'
+    '{"tool":"browser_type","ref":"@e7","text":"goodbye"}',
+    '{"tool":"browser_snapshot","full":true}{"tool":"browser_snapshot","full":1}',
 ])
 def test_real_ambiguity_returns_observation_without_effect(registry, response):
     tools, effects = registry

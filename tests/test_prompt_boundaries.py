@@ -117,6 +117,29 @@ def test_browse_view_keeps_prefix_without_late_heading(title):
     assert view["text_start_char"] == 0
 
 
+def test_browser_view_preserves_complete_observation_and_valid_metadata():
+    snapshot = 'Observed line\n' * 600 + '- button "Late control" [ref=e80]'
+    result = {'ok': True, 'snapshot': snapshot, 'elements': [
+        {'ref': '@e' + str(i), 'role': 'button', 'name': 'Control ' + str(i)} for i in range(1, 81)],
+        'effect': {'status': 'ambiguous', 'action_id': 42}}
+    original = copy.deepcopy(result)
+    head, _, page = runtime._tool_result_view('browser_snapshot', result).partition('\nPAGE (refs @eN) :\n')
+    metadata = json.loads(head)
+    assert metadata['elements'][-1]['ref'] == '@e80'
+    assert metadata['effect']['status'] == 'ambiguous'
+    assert page == snapshot
+    assert result == original
+
+
+def test_browser_handoff_shortening_is_explicit_and_keeps_whole_lines():
+    snapshot = 'Observed line\n' * 600
+    head, _, page = runtime._tool_result_view('browser_snapshot', {'ok': True, 'snapshot': snapshot},
+                                            max_chars=200).partition('\nPAGE (refs @eN) :\n')
+    assert json.loads(head)['ok']
+    assert 'tronquées' in page
+    assert page.splitlines()[0] == 'Observed line'
+
+
 @pytest.fixture
 def web(monkeypatch):
     """SEARCH est structuré : le seam de test est l'enveloppe, pas le texte."""

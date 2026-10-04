@@ -384,14 +384,9 @@ def redact(text: str) -> str:
     return SECRET_RE.sub(lambda m: m.group(1)[:4] + "…[masqué]", str(text or ""))
 
 
-_NOISE_LINE_RE = re.compile(r'^\s*- (?:ListMarker "[^"]*"|StaticText "[\s\W_]*")\s*$')
-
-
 def prune_snapshot(text: str) -> str:
-    """Arbre complet sans le bruit (puces, séparateurs de ponctuation). Le mode compact (`-c`) de
-    agent-browser, utilisé par défaut par Hermes, supprime aussi les éléments de liste purement
-    textuels : l'IA ne verrait pas le contenu d'une page de résultats."""
-    return "\n".join(line for line in str(text or "").split("\n") if not _NOISE_LINE_RE.match(line))
+    """Compatibility helper: preserve every observed accessibility node."""
+    return str(text or "")
 
 
 def truncate_snapshot(text: str, max_chars: int) -> str:

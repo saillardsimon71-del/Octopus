@@ -274,11 +274,13 @@ class ObservationDecider:
         # Un refus ou une erreur ne renvoie pas de page : la dernière observation reste la référence.
         page = result.get("_page") or next((r.get("_page") for _t, r in reversed(history) if r.get("_page")), "")
         refused = str(result.get("reason") or "") if result.get("refused") else ""
+        if refused and 'absente du dernier snapshot' in refused:
+            return {'tool': 'browser_snapshot', 'args': {}}
         if refused and ("inconnu" in refused or "non vérifiée" in refused or "ne pas la" in refused):
             link = self._find(page, ("link",), self.verify_link)
             if link:
                 return {"tool": "browser_click", "args": {"ref": "@" + link[2]}}
-        if refused and "canal" in refused:
+        if refused and ("canal" in refused or "ressource" in refused):
             return {"final": "Accès en écriture non accordé sur ce site : " + refused[:200]}
         if tool == "browser_download" and result.get("ok"):
             return {"final": f"Demande envoyée et vérifiée ; récapitulatif téléchargé ({result.get('file')})."}
@@ -386,16 +388,21 @@ class ObservationDecider:
                 except ValueError:
                     pending_action = None
                 continue
-            match = re.match(r"Résultat de (browser_\w+) : (.*)", content, re.DOTALL)
-            if not match:
+            match = re.match(r"Résultat de (browser_\w+)(?: \(step=\d+\))? : (.*)", content, re.DOTALL)
+            if match:
+                tool, body = match.group(1), match.group(2)
+            elif content.startswith('Observation déjà acquise, ne pas répéter : ') and str((pending_action or {}).get('tool', '')).startswith('browser_'):
+                tool = pending_action['tool']
+                body = content.split(' : ', 1)[1]
+            else:
                 continue
-            tool, body = match.group(1), match.group(2)
             head, _, page = body.partition("\nPAGE (refs @eN) :\n")
             try:
                 result = json.loads(head)
             except ValueError:
                 result = {"ok": False, "error": head[:200]}
-            ref = str(((pending_action or {}).get("args") or {}).get("ref") or "").lstrip("@")
+            action_args = (pending_action or {}).get('args') or pending_action or {}
+            ref = str(action_args.get('ref') or '').lstrip('@')
             label = next((n for _r, n, _a, rf in _LINE_RE.findall(last_page) if rf == ref), None)
             result["_action"] = {"_label": label, "_edit": False}
             result["_page"] = page
