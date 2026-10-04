@@ -592,7 +592,7 @@ class Workspace:
             raise Refused(f"plafond de {MAX_EFFECTS} actions à effet atteint pour cette tâche")
 
     # -- registre des actions à effet --------------------------------------------------------
-    def _fingerprint(self, channel_id: int, kind: str, target: str) -> tuple[str, str]:
+    def _fingerprint(self, channel_id: int, kind: str, target: str | list) -> tuple[str, str]:
         page = _page_key(self._url)
         form = _digest(self._typed.get(page, {}))
         return _digest([int(channel_id), kind, page, target, form])[:32], form
@@ -614,10 +614,26 @@ class Workspace:
         expect = str(expect or "").strip() or None
         if expect and (len(expect) > 200 or agent_browser.contains_secret(expect)):
             raise Refused("expect : court texte visible attendu après l'action, sans secret")
-        fingerprint, form = self._fingerprint(int(channel["id"]), kind, target_sig)
+        target_identity = target_sig
+        if command == 'click':
+            ref, info = self._target(args[0])
+            peers = [key for key, value in self._refs.items()
+                     if (value.get('role'), value.get('name')) == (info.get('role'), info.get('name'))]
+            peers.sort(key=lambda key: int(key[1:]))
+            # Rank within the observed matching controls, independent of volatile ref numbering.
+            target_identity = [target_sig, peers.index(ref[1:])]
+        fingerprint, form = self._fingerprint(int(channel["id"]), kind, target_identity)
         key = f"browser:{fingerprint}:{self.scope.key}"
         mine = next((r for r in self._ledger(fingerprint) if r["idempotency_key"] == key), None)
         lineage = _lineage(self.scope.task_id)
+        if command == 'click':
+            legacy, _ = self._fingerprint(int(channel['id']), kind, target_sig)
+            for row in self._ledger(legacy):
+                if row['status'] in UNRESOLVED or row['status'] == 'verified' and (
+                        row['idempotency_key'].endswith(':' + self.scope.key) or
+                        lineage and _lineage(_row_task(row)) == lineage):
+                    raise Refused(f"L'ancienne action #{row['id']} ne distingue pas les contrôles de même nom. "
+                                  "Ne répète pas un effet déjà exécuté ou incertain ; vérifie son résultat sur la page.")
         for row in self._ledger(fingerprint):
             if row["idempotency_key"] == key:
                 continue
@@ -655,6 +671,8 @@ class Workspace:
         payload = {"mandate_id": authority.get("mandate_id"), "scope": self.scope.key, "task_id": self.scope.task_id, "kind": kind, "target": target_sig,
                    "page": _page_key(self._url), "form_digest": form, "expect": expect,
                    "pre_text": pre_text[:8000]}
+        if command == 'click':
+            payload['target_identity'] = target_identity
         now = time.time()
         with tasks._tx() as conn:  # persisté AVANT l'action externe
             if mine is None:

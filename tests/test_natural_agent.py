@@ -233,6 +233,33 @@ def test_unverified_submission_retains_identity_and_cannot_repeat(monkeypatch):
         browser.close()
 
 
+def test_distinct_same_named_submit_buttons_cannot_repeat_an_unconfirmed_submission(monkeypatch):
+    from test_delegated_resource_hub import FakeAccountSession
+    from octopus import browser_workspace
+    account()
+    resources.set_account_session('new-platform', 'connected')
+    real_run = FakeAccountSession.run
+
+    def run(session, command, args=(), **kwargs):
+        result = real_run(session, command, args, **kwargs)
+        if command == 'snapshot':
+            result['data']['snapshot'] += '\n- button "Publier" [ref=e5]'
+            result['data']['refs']['e5'] = {'role': 'button', 'name': 'Publier'}
+        return result
+
+    monkeypatch.setattr(FakeAccountSession, 'run', run)
+    browser = space(monkeypatch)
+    try:
+        browser.navigate(URL)
+        assert browser.click('@e1')['ok']
+        assert browser.click('@e1')['already_done']
+        with pytest.raises(browser_workspace.Refused, match='effet précédent'):
+            browser.click('@e5')
+        assert browser._session.clicks == 1
+    finally:
+        browser.close()
+
+
 @pytest.mark.parametrize('tool,field', [('ACT_ON_CHANNEL', 'action'), ('REGISTER_CHANNEL', 'name')])
 def test_tool_alias_preserves_real_parameters(tool, field):
     tools = ToolRegistry({tool.lower(): {'params': {field: 'str'}, 'desc': '', 'fn': lambda args: args}})

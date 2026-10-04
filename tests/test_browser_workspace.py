@@ -145,6 +145,126 @@ def _rows() -> list[dict]:
     return [dict(r) for r in journal.query("SELECT * FROM channel_actions ORDER BY id")]
 
 
+@pytest.fixture
+def duplicate_controls(monkeypatch):
+    monkeypatch.setitem(SITE, '/', ('Accueil', [('button', 'Open section', '/form'),
+                                               ('button', 'Open section', '/done')], ''))
+    _channel()
+
+
+def test_distinct_same_named_buttons_dispatch_independently(duplicate_controls):
+    space = _space()
+    try:
+        space.navigate(ORIGIN + '/')
+        assert space.click('@e1')['url'] == ORIGIN + '/form'
+        space.navigate(ORIGIN + '/')
+        assert space.click('@e2')['url'] == ORIGIN + '/done'
+        assert space._session.clicks == ['e1', 'e2']
+        assert len(_rows()) == 2
+    finally:
+        space.close()
+
+
+@pytest.mark.parametrize('ref', ['@e1', '@e2'])
+def test_same_named_button_replay_still_dispatches_only_once(duplicate_controls, ref):
+    space = _space()
+    try:
+        space.navigate(ORIGIN + '/')
+        first = space.click(ref)
+        space.navigate(ORIGIN + '/')
+        repeated = space.click(ref)
+        assert repeated['already_done'] and repeated['action_id'] == first['effect']['action_id']
+        assert space._session.clicks == [ref[1:]]
+        assert len(_rows()) == 1
+    finally:
+        space.close()
+
+
+@pytest.mark.parametrize('shift,second_ref,first_ref', [(1, '@e3', '@e2'), (8, '@e10', '@e9')])
+def test_reobserved_button_identity_survives_unrelated_ref_renumbering(
+        duplicate_controls, monkeypatch, shift, second_ref, first_ref):
+    original_refs = FakeSession._refs
+    monkeypatch.setattr(FakeSession, '_refs', lambda session: dict(sorted(original_refs(session).items())))
+    space = _space()
+    try:
+        space.navigate(ORIGIN + '/')
+        first = space.click('@e2')
+        title, controls, text = SITE['/']
+        monkeypatch.setitem(SITE, '/', (title, [('link', f'Help {n}', '/') for n in range(shift)] + controls, text))
+        space.navigate(ORIGIN + '/')
+        assert space._refs[second_ref[1:]]['name'] == 'Open section'
+        repeated = space.click(second_ref)
+        assert repeated['already_done'] and repeated['action_id'] == first['effect']['action_id']
+        assert space._session.clicks == ['e2']
+        assert space.click(first_ref)['url'] == ORIGIN + '/form'
+        assert space._session.clicks == ['e2', first_ref[1:]]
+        assert len(_rows()) == 2
+    finally:
+        space.close()
+
+
+def test_duplicate_button_crash_resume_never_repeats_unknown_effect(duplicate_controls, monkeypatch):
+    task_id = tasks.enqueue(BUSINESS, 'supervisor.objective_work', {'objective_id': 1})
+    key = f't{task_id}'
+    space = _space(key, task_id)
+
+    class Killed(BaseException):
+        pass
+
+    def kill(session, ref):
+        session.path = '/done'
+        raise Killed()
+
+    try:
+        space.navigate(ORIGIN + '/')
+        space._session.on_click = kill
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(bw.Workspace, '_settle', lambda *a, **k: None)
+            with pytest.raises(Killed):
+                space.click('@e2')
+        assert _rows()[0]['status'] == 'proposed'
+    finally:
+        space.close()
+    title, controls, text = SITE['/']
+    monkeypatch.setitem(SITE, '/', (title, [('link', 'Help', '/'), *controls], text))
+    resumed = _space(key, task_id)
+    try:
+        resumed.snapshot()
+        assert _rows()[0]['status'] == 'ambiguous'
+        with pytest.raises(bw.Refused, match='résultat inconnu'):
+            resumed.click('@e3')
+        assert resumed._session.clicks == []
+        assert len(_rows()) == 1
+    finally:
+        resumed.close()
+
+
+def test_legacy_label_only_journal_cannot_be_bypassed_with_new_control_identity(duplicate_controls):
+    space = _space()
+    try:
+        space.navigate(ORIGIN + '/')
+        space.click('@e1')
+        space.navigate(ORIGIN + '/')
+        row = _rows()[0]
+        payload = json.loads(row['payload'])
+        payload.pop('target_identity', None)
+        fingerprint, _ = space._fingerprint(row['channel_id'], 'click', 'button:Open section')
+        with tasks._tx() as conn:
+            conn.execute('UPDATE channel_actions SET payload=?, idempotency_key=? WHERE id=?',
+                         (json.dumps(payload), f'browser:{fingerprint}:{space.scope.key}', row['id']))
+        before = list(space._session.clicks)
+        try:
+            repeated = space.click('@e2')
+        except bw.Refused:
+            pass
+        else:
+            assert repeated['already_done']
+        assert space._session.clicks == before
+        assert len(_rows()) == 1
+    finally:
+        space.close()
+
+
 # --- permissions ----------------------------------------------------------------------------
 
 def test_untrusted_page_cannot_mutate_without_a_resource_for_this_business():
