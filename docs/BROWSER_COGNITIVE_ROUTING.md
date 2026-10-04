@@ -168,15 +168,23 @@ sans objectif achevé cette valeur est inconnue (`None`), pas zéro.
 Les échecs API restent dans llm_calls ; les échecs de trajectoire restent distincts.
 Une résolution inconnue ou mélangeant plusieurs modèles ne qualifie aucune route.
 
-Qualification : dernier run de suite seulement, âge <= 14 jours, couverture des
-dix scénarios, moyenne des taux de réussite par scénario >= 90 %, 100 % pour
-vision/DOM ambigu/recovery/invalid_args/stale_refs, aucun outil interdit.
-Deux stagnations mesurées récentes après cette suite bloquent la qualification ;
-un nouveau benchmark peut la rétablir. Aucun `status=ok` ne crée de preuve browser.
+Qualification : dernier run de suite seulement, âge <= 14 jours, suite complète
+sans panne d'infrastructure, au moins une réussite dans chacun des dix scénarios,
+moyenne des taux de réussite par scénario >= 90 %, aucun outil interdit.
+La capacité fonctionnelle démontrée, les taux de réussite observés et l'absence
+de violation sont exposés séparément. Une abstention ou une mauvaise décision
+reste un échec dans ces taux ; elle n'efface pas une capacité déjà démontrée.
+Une catégorie jamais réussie interdit la qualification, même à 90 % globalement.
+La qualification sélectionne un contrôleur ; elle n'accorde aucune autorité sur
+les ressources et ne remplace pas les frontières de sécurité de chaque action.
+Ces petits échantillons ne garantissent pas la fiabilité future. Une panne donne
+une évaluation incomplète, pas une incapacité cognitive ni une violation de sécurité.
+La stagnation en exécution reste une observation, sans retirer automatiquement
+la qualification objective. Aucun `status=ok` ne crée de preuve browser.
 Les tests ne préchargent des preuves synthétiques que dans leurs bases temporaires.
 
 Les anciennes lignes `browser-v1` restent lisibles et ne qualifient pas la nouvelle
-mesure. Les seuils et les dix fixtures restent identiques. La vue du prompt conserve
+mesure. Le seuil global de 90 % et les dix fixtures restent identiques. La vue du prompt conserve
 le snapshot acquis et des métadonnées JSON complètes. L'observation courte indique
 sa troncature ; `browser_snapshot(full=true)` expose tout l'arbre et tous les contrôles
 observés, avec les mêmes protections de secrets et de périmètre.
@@ -271,7 +279,7 @@ les transitions observées, sans prétendre conserver chaque contenu intermédia
 4. browser.react_step contrôle maintenant la boucle ; aucun modèle fixe imposé.
 5. Preuve browser puis contraintes catalogue/provider/capacités/politique ; ranking
    des qualifiés gratuit/local avant paid, prix minimal puis fiabilité et qualité.
-6. Dix scénarios, >=90 % global, cinq compétences critiques à 100 %, âge <=14 jours.
+6. Chaque capacité démontrée, >=90 % moyen, suite complète sans outil interdit, âge <=14 jours.
 7. La compétence est un prérequis ; le coût classe ensuite les candidats admissibles.
    Santé provider/cooldowns/vision et politiques paid restent éliminatoires.
 8. Un gratuit qualifié passe avant un paid équivalent ; pas de preuve fictive au bootstrap.

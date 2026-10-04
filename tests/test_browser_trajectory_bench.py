@@ -435,7 +435,9 @@ def test_recovered_429_does_not_retry_later_cognitive_failure(monkeypatch, trans
 
 
 def test_multimodal_controller_keeps_real_png_and_capture_history(monkeypatch,transport,providers_up):
-    qualify('openrouter/fixture/vision-alpha:free',fail=('sufficient_dom',))
+    with journal.run('test', 'bench') as ctx:
+        qualify('openrouter/fixture/vision-alpha:free', fail=('sufficient_dom',), run_id=ctx.id)
+        qualify('openrouter/fixture/vision-alpha:free', run_id=ctx.id)
     qualify('deepseek/flash')
     qualify('openrouter/fixture/text-gamma:free')  # Synthetic proof; capabilities still forbid this text-only model after image.
     with bb.Fixture('vision') as fixture:

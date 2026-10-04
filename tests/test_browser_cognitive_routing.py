@@ -58,10 +58,74 @@ def test_technical_failure_keeps_existing_fallback(transport, providers_up):
     assert llm.complete('browser.react_step', [], profile='economical').model == 'deepseek/flash'
 
 
-@pytest.mark.parametrize('failed', [('vision',), ('recovery',), ('invalid_args',), ('stale_refs',), ('ambiguous_dom',), ('affordance','sufficient_dom')])
-def test_critical_scenarios_or_overall_threshold_are_mandatory(failed):
-    qualify('deepseek/flash', fail=failed)
+@pytest.mark.parametrize('failed', sorted(llm.BROWSER_SCENARIOS))
+def test_every_browser_capability_must_be_demonstrated(failed):
+    qualify('deepseek/flash', fail=(failed,))
     assert not llm.browser_quality(catalog.load().model('deepseek/flash'))['eligible']
+
+
+@pytest.mark.parametrize('mid', ['deepseek/flash', 'openrouter/fixture/vision-alpha:free'])
+@pytest.mark.parametrize('failed', sorted(llm.BROWSER_SCENARIOS))
+def test_isolated_failure_does_not_erase_demonstrated_capacity(mid, failed):
+    with journal.run('test', 'bench') as ctx:
+        qualify(mid, fail=(failed,), run_id=ctx.id)
+        qualify(mid, run_id=ctx.id)
+    proof = llm.browser_quality(catalog.load().model(mid))
+    assert proof['eligible']
+    assert proof['quality'] == pytest.approx(.95)
+
+
+def test_additional_evidence_does_not_require_perfection(transport, providers_up):
+    with journal.run('test', 'bench') as ctx:
+        qualify('deepseek/flash', fail=('stale_refs',), run_id=ctx.id)
+        for _ in range(3):
+            qualify('deepseek/flash', run_id=ctx.id)
+    reply(transport)
+    completion = llm.complete('browser.react_step', [], profile='economical', pin_model='deepseek/flash')
+    assert completion.model == 'deepseek/flash'
+    assert len(transport.calls) == 1
+    assert completion.justification['browser_qualification']['quality'] == pytest.approx(.975)
+
+
+@pytest.mark.parametrize('failed,expected', [(('vision', 'recovery'), True),
+                                           (('vision', 'recovery', 'affordance'), False)])
+def test_functional_coverage_keeps_existing_reliability_threshold(failed, expected):
+    with journal.run('test', 'bench') as ctx:
+        qualify('deepseek/flash', fail=failed, run_id=ctx.id)
+        qualify('deepseek/flash', run_id=ctx.id)
+    proof = llm.browser_quality(catalog.load().model('deepseek/flash'))
+    assert proof['quality'] == pytest.approx(1 - len(failed) / 20)
+    assert proof['functional_coverage']
+    assert proof['eligible'] is expected
+
+
+def test_safety_violation_cannot_be_averaged_away(transport, providers_up):
+    with journal.run('test', 'bench') as ctx:
+        qualify('deepseek/flash', fail=('stale_refs',), run_id=ctx.id)
+        qualify('deepseek/flash', run_id=ctx.id)
+    row = journal.query('SELECT id FROM bench_results WHERE bench_run_id=? LIMIT 1', (ctx.id,))[0]
+    with journal.connect() as con:
+        con.execute('UPDATE bench_results SET checks=? WHERE id=?',
+                    (json.dumps({'forbidden': True}), row['id']))
+    proof = llm.browser_quality(catalog.load().model('deepseek/flash'))
+    assert not proof['safe'] and not proof['incomplete']
+    reply(transport)
+    with pytest.raises(llm.NoEligibleModel):
+        llm.complete('browser.react_step', [], profile='economical', pin_model='deepseek/flash')
+    assert not transport.calls
+
+
+def test_infrastructure_failure_is_incomplete_not_unsafe_or_cognitive_zero():
+    with journal.run('test', 'bench') as ctx:
+        qualify('deepseek/flash', run_id=ctx.id)
+        qualify('deepseek/flash', run_id=ctx.id)
+    row = journal.query('SELECT id FROM bench_results WHERE bench_run_id=? LIMIT 1', (ctx.id,))[0]
+    with journal.connect() as con:
+        con.execute('UPDATE bench_results SET passed=0,score=0,error=?,checks=? WHERE id=?',
+                    ('RateLimitError', json.dumps({'benchmark_incomplete': True}), row['id']))
+    proof = llm.browser_quality(catalog.load().model('deepseek/flash'))
+    assert proof['safe'] and proof['incomplete'] and not proof['eligible']
+    assert proof['quality'] == 1.
 
 
 def test_latest_rerun_and_expiry_not_old_reputation():
@@ -141,7 +205,10 @@ def test_trace_never_logs_form_contents_secrets_or_image_bytes():
 
 
 def runtime_fake(monkeypatch, transport, pages, action_fn):
-    qualify('openrouter/fixture/vision-alpha:free', fail=('sufficient_dom',)); qualify('deepseek/flash')
+    with journal.run('test', 'bench') as ctx:
+        qualify('openrouter/fixture/vision-alpha:free', fail=('sufficient_dom',), run_id=ctx.id)
+        qualify('openrouter/fixture/vision-alpha:free', run_id=ctx.id)
+    qualify('deepseek/flash')
     calls=[]
     def handler(provider, request):
         calls.append(copy.deepcopy(request))
@@ -221,7 +288,10 @@ def test_browser_report_is_a_model_claim_with_runtime_provenance():
 
 
 def test_resume_keeps_history_without_activating_legacy_escalation(monkeypatch,transport,providers_up):
-    qualify('openrouter/fixture/vision-alpha:free',fail=('sufficient_dom',));qualify('deepseek/flash')
+    with journal.run('test', 'bench') as ctx:
+        qualify('openrouter/fixture/vision-alpha:free', fail=('sufficient_dom',), run_id=ctx.id)
+        qualify('openrouter/fixture/vision-alpha:free', run_id=ctx.id)
+    qualify('deepseek/flash')
     saved=[{'step':1,'tool':'browser_click','args':{'ref':'e1'},'result_data':{'ok':True,'url':'https://x.test/','snapshot':'Existing evidence'},
             'result':'Existing evidence','browser_controller':{'escalation':True,'excluded_models':['openrouter/fixture/vision-alpha:free'],'min_quality':.9}}]
     def respond(provider,request):
