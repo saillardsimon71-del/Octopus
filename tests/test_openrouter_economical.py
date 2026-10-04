@@ -78,11 +78,9 @@ def test_economical_caps_two_free_routes_and_three_requests(transport, providers
         return UnsupportedFormat("400")
 
     transport.handler = handler
-    result = llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
-                          validate=llm.parse_json)
-
-    assert result.model == "deepseek/flash"
-    assert transport.models == ["fixture/text-delta:free"] * 2 + ["fixture/text-gamma:free", "deepseek-flash"]
+    with pytest.raises(llm.NoEligibleModel, match='payant'):
+        llm.complete("agent.react_step", MSG, profile="economical", json_mode=True, validate=llm.parse_json)
+    assert transport.models == ["fixture/text-delta:free"] * 2 + ["fixture/text-gamma:free"]
 
 
 def test_429_with_structured_word_does_not_retry_same_route(transport, providers_up, monkeypatch):
@@ -100,11 +98,9 @@ def test_429_with_structured_word_does_not_retry_same_route(transport, providers
         return ('{"tasks":[]}', Usage(prompt_tokens=20, completion_tokens=8))
 
     transport.handler = handler
-    result = llm.complete("agent.plan", MSG, profile="economical", json_mode=True,
-                          validate=llm.parse_json)
-
-    assert result.model == "deepseek/flash"
-    assert transport.models == ["fixture/text-delta:free", "deepseek-flash"]
+    with pytest.raises(llm.NoEligibleModel, match='payant'):
+        llm.complete("agent.plan", MSG, profile="economical", json_mode=True, validate=llm.parse_json)
+    assert transport.models == ["fixture/text-delta:free"]
     assert "429" in llm._rate_limit_cooldown_reason("openrouter/fixture/text-delta:free")
 
 
@@ -120,12 +116,11 @@ def test_openrouter_unattested_or_paid_response_is_blocked(transport, providers_
         return _free(request)
 
     transport.handler = handler
-    result = llm.complete("agent.react_step", MSG, profile="economical", json_mode=True)
-
-    assert result.model == "deepseek/flash"
+    with pytest.raises(llm.NoEligibleModel, match='payant'):
+        llm.complete("agent.react_step", MSG, profile="economical", json_mode=True)
     rows = journal.query("SELECT status FROM llm_calls ORDER BY id")
-    assert [row["status"] for row in rows] == ["blocked", "ok"]
-    assert transport.models == ["fixture/text-delta:free", "deepseek-flash"]
+    assert [row["status"] for row in rows] == ["blocked", "blocked"]
+    assert transport.models == ["fixture/text-delta:free"]
 
 
 def test_openrouter_account_429_cools_sibling_route_and_survives_restart(transport, providers_up,

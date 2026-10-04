@@ -32,7 +32,7 @@ PAGE_DATA_KEYS = {
     "Livrables": ("tasks", "decisions", "evidence", "generations"),
     "Navigateur": ("browser",),
     "Activité": ("requests", "llm_calls", "events"),
-    "Paramètres": ("channels", "allowances", "agnes_health", "tasks", "accounts", "mandates", "requests"),
+    "Paramètres": ("channels", "allowances", "agnes_health", "tasks", "accounts", "mandates", "requests", "llm_calls"),
 }
 
 
@@ -640,6 +640,16 @@ class WorkbenchV2(EntrepreneurialWorkbench):
         self._line(body, "Moteur, outils installés et configuration LLM : partagés. Canaux et enveloppes ci-dessous : contexte sélectionné.",
                    COLORS["muted"], pady=(0, 8))
         self._resource_hub(body)
+        self._section(body, 'Modèles et coût')
+        self._line(body, 'Profil economical : routes gratuites compatibles en priorité. Aucun appel payant automatique. '
+                   'Le navigateur conserve sa qualification spécifique. Les refus et leurs raisons sont dans Activité ; '
+                   "les demandes d'autorisation sont dans Humain.", COLORS['muted'])
+        self._section(body, 'Savoir-faire disponibles')
+        self._line(body, "Ces fiches guident le travail. Leurs prérequis doivent être réunis ; elles n'accordent aucun droit.", COLORS['muted'])
+        from octopus import capabilities
+        for skill in capabilities.skill_cards():
+            self._line(body, skill['name'] + ' : ' + skill['outputs'] + '\nPrérequis : ' +
+                       skill['prerequisites'] + '\nPreuve attendue : ' + skill['evidence'], pady=(7, 0))
         self._section(body, "Services et permissions")
         card = self._card(body)
         card.pack(fill="x")
@@ -685,7 +695,8 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             card = self._card(body)
             card.pack(fill='x', pady=4)
             self._line(card, row['label'] + ' · ' + account.get('provider', row['kind']), padx=18, pady=(10, 2), bold=True)
-            self._line(card, labels.get(account.get('session_status', 'absent'), 'Absent') +
+            self._line(card, (labels.get(account.get('session_status', 'absent'), 'Absent') if account else
+                             'Ressource déclarée : accès administrateur via le compte associé') +
                        (' · Désactivé' if account and not account.get('enabled') else '') +
                        ' · ' + account.get('ownership', 'À définir') +
                        (' · Dédié à OCTOPUS' if account.get('dedicated') else ''), padx=18, pady=2)
@@ -698,7 +709,8 @@ class WorkbenchV2(EntrepreneurialWorkbench):
             self._line(card, 'Mandats : ' + (' ; '.join(m['label'] for m in related) or 'Aucun dans ce contexte'),
                        COLORS['muted'], padx=18, pady=2)
             if not self._readonly:
-                self._secondary(card, 'Configurer / modifier', lambda key=row['key']: self._account_form(key))
+                if account or row['kind'] == 'web_account':
+                    self._secondary(card, 'Configurer / modifier', lambda key=row['key']: self._account_form(key))
                 if account and account.get('enabled'):
                     self._secondary(card, 'Ouvrir la connexion', lambda key=row['key']: self._open_account(key))
                     self._secondary(card, 'J’ai terminé — vérifier', lambda key=row['key']: self._verify_account(key))

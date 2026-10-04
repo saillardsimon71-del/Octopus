@@ -18,7 +18,9 @@ SENSITIVE = re.compile(
     r'pay(?:ment|out)?\b|paiement|payer|rembours|refund|withdraw|retrait|transf|'
     r'bank|bancair|\biban\b|\bcvv\b|\bcvc\b|card number|numéro de carte|billing|checkout|'
     r'\bbuy\b|achet|\bsubscribe\b|paid subscription|abonn.*pay|\bsign\b.*contract|\bsigner\b.*contrat|'
-    r'accept.*(?:paid|contract)|place.*order|sign up|signup|\bregister\b|'
+    r'accept.*(?:paid|contract)|place.*order|\bowner(?:ship)?\b|propri[ée]t[ée]|propri[ée]taire|'
+    r'(?:permanent|définitiv|definitiv).*(?:delet|supprim)|(?:delet|supprim).*(?:permanent|définitiv|definitiv)|'
+    r'sign up|signup|\bregister\b|'
     r'cré(?:er|ation).*compte|cr(?:eer|eation).*compte|create.*account|nouveau compte|'
     r's[\x27\u2019 ]?inscrire|/registration\b|/inscription\b', re.I)
 
@@ -78,7 +80,7 @@ def revoke(business, mandate_id, *, actor):
 
 def covering(business, target, effect, resource_key=None):
     for m in list_mandates(business, active=True):
-        if m['target'] == target:
+        if m['target'] == target and effect in m['effects']:
             if target == 'public_business' or resource_key in m['resource_keys'] or '*' in m['resource_keys']:
                 return m
     return None
@@ -91,7 +93,7 @@ def account_authority(business, resource_key, effect):
     if (not account or not account.get('enabled') or account.get('session_status') != 'connected'
             or business not in account.get('businesses', [])):
         return None
-    return {'resource_key': resource_key, 'business': business}
+    return covering(business, 'owned_account', effect, resource_key)
 
 
 def qualify_public(channel_id, business, *, source_url, observed_text):
@@ -140,6 +142,9 @@ def bind_account(channel_id, business, resource_key):
     if urlsplit(rows[0]['locator']).hostname not in a['domains']:
         raise PermissionError('canal hors des domaines de la ressource')
     with tasks._tx() as conn:
+        existing = conn.execute('SELECT target,resource_key FROM channel_authority WHERE channel_id=?', (channel_id,)).fetchone()
+        if existing and (existing['target'] != 'owned_account' or existing['resource_key'] != resource_key):
+            raise PermissionError('canal déjà lié à une autre ressource')
         conn.execute('INSERT OR IGNORE INTO channel_authority '
                      '(channel_id,business,target,resource_key,source_ref,qualified_at) '
                      "VALUES (?,?,'owned_account',?,?,?)", (channel_id, business, resource_key, r['locator'], time.time()))

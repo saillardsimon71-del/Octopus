@@ -18,8 +18,27 @@ MSG = [{"role": "user", "content": "Ecris le job en JSON."}]
 from browser_evidence import prove
 
 
+@pytest.fixture
+def route_candidates(monkeypatch):
+    selected = {}
+    original_load = catalog.load
+    def load():
+        cat = original_load()
+        for task, ids in selected.items():
+            for profile, pool in cat.task(task)['candidates'].items():
+                paid = [m for m in pool if cat.model(m)['cost_class'] == 'paid']
+                cat.task(task)['candidates'][profile] = paid + ids if profile == 'quality_first' else ids + paid
+        return cat
+    monkeypatch.setattr(catalog, 'load', load)
+    def select(task, model):
+        ids = selected.setdefault(task, [])
+        if model not in ids:
+            ids.append(model)
+    return select
+
+
 def calls() -> list[dict]:
-    return [dict(r) for r in journal.query("SELECT * FROM llm_calls ORDER BY id")]
+    return [dict(r) for r in journal.query("SELECT * FROM llm_calls WHERE model != 'none' ORDER BY id")]
 
 
 def by_model(mapping: dict):
@@ -51,27 +70,24 @@ def test_transport_error_is_journaled_and_raised(transport):
 
 def test_zero_cost_without_evidence_never_pays(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    with pytest.raises(llm.NoEligibleModel) as err:
-        deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG)
-    assert transport.calls == []
-    assert all("preuve insuffisante" in c["reason"] for c in err.value.considered)
-    assert calls() == []
+    transport.reply('{"ok":true}')
+    assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {'ok': True}
+    assert all(m.endswith(':free') for m in transport.models)
+    assert all(c['cost_usd'] == 0 for c in calls())
 
 
-def test_openrouter_requires_evidence_before_zero_cost_use(transport, providers_up, monkeypatch):
+def test_openrouter_generic_compatibility_is_sufficient(transport, providers_up, monkeypatch):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
 
-    with pytest.raises(llm.NoEligibleModel) as err:
-        llm.complete("agent.plan", MSG, profile="zero_cost", json_mode=True)
-
-    assert transport.calls == []
-    candidate = next(item for item in err.value.considered if item["model"] == "openrouter/fixture/text-gamma:free")
-    assert "preuve insuffisante" in candidate["reason"]
+    transport.reply('{"tasks":[]}')
+    result = llm.complete("agent.plan", MSG, profile="zero_cost", json_mode=True)
+    assert result.provider == 'openrouter' and result.cost_usd == 0
+    assert not journal.query('SELECT * FROM bench_results')
 
 
-def test_structured_bad_request_retries_same_model_as_prompt_json(transport, providers_up, monkeypatch):
+def test_structured_bad_request_retries_same_model_as_prompt_json(transport, providers_up, monkeypatch, route_candidates):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
+    route_candidates("podalux.write_job", "openrouter/fixture/vision-alpha:free")
 
     def handler(provider, request):
         if "response_format" in request:
@@ -120,9 +136,9 @@ def test_failed_generation_field_is_structured_error():
     assert llm._structured_method_error(FailedGeneration("400")) is True
 
 
-def test_structured_fallback_keeps_grounding_messages_identical(transport, providers_up, monkeypatch):
+def test_structured_fallback_keeps_grounding_messages_identical(transport, providers_up, monkeypatch, route_candidates):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
+    route_candidates("podalux.write_job", "openrouter/fixture/vision-alpha:free")
     grounded = [
         {"role": "system", "content": "RÈGLE DE PREUVE: toute inconnue reste inconnue."},
         {"role": "user", "content": "Réponds en JSON."},
@@ -146,10 +162,10 @@ def test_structured_fallback_keeps_grounding_messages_identical(transport, provi
     assert transport.calls[1][1]["messages"] == grounded
 
 
-def test_structured_cascade_has_bounded_call_count(transport, providers_up, monkeypatch):
+def test_structured_cascade_has_bounded_call_count(transport, providers_up, monkeypatch, route_candidates):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    prove("agent.synthesize", "openrouter/fixture/text-gamma:free")
-    prove("agent.synthesize", "openrouter/fixture/vision-alpha:free")
+    route_candidates("agent.synthesize", "openrouter/fixture/text-gamma:free")
+    route_candidates("agent.synthesize", "openrouter/fixture/vision-alpha:free")
 
     class FailedGeneration(Exception):
         body = {"error": {"message": "Failed to generate JSON", "failed_generation": "x"}}
@@ -160,7 +176,7 @@ def test_structured_cascade_has_bounded_call_count(transport, providers_up, monk
         return RuntimeError("route indisponible après cette méthode")
 
     transport.handler = handler
-    with pytest.raises(llm.NoEligibleModel):
+    with pytest.raises(RuntimeError, match="route indisponible"):
         llm.complete("agent.synthesize", MSG, profile="zero_cost", json_mode=True, validate=llm.parse_json)
 
     assert transport.models == [
@@ -170,8 +186,8 @@ def test_structured_cascade_has_bounded_call_count(transport, providers_up, monk
     ]
 
 
-def test_http_413_skips_same_provider_for_same_prompt_across_calls(transport, providers_up, monkeypatch):
-    prove("agent.plan", "openrouter/fixture/text-gamma:free")
+def test_http_413_skips_same_provider_for_same_prompt_across_calls(transport, providers_up, monkeypatch, route_candidates):
+    route_candidates("agent.plan", "openrouter/fixture/text-gamma:free")
 
     class TooLarge(Exception):
         status_code = 413
@@ -194,10 +210,10 @@ def test_http_413_skips_same_provider_for_same_prompt_across_calls(transport, pr
     assert len([row for row in calls() if row["status"] == "request_too_large"]) == 1
 
 
-def test_normal_zero_cost_routes_to_proven_free_model(transport, providers_up, monkeypatch):
+def test_normal_zero_cost_routes_to_proven_free_model(transport, providers_up, monkeypatch, route_candidates):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
     monkeypatch.setattr(deepseek, "_client", lambda: pytest.fail("le mode normal ne doit pas appeler DeepSeek directement"))
-    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
+    route_candidates("podalux.write_job", "openrouter/fixture/vision-alpha:free")
     transport.reply('{"titre": "ok"}')
     assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "ok"}
     provider, request = transport.calls[0]
@@ -254,9 +270,9 @@ def test_run_profile_overrides_ambient_environment(monkeypatch):
         assert llm._resolve_profile(cat, "quality_first", ctx) == "quality_first"
 
 
-def test_rate_limited_route_is_skipped_until_cooldown_expires(transport, providers_up, monkeypatch):
+def test_rate_limited_route_is_skipped_until_cooldown_expires(transport, providers_up, monkeypatch, route_candidates):
     for mid in ('openrouter/fixture/vision-alpha:free', 'openrouter/fixture/vision-beta:free'):
-        prove('agent.react_step', mid)
+        route_candidates('agent.react_step', mid)
     attempts = 0
     class UpstreamLimit(_FakeRateLimit):
         body = {'metadata': {'limit_source': 'upstream_provider_shared_pool'}}
@@ -284,10 +300,10 @@ def test_rate_limited_route_is_skipped_until_cooldown_expires(transport, provide
     assert '429 rate limit; cooldown' in skipped['reason']
 
 
-def test_fallback_to_next_free_model_after_failure(transport, providers_up, monkeypatch):
+def test_fallback_to_next_free_model_after_failure(transport, providers_up, monkeypatch, route_candidates):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
-    prove("podalux.write_job", "openrouter/fixture/vision-beta:free")
+    route_candidates("podalux.write_job", "openrouter/fixture/vision-alpha:free")
+    route_candidates("podalux.write_job", "openrouter/fixture/vision-beta:free")
     transport.handler = by_model({"fixture/vision-alpha:free": TimeoutError("modèle indisponible"), "fixture/vision-beta:free": '{"titre": "g"}'})
     assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "g"}
     assert [c["status"] for c in calls()] == ["error", "ok"]
@@ -322,33 +338,31 @@ def test_low_cost_pays_only_when_alternatives_are_ineligible(transport, provider
     monkeypatch.setenv("OCTOPUS_PROFILE", "low_cost")
     transport.reply('{"titre": "ok"}')
     deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG)
-    assert transport.models == ["deepseek-flash"]  # reference du banc : pas de preuve exigee
-    just = json.loads(calls()[0]["justification"])
-    assert just["paid_reason"] == "alternatives_ineligible"
-    assert "preuve insuffisante" in just["explanation"]
+    assert transport.models == ["fixture/text-delta:free"]
+    assert calls()[0]["cost_usd"] == 0
 
 
-def test_low_cost_paid_fallback_after_free_failure_is_explained(transport, providers_up, monkeypatch):
+def test_low_cost_paid_fallback_after_free_failure_is_explained(transport, providers_up, monkeypatch, route_candidates):
     monkeypatch.setenv("OCTOPUS_PROFILE", "low_cost")
-    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
+    route_candidates("podalux.write_job", "openrouter/fixture/vision-alpha:free")
     transport.handler = by_model({"fixture/vision-alpha:free": ConnectionError("down"), "deepseek-flash": '{"titre": "p"}'})
     deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG)
     just = json.loads(calls()[-1]["justification"])
     assert just["paid_reason"] == "fallback_after_failure" and "ConnectionError" in just["explanation"]
 
 
-def test_invalid_output_falls_back(transport, providers_up):
-    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
+def test_invalid_output_falls_back(transport, providers_up, route_candidates):
+    route_candidates("podalux.write_job", "openrouter/fixture/vision-alpha:free")
     transport.handler = by_model({"fixture/vision-alpha:free": "pas du json", "deepseek-flash": '{"titre": "p"}'})
     c = llm.complete("podalux.write_job", MSG, profile="low_cost", json_mode=True, validate=llm.parse_json)
     assert c.model == "deepseek/flash" and c.data == {"titre": "p"}
     assert [r["status"] for r in calls()] == ["invalid", "invalid", "ok"]
 
 
-def test_call_json_invalid_output_falls_back_between_free_models(transport, providers_up, monkeypatch):
+def test_call_json_invalid_output_falls_back_between_free_models(transport, providers_up, monkeypatch, route_candidates):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
-    prove("podalux.write_job", "openrouter/fixture/vision-beta:free")
+    route_candidates("podalux.write_job", "openrouter/fixture/vision-alpha:free")
+    route_candidates("podalux.write_job", "openrouter/fixture/vision-beta:free")
     transport.handler = by_model({"fixture/vision-alpha:free": "pas du json", "fixture/vision-beta:free": '{"titre": "g"}'})
 
     assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "g"}
@@ -356,10 +370,10 @@ def test_call_json_invalid_output_falls_back_between_free_models(transport, prov
     assert [r["status"] for r in calls()] == ["invalid", "invalid", "ok"]
 
 
-def test_vision_invalid_verdict_falls_back_between_free_models(transport, providers_up, monkeypatch):
+def test_vision_invalid_verdict_falls_back_between_free_models(transport, providers_up, monkeypatch, route_candidates):
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    prove("podalux.qc_vision", "openrouter/fixture/vision-alpha:free")
-    prove("podalux.qc_vision", "openrouter/fixture/vision-beta:free")
+    route_candidates("podalux.qc_vision", "openrouter/fixture/vision-alpha:free")
+    route_candidates("podalux.qc_vision", "openrouter/fixture/vision-beta:free")
     valid = {axis: 1 for axis in ag.AXES}
     transport.handler = by_model({
         "fixture/vision-alpha:free": json.dumps({**valid, "hook": 40}),
@@ -410,14 +424,14 @@ def test_explicit_legacy_overrides_default(monkeypatch):
     assert llm._resolve_profile(catalog.load(), None, None) == 'legacy'
 
 
-def test_legacy_wrapper_uses_catalog_default_profile(transport, providers_up, monkeypatch, tmp_path):
+def test_legacy_wrapper_uses_catalog_default_profile(transport, providers_up, monkeypatch, tmp_path, route_candidates):
     raw = copy.deepcopy(catalog.load().raw)
     raw["default_profile"] = "zero_cost"
     path = tmp_path / "catalog.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     monkeypatch.setenv("OCTOPUS_CATALOG", str(path))
     monkeypatch.delenv("OCTOPUS_PROFILE", raising=False)
-    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
+    route_candidates("podalux.write_job", "openrouter/fixture/vision-alpha:free")
     transport.reply('{"titre": "local"}')
 
     assert deepseek.call_json("CONVERT", "redaction_job", config.MODEL_FLASH, MSG) == {"titre": "local"}
@@ -478,8 +492,8 @@ def test_daily_budget(transport, tmp_path, monkeypatch):
         deepseek.call_json("SOUT", "action", config.MODEL_FLASH, MSG)
 
 
-def test_free_calls_ignore_budgets(transport, providers_up):
-    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
+def test_free_calls_ignore_budgets(transport, providers_up, route_candidates):
+    route_candidates("podalux.write_job", "openrouter/fixture/vision-alpha:free")
     transport.reply('{"a": 1}')
     with journal.run("podalux", "video_cycle", budget_usd=0.0):
         c = llm.complete("podalux.write_job", MSG, profile="zero_cost", json_mode=True)
@@ -515,10 +529,10 @@ def test_octopus_off_alone_refuses_direct_legacy(transport, monkeypatch):
     assert client.kwargs == [] and transport.calls == []
 
 
-def test_legacy_opt_in_alone_does_not_bypass_gateway(transport, providers_up, monkeypatch):
+def test_legacy_opt_in_alone_does_not_bypass_gateway(transport, providers_up, monkeypatch, route_candidates):
     monkeypatch.setenv("OCTOPUS_ALLOW_LEGACY_DIRECT", "1")
     monkeypatch.setenv("OCTOPUS_PROFILE", "zero_cost")
-    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
+    route_candidates("podalux.write_job", "openrouter/fixture/vision-alpha:free")
     transport.reply('{"titre": "local"}')
     monkeypatch.setattr(deepseek, "_client", lambda: pytest.fail("opt-in seul ne doit pas appeler DeepSeek"))
 
@@ -541,8 +555,8 @@ def test_double_opt_in_restores_direct_legacy_calls(transport, monkeypatch, tmp_
     assert cost == pytest.approx(config.PRICES[config.MODEL_FLASH]["in"])
 
 
-def test_budget_block_falls_back_to_free_model(transport, providers_up, monkeypatch):
-    prove('podalux.write_job', 'openrouter/fixture/vision-beta:free')
+def test_budget_block_falls_back_to_free_model(transport, providers_up, monkeypatch, route_candidates):
+    route_candidates('podalux.write_job', 'openrouter/fixture/vision-beta:free')
     cat = catalog.load()
     cat.task('podalux.write_job')['candidates']['quality_first'] = ['deepseek/flash', 'openrouter/fixture/vision-beta:free']
     monkeypatch.setattr(catalog, 'load', lambda: cat)
@@ -553,17 +567,20 @@ def test_budget_block_falls_back_to_free_model(transport, providers_up, monkeypa
     assert [r['status'] for r in calls()] == ['blocked', 'ok']
 
 
-def test_budget_block_without_alternative_raises_budget_exceeded(transport, providers_up):
+def test_budget_block_without_alternative_raises_budget_exceeded(transport, providers_up, monkeypatch):
+    cat = catalog.load()
+    cat.task("podalux.write_job")["candidates"]["quality_first"] = ["deepseek/flash"]
+    monkeypatch.setattr(catalog, "load", lambda: cat)
     transport.reply('{"a": 1}')
     with journal.run("podalux", "video_cycle", budget_usd=0.0):
-        with pytest.raises(llm.BudgetExceeded, match="openrouter/fixture/vision-beta:free : preuve insuffisante"):
+        with pytest.raises(llm.BudgetExceeded, match="budget du run"):
             llm.complete("podalux.write_job", MSG, profile="quality_first", json_mode=True)
     assert transport.calls == []
 
 
 
-def test_zero_ceiling_allows_proven_free_calls_but_blocks_paid(transport, providers_up):
-    prove("podalux.write_job", "openrouter/fixture/vision-alpha:free")
+def test_zero_ceiling_allows_proven_free_calls_but_blocks_paid(transport, providers_up, route_candidates):
+    route_candidates("podalux.write_job", "openrouter/fixture/vision-alpha:free")
     transport.reply('{"ok": true}')
     with journal.run("atelier", "task", budget_usd=0):
         out = llm.complete("podalux.write_job", MSG, profile="zero_cost", json_mode=True)
@@ -603,8 +620,8 @@ def test_explicit_paid_profile_shares_two_dollar_ceiling_without_external_allowa
     assert not journal.query("SELECT id FROM spend_requests")
 
 
-def test_economical_uses_eligible_free_route_without_paid_cost(transport, providers_up):
-    prove("agent.react_step", "openrouter/fixture/text-gamma:free")
+def test_economical_uses_eligible_free_route_without_paid_cost(transport, providers_up, route_candidates):
+    route_candidates("agent.react_step", "openrouter/fixture/text-gamma:free")
     transport.handler = by_model({"fixture/text-gamma:free": '{"final":"ok"}'})
     result = llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
                           validate=llm.parse_json)
@@ -614,43 +631,43 @@ def test_economical_uses_eligible_free_route_without_paid_cost(transport, provid
     assert calls()[0]["cost_class"] == "free_quota"
 
 
-def test_economical_bounds_free_attempts_then_uses_deepseek(transport, providers_up):
+def test_economical_bounds_free_attempts_then_requests_human(transport, providers_up, route_candidates):
     for mid in ('text-delta', 'text-gamma', 'vision-alpha'):
-        prove('podalux.select_offer', 'openrouter/fixture/'+mid+':free')
+        route_candidates('podalux.select_offer', 'openrouter/fixture/'+mid+':free')
     transport.handler = by_model({'fixture/text-delta:free':'pas du JSON',
         'fixture/text-gamma:free':TimeoutError('quota'), 'deepseek-flash':'{"ok":true}'})
-    result = llm.complete('podalux.select_offer', MSG, profile='economical', json_mode=True, validate=llm.parse_json)
-    assert result.model == 'deepseek/flash'
-    assert transport.models == ['fixture/text-delta:free', 'fixture/text-gamma:free', 'deepseek-flash']
-    assert [row['status'] for row in calls()] == ['invalid', 'error', 'ok']
-    assert "limite d'essais gratuits" in result.justification['explanation']
-    assert result.justification['paid_reason'] == 'fallback_after_failure'
-    assert all(row['cost_usd'] == 0 for row in calls()[:2]) and calls()[-1]['cost_usd'] > 0
+    with pytest.raises(llm.NoEligibleModel, match='payant') as error:
+        llm.complete('podalux.select_offer', MSG, profile='economical', json_mode=True, validate=llm.parse_json)
+    assert error.value.human_required
+    assert transport.models == ['fixture/text-delta:free', 'fixture/text-gamma:free']
+    assert [row['status'] for row in calls()] == ['invalid', 'error']
+    assert all(row['cost_usd'] == 0 for row in calls())
 
 
-def test_economical_goes_directly_to_deepseek_without_eligible_free_model(transport, providers_up):
+def test_economical_uses_compatible_free_model_without_benchmark(transport, providers_up, route_candidates):
+    route_candidates('agent.plan', 'openrouter/fixture/text-delta:free')
     from octopus import status
     transport.reply('{"ok":true}')
     result = llm.complete("agent.plan", MSG, profile="economical", json_mode=True,
                           validate=llm.parse_json)
-    assert result.model == "deepseek/flash"
-    assert transport.models == ["deepseek-flash"]
-    assert result.justification["paid_reason"] == "alternatives_ineligible"
+    assert result.model == "openrouter/fixture/text-delta:free"
+    assert transport.models == ["fixture/text-delta:free"]
+    assert "paid_reason" not in result.justification
     assert status.llm_routing()["fallbacks_observed"] == 0
 
 
-def test_economical_invalid_free_json_falls_back_once_to_deepseek(transport, providers_up):
-    prove("agent.react_step", "openrouter/fixture/text-gamma:free")
+def test_economical_invalid_free_json_requires_human(transport, providers_up, route_candidates):
+    route_candidates("agent.react_step", "openrouter/fixture/text-gamma:free")
     transport.handler = by_model({"fixture/text-gamma:free": "invalide",
                                   "deepseek-flash": '{"final":"ok"}'})
-    result = llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
-                          validate=llm.parse_json)
-    assert result.model == "deepseek/flash"
-    assert transport.models == ["fixture/text-gamma:free", "deepseek-flash"]
-    assert [row["status"] for row in calls()] == ["invalid", "ok"]
+    with pytest.raises(llm.NoEligibleModel, match='payant'):
+        llm.complete("agent.react_step", MSG, profile="economical", json_mode=True, validate=llm.parse_json)
+    assert transport.models == ["fixture/text-gamma:free"]
+    assert [row["status"] for row in calls()] == ["invalid"]
 
 
-def test_economical_repairs_control_character_without_another_provider_call(transport, providers_up):
+def test_economical_repairs_control_character_without_another_provider_call(transport, providers_up, route_candidates):
+    route_candidates('agent.decision', 'openrouter/fixture/text-delta:free')
     from agents import runtime
     transport.reply('{"rapport":"ligne 1\nligne 2","determination":'
                     '{"action":"pause","reason":"preuve absente","next_goal":"","permission":""}}',
@@ -661,30 +678,30 @@ def test_economical_repairs_control_character_without_another_provider_call(tran
 
     assert result.data["rapport"] == "ligne 1\nligne 2"
     assert result.data["determination"]["action"] == "pause"
-    assert transport.models == ["deepseek-flash"]
+    assert transport.models == ["fixture/text-delta:free"]
     row = calls()[0]
-    assert row["status"] == "ok" and row["cost_usd"] > 0
+    assert row["status"] == "ok" and row["cost_usd"] == 0
     assert json.loads(row["justification"])["json_repair"] == "control_chars"
 
 
-def test_economical_failed_single_repair_falls_back_without_second_repair(transport, providers_up):
-    prove("agent.react_step", "openrouter/fixture/text-gamma:free")
+def test_economical_failed_single_repair_falls_back_without_second_repair(transport, providers_up, route_candidates):
+    route_candidates("agent.react_step", "openrouter/fixture/text-gamma:free")
     transport.handler = by_model({"fixture/text-gamma:free": '{"final":"line\nbreak" "other":1}',
                                   "deepseek-flash": '{"final":"line\nbreak" "other":1}'})
 
-    with pytest.raises(llm.InvalidOutput):
+    with pytest.raises(llm.NoEligibleModel):
         llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
                      validate=llm.parse_json)
 
-    assert transport.models == ["fixture/text-gamma:free"] * 2 + ["deepseek-flash"] * 2
+    assert transport.models == ["fixture/text-gamma:free"] * 2
     rows = calls()
-    assert [row["status"] for row in rows] == ["invalid"] * 4
+    assert [row["status"] for row in rows] == ["invalid"] * 2
     assert json.loads(rows[0]["justification"])["json_repair_attempted"] is True
     assert all("json_repair_attempted" not in json.loads(row["justification"]) for row in rows[1:])
     assert [json.loads(row["justification"])["structured_method"] for row in rows] == [
-        "json_object", "text", "json_object", "text"]
+        "json_object", "text"]
     assert all(row["cost_usd"] == 0 for row in rows[:2])
-    assert all(row["cost_usd"] > 0 for row in rows[2:])
+    assert all(row["cost_usd"] == 0 for row in rows)
 
 
 @pytest.mark.parametrize("malformed", [
@@ -693,7 +710,7 @@ def test_economical_failed_single_repair_falls_back_without_second_repair(transp
     '{\n  "rapport": "Observation conservée."\n  "determination": {"action":"pause",'
     '"reason":"Revenu inconnu","next_goal":"","permission":""}\n}',
 ])
-def test_economical_missing_comma_uses_one_method_alternative_and_counts_both_costs(
+def test_explicit_paid_missing_comma_uses_one_method_alternative_and_counts_both_costs(
         transport, providers_up, malformed):
     from agents import runtime
     from agents.gui.workbench_v2_data import read_snapshot
@@ -713,8 +730,8 @@ def test_economical_missing_comma_uses_one_method_alternative_and_counts_both_co
                                    resolved_provider="deepseek", provider_cost_usd=cost)
 
     transport.handler = respond
-    with journal.run("octopus", "task:mission", budget_usd=.20, profile="economical") as run:
-        result = llm.complete("agent.decision", MSG, json_mode=True, max_tokens=50,
+    with journal.run("octopus", "task:mission", budget_usd=.20, profile="legacy") as run:
+        result = llm.complete("agent.decision", MSG, pin_model="deepseek/flash", json_mode=True, max_tokens=50,
                               validate=lambda text: runtime._validate_synthesis_contract(llm.parse_json(text), True))
         assert journal.subtree_cost(run.id) == pytest.approx(.00594607 + .0060291)
     assert result.data["determination"]["action"] == "pause"
@@ -740,16 +757,16 @@ def test_economical_missing_comma_uses_one_method_alternative_and_counts_both_co
 
 
 @pytest.mark.parametrize("budget", [.006, .00594607])
-def test_economical_syntax_alternative_checks_remaining_budget_before_call(
+def test_explicit_paid_syntax_alternative_checks_remaining_budget_before_call(
         transport, providers_up, monkeypatch, budget):
     from octopus import pricing
     monkeypatch.setattr(pricing, "estimate_max_cost", lambda *args: .001)
     transport.handler = lambda provider, request: llm.TransportResult(
         '{"rapport":"Observation" "other":1}', Usage(prompt_tokens=100, completion_tokens=50),
         request["model"], provider_cost_usd=.00594607)
-    with journal.run("octopus", "task:mission", budget_usd=budget, profile="economical") as run:
+    with journal.run("octopus", "task:mission", budget_usd=budget, profile="legacy") as run:
         with pytest.raises(llm.BudgetExceeded, match="budget du run"):
-            llm.complete("agent.decision", MSG, json_mode=True, validate=llm.parse_json)
+            llm.complete("agent.decision", MSG, pin_model="deepseek/flash", json_mode=True, validate=llm.parse_json)
         assert journal.subtree_cost(run.id) == pytest.approx(.00594607)
     assert transport.models == ["deepseek-flash"]
     assert [row["status"] for row in calls()] == ["invalid", "blocked"]
@@ -758,13 +775,14 @@ def test_economical_syntax_alternative_checks_remaining_budget_before_call(
 
 @pytest.mark.parametrize("text", ['{"rapport":123}', '{"rapport":"ligne\nbreak"}'])
 def test_economical_semantic_failure_does_not_retry_even_after_safe_repair(
-        transport, providers_up, text):
+        transport, providers_up, text, route_candidates):
+    route_candidates('agent.decision', 'openrouter/fixture/text-delta:free')
     from agents import runtime
     transport.reply(text)
-    with pytest.raises(llm.InvalidOutput, match="ValueError"):
+    with pytest.raises(llm.NoEligibleModel, match="ValueError"):
         llm.complete("agent.decision", MSG, profile="economical", json_mode=True,
                      validate=lambda raw: runtime._validate_synthesis_contract(llm.parse_json(raw), True))
-    assert transport.models == ["deepseek-flash"]
+    assert transport.models == ["fixture/text-delta:free"]
     assert calls()[0]["status"] == "invalid"
     if "\n" in text:
         assert json.loads(calls()[0]["justification"])["json_repair_attempted"] is True
@@ -772,16 +790,17 @@ def test_economical_semantic_failure_does_not_retry_even_after_safe_repair(
 
 @pytest.mark.parametrize("reason", ["permission refusée", "finance refusée", "contenu refusé", "résultat insuffisant"])
 def test_economical_arbitrary_validator_value_error_never_triggers_syntax_retry(
-        transport, providers_up, reason):
+        transport, providers_up, reason, route_candidates):
+    route_candidates('agent.decision', 'openrouter/fixture/text-delta:free')
     transport.reply('{"ok":true}')
 
     def refuse(text):
         llm.parse_json(text)
         raise ValueError(reason)
 
-    with pytest.raises(llm.InvalidOutput, match=reason):
+    with pytest.raises(llm.NoEligibleModel, match=reason):
         llm.complete("agent.decision", MSG, profile="economical", json_mode=True, validate=refuse)
-    assert transport.models == ["deepseek-flash"]
+    assert transport.models == ["fixture/text-delta:free"]
     assert calls()[0]["status"] == "invalid"
 
 
@@ -789,38 +808,42 @@ def test_economical_arbitrary_validator_value_error_never_triggers_syntax_retry(
     (["json_object"], 1), (["json_object", "text", "json_object"], 2),
 ])
 def test_economical_syntax_retry_uses_only_one_existing_method_and_stops(
-        transport, providers_up, monkeypatch, declared, expected_calls):
+        transport, providers_up, monkeypatch, declared, expected_calls, route_candidates):
+    route_candidates('agent.decision', 'openrouter/fixture/text-delta:free')
     cat = copy.deepcopy(catalog.load())
-    cat.raw["models"]["deepseek/flash"]["structured_methods"] = declared
+    cat.raw["models"]["openrouter/fixture/text-delta:free"]["structured_methods"] = declared
     monkeypatch.setattr(catalog, "load", lambda: cat)
     transport.reply('{"rapport":"Observation" "other":1}')
-    with pytest.raises(llm.InvalidOutput, match="JSONDecodeError"):
+    with pytest.raises(llm.NoEligibleModel, match="JSONDecodeError"):
         llm.complete("agent.decision", MSG, profile="economical", json_mode=True, validate=llm.parse_json)
-    assert transport.models == ["deepseek-flash"] * expected_calls
+    assert transport.models == ["fixture/text-delta:free"] * expected_calls
     assert [row["status"] for row in calls()] == ["invalid"] * expected_calls
-    assert all(row["cost_usd"] > 0 for row in calls())
+    assert all(row["cost_usd"] == 0 for row in calls())
 
 
-def test_economical_unstructured_validator_json_error_does_not_retry(transport, providers_up):
+def test_economical_unstructured_validator_json_error_does_not_retry(transport, providers_up, route_candidates):
+    route_candidates('agent.decision', 'openrouter/fixture/text-delta:free')
     transport.reply('{"rapport":"Observation" "other":1}')
-    with pytest.raises(llm.InvalidOutput, match="JSONDecodeError"):
+    with pytest.raises(llm.NoEligibleModel, match="JSONDecodeError"):
         llm.complete("agent.decision", MSG, profile="economical", validate=llm.parse_json)
-    assert transport.models == ["deepseek-flash"]
+    assert transport.models == ["fixture/text-delta:free"]
     assert json.loads(calls()[0]["justification"])["structured_method"] is None
 
 
 @pytest.mark.parametrize("failure", [TimeoutError("timeout"), ConnectionError("network"),
                                      ValueError("business transport failure")])
-def test_economical_transport_error_does_not_trigger_syntax_retry(transport, providers_up, failure):
+def test_economical_transport_error_does_not_trigger_syntax_retry(transport, providers_up, failure, route_candidates):
+    route_candidates('agent.decision', 'openrouter/fixture/text-delta:free')
     transport.handler = lambda provider, request: failure
     with pytest.raises(llm.NoEligibleModel):
         llm.complete("agent.decision", MSG, profile="economical", json_mode=True, validate=llm.parse_json)
-    assert transport.models == ["deepseek-flash"]
+    assert transport.models == ["fixture/text-delta:free"]
     assert calls()[0]["status"] == "error"
 
 
 @pytest.mark.parametrize("status_code", [401, 429])
-def test_economical_auth_and_quota_errors_do_not_trigger_syntax_retry(transport, providers_up, status_code):
+def test_economical_auth_and_quota_errors_do_not_trigger_syntax_retry(transport, providers_up, status_code, route_candidates):
+    route_candidates('agent.decision', 'openrouter/fixture/text-delta:free')
     class Failure(Exception):
         pass
     error = Failure("request rejected")
@@ -828,10 +851,10 @@ def test_economical_auth_and_quota_errors_do_not_trigger_syntax_retry(transport,
     transport.handler = lambda provider, request: error
     with pytest.raises(llm.NoEligibleModel):
         llm.complete("agent.decision", MSG, profile="economical", json_mode=True, validate=llm.parse_json)
-    assert transport.models == ["deepseek-flash"]
+    assert transport.models == ["fixture/text-delta:free"]
     assert calls()[0]["status"] == "error"
     if status_code == 429:
-        assert "deepseek/flash" in llm._rate_limit_cooldowns
+        assert "openrouter/fixture/text-delta:free" in llm._rate_limit_cooldowns
 
 
 def test_legacy_syntax_method_fallback_remains_unchanged(transport, providers_up):
@@ -845,9 +868,9 @@ def test_legacy_syntax_method_fallback_remains_unchanged(transport, providers_up
 
 
 @pytest.mark.parametrize("arguments", ["", "[]", '{"query":"prix","extra":1}', '{"query":42}', "{}"])
-def test_economical_invalid_tool_arguments_try_structured_alternative(transport, providers_up, arguments):
+def test_economical_invalid_tool_arguments_try_structured_alternative(transport, providers_up, arguments, route_candidates):
     from types import SimpleNamespace
-    prove("agent.react_step", "openrouter/fixture/text-gamma:free")
+    route_candidates("agent.react_step", "openrouter/fixture/text-gamma:free")
     schema = {"type": "object", "properties": {"query": {"type": "string"}},
               "required": ["query"], "additionalProperties": False}
     tool = {"type": "function", "function": {"name": "search", "parameters": schema}}
@@ -903,9 +926,9 @@ def test_paid_malformed_tool_response_is_charged_before_method_fallback(transpor
         llm.TransportResult("", Usage(prompt_tokens=20, completion_tokens=10), request["model"],
                             resolved_model=request["model"], resolved_provider="deepseek", provider_cost_usd=0.001))
 
-    with journal.run("octopus", "task:mission", budget_usd=0.001, profile="economical") as run:
+    with journal.run("octopus", "task:mission", budget_usd=0.001, profile="legacy") as run:
         with pytest.raises(llm.BudgetExceeded, match="budget du run"):
-            llm.complete("agent.decision", MSG, profile="economical", json_schema=schema,
+            llm.complete("agent.decision", MSG, profile="legacy", pin_model="deepseek/flash", json_schema=schema,
                          tool_schemas=[tool], validate=llm.parse_json, max_tokens=50)
         assert journal.subtree_cost(run.id) == pytest.approx(0.001)
 
@@ -913,7 +936,7 @@ def test_paid_malformed_tool_response_is_charged_before_method_fallback(transpor
     assert calls()[0]["status"] == "invalid" and calls()[0]["cost_usd"] == pytest.approx(0.001)
 
 
-def test_economical_method_change_rechecks_consumed_run_budget(transport, providers_up):
+def test_explicit_paid_method_change_rechecks_consumed_run_budget(transport, providers_up):
     class UnsupportedFormat(Exception):
         status_code = 400
         body = {"error": {"message": "response_format is not supported"}}
@@ -927,15 +950,16 @@ def test_economical_method_change_rechecks_consumed_run_budget(transport, provid
         return UnsupportedFormat("400")
 
     transport.handler = handler
-    with journal.run("octopus", "task:mission", budget_usd=0.001, profile="economical"):
+    with journal.run("octopus", "task:mission", budget_usd=0.001, profile="legacy"):
         with pytest.raises(llm.BudgetExceeded, match="budget du run"):
-            llm.complete("agent.decision", MSG, profile="economical", json_mode=True,
+            llm.complete("agent.decision", MSG, profile="legacy", pin_model="deepseek/flash", json_mode=True,
                          max_tokens=50, validate=llm.parse_json)
 
     assert transport.models == ["deepseek-flash"]
 
 
-def test_economical_deepseek_structured_400_uses_one_text_alternative(transport, providers_up):
+def test_economical_deepseek_structured_400_uses_one_text_alternative(transport, providers_up, route_candidates):
+    route_candidates('agent.decision', 'openrouter/fixture/text-delta:free')
     class UnsupportedFormat(Exception):
         status_code = 400
         body = {"error": {"message": "json_object response_format is not supported"}}
@@ -950,42 +974,45 @@ def test_economical_deepseek_structured_400_uses_one_text_alternative(transport,
                           validate=llm.parse_json)
 
     assert result.data == {"rapport": "Aucune preuve bancaire."}
-    assert transport.models == ["deepseek-flash", "deepseek-flash"]
+    assert transport.models == ["fixture/text-delta:free", "fixture/text-delta:free"]
     assert "response_format" not in transport.calls[1][1]
     assert [row["status"] for row in calls()] == ["error", "ok"]
 
 
-def test_economical_invalid_plan_contract_falls_back_to_deepseek(transport, providers_up):
+def test_economical_invalid_plan_contract_requires_human(transport, providers_up, route_candidates):
     from agents import runtime
-    prove("agent.plan", "openrouter/fixture/text-gamma:free")
+    route_candidates("agent.plan", "openrouter/fixture/text-gamma:free")
     transport.handler = by_model({"fixture/text-gamma:free": '{"tasks":"invalid"}',
                                   "deepseek-flash": '{"tasks":[]}'})
-    result = llm.complete("agent.plan", MSG, profile="economical", json_mode=True,
-                          validate=lambda text: runtime._validate_plan_contract(llm.parse_json(text)))
-    assert result.model == "deepseek/flash"
-    assert [row["status"] for row in calls()] == ["invalid", "ok"]
+    with pytest.raises(llm.NoEligibleModel, match='payant'):
+        llm.complete("agent.plan", MSG, profile="economical", json_mode=True,
+                     validate=lambda text: runtime._validate_plan_contract(llm.parse_json(text)))
+    assert transport.models == ["fixture/text-gamma:free"]
+    assert [row["status"] for row in calls()] == ["invalid"]
 
 
-def test_economical_deepseek_failure_stops_without_another_paid_route(transport, providers_up):
-    transport.handler = by_model({"deepseek-flash": TimeoutError("indisponible")})
+def test_economical_free_failure_stops_before_paid(transport, providers_up, route_candidates):
+    route_candidates('agent.plan', 'openrouter/fixture/text-delta:free')
+    transport.handler = by_model({"fixture/text-delta:free": TimeoutError("indisponible")})
     with pytest.raises(llm.NoEligibleModel, match="agent.plan") as error:
         llm.complete("agent.plan", MSG, profile="economical", json_mode=True,
                      validate=llm.parse_json)
     assert isinstance(error.value.last_error, TimeoutError)
-    assert transport.models == ["deepseek-flash"]
+    assert transport.models == ["fixture/text-delta:free"]
     assert calls()[-1]["status"] == "error"
 
 
-def test_economical_never_journals_a_key_echoed_by_provider(transport, providers_up):
-    transport.handler = by_model({"deepseek-flash": RuntimeError("test-key rejected")})
+def test_economical_never_journals_a_key_echoed_by_provider(transport, providers_up, route_candidates):
+    route_candidates('agent.plan', 'openrouter/fixture/text-delta:free')
+    transport.handler = by_model({"fixture/text-delta:free": RuntimeError("offline-fixture rejected")})
     with pytest.raises(llm.NoEligibleModel):
         llm.complete("agent.plan", MSG, profile="economical")
-    assert "test-key" not in calls()[-1]["error"]
+    assert "offline-fixture" not in calls()[-1]["error"]
     assert "[redacted]" in calls()[-1]["error"]
 
 
-def test_economical_allows_free_calls_when_paid_budget_consumed(transport, providers_up):
-    prove("agent.react_step", "openrouter/fixture/text-gamma:free")
+def test_economical_allows_free_calls_when_paid_budget_consumed(transport, providers_up, route_candidates):
+    route_candidates("agent.react_step", "openrouter/fixture/text-gamma:free")
     transport.reply('{"ok":true}')
     with journal.run("octopus", "mission", budget_usd=0.01, profile="economical") as ctx:
         journal.record_llm_call({"ts": time.time(), "run_id": ctx.id, "root_run_id": ctx.root_id,
@@ -998,14 +1025,14 @@ def test_economical_allows_free_calls_when_paid_budget_consumed(transport, provi
 
 def test_resumed_run_keeps_llm_spend_for_budget_gate(transport, providers_up):
     transport.reply('{"ok":true}', prompt_tokens=10, completion_tokens=1000)
-    with journal.run("octopus", "task:mission", budget_usd=0.0012, profile="economical") as first:
-        llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
+    with journal.run("octopus", "task:mission", budget_usd=0.0012, profile="legacy") as first:
+        llm.complete("agent.react_step", MSG, profile="legacy", pin_model="deepseek/flash", json_mode=True,
                      validate=llm.parse_json)
     with journal.run("octopus", "task:mission", budget_usd=0.0012,
                      resume_run_id=first.id) as resumed:
         assert resumed.root_id == first.root_id
         assert journal.subtree_cost(first.id) > 0
         with pytest.raises(llm.BudgetExceeded):
-            llm.complete("agent.react_step", MSG, profile="economical", json_mode=True,
+            llm.complete("agent.react_step", MSG, profile="legacy", pin_model="deepseek/flash", json_mode=True,
                          validate=llm.parse_json)
     assert transport.models == ["deepseek-flash"]

@@ -43,7 +43,10 @@ def test_free_qualified_beats_equivalent_paid(transport, providers_up):
 
 def test_qualified_paid_fallback_and_zero_cost_stays_free(transport, providers_up):
     qualify('deepseek/flash'); reply(transport)
-    c = llm.complete('browser.react_step', [], profile='economical')
+    with pytest.raises(llm.NoEligibleModel):
+        llm.complete('browser.react_step', [], profile='economical')
+    assert not transport.calls
+    c = llm.complete('browser.react_step', [], profile='flash_fallback')
     assert c.model == 'deepseek/flash'
     with pytest.raises(llm.NoEligibleModel):
         llm.complete('browser.react_step', [], profile='zero_cost')
@@ -55,7 +58,7 @@ def test_technical_failure_keeps_existing_fallback(transport, providers_up):
         if request['model'] == 'fixture/vision-alpha:free': raise ConnectionError('offline')
         return '{}', Usage(prompt_tokens=10, completion_tokens=2)
     transport.handler = handler
-    assert llm.complete('browser.react_step', [], profile='economical').model == 'deepseek/flash'
+    assert llm.complete('browser.react_step', [], profile='flash_fallback').model == 'deepseek/flash'
 
 
 @pytest.mark.parametrize('failed', sorted(llm.BROWSER_SCENARIOS))
@@ -81,7 +84,7 @@ def test_additional_evidence_does_not_require_perfection(transport, providers_up
         for _ in range(3):
             qualify('deepseek/flash', run_id=ctx.id)
     reply(transport)
-    completion = llm.complete('browser.react_step', [], profile='economical', pin_model='deepseek/flash')
+    completion = llm.complete('browser.react_step', [], profile='flash_fallback', pin_model='deepseek/flash')
     assert completion.model == 'deepseek/flash'
     assert len(transport.calls) == 1
     assert completion.justification['browser_qualification']['quality'] == pytest.approx(.975)
@@ -145,7 +148,7 @@ def test_resolved_identity_changed_is_blocked(transport, providers_up):
     qualify('deepseek/flash')
     transport.handler = lambda provider, request: llm.TransportResult('{}', Usage(), request['model'],
         resolved_model='other', resolved_provider='deepseek')
-    with pytest.raises(llm.NoEligibleModel): llm.complete('browser.react_step', [], profile='economical')
+    with pytest.raises(llm.NoEligibleModel): llm.complete('browser.react_step', [], profile='flash_fallback')
     assert journal.query('SELECT status FROM llm_calls')[-1]['status'] == 'blocked'
 
 
@@ -264,6 +267,7 @@ def test_novelty_does_not_change_explicit_step_bound(monkeypatch, transport, pro
 
 def test_invalid_args_are_observations_then_corrected(monkeypatch,transport,providers_up):
     qualify('deepseek/flash')
+    qualify('openrouter/fixture/vision-alpha:free')
     actions=iter([{'tool':'browser_click','args':{'ref':'stale'}},
                   {'tool':'browser_snapshot','args':{}},
                   {'final':'report','objective_status':'completed','missing':[], 'evidence':[{'step':2,'quote':'useful'}]}])
@@ -345,13 +349,14 @@ def test_task16_technically_ok_sequence_cannot_qualify_mouse_controller(monkeypa
         assert c.model=='openrouter/fixture/text-delta:free'
     assert all(r['status']=='ok' for r in journal.query("SELECT status FROM llm_calls WHERE task='agent.react_step'"))
     qualify('deepseek/flash')
-    c=llm.complete('browser.react_step',[],profile='economical',json_mode=True,validate=llm.parse_json)
+    c=llm.complete('browser.react_step',[],profile='flash_fallback',json_mode=True,validate=llm.parse_json)
     assert c.model=='deepseek/flash'
     assert not llm.browser_quality(catalog.load().model('openrouter/fixture/text-delta:free'))['eligible']
 
 
 def test_unsupported_screenshot_is_recoverable_without_human(monkeypatch,transport,providers_up):
     qualify('deepseek/flash')
+    qualify('openrouter/fixture/vision-alpha:free')
     actions=iter([{'tool':'browser_screenshot','args':{}},{'tool':'browser_snapshot','args':{}},
         {'final':'grounded','objective_status':'completed','missing':[], 'evidence':[{'step':2,'quote':'known state'}]}])
     transport.handler=lambda *_:(json.dumps(next(actions)),Usage())

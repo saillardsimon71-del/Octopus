@@ -7,7 +7,7 @@ budgets AVANT l'appel, journalisation de l'usage reel et du cout, justification 
 Profils (config/catalog.json) :
 - legacy        : modele impose par le code existant (comportement historique) ;
 - zero_cost     : local et quotas gratuits uniquement, aucun appel payant ;
-- economical    : au plus deux routes gratuites (trois requetes), puis DeepSeek sous plafond ;
+- economical    : au plus deux routes gratuites (trois requetes), frontière humaine avant le payant ;
 - low_cost      : local et gratuit d'abord, payant si aucune alternative validee ;
 - quality_first : meilleur modele valide d'abord ;
 - bench         : banc d'evaluation (modele impose, sans exigence de preuve).
@@ -60,7 +60,10 @@ class StructuredResponseError(ValueError):
 class NoEligibleModel(GatewayError):
     def __init__(self, task: str, profile: str, considered: list[dict], last_error: Exception | None = None):
         self.task, self.profile, self.considered, self.last_error = task, profile, considered, last_error
+        self.human_required = profile == 'economical'
         detail = "; ".join(f"{c['model']} : {c['reason']}" for c in considered) or "aucun candidat configure"
+        if self.human_required:
+            detail = "aucune route gratuite utilisable. Le payant exige une autorisation humaine explicite de profil et budget. " + detail
         super().__init__(f"aucun modele utilisable pour {task} (profil {profile}) : {detail}")
 
 
@@ -515,6 +518,8 @@ def _ineligibility(cat, profile_name: str, profile: dict, task: str, task_def: d
                    model: dict, needs: set[str]) -> str | None:
     if model["provider"] not in {"openrouter", "deepseek"}:
         return "fournisseur retire"
+    if profile_name == 'economical' and model['cost_class'] == 'paid':
+        return 'payant interdit en economical : profil et budget humains explicites requis'
     allowed = profile.get("allowed_cost_classes", list(catalog.COST_CLASSES))
     if model["cost_class"] not in allowed:
         return f"classe de cout {model['cost_class']} interdite par le profil {profile_name}"
@@ -543,15 +548,6 @@ def _ineligibility(cat, profile_name: str, profile: dict, task: str, task_def: d
     if task == "browser.react_step":
         proof = browser_quality(model)
         return None if proof["eligible"] else proof["reason"]
-    evidence_required = profile.get("require_evidence") and model_id != task_def.get("baseline")
-    if profile_name == "economical" and model["provider"] == "deepseek" and model["cost_class"] == "paid":
-        evidence_required = False
-    if evidence_required:
-        identity = model.get("evidence_identity", model_id)
-        proof_tasks = (task,) + (_BENCH_TASKS.get(task, ()) if profile_name == "economical" else ())
-        proofs = [journal.evidence(name, identity, cat.evidence_rules()) for name in proof_tasks]
-        if not any(proof["eligible"] for proof in proofs):
-            return proofs[0]["reason"]
     return None
 
 
@@ -755,7 +751,7 @@ def _justify(profile_name: str, task: str, model_id: str, model: dict, considere
         justification.update({key: model[key] for key in
             ("evidence_identity", "canonical_slug", "source", "fetched_at")})
     if profile_name == "economical":
-        justification["selection_reason"] = "qualité du dernier benchmark, succès et latence récents; gratuit qualifié puis DeepSeek"
+        justification["selection_reason"] = "gratuit compatible d'abord ; santé et latence récentes ; aucun repli payant automatique"
     if model["cost_class"] != "paid":
         return justification
     others = [c for c in considered if c["model"] != model_id]
@@ -793,36 +789,9 @@ def _zero_cost_violation(profile_name: str, model: dict, result: TransportResult
     return None
 
 
-_BENCH_TASKS = {
-    "agent.plan": ("octopus.plan",),
-    "agent.react_step": ("octopus.json",),
-    "agent.synthesize": ("octopus.synthesis",),
-    "agent.decision": ("octopus.decision", "octopus.critique"),
-    "web.summarize": ("octopus.extraction", "octopus.synthesis"),
-    "web.inspect_page": ("octopus.extraction",),
-}
-
-
 def _rank_economical(task: str, candidates: list[str], cat: catalog.Catalog) -> list[str]:
-    bench_tasks = _BENCH_TASKS.get(task, ("octopus.json",))
-    marks = ",".join("?" for _ in bench_tasks)
-    rows = journal.query(
-        f"SELECT task, model, passed, latency_ms, bench_run_id FROM bench_results WHERE task IN ({marks}) AND ts>=? ORDER BY ts DESC",
-        (*bench_tasks, time.time() - 14 * 86400),
-    )
-    bench: dict[str, list[int]] = {}
-    bench_latency: dict[str, list[int]] = {}
-    latest_run: dict[tuple[str, str], int] = {}
-    for row in rows:
-        key = (row["task"], row["model"])
-        if key not in latest_run:
-            latest_run[key] = row["bench_run_id"]
-        if row["bench_run_id"] == latest_run[key] and len(bench.setdefault(row["model"], [])) < 20:
-            bench[row["model"]].append(row["passed"])
-            if row["latency_ms"] is not None:
-                bench_latency.setdefault(row["model"], []).append(row["latency_ms"])
-    recent = journal.query("SELECT model, status, duration_ms FROM llm_calls WHERE task=? AND ts>=? "
-                           "ORDER BY ts DESC LIMIT 100", (task, time.time() - 86400))
+    recent = journal.query("SELECT model, status, duration_ms FROM llm_calls WHERE task!='browser.react_step' AND ts>=? "
+                           "ORDER BY ts DESC LIMIT 100", (time.time() - 86400,))
     health: dict[str, list] = {}
     for row in recent:
         health.setdefault(row["model"], []).append(row)
@@ -831,22 +800,12 @@ def _rank_economical(task: str, candidates: list[str], cat: catalog.Catalog) -> 
         model = cat.model(model_id)
         if model is None or model["cost_class"] == "paid":
             return (1, 0)
-        samples = bench.get(model.get("evidence_identity", model_id), [])
-        quality = sum(samples) / len(samples) if samples else 0.5
         calls = health.get(model_id, [])[:10]
         reliability = sum(r["status"] == "ok" for r in calls) / len(calls) if calls else 0.5
         latency = sum((r["duration_ms"] or 0) for r in calls) / len(calls) if calls else 0
-        benchmark_latency = statistics.median(bench_latency[model.get("evidence_identity", model_id)]) if bench_latency.get(model.get("evidence_identity", model_id)) else 0
-        return (0, -(quality * 100 + reliability * 20
-                     - min(latency / 1000, 30) - min(benchmark_latency / 1000, 10)))
+        return (0, -(reliability * 20 - min(latency / 1000, 30)))
 
-    qualified = []
-    for mid in candidates:
-        model = cat.model(mid)
-        samples = bench.get(model.get("evidence_identity", mid), []) if model else []
-        if model and (model["cost_class"] == "paid" or len(samples) < 2 or sum(samples) / len(samples) >= .9):
-            qualified.append(mid)
-    return sorted(qualified, key=score)
+    return sorted(candidates, key=score)
 
 
 # Multi-step fixture evidence is independent of JSON/API health. No baseline exemption.
@@ -939,6 +898,8 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
     prof = cat.profile(profile_name)
     task_def = cat.task(task)
     need = set(task_def.get("needs", [])) | set(needs) | ({"json"} if json_mode or json_schema is not None else set())
+    if tool_schemas:
+        need.add('tools')
     if task in {'browser.bench_step', 'browser.react_step'} and json_schema is None:
         need.discard('json')
     business_name = business or (ctx.business if ctx else "")
@@ -991,18 +952,6 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
         if model is None:
             considered.append({"model": model_id, "eligible": False, "reason": "absent du catalogue"})
             continue
-        if profile_name == "economical" and ctx is not None and model["cost_class"] == "paid":
-            exhausted = next((f"budget du run #{run_id} atteint : {journal.subtree_cost(run_id):.4f} $ "
-                              f"depenses >= {budget:.4f} $"
-                              for run_id, budget in ctx.budgets
-                              if journal.subtree_cost(run_id) >= budget), None)
-            if exhausted:
-                journal.record_llm_call({"ts": time.time(), "run_id": ctx.id, "root_run_id": ctx.root_id,
-                                         "business": business_name, "agent": agent, "task": task,
-                                         "profile": profile_name, "model": model_id,
-                                         "provider": model["provider"], "cost_class": model["cost_class"],
-                                         "attempt": candidate_attempt, "status": "blocked", "error": exhausted})
-                raise BudgetExceeded(exhausted)
         is_free = model["cost_class"] != "paid"
         if is_free and (free_routes if profile_name == "economical" else free_attempts) >= free_limit:
             considered.append({"model": model_id, "eligible": False, "reason": "limite d'essais gratuits atteinte"})
@@ -1018,8 +967,6 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
         provider = dict(cat.provider(model["provider"]))
         if profile_name in {"economical", "bench"}:
             provider["max_retries"] = 0
-            if profile_name == "economical" and model["cost_class"] == "paid":
-                provider["timeout_s"] = min(provider.get("timeout_s", 90), prof["paid_timeout_s"])
         methods = (['text'] if task in {'browser.bench_step', 'browser.react_step'} and json_schema is None
             and 'json' not in model.get('capabilities', []) else
             _structured_methods(model, json_mode, json_schema, tool_schemas))
@@ -1040,14 +987,6 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 "requested_model": model["api_model"],
                 "attempt": candidate_attempt, "peak": int(peak), "prompt_sha256": digest, "prompt_chars": prompt_chars,
             }
-            if profile_name == "economical" and ctx is not None and method_index and model["cost_class"] == "paid":
-                exhausted = next((f"budget du run #{run_id} atteint : {journal.subtree_cost(run_id):.4f} $ "
-                                  f"depenses >= {budget:.4f} $"
-                                  for run_id, budget in ctx.budgets
-                                  if journal.subtree_cost(run_id) >= budget), None)
-                if exhausted:
-                    journal.record_llm_call({**base, "status": "blocked", "error": exhausted})
-                    raise BudgetExceeded(exhausted)
             estimate = pricing.estimate_max_cost(model.get("price"), prompt_chars + images * pricing.IMAGE_CHARS_ESTIMATE,
                                                  max_tokens, peak)
             block = _budget_block(ctx, cat, business_name, estimate)
@@ -1129,9 +1068,7 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                 if (structured_method is not None and method_index + 1 < len(methods)
                         and _structured_method_error(exc)):
                     continue
-                if profile_name == "economical" and model["cost_class"] == "paid":
-                    raise NoEligibleModel(task, profile_name, considered, safe_exc) from None
-                if prof.get("fallback") and candidate_attempt < len(candidates):
+                if profile_name == 'economical' or prof.get("fallback") and candidate_attempt < len(candidates):
                     break
                 if images:
                     raise safe_exc from None
@@ -1224,6 +1161,8 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
                     continue
                 if prof.get("fallback") and candidate_attempt < len(candidates):
                     break
+                if profile_name == 'economical':
+                    break
                 raise last_error
             return Completion(text=text, model=model_id, provider=model["provider"], cost_usd=cost, usage=usage,
                               call_id=call_id, requested_model=result.requested_model,
@@ -1239,5 +1178,12 @@ def complete(task: str, messages: list[dict], *, agent: str = "", business: str 
     if budget_block:
         detail = "; ".join(f"{c['model']} : {c['reason']}" for c in considered)
         raise BudgetExceeded(f"{budget_block} (candidats : {detail})")
-    raise NoEligibleModel(task, profile_name, considered, last_error)
+    error = NoEligibleModel(task, profile_name, considered, last_error)
+    if error.human_required:
+        journal.record_llm_call({"ts": time.time(), "run_id": ctx.id if ctx else None,
+            "root_run_id": ctx.root_id if ctx else None, "business": business_name, "agent": agent,
+            "task": task, "profile": profile_name, "model": "none", "provider": "none",
+            "cost_class": "free_quota", "status": "blocked", "error": str(error),
+            "justification": json.dumps({"human_required": True, "considered": considered})})
+    raise error
 

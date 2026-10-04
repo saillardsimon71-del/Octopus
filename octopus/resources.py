@@ -118,6 +118,8 @@ def list_resources(*, state: str | None = None, kind: str | None = None, capabil
         sql += " AND (business=? OR business IS NULL)" if include_global else " AND business=?"
         params.append(business)
     rows = [_row(r) for r in journal.query(sql + " ORDER BY kind, key", tuple(params))]
+    if business:
+        rows = [r for r in rows if not r['web_account'] or business in r['web_account'].get('businesses', [])]
     if capability:
         rows = [r for r in rows if capability.strip().lower() in r["capabilities"]]
     return rows
@@ -885,5 +887,10 @@ def account_task(business, key, goal, *, parent_id=None):
     worker.load_handlers(['octopus.builtin_handlers'])
     result = worker.run_one(task_id=tid, log=lambda _message: None) or tasks.get(tid)
     cancel.checkpoint()
-    return {'task_id': tid, 'status': result['status'], 'observations': result.get('output') or {},
+    observations = result.get('output') or {}
+    boundary = observations.get('execution_status') == 'human_required'
+    return {'task_id': tid, 'status': result['status'], 'observations': observations,
+            **({'refused': True, 'human_required': True,
+                'reason': observations.get('synthesis_error') or observations.get('execution_error') or
+                          'aucune route navigateur gratuite qualifiée ; intervention humaine requise'} if boundary else {}),
             'error': 'Sous-tâche compte interrompue ; examiner son état' if result.get('error') else None}

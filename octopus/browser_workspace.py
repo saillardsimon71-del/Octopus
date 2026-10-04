@@ -581,7 +581,8 @@ class Workspace:
             if _origin(locator) != _origin(page) or not (urlsplit(page).path or "/").startswith(
                     urlsplit(locator).path or "/"):
                 continue
-            if mandates.authorize(channel, None)['allowed']:
+            authority = mandates.authorize(channel, effect or ('read' if self.resource_key else 'contact'))
+            if authority['allowed'] and authority.get('resource_key') == self.resource_key:
                 candidates.append(channel)
         if channel_id not in (None, ""):
             chosen = next((c for c in candidates if int(c["id"]) == int(channel_id)), None)
@@ -619,13 +620,22 @@ class Workspace:
             (self.scope.business, f"browser:{fingerprint}:%"))]
 
     def _effect(self, kind: str, target_sig: str, command: str, args: list[str], *, expect: str | None,
-                channel_id, target_context=None) -> dict:
+                channel_id, target_context=None, effect=None) -> dict:
         from agents import cancel
         if mandates.IDENTITY_DELETION.search(target_sig):
             raise Refused("suppression irréversible de l'identité : hors des opérations ordinaires confiées à ces outils.")
         if mandates.SENSITIVE.search(target_sig + ' ' + self._url) or mandates.SECRET_SURFACE.search(target_sig):
             raise Refused('Paiement, engagement financier ou création de compte : intervention humaine requise ; les secrets restent protégés.')
-        channel = self._channel(channel_id)
+        observed_effect = ('publish' if re.search(r'publi|publish|\bpost\b|deploy|déploi', target_sig, re.I) else
+                           'contact' if re.search(r'envoy|send|reply|répond|message|invit', target_sig, re.I) else
+                           'edit' if re.search(r'save|enregistr|modifi|update', target_sig, re.I) else None)
+        required_effect = ('edit' if self.resource_key and command in ('fill', 'select', 'check') else
+                           observed_effect or ('edit' if self.resource_key else 'contact'))
+        if required_effect not in mandates.EFFECTS - {'read'}:
+            raise Refused('effet non déléguable : intervention humaine requise')
+        channel = self._channel(channel_id, required_effect)
+        if effect and effect != required_effect:
+            self._channel(channel['id'], effect)
         self._effect_budget()
         expect = str(expect or "").strip() or None
         if expect and (len(expect) > 200 or agent_browser.contains_secret(expect)):
@@ -687,9 +697,9 @@ class Workspace:
                           "Vérifie sur le site si elle a eu lieu (browser_verify) ou demande à l'humain.")
         pre_text = self._page_text()
         expect_is_new = bool(expect and expect.casefold() not in pre_text.casefold())
-        authority = mandates.authorize(channel, None)
+        authority = mandates.authorize(channel, required_effect)
         payload = {"mandate_id": authority.get("mandate_id"), "scope": self.scope.key, "task_id": self.scope.task_id, "kind": kind, "target": target_sig,
-                   "page": _page_key(self._url), "form_digest": form, "expect": expect,
+                   "page": _page_key(self._url), "effect": required_effect, "form_digest": form, "expect": expect,
                    "pre_text": pre_text, "pre_text_complete": True}
         if isinstance(target_identity, list):
             payload['target_identity'] = target_identity
@@ -709,7 +719,9 @@ class Workspace:
                 actions._set(conn, action_id, self.scope.business, "proposed", reason=None)
         self._effects += 1
         try:
-            self._channel(channel_id)  # Live scope check before the command.
+            self._channel(channel_id, required_effect)  # Live scope check before the command.
+            if effect and effect != required_effect:
+                self._channel(channel['id'], effect)
             result = self._cmd(command, args)
         except Refused:
             self._settle(action_id, "failed", "refusée avant exécution (plafond)")
@@ -795,10 +807,10 @@ class Workspace:
             # Account edits may autosave. Treat typing/select/check as real journaled effects.
             self._typed.setdefault(_page_key(self._url), {})[sig] = _digest([kind, value_for_digest])
             result = self._effect(kind, f"{info.get('role')}:{name}", command, [target, *args],
-                                  expect=None, channel_id=channel_id)
+                                  expect=None, channel_id=channel_id, effect='edit')
             self._typed.setdefault(_page_key(self._url), {})[sig] = _digest([kind, value_for_digest])
             return result
-        self._channel(channel_id)
+        self._channel(channel_id, 'contact')
         result = self._cmd(command, [target, *args])
         if not result.get("success"):
             return {"ok": False, "error": agent_browser.redact(str(result.get("error") or ""))[:300]}
@@ -827,14 +839,8 @@ class Workspace:
             except web_guard.BrowseRefused as exc:
                 raise Refused(str(exc)) from exc
             if kind == web_guard.ACCOUNT and not self.account_mode:
-                from agents import browser
                 host = (urlsplit(url).hostname or "").lower()
-                if not self.public_only and browser.profile_has_cookies(url):
-                    self.close()
-                    self.account_mode = True
-                    self._start()
-                else:
-                    self.anonymous_domains.add(host)
+                self.anonymous_domains.add(host)
         self._open(url)
         view = self._observe()
         self._qualify_page(view)
@@ -849,8 +855,9 @@ class Workspace:
         if not useful or not self.resource_key and not any(v.get('role') in ('textbox', 'button') for v in self._refs.values()):
             return
         from . import economy
-        existing = journal.query('SELECT id FROM economic_channels WHERE business=? AND locator=?',
-                                 (self.scope.business, page))
+        existing = journal.query('SELECT c.id FROM economic_channels c LEFT JOIN channel_authority a '
+                                 'ON a.channel_id=c.id WHERE c.business=? AND c.locator=? '
+                                 "AND COALESCE(a.resource_key,'')=?", (self.scope.business, page, self.resource_key or ''))
         cid = int(existing[0]['id']) if existing else economy.add_channel(
             self.scope.business, 'website', view.get('title') or page, created_by='policy:browser', locator=page,
             capabilities=[CAPABILITY], nature='observed', source_ref=page)
@@ -895,7 +902,7 @@ class Workspace:
                 return {"ok": False, "error": agent_browser.redact(str(result.get("error") or ""))[:300]}
             self._settle_page()
             return self._observe()
-        return self._effect("click", f"{role}:{name}", "click", [target], expect=expect, channel_id=channel_id)
+        return self._effect("click", f"{role}:{name}", "click", [target], expect=expect, channel_id=channel_id, effect=effect)
 
     def type(self, ref: str, text: str, channel_id=None, effect=None) -> dict:
         self._ensure_page()
@@ -944,8 +951,16 @@ class Workspace:
             'return JSON.stringify(path); })()']).get('result')
         if not isinstance(focus, str) or not focus:
             raise Refused('cible clavier indisponible : observe la page ou utilise une cible précise.')
-        return self._effect("press", f"key:{key}", "press", [key], expect=expect, channel_id=channel_id,
-                            target_context=_digest(focus))
+        label = self._read('eval', ['(() => { /* octopus_commit_label */ const node = document.activeElement; '
+            'if (!node) return null; const controls = node.form && !node.matches("button,input[type=submit]") '
+            '? Array.from(node.form.querySelectorAll("button,input[type=submit]")) : [node]; '
+            'return controls.map(n => [n.getAttribute("aria-label"), n.innerText, '
+            'n.matches("input[type=submit]") ? n.value : ""].filter(Boolean).join(" ")).join(" "); })()']).get('result')
+        if self.resource_key and (not isinstance(label, str) or not re.search(
+                r'publi|publish|\bpost\b|deploy|déploi|envoy|send|reply|répond|message|invit|save|enregistr|modifi|update', label, re.I)):
+            raise Refused('effet de la cible clavier inconnu : utiliser un contrôle observé précis')
+        return self._effect("press", f"key:{key} {label or ''}", "press", [key], expect=expect, channel_id=channel_id,
+                            target_context=_digest(focus), effect=effect)
 
     def scroll(self, direction: str = "down") -> dict:
         self._ensure_page()
