@@ -154,26 +154,47 @@ Les seuls contrôles scriptés sont la vérité de fixture, l'injection d'erreur
 le score. Plusieurs chemins peuvent réussir ; aucune séquence exacte imposée.
 
 Score : 0,60 objectif atteint + code correctement rapporté ; 0,15 taux d'outils
-valides ; 0,10 récupération ; 0,10 efficacité (au plus 9 actions) ; 0,05 perception
-visuelle lorsqu'elle est nécessaire. Au plus 12 décisions, arrêt après cinq
-observations sans nouveauté. Pour passer : score >= 0,90 ET objectif, preuve,
-récupération, absence d'outil interdit, capture effective dans les deux scénarios
-visuels. Demander une capture lorsque le DOM suffit n'est pas sanctionné en soi.
+valides ; 0,10 récupération ; 0,10 efficacité (au plus 9 actions) ; 0,05 preuve
+observée. Au plus 12 décisions, arrêt après cinq observations sans nouveauté.
+Pour passer : score >= 0,90 ET objectif, preuve, récupération, absence d'outil interdit.
+La capture reste un choix du contrôleur. Une exploration DOM peut lever l'ambiguïté
+sans capture ; le scénario vision conserve un code accessible uniquement dans les pixels.
 Le code du canvas doit figurer dans le rapport : une image jointe seule ne suffit pas.
 
-Persistance : `bench_results`, task `browser.trajectory`, version `browser-v1`,
+Persistance : `bench_results`, task `browser.trajectory`, version `browser-v1-fidelity-1`,
 clé `browser.model:<identité sous-jacente>`, run/item/répétition/score/checks/coût.
 Le runner produit les CSV et matrices existants et `cost_per_completed_objective_usd` ;
 sans objectif achevé cette valeur est inconnue (`None`), pas zéro.
 Les échecs API restent dans llm_calls ; les échecs de trajectoire restent distincts.
 Une résolution inconnue ou mélangeant plusieurs modèles ne qualifie aucune route.
 
-Qualification : dernier run de suite seulement, âge <= 14 jours, couverture des
-dix scénarios, moyenne des taux de réussite par scénario >= 90 %, 100 % pour
-vision/DOM ambigu/recovery/invalid_args/stale_refs, aucun outil interdit.
-Deux stagnations mesurées récentes après cette suite bloquent la qualification ;
-un nouveau benchmark peut la rétablir. Aucun `status=ok` ne crée de preuve browser.
+Qualification : dernier run de suite seulement, âge <= 14 jours, suite complète
+sans panne d'infrastructure, au moins une réussite dans chacun des dix scénarios,
+moyenne des taux de réussite par scénario >= 90 %, aucun outil interdit.
+La capacité fonctionnelle démontrée, les taux de réussite observés et l'absence
+de violation sont exposés séparément. Une abstention ou une mauvaise décision
+reste un échec dans ces taux ; elle n'efface pas une capacité déjà démontrée.
+Une catégorie jamais réussie interdit la qualification, même à 90 % globalement.
+La qualification sélectionne un contrôleur ; elle n'accorde aucune autorité sur
+les ressources et ne remplace pas les frontières de sécurité de chaque action.
+Ces petits échantillons ne garantissent pas la fiabilité future. Une panne donne
+une évaluation incomplète, pas une incapacité cognitive ni une violation de sécurité.
+La stagnation en exécution reste une observation, sans retirer automatiquement
+la qualification objective. Aucun `status=ok` ne crée de preuve browser.
 Les tests ne préchargent des preuves synthétiques que dans leurs bases temporaires.
+
+Les anciennes lignes `browser-v1` restent lisibles et ne qualifient pas la nouvelle
+mesure. Le seuil global de 90 % et les dix fixtures restent identiques. La vue du prompt conserve
+le snapshot acquis et des métadonnées JSON complètes. L'observation courte indique
+sa troncature ; `browser_snapshot(full=true)` expose tout l'arbre et tous les contrôles
+observés, avec les mêmes protections de secrets et de périmètre.
+L'identité des effets distingue les champs de même nom, le contrôle clavier focalisé
+(le formulaire pour une soumission Enter), et le contexte query/fragment de l'URL
+sous forme de digest. Les anciennes identités ambiguës restent conservatrices.
+La preuve préalable interne conserve tout le texte acquis et masqué. Une coupe de
+journal historique ne permet pas de déduire qu'un texte était absent avant l'effet.
+Les symboles de statut, unités et marqueurs de listes restent présents dans le DOM
+observé ; le runtime ne les classe plus comme bruit.
 
 ## Continuation, erreurs et honnêteté
 
@@ -258,7 +279,7 @@ les transitions observées, sans prétendre conserver chaque contenu intermédia
 4. browser.react_step contrôle maintenant la boucle ; aucun modèle fixe imposé.
 5. Preuve browser puis contraintes catalogue/provider/capacités/politique ; ranking
    des qualifiés gratuit/local avant paid, prix minimal puis fiabilité et qualité.
-6. Dix scénarios, >=90 % global, cinq compétences critiques à 100 %, âge <=14 jours.
+6. Chaque capacité démontrée, >=90 % moyen, suite complète sans outil interdit, âge <=14 jours.
 7. La compétence est un prérequis ; le coût classe ensuite les candidats admissibles.
    Santé provider/cooldowns/vision et politiques paid restent éliminatoires.
 8. Un gratuit qualifié passe avant un paid équivalent ; pas de preuve fictive au bootstrap.

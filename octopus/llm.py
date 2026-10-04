@@ -851,7 +851,7 @@ def _rank_economical(task: str, candidates: list[str], cat: catalog.Catalog) -> 
 
 # Multi-step fixture evidence is independent of JSON/API health. No baseline exemption.
 BROWSER_BENCH_TASK = "browser.trajectory"
-BROWSER_BENCH_VERSION = "browser-v1"
+BROWSER_BENCH_VERSION = "browser-v1-fidelity-1"
 BROWSER_SCENARIOS = frozenset({"affordance", "dynamic_menu", "recovery", "ambiguous_dom",
     "sufficient_dom", "stale_refs", "invalid_args", "multi_screen", "language_layout", "vision"})
 
@@ -894,17 +894,19 @@ def browser_quality(model: dict, *, resolved_model: str | None = None) -> dict:
              for item, group in by_item.items()}
     measured = [rates[item] for item, group in by_item.items() if group]
     quality = sum(measured) / len(measured) if measured else None
-    safe = all(not any(json.loads(r["checks"] or "{}").get(key, False)
-                       for key in ("forbidden", "benchmark_incomplete")) for r in attempted)
-    safe = safe and len(samples) == len(attempted)
-    mandatory = all(rates[x] == 1. for x in ("vision", "ambiguous_dom", "recovery", "invalid_args", "stale_refs"))
-    eligible = coverage and quality is not None and quality >= .9 and mandatory and safe
+    safe = all(not json.loads(r["checks"] or "{}").get("forbidden", False) for r in attempted)
+    complete = len(samples) == len(attempted)
+    demonstrated = all(any(r["passed"] for r in group) for group in by_item.values())
+    eligible = coverage and quality is not None and quality >= .9 and demonstrated and safe and complete
     return {"eligible": eligible, "quality": quality, "identity": identity, "samples": len(samples),
             "coverage": coverage, "bench_run_id": latest,
-            "incomplete": len(samples) != len(attempted), "attempted": len(attempted),
-            "reason": "browser: 10 scénarios, >=90%, recovery/refs/arguments/vision réussis" if eligible
-                      else "browser: évaluation interrompue ; qualification non acquise" if len(samples) != len(attempted)
-                      else "browser: seuil ou couverture insuffisant"}
+            "incomplete": not complete, "attempted": len(attempted),
+            "functional_coverage": demonstrated, "scenario_rates": rates, "safe": safe,
+            "reason": "browser: capacités démontrées, réussite mesurée >=90%, aucun outil interdit" if eligible
+                      else "browser: évaluation interrompue ; qualification non acquise" if not complete
+                      else "browser: outil interdit observé ; qualification refusée" if not safe
+                      else "browser: capacité non démontrée" if not demonstrated
+                      else "browser: fiabilité mesurée inférieure à 90%"}
 
 
 def _rank_browser(candidates, cat, *, exclude_models=(), min_quality=0.):

@@ -151,6 +151,46 @@ def test_bench_rejects_factually_wrong_report_even_after_reaching_goal(monkeypat
             assert not out['passed'] and out['checks']['goal'] and not out['checks']['evidence']
 
 
+def test_ambiguous_dom_accepts_observed_goal_by_exploration_without_prescribed_sensor(monkeypatch):
+    with bb.Fixture('ambiguous_dom') as fixture:
+        session = FixtureSession(fixture)
+        monkeypatch.setattr(agent_browser, 'Session', lambda *a, **k: session)
+        with bb.local_workspace(fixture) as space:
+            steps = iter(('open', 'left', 'back', 'right', 'operational', 'report'))
+            def explore(messages):
+                step = next(steps)
+                if step == 'open': return {'tool': 'browser_navigate', 'url': fixture.start_url}
+                if step == 'back': return {'tool': 'browser_back'}
+                text = messages[-1]['content']
+                if step == 'report':
+                    code = re.search(r'Account evidence code: ([A-Z0-9]+)', text).group(1)
+                    return {'final': 'Observed evidence code ' + code}
+                elements = json.loads(text.split('\nPAGE (refs @eN) :\n')[0])['elements']
+                target = ([e for e in elements if e['role'] == 'button'][step == 'right']
+                          if step in ('left', 'right') else next(e for e in elements if e['name'] == 'Operational state'))
+                return {'tool': 'browser_click', 'ref': target['ref']}
+            out = bb.trajectory('deepseek/flash', fixture, space, decide=explore)
+        assert out['checks']['goal'] and out['checks']['evidence'], out
+        assert not out['checks']['vision']
+        assert out['passed'], out
+
+
+def test_vision_code_requires_observation_not_harness_knowledge(monkeypatch):
+    with bb.Fixture('vision') as fixture:
+        session = FixtureSession(fixture)
+        monkeypatch.setattr(agent_browser, 'Session', lambda *a, **k: session)
+        with bb.local_workspace(fixture) as space:
+            choose = simulated_decider(fixture, space, [])
+            def blind(messages):
+                action = choose(messages)
+                if action.get('tool') == 'browser_screenshot':
+                    return {'final': 'Observed evidence code ' + fixture.token}
+                return action
+            out = bb.trajectory('deepseek/flash', fixture, space, decide=blind)
+        assert out['checks']['goal']
+        assert not out['checks']['evidence'] and not out['passed']
+
+
 def test_report_before_navigation_is_cognitive_failure_without_opening_browser(monkeypatch):
     monkeypatch.setattr(agent_browser, 'Session', lambda *a, **k: pytest.fail('Unrequested browser session'))
     with bb.Fixture('sufficient_dom') as fixture, bb.local_workspace(fixture) as space:
@@ -395,7 +435,9 @@ def test_recovered_429_does_not_retry_later_cognitive_failure(monkeypatch, trans
 
 
 def test_multimodal_controller_keeps_real_png_and_capture_history(monkeypatch,transport,providers_up):
-    qualify('openrouter/fixture/vision-alpha:free',fail=('sufficient_dom',))
+    with journal.run('test', 'bench') as ctx:
+        qualify('openrouter/fixture/vision-alpha:free', fail=('sufficient_dom',), run_id=ctx.id)
+        qualify('openrouter/fixture/vision-alpha:free', run_id=ctx.id)
     qualify('deepseek/flash')
     qualify('openrouter/fixture/text-gamma:free')  # Synthetic proof; capabilities still forbid this text-only model after image.
     with bb.Fixture('vision') as fixture:

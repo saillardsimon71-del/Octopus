@@ -46,8 +46,6 @@ LAB_ORIGINS_ENV = "OCTOPUS_BROWSER_LAB_ORIGINS"
 MAX_COMMANDS = 300
 MAX_EFFECTS = 30
 SNAPSHOT_CHARS = 6000
-FULL_SNAPSHOT_CHARS = 15000
-PAGE_TEXT_CHARS = 20000
 VERIFY_WAIT_S = 5.0
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 FILES_KEY = "browser.files"
@@ -428,11 +426,8 @@ class Workspace:
     def _page_text(self) -> str:
         self._check_challenge()
         self._check_account()
-        try:
-            text = agent_browser.redact(str(self._read("get", ["text", "body"]).get("text") or ""))
-            return _account_text(text)[:PAGE_TEXT_CHARS] if self.resource_key else text[:PAGE_TEXT_CHARS]
-        except RuntimeError:
-            return ""
+        text = agent_browser.redact(str(self._read("get", ["text", "body"]).get("text") or ""))
+        return _account_text(text) if self.resource_key else text
 
     def _observe(self, *, full: bool = False) -> dict:
         self._check_challenge()
@@ -445,12 +440,12 @@ class Workspace:
             title = str(self._read("get", ["title"]).get("title") or "")
         except RuntimeError:
             title = ""
-        if _page_key(url) != _page_key(self._url):
+        if url != self._url:
             self._typed.pop(_page_key(url), None)  # nouvelle page : les saisies repartent de zéro
         self._url = url
-        snapshot = agent_browser.truncate_snapshot(agent_browser.redact(agent_browser.prune_snapshot(
-            str(data.get("snapshot") or ""))),
-                                                   FULL_SNAPSHOT_CHARS if full else SNAPSHOT_CHARS)
+        snapshot = agent_browser.redact(agent_browser.prune_snapshot(str(data.get("snapshot") or "")))
+        if not full:
+            snapshot = agent_browser.truncate_snapshot(snapshot, SNAPSHOT_CHARS)
         if self.resource_key:
             # Do not expose security surfaces or one-time codes even as ordinary text.
             snapshot = _account_text(snapshot)
@@ -459,7 +454,8 @@ class Workspace:
         self._checkpoint()
         blocked = self._proxy.blocked[-5:] if self._proxy else []
         view = {"ok": True, "url": self._safe_url(url), "title": agent_browser.redact(title),
-                "snapshot": snapshot, "refs": len(self._refs), "elements": self._element_metadata(), "source": web_guard.UNTRUSTED_NOTE}
+                "snapshot": snapshot, "refs": len(self._refs), "elements": self._element_metadata(full=full),
+                "elements_truncated": not full and len(self._refs) > 40, "source": web_guard.UNTRUSTED_NOTE}
         if blocked:
             view["blocked_requests"] = [self._safe_url(u) for u in blocked]
             self._proxy.blocked.clear()
@@ -469,10 +465,13 @@ class Workspace:
         self._qualify_page(view)
         return view
 
-    def _element_metadata(self):
+    def _element_metadata(self, *, full=False):
         """Only allowlisted observed attributes. No arbitrary JS, values, HTML or secrets."""
         requests = []
-        for ref, info in list(self._refs.items())[:40]:
+        observed = list(self._refs.items())
+        if not full:
+            observed = observed[:40]
+        for ref, info in observed:
             if not re.fullmatch(r'e[0-9]+', ref):
                 continue
             attrs = ['href'] if info.get('role') == 'link' else (
@@ -500,14 +499,20 @@ class Workspace:
             except (RuntimeError, ValueError, TypeError):
                 pass  # Older backend: original accessibility snapshot remains usable.
         metadata = []
-        for ref, info in self._refs.items():
+        for ref, info in observed:
             entry = {'ref': '@' + ref}
             for key in ('role', 'name', 'href', 'expanded', 'disabled', 'checked', 'haspopup'):
                 if key in info:
                     value = info[key]
-                    entry[key] = (_account_text(agent_browser.redact(str(value)))[:300] if isinstance(value, str) else value)
+                    if isinstance(value, str):
+                        value = agent_browser.redact(value)
+                        value = _account_text(value) if self.resource_key else value
+                        if key != 'href' and not full and len(value) > 300:
+                            entry[key + '_truncated'] = True
+                            value = value[:300]
+                    entry[key] = value
             metadata.append(entry)
-        return metadata[:40]
+        return metadata
 
     def _safe_url(self, url):
         if self.resource_key:
@@ -592,10 +597,21 @@ class Workspace:
             raise Refused(f"plafond de {MAX_EFFECTS} actions à effet atteint pour cette tâche")
 
     # -- registre des actions à effet --------------------------------------------------------
-    def _fingerprint(self, channel_id: int, kind: str, target: str) -> tuple[str, str]:
+    def _control_identity(self, ref, info, *, click=False):
+        sig = f"{info.get('role') or ''}:{info.get('name') or ''}"
+        peers = [key for key, value in self._refs.items()
+                 if (value.get('role'), value.get('name')) == (info.get('role'), info.get('name'))]
+        peers.sort(key=lambda key: int(key[1:]))
+        return [sig, peers.index(ref.lstrip('@'))] if click or len(peers) > 1 else sig
+
+    def _fingerprint(self, channel_id: int, kind: str, target: str | list, *, url_context=True) -> tuple[str, str]:
         page = _page_key(self._url)
         form = _digest(self._typed.get(page, {}))
-        return _digest([int(channel_id), kind, page, target, form])[:32], form
+        identity = [int(channel_id), kind, page, target, form]
+        parts = urlsplit(self._url)
+        if url_context and (parts.query or parts.fragment):
+            identity.append(_digest([parts.query, parts.fragment]))
+        return _digest(identity)[:32], form
 
     def _ledger(self, fingerprint: str) -> list[dict]:
         return [dict(r) for r in journal.query(
@@ -603,7 +619,7 @@ class Workspace:
             (self.scope.business, f"browser:{fingerprint}:%"))]
 
     def _effect(self, kind: str, target_sig: str, command: str, args: list[str], *, expect: str | None,
-                channel_id) -> dict:
+                channel_id, target_context=None) -> dict:
         from agents import cancel
         if mandates.IDENTITY_DELETION.search(target_sig):
             raise Refused("suppression irréversible de l'identité : hors des opérations ordinaires confiées à ces outils.")
@@ -614,10 +630,32 @@ class Workspace:
         expect = str(expect or "").strip() or None
         if expect and (len(expect) > 200 or agent_browser.contains_secret(expect)):
             raise Refused("expect : court texte visible attendu après l'action, sans secret")
-        fingerprint, form = self._fingerprint(int(channel["id"]), kind, target_sig)
+        target_identity = [target_sig, target_context] if target_context is not None else target_sig
+        if command in ('click', 'fill', 'select', 'check'):
+            ref, info = self._target(args[0])
+            target_identity = self._control_identity(ref, info, click=command == 'click')
+        fingerprint, form = self._fingerprint(int(channel["id"]), kind, target_identity)
         key = f"browser:{fingerprint}:{self.scope.key}"
         mine = next((r for r in self._ledger(fingerprint) if r["idempotency_key"] == key), None)
         lineage = _lineage(self.scope.task_id)
+        if command in ('fill', 'select', 'check') and isinstance(target_identity, list):
+            # Historical edits did not distinguish same-named fields; do not reinterpret their effects.
+            for row in journal.query('SELECT * FROM channel_actions WHERE business=? AND channel_id=? AND action=?',
+                                     (self.scope.business, channel['id'], f'browser.{kind}')):
+                prior = json.loads(row['payload'])
+                if prior.get('target') == target_sig and prior.get('page') == _page_key(self._url) and not prior.get('target_identity'):
+                    if row['status'] in UNRESOLVED or row['status'] in ('executed', 'verified') and (
+                            row['idempotency_key'].endswith(':' + self.scope.key) or lineage and _lineage(_row_task(row)) == lineage):
+                        raise Refused("Une ancienne saisie ne distingue pas les champs de même nom. Vérifie son effet avant de la répéter.")
+        legacy_keys = {self._fingerprint(int(channel['id']), kind, target, url_context=False)[0]
+                       for target in (target_identity, target_sig)} - {fingerprint}
+        for legacy in legacy_keys:
+            for row in self._ledger(legacy):
+                if row['status'] in UNRESOLVED or row['status'] == 'verified' and (
+                        row['idempotency_key'].endswith(':' + self.scope.key) or
+                        lineage and _lineage(_row_task(row)) == lineage):
+                    raise Refused(f"L'ancienne action #{row['id']} ne distingue pas les contrôles ou leur contexte de page. "
+                                  "Ne répète pas un effet déjà exécuté ou incertain ; vérifie son résultat sur la page.")
         for row in self._ledger(fingerprint):
             if row["idempotency_key"] == key:
                 continue
@@ -648,13 +686,13 @@ class Workspace:
             raise Refused(f"action #{mine['id']} au résultat inconnu (interruption) : ne pas la répéter. "
                           "Vérifie sur le site si elle a eu lieu (browser_verify) ou demande à l'humain.")
         pre_text = self._page_text()
-        if expect and expect.casefold() in pre_text.casefold():
-            raise Refused(f"expect={expect!r} est déjà visible avant l'action : il ne prouverait rien. "
-                          "Choisis un texte qui n'apparaîtra qu'après (confirmation, référence...).")
+        expect_is_new = bool(expect and expect.casefold() not in pre_text.casefold())
         authority = mandates.authorize(channel, None)
         payload = {"mandate_id": authority.get("mandate_id"), "scope": self.scope.key, "task_id": self.scope.task_id, "kind": kind, "target": target_sig,
                    "page": _page_key(self._url), "form_digest": form, "expect": expect,
-                   "pre_text": pre_text[:8000]}
+                   "pre_text": pre_text, "pre_text_complete": True}
+        if isinstance(target_identity, list):
+            payload['target_identity'] = target_identity
         now = time.time()
         with tasks._tx() as conn:  # persisté AVANT l'action externe
             if mine is None:
@@ -692,12 +730,12 @@ class Workspace:
                     "note": "effet inconnu : ne pas répéter ; vérifie sur le site (browser_verify)"}
         self._settle_page()
         status, evidence = "executed", None
-        if expect:
+        if expect_is_new:
             if self._wait_for(expect):
                 status = "verified"
                 evidence = self._evidence(action_id, int(channel["id"]), kind, f"texte attendu observé : {expect}")
         self._settle(action_id, status, None if status == "verified" else
-                     ("attendu non observé après l'action" if expect else "exécutée, effet non vérifié"),
+                     ("attendu non observé après l'action" if expect_is_new else "exécutée, effet non vérifié"),
                      result={"url": self._current_url(), "expect": expect}, evidence_id=evidence)
         view = self._observe()
         view["effect"] = {"action_id": action_id, "status": status,
@@ -751,18 +789,19 @@ class Workspace:
         name = str(info.get("name") or "")
         if _HUMAN_ONLY_FIELD_RE.search(name) or mandates.SENSITIVE.search(name + " " + self._url):
             raise Refused(f"champ « {name} » réservé à l'humain (identifiants, second facteur, paiement)")
+        identity = self._control_identity(target, info)
+        sig = json.dumps(identity, ensure_ascii=False) if isinstance(identity, list) else identity
         if self.resource_key:
             # Account edits may autosave. Treat typing/select/check as real journaled effects.
-            self._typed.setdefault(_page_key(self._url), {})[f"{info.get('role')}:{name}"] = _digest([kind, value_for_digest])
+            self._typed.setdefault(_page_key(self._url), {})[sig] = _digest([kind, value_for_digest])
             result = self._effect(kind, f"{info.get('role')}:{name}", command, [target, *args],
                                   expect=None, channel_id=channel_id)
-            self._typed.setdefault(_page_key(self._url), {})[f"{info.get('role')}:{name}"] = _digest([kind, value_for_digest])
+            self._typed.setdefault(_page_key(self._url), {})[sig] = _digest([kind, value_for_digest])
             return result
         self._channel(channel_id)
         result = self._cmd(command, [target, *args])
         if not result.get("success"):
             return {"ok": False, "error": agent_browser.redact(str(result.get("error") or ""))[:300]}
-        sig = f"{info.get('role')}:{name}"
         self._typed.setdefault(_page_key(self._url), {})[sig] = _digest([kind, value_for_digest])
         return self._observe()
 
@@ -887,14 +926,26 @@ class Workspace:
             'const nodes = [octopus_commit_boundary]; '
             'if (octopus_commit_boundary && octopus_commit_boundary.form && octopus_commit_boundary.tagName !== "BUTTON") '
             'nodes.push(...octopus_commit_boundary.form.querySelectorAll("button, input[type=submit]")); '
-            f'const pattern = new RegExp({json.dumps(mandates.SENSITIVE.pattern + "|" + mandates.IDENTITY_DELETION.pattern)}, "i"); '
-            'return nodes.filter(Boolean).some(n => pattern.test([n.getAttribute("aria-label"), '
+            f'const pattern = new RegExp({json.dumps(mandates.SENSITIVE.pattern + "|" + mandates.IDENTITY_DELETION.pattern + "|" + mandates.SECRET_SURFACE.pattern)}, "i"); '
+            'return nodes.filter(Boolean).some(n => n.matches("input[type=password]") || pattern.test([n.getAttribute("aria-label"), '
             'n.innerText, n.matches("input[type=submit]") ? n.value : ""].join(" "))); })()']).get('result')
         if probe is True:
             raise Refused('Paiement, engagement financier ou création de compte : intervention humaine requise.')
         if probe is not False:
             raise Refused('cible clavier indisponible : observe la page ou utilise une cible précise.')
-        return self._effect("press", f"key:{key}", "press", [key], expect=expect, channel_id=channel_id)
+        focus = self._read('eval', ['(() => { /* octopus_focus_identity */ '
+            'let node = document.activeElement; if (!node) return null; '
+            f'if ({json.dumps(key)} === "Enter" && node.form && '
+            '(!node.matches("button,input[type=submit],input[type=button]") || node.type === "submit")) node = node.form; '
+            'if (node.id && Array.from(document.querySelectorAll("[id]")).filter(n => n.id === node.id).length === 1) '
+            'return JSON.stringify(["id", node.id]); '
+            'const path = []; while (node) { const parent = node.parentElement; '
+            'path.unshift([node.tagName, parent ? Array.from(parent.children).indexOf(node) : 0]); node = parent; } '
+            'return JSON.stringify(path); })()']).get('result')
+        if not isinstance(focus, str) or not focus:
+            raise Refused('cible clavier indisponible : observe la page ou utilise une cible précise.')
+        return self._effect("press", f"key:{key}", "press", [key], expect=expect, channel_id=channel_id,
+                            target_context=_digest(focus))
 
     def scroll(self, direction: str = "down") -> dict:
         self._ensure_page()
@@ -946,6 +997,10 @@ class Workspace:
         if text.casefold() in str(payload.get("pre_text") or "").casefold():
             view.update(verified=False, status=row["status"],
                         note="ce texte était déjà présent avant l'action : il ne prouve rien")
+            return view
+        if not payload.get('pre_text_complete', 0 < len(payload.get('pre_text') or '') < 8000):
+            view.update(verified=False, status=row['status'],
+                        note="L'observation préalable ancienne est incomplète : ce texte ne prouve pas un nouvel effet. Ne répète pas un effet incertain.")
             return view
         channel = journal.query("SELECT locator FROM economic_channels WHERE id=?", (row["channel_id"],))
         if not channel or _origin(channel[0]["locator"]) != _origin(self._current_url()):

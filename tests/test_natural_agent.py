@@ -43,6 +43,21 @@ def test_one_clear_action_executes_once(registry, response):
 
 
 @pytest.mark.parametrize('response', [
+    '{"tool":"browser_click","args":{"ref":"@e7"}}'
+    '{"tool":"browser_click","ref":"@e7"}',
+    '{"tool":"BROWSER_CLICK","ref":"e7"} {"action":{"tool":"click","ref":7}}',
+    '{"tool":"browser_type","ref":"@e7","text":"hello"}'
+    '{"tool":"browser_type","args":{"text":"hello","ref":"@e7"}}',
+])
+def test_repeated_representations_of_one_action_execute_once(registry, response):
+    tools, effects = registry
+    action = tools.parse_action(response)
+    assert action['_protocol'] == 'normalized'
+    assert tools.dispatch(action['tool'], action['args'])[0] is None
+    assert len(effects) == 1
+
+
+@pytest.mark.parametrize('response', [
     '{"tool":"browser_click","ref":"@e1"} {"tool":"browser_click","ref":"@e2"}',
     {'tool': 'browser_click', 'ref': '@e2', 'args': {'ref': '@e1'}},
     {'tool': 'browser_click', 'args': {'ref': ['@e1', '@e2']}},
@@ -51,6 +66,9 @@ def test_one_clear_action_executes_once(registry, response):
     {'tool': 'browser_click', 'action': 'browser_type', 'ref': '@e1'},
     '{"tool":"browser_click","ref":"@e1","ref":"@e2"}',
     "{'tool':'browser_click','ref':'@e1','ref':'@e2'}",
+    '{"tool":"browser_type","ref":"@e7","text":"hello"}'
+    '{"tool":"browser_type","ref":"@e7","text":"goodbye"}',
+    '{"tool":"browser_snapshot","full":true}{"tool":"browser_snapshot","full":1}',
 ])
 def test_real_ambiguity_returns_observation_without_effect(registry, response):
     tools, effects = registry
@@ -229,6 +247,33 @@ def test_unverified_submission_retains_identity_and_cannot_repeat(monkeypatch):
         with pytest.raises(browser_workspace.Refused, match='effet précédent'):
             browser.press('Enter')
         assert not any(command == 'press' for command, _ in browser._session.commands)
+    finally:
+        browser.close()
+
+
+def test_distinct_same_named_submit_buttons_cannot_repeat_an_unconfirmed_submission(monkeypatch):
+    from test_delegated_resource_hub import FakeAccountSession
+    from octopus import browser_workspace
+    account()
+    resources.set_account_session('new-platform', 'connected')
+    real_run = FakeAccountSession.run
+
+    def run(session, command, args=(), **kwargs):
+        result = real_run(session, command, args, **kwargs)
+        if command == 'snapshot':
+            result['data']['snapshot'] += '\n- button "Publier" [ref=e5]'
+            result['data']['refs']['e5'] = {'role': 'button', 'name': 'Publier'}
+        return result
+
+    monkeypatch.setattr(FakeAccountSession, 'run', run)
+    browser = space(monkeypatch)
+    try:
+        browser.navigate(URL)
+        assert browser.click('@e1')['ok']
+        assert browser.click('@e1')['already_done']
+        with pytest.raises(browser_workspace.Refused, match='effet précédent'):
+            browser.click('@e5')
+        assert browser._session.clicks == 1
     finally:
         browser.close()
 

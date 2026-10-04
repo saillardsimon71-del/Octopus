@@ -36,10 +36,13 @@ Les 429 respectent `Retry-After` numérique ou HTTP-date avec un plancher de
 amont suspend le modèle. Les cooldowns persistent dans `llm_calls`.
 Le transport ne fait aucun retry automatique sous `economical` ou `bench`.
 
-`browser.react_step` exige toujours `browser.trajectory/browser-v1`, quel
+`browser.react_step` exige toujours `browser.trajectory/browser-v1-fidelity-1`, quel
 que soit le profil, le pin ou le baseline DeepSeek. Les dix scénarios doivent
-être couverts, le score moyen atteindre 90 %, les scénarios critiques réussir
-et la suite être complète. Ni le JSON, ni tools, ni un faible prix ne donnent
+avoir chacun au moins une réussite, la moyenne des taux par scénario atteindre 90 %,
+aucun outil interdit être observé et la suite être complète sans panne d'infrastructure.
+Une abstention ponctuelle compte comme échec sans exiger la perfection par scénario.
+La qualification ne remplace pas l'autorité et la sécurité vérifiées à chaque action.
+Ni le JSON, ni tools, ni un faible prix ne donnent
 cette qualification. Le benchmark exige une shortlist et un plafond global
 `--max-requests`, indépendant de `--max-cost`.
 

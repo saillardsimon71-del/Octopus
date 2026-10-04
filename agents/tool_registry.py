@@ -102,6 +102,12 @@ class ToolRegistry(dict):
             if depth:
                 return reject('format', 'Action incomplète. Donne le nom de l\'outil et ses paramètres.')
             if len(objects) > 1:
+                actions = [self.parse_action(item) for item in objects]
+                if all(action.get('tool') and not action.get('_protocol_error') for action in actions):
+                    identities = {json.dumps([action['tool'], action['args']], sort_keys=True, ensure_ascii=False)
+                                  for action in actions}
+                    if len(identities) == 1:
+                        return {**actions[0], '_protocol': 'normalized'}
                 return reject('ambiguous', 'Plusieurs actions sont proposées. Choisis une seule action.')
             if not objects:
                 return {'final': text, '_protocol': 'immediate'}

@@ -112,6 +112,52 @@ def _objective_status(objective_id: int) -> str:
     return strategy.get("objective", objective_id, BUSINESS)["status"]
 
 
+@pytest.mark.parametrize('form', [False, True])
+@pytest.mark.parametrize('context_switch', [False, True])
+def test_real_keyboard_focus_identity_preserves_controls_and_submission_deduplication(monkeypatch, form, context_switch):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    markup = ('<form id="request" onsubmit="event.preventDefault();document.querySelector(\'output\').textContent+=\'SUBMITTED\'">'
+              '<input id="first" aria-label="Value"><input id="second" aria-label="Value"><button>Send</button></form>'
+              if form else '<button id="first" type="button" onclick="document.querySelector(\'output\').textContent+=\'FIRST_DONE\'">Open section</button>'
+              '<button id="second" type="button" onclick="document.querySelector(\'output\').textContent+=\'SECOND_DONE\'">Open section</button>')
+    class Site(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = ('<html><body>' + markup + '<output></output></body></html>').encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(body)
+        def log_message(self, *args): pass
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Site)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    origin = f'http://127.0.0.1:{server.server_port}'
+    monkeypatch.setenv(browser_workspace.LAB_ORIGINS_ENV, origin)
+    _grant_site(origin)
+    space = browser_workspace.Workspace(browser_workspace.Scope('keyboard', BUSINESS, None), web_guard.BrowseState())
+    try:
+        space.navigate(origin + ('/?record=first' if context_switch else '/'))
+        space._read('eval', ['document.getElementById("first").focus(); true'])
+        space.press('Enter', expect='SUBMITTED' if form else 'FIRST_DONE')
+        space.snapshot()
+        if context_switch:
+            space.navigate(origin + '/?record=second')
+        space._read('eval', ['document.getElementById("second").focus(); true'])
+        second = space.press('Enter', expect='SUBMITTED' if form else 'SECOND_DONE')
+        if form and not context_switch:
+            assert second['already_done']
+            assert space._page_text().count('SUBMITTED') == 1
+        else:
+            assert not second.get('already_done')
+            assert space.press('Enter')['already_done']
+            assert space._page_text().count('SUBMITTED' if form else 'SECOND_DONE') == 1
+    finally:
+        space.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(3)
+
+
 @pytest.mark.parametrize("seed", [0, 1])
 def test_objective_to_verified_web_workflow_through_supervisor_and_real_browser(handlers, lab, monkeypatch, seed):
     site = lab(seed)
@@ -266,7 +312,7 @@ def test_worker_killed_during_submission_resumes_without_blind_repeat(handlers, 
     assert resumed["attempts"] == 2 and resumed["status"] == "done"
 
 
-def test_without_human_act_grant_the_workflow_stays_read_only(lab, monkeypatch):
+def test_without_entrusted_resource_the_workflow_stays_read_only(lab, monkeypatch):
     site = lab(0)
     decider = ObservationDecider(None, FACTS)
     monkeypatch.setattr(deepseek, "call_json", decider)
@@ -275,7 +321,8 @@ def test_without_human_act_grant_the_workflow_stays_read_only(lab, monkeypatch):
     assert site.posts == [] and site.submissions == []
     assert journal.query("SELECT COUNT(*) AS n FROM channel_actions")[0]["n"] == 0
     steps = result["results"][0]["steps"]
-    assert any("canal actif avec accès 'act'" in s["result"] for s in steps if s["tool"] == "browser_type")
+    assert any(s.get('result_data', {}).get('refused') and 'ressource' in s['result_data']['reason']
+               for s in steps if s['tool'] == 'browser_type')
     assert "Accès en écriture non accordé" in str(result["results"][0]["final"])
 
 

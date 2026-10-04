@@ -118,7 +118,12 @@ def test_session_timeout_and_abort_are_indeterminate(monkeypatch, tmp_path):
 
 def test_snapshot_view_helpers():
     raw = '- list\n  - ListMarker "• "\n  - StaticText " · "\n  - StaticText "DV-1 enregistrée"'
-    assert agent_browser.prune_snapshot(raw) == '- list\n  - StaticText "DV-1 enregistrée"'
+    assert agent_browser.prune_snapshot(raw) == raw
+
+
+def test_accessibility_observation_preserves_units_status_symbols_and_numbered_positions():
+    raw = '- ListMarker "50."\n- StaticText "€"\n- StaticText "%"\n- StaticText "✓"\n- StaticText "✕"'
+    assert agent_browser.prune_snapshot(raw) == raw
     long = "\n".join(f'- button "b{i}" [ref=e{i}]' for i in range(500))
     cut = agent_browser.truncate_snapshot(long, 1000)
     assert len(cut) <= 1000 and cut.endswith("browser_snapshot(full=true)]") and "[ref=e0]" in cut

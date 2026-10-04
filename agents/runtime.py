@@ -357,11 +357,13 @@ def _browse_result_meta(value) -> dict | None:
 def _tool_result_view(tool: str, result, max_chars: int | None = None) -> str:
     """Vue courte destinée au prompt ; l'objet structuré source reste intact à côté."""
     if tool.startswith("browser_") and isinstance(result, dict):
-        limit = 6000 if max_chars is None else max(200, int(max_chars))
+        from . import agent_browser
         head = {k: v for k, v in result.items() if k != "snapshot"}
-        text = json.dumps(head, ensure_ascii=False, default=str)[:2000]
+        text = json.dumps(head, ensure_ascii=False, default=str)
         snapshot = str(result.get("snapshot") or "")
-        return text + (f"\nPAGE (refs @eN) :\n{snapshot[:limit]}" if snapshot else "")
+        if max_chars is not None:
+            snapshot = agent_browser.truncate_snapshot(snapshot, max(200, int(max_chars)))
+        return text + (f"\nPAGE (refs @eN) :\n{snapshot}" if snapshot else "")
     if tool == "browse" and isinstance(result, dict):
         page = result.get("page") if isinstance(result.get("page"), dict) else result
         text = str(page.get("main_text") or result.get("texte") or "")

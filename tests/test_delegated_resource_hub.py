@@ -82,6 +82,9 @@ class FakeAccountSession:
             self.url = args[0]
             return ok({'url': self.url})
         if command == 'eval':
+            if 'octopus_focus_identity' in args[0]:
+                assert '.value' not in args[0] and 'document.cookie' not in args[0]
+                return ok({'result': json.dumps(['id', 'ordinary-control'])})
             if 'octopus_commit_boundary' in args[0]:
                 return ok({'result': False})
             if args[0].endswith('return Boolean(!login && !challenge); })()'):

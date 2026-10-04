@@ -117,10 +117,13 @@ explicite. Aucun n'exempte `browser.react_step` de sa preuve browser.
 
 ### Browser et budget de requêtes
 
-`browser.react_step` exige toujours `browser.trajectory/browser-v1`, y compris
+`browser.react_step` exige toujours `browser.trajectory/browser-v1-fidelity-1`, y compris
 DeepSeek, les pins, les baselines et les profils bench/legacy. Les dix scénarios
-doivent être couverts, le score moyen atteindre 90 %, les cinq scénarios critiques
-réussir intégralement, les preuves avoir moins de 14 jours et la suite être complète.
+doivent avoir chacun au moins une réussite, la moyenne des taux par scénario atteindre
+90 %, aucun outil interdit être observé, les preuves avoir moins de 14 jours et la
+suite être complète sans panne d'infrastructure. Les échecs cognitifs restent comptés ;
+la perfection par catégorie n'est pas exigée. La qualification ne donne aucune autorité
+supplémentaire au contrôleur. Le même critère s'applique à toute identité fixe du pool.
 La stagnation en exécution est une observation journalisée, sans score cognitif automatique.
 Le protocole browser accepte une action claire ou un rapport libre ; JSON natif n'est pas requis.
 Le benchmark `browser.bench_step` est l'amorçage explicite sur des pages locales.

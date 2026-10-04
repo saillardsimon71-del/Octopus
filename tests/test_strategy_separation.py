@@ -228,7 +228,10 @@ def test_llm_cannot_invent_or_hide_a_capability():
     assert hidden["retained"]["llm_availability_claims_ignored"] is True
 
 
-def test_registry_remains_the_authority_and_permissions_are_not_expanded():
+@pytest.mark.parametrize('browser_ready', [False, True])
+def test_registry_remains_the_authority_and_permissions_are_not_expanded(monkeypatch, browser_ready):
+    from agents import agent_browser
+    monkeypatch.setattr(agent_browser, 'availability', lambda: {'ready': browser_ready})
     before_tools = set(runtime.TOOLS)
     before_pursuit = set(supervisor.PURSUIT_TOOLS)
     before_executors = list(actions.registered_executors())
@@ -239,7 +242,7 @@ def test_registry_remains_the_authority_and_permissions_are_not_expanded():
     assert facts.executable <= before_pursuit
     assert facts.executable.isdisjoint(facts.human_required)
     assert "phone_call" not in facts.present
-    assert "browser_click" not in facts.executable
+    assert ('browser_click' in facts.executable) == browser_ready
     assert "act_on_channel" in facts.executable
     assert not journal.query("SELECT * FROM operational_mandates")
     assert "email:send" not in facts.executable
