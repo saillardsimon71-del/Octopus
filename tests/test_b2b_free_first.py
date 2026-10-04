@@ -109,6 +109,7 @@ def test_skills_are_metadata_and_preserve_authority():
     assert set(runtime.TOOLS) == before_tools
     assert not mandates.list_mandates('b2b')
 
+
 def test_youtube_learning_is_read_only_deduplicated_and_provenanced(monkeypatch):
     monkeypatch.setattr(runtime, '_seen_this_session', lambda url: True)
     observation = json.dumps({'title': 'Fixture', 'channel': 'Fixture channel', 'date': '2026-01-01',

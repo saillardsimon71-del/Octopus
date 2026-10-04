@@ -5,7 +5,7 @@ import time
 import pytest
 from agents import runtime, cancel
 from agents.gui.workbench_v2_data import read_snapshot
-from octopus import businesses, journal, llm, pricing, strategy, supervisor, tasks
+from octopus import businesses, journal, llm, pricing, strategy, supervisor, tasks, worker
 NAME = "Produits digitaux & automatisation IA B2B"
 DESCRIPTION = (
     "Créer et vendre des produits numériques, micro-services ou automatisations IA à des indépendants, TPE et PME. "
@@ -19,7 +19,9 @@ DESCRIPTION = (
 def deny_real_network(monkeypatch):
     import requests, socket
     monkeypatch.setattr(requests.sessions.Session, "request", lambda *a, **k: pytest.fail("real HTTP"))
-    monkeypatch.setattr(socket.socket, "connect", lambda *a, **k: pytest.fail("real network"))
+    connect = socket.socket.connect
+    monkeypatch.setattr(socket.socket, "connect", lambda sock, address: connect(sock, address)
+                        if address[0] in ('127.0.0.1', '::1') else pytest.fail("real network"))
 
 def page(url, text):
     from agents.browser import _page_record
@@ -39,7 +41,7 @@ GOALS = [
 
 
 class Trajectory:
-    def __init__(self, monkeypatch, transport, *, intent="discovery", final_permission=True, cost=.001):
+    def __init__(self, monkeypatch, transport, *, intent="discovery", final_permission=True, cost=0.):
         self.stage = 0
         self.calls, self.states, self.acquired, self.action_count = [], [], [], {}
         self.intent, self.final_permission, self.cost = intent, final_permission, cost
@@ -79,7 +81,8 @@ class Trajectory:
             raise AssertionError(limit)
         text = json.dumps(out, ensure_ascii=False)
         usage = pricing.Usage(prompt_tokens=sum(len(m["content"]) for m in request["messages"])//4, completion_tokens=len(text)//4)
-        return llm.TransportResult(text, usage, request["model"], resolved_provider="OfflineFake", provider_cost_usd=self.cost)
+        return llm.TransportResult(text, usage, request["model"], resolved_model=request['model'],
+                                   resolved_provider="OfflineFake", provider_cost_usd=self.cost)
 
 
 def batch(activity, oid=None):
@@ -109,7 +112,7 @@ def test_continuity_of_model_continue_beyond_third(monkeypatch, transport, provi
     assert all(t["output"]["decision"] == "continue" for t in supervisor.work_tasks(activity.id, oid)[:5])
     assert script.acquired == [f"https://simulated.example/step{i}" for i in range(1,7)]
     assert len(script.calls) == 24
-    assert read_snapshot(activity.id)["token_cost_usd"] == pytest.approx(.024)
+    assert read_snapshot(activity.id)["token_cost_usd"] == 0
     assert len(journal.query("SELECT id FROM strategy_decisions WHERE business=?", (activity.id,))) == 6
     assert len(tasks.pending_human_requests(activity.id)) == 1
     assert len(supervisor.work_tasks(activity.id, oid)) == 6
@@ -138,15 +141,17 @@ def test_same_six_units_different_batch_boundaries(monkeypatch, transport, provi
     assert [t["output"]["decision"] for t in work] == ["continue"] * 6
     assert [s["prochaine_recherche"] for s in script.states][1:] == GOALS[:5]
     assert all(tasks.step_value(t["id"], "pursuit.strategy_assessment")["retained"]["economic_rank"] == 1 for t in work)
-    assert snapshot["token_cost_usd"] == pytest.approx(.024)
+    assert snapshot["token_cost_usd"] == 0
     assert len(journal.query("SELECT id FROM strategy_decisions WHERE business=?", (activity.id,))) == 6
 
 
-def test_repeated_resume_accumulates_cost_above_old_run_and_daily_caps(monkeypatch, transport, providers_up):
+def test_repeated_free_resume_preserves_historical_cost_above_old_caps(monkeypatch, transport, providers_up):
     activity = businesses.create_activity(NAME, DESCRIPTION)
-    from octopus import catalog
-    providers_up.update(set(catalog.load().raw["providers"]) - {"deepseek"})
-    script = Trajectory(monkeypatch, transport, final_permission=False, cost=.25)
+    with journal.run(activity.id, 'human-paid-history', profile='legacy') as ctx:
+        journal.record_llm_call({'ts': time.time(), 'run_id': ctx.id, 'business': activity.id,
+            'task': 'agent.plan', 'profile': 'legacy', 'model': 'deepseek/flash', 'provider': 'deepseek',
+            'cost_class': 'paid', 'status': 'ok', 'cost_usd': 9.})
+    script = Trajectory(monkeypatch, transport, final_permission=False)
     oid = None
     for _ in range(3):
         oid = batch(activity, oid)
@@ -156,9 +161,9 @@ def test_repeated_resume_accumulates_cost_above_old_run_and_daily_caps(monkeypat
     assert read_snapshot(activity.id)["token_cost_usd"] == pytest.approx(9.)
     assert [t["budget_usd"] for t in work if t["input"]["round"] == 1] == [None,None,None]
     assert not tasks.pending_human_requests(activity.id)
-    assert read_snapshot(activity.id)["pursuit_llm"] == {"spent_usd":9.}
+    assert read_snapshot(activity.id)["pursuit_llm"] == {"spent_usd":0.}
     assert all(r["budget_usd"] is None for r in journal.query("SELECT budget_usd FROM runs"))
-    assert {r["provider"] for r in journal.query("SELECT provider FROM llm_calls WHERE status='ok'")} == {"deepseek"}
+    assert all(request['model'].endswith(':free') for request in script.calls)
 
 
 def test_timeout_after_observation_keeps_checkpoint_and_reuses_source(monkeypatch, transport, providers_up):
@@ -176,7 +181,7 @@ def test_timeout_after_observation_keeps_checkpoint_and_reuses_source(monkeypatc
     assert script.acquired == ["https://simulated.example/step1"]
     assert script.stage == 1
     assert len(script.calls) == 4
-    assert read_snapshot(activity.id)["token_cost_usd"] == pytest.approx(.004)
+    assert read_snapshot(activity.id)["token_cost_usd"] == 0
     assert not tasks.pending_human_requests(activity.id)
 
 
@@ -191,30 +196,30 @@ def test_non_pursuit_run_and_daily_llm_limits_remain_enforced(monkeypatch):
         assert "journalier" in llm._budget_block(ctx, cat, "octopus", .01)
 
 
-def test_same_model_json_fallback_still_records_both_calls_without_cost_stop(monkeypatch, transport, providers_up):
-    from octopus import catalog
-    providers_up.update(set(catalog.load().raw["providers"]) - {"deepseek"})
+def test_invalid_free_synthesis_requires_human_and_reuses_observations(monkeypatch, transport, providers_up):
     activity = businesses.create_activity(NAME, DESCRIPTION)
-    script = Trajectory(monkeypatch, transport, final_permission=False, cost=.25)
-    original, invalidated = script.respond, False
-    def syntax_error_once(provider, request):
-        nonlocal invalidated
+    monkeypatch.setattr(supervisor, 'PURSUIT_ROUNDS', 1)
+    script = Trajectory(monkeypatch, transport, final_permission=False)
+    original, resumed = script.respond, False
+    def syntax_error(provider, request):
         result = original(provider, request)
-        if request["max_tokens"] == 4000 and not invalidated:
-            invalidated = True
-            assert request["response_format"] == {"type":"json_object"}
+        if request["max_tokens"] == 4000 and not resumed:
             return llm.TransportResult('{"rapport":"x" "determination":{}}', result.usage,
-                result.requested_model, provider_cost_usd=.25)
+                result.requested_model, resolved_model=result.requested_model,
+                resolved_provider='OfflineFake', provider_cost_usd=0.)
         return result
-    transport.handler = syntax_error_once
-    batch(activity)
+    transport.handler = syntax_error
+    oid = batch(activity)
     rows = [dict(r) for r in journal.query("SELECT status, cost_usd, justification FROM llm_calls ORDER BY id")]
-    assert len(rows) == 13 and len(script.acquired) == 3
-    invalid = next(i for i,r in enumerate(rows) if r["status"] == "invalid")
-    assert rows[invalid+1]["status"] == "ok"
-    assert json.loads(rows[invalid]["justification"])["structured_method"] == "json_object"
-    assert json.loads(rows[invalid+1]["justification"])["structured_method"] == "text"
-    assert read_snapshot(activity.id)["token_cost_usd"] == pytest.approx(3.25)
+    assert any(r['status'] == 'invalid' for r in rows) and len(script.acquired) == 1
+    assert supervisor.work_tasks(activity.id, oid)[-1]['status'] == 'waiting_human'
+    tasks.answer(tasks.pending_human_requests(activity.id)[0]['id'], 'Réessayer gratuitement')
+    worker.run_one(task_id=supervisor.work_tasks(activity.id, oid)[-1]['id'], log=lambda _: None)
+    resumed = True
+    batch(activity, oid)
+    assert script.stage == 1 and len(script.acquired) == 1
+    assert supervisor.work_tasks(activity.id, oid)[-1]['status'] == 'done'
+    assert read_snapshot(activity.id)["token_cost_usd"] == 0
     assert not tasks.pending_human_requests(activity.id)
 
 
@@ -227,7 +232,8 @@ def test_third_cycle_missing_capability_keeps_adjusted_continuation(monkeypatch,
         if request["max_tokens"] == 4000 and script.stage == 3:
             data = json.loads(result.text)
             data["determination"].update(action="request_permission", permission="L'outil email_send est absent.")
-            return llm.TransportResult(json.dumps(data,ensure_ascii=False), result.usage, result.requested_model, provider_cost_usd=.001)
+            return llm.TransportResult(json.dumps(data,ensure_ascii=False), result.usage, result.requested_model,
+                                       resolved_model=result.requested_model, resolved_provider='OfflineFake', provider_cost_usd=0.)
         return result
     transport.handler = missing_tool
     oid = batch(activity)

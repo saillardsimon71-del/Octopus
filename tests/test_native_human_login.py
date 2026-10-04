@@ -282,7 +282,7 @@ def test_real_account_task_runtime_captcha_propagates_without_synthesis(native, 
         return llm.TransportResult(json.dumps(output), Usage(prompt_tokens=10, completion_tokens=10),
             request['model'], resolved_model=request['model'], resolved_provider='OfflineFake', provider_cost_usd=0.)
     from browser_evidence import qualify
-    qualify('deepseek/flash')
+    qualify('openrouter/fixture/vision-alpha:free')
     transport.handler = response
     result = resources.account_task('b2b', 'account', 'Observer le compte')
     assert result['status'] == 'waiting_human' and len(transport.calls) == 2

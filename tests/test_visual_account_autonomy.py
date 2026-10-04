@@ -69,7 +69,7 @@ def configured(monkeypatch, tmp_path, providers_up):
     monkeypatch.setattr(resources, 'account_browser_options', lambda key: {})
     monkeypatch.setattr(web_guard, '_resolved_ips', lambda host: [ipaddress.ip_address('8.8.8.8')])
     from browser_evidence import qualify
-    qualify('deepseek/flash')
+    qualify('openrouter/fixture/vision-alpha:free')
     # Gateway uses the configured economical policy; availability/evidence are simulated only.
     monkeypatch.setattr(journal, 'evidence', lambda *a: {'eligible': True, 'reason': 'offline fixture'})
     return resources.get('account')['web_account']
