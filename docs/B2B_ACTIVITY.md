@@ -14,7 +14,7 @@ fournit les URL/domaines/providers des services connus. **Paramètres avancés**
 les réglages techniques et permet de configurer un autre service. Modifier une fiche
 ne relance pas automatiquement la connexion.
 
-1. Pour OVH Mail (Roundcube), Netlify, LinkedIn et TikTok, choisir **Ouvrir la connexion**.
+1. Pour OVH Mail, Netlify, LinkedIn et TikTok, choisir **Ouvrir la connexion**.
    Chrome stable utilise un profil propre à cette ressource. L'humain réalise login,
    OAuth, 2FA et éventuel captcha. OCTOPUS ne reçoit pas les secrets.
 2. Fermer les fenêtres Chrome de cette connexion, puis choisir **J'ai terminé - vérifier**.
@@ -22,14 +22,28 @@ ne relance pas automatiquement la connexion.
    demande une intervention humaine ; aucune protection n'est contournée. Une erreur
    du backend ou un timeout ne prouvent jamais l'expiration : le profil et la dernière
    preuve sont préservés, l'accès agent reste bloqué jusqu'à une vérification réussie.
-3. Vérifier simon@sitequivend.fr sur Roundcube, le site Netlify concerné et les profils sociaux dédiés.
+3. Vérifier simon@sitequivend.fr dans le webmail OVH, le site Netlify concerné et les profils sociaux dédiés.
    Modifier la fiche si nécessaire, notamment l'URL de vérification et les domaines.
    Le site public est déclaré séparément ; son administration passe par Netlify.
+
 4. Choisir **Accorder un mandat**, cible `owned_account`, puis les effets
    `read`, `contact`, `edit`, `publish`. Sélectionner explicitement les clés
    `ovh-mail-pro,netlify-sitequivend,linkedin-b2b,tiktok-b2b`.
    Le mandat proposé couvre opérations B2B, contenu, démos, maquettes, audits et prototypes.
    Il reste révocable. Aucune réponse libre dans Humain ne l'accorde à elle seule.
+
+OVH Mail ouvre `https://www.ovhcloud.com/fr/mail/`, qui contient le formulaire humain.
+Le catalogue générique n'impose aucun backend webmail. Après authentification,
+**Paramètres avancés** permet de définir l'URL réelle du webmail comme URL de
+vérification et d'ajouter seulement son hôte observé aux domaines autorisés.
+La vérification existante contrôle cette destination dans le profil conservé.
+Pour simon@sitequivend.fr, la résolution publique utilisée par ce formulaire
+(`https://msservices.eu.ovhapis.com/1.0/webmail/?email=simon%40sitequivend.fr`,
+observée le 2026-10-05) renvoie actuellement `https://mail.ovh.net/roundcube/`.
+Cette destination concerne uniquement la fiche préparée pour cette adresse ;
+elle ne définit pas le provider générique. Seuls `www.ovhcloud.com` et `mail.ovh.net`
+sont autorisés dans cette fiche. Si le parcours humain aboutit ailleurs, renseigner
+l'URL et l'hôte réellement observés avant de vérifier ; aucun domaine n'est ajouté automatiquement.
 
 Finance, dépenses, retrait, facturation, propriété, sécurité, secrets, nouveaux comptes
 et engagements contractuels sensibles restent hors de ces mandats. L'activité choisit

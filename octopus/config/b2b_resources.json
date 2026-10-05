@@ -9,7 +9,7 @@
   },
   "accounts": [
     {"key": "ovh-mail-pro", "provider": "OVHcloud Mail", "label": "Mail pro - simon@sitequivend.fr",
-     "url": "https://mail.ovh.net/roundcube/", "domains": ["mail.ovh.net"],
+     "url": "https://www.ovhcloud.com/fr/mail/", "domains": ["www.ovhcloud.com", "mail.ovh.net"],
      "verify_url": "https://mail.ovh.net/roundcube/", "ownership": "operator", "dedicated": true},
     {"key": "netlify-sitequivend", "provider": "Netlify", "label": "Netlify - sitequivend.fr",
      "url": "https://app.netlify.com/", "domains": ["app.netlify.com"],

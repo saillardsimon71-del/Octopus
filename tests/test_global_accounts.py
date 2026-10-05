@@ -106,3 +106,46 @@ def test_global_resources_do_not_broaden_sensitive_permissions(description):
         actor='human', resource_keys=[resource['key']])
     assert not mandates.authorize({'id': -1, 'business': 'first', 'status': 'active', 'access': 'act'},
         'edit', description=description)['allowed']
+
+
+def test_ovh_provider_uses_public_login_without_assuming_webmail_backend():
+    account = resources.add_account('OVH Mail', actor='human')
+    assert account['locator'] == 'https://www.ovhcloud.com/fr/mail/'
+    assert account['web_account']['verify_url'] == account['locator']
+    assert account['web_account']['domains'] == ['www.ovhcloud.com']
+    assert 'roundcube' not in json.dumps(resources.account_services()['OVH Mail']).lower()
+
+
+def test_prepared_ovh_mail_separates_login_from_observed_destination():
+    from pathlib import Path
+    data = json.loads((Path(resources.__file__).parent / 'config/b2b_resources.json').read_text(encoding='utf-8'))
+    mail = next(a for a in data['accounts'] if a['key'] == 'ovh-mail-pro')
+    account = resources.configure_account(actor='human', **mail)
+    assert account['locator'] == 'https://www.ovhcloud.com/fr/mail/'
+    assert account['web_account']['domains'] == ['mail.ovh.net', 'www.ovhcloud.com']
+    assert account['web_account']['verify_url'] == 'https://mail.ovh.net/roundcube/'
+    assert account['web_account']['session_status'] == 'connection_required'
+    assert not journal.query('SELECT * FROM llm_calls')
+    assert not journal.query('SELECT * FROM operational_mandates')
+
+
+@pytest.mark.parametrize('host,allowed', [('mail.ovh.net', True), ('www.ovhcloud.com', True),
+                                        ('other.ovh.net', False), ('mail.ovh.net.evil.example', False)])
+def test_ovh_verifier_checks_only_explicit_observed_hosts(monkeypatch, host, allowed):
+    from pathlib import Path
+    data = json.loads((Path(resources.__file__).parent / 'config/b2b_resources.json').read_text(encoding='utf-8'))
+    mail = next(a for a in data['accounts'] if a['key'] == 'ovh-mail-pro')
+    resource = resources.configure_account(actor='human', **mail)
+    reads = []
+    def run(command, args=(), **kwargs):
+        if command == 'get':
+            return {'success': True, 'data': {'url': 'https://' + host + '/mail/'}}
+        reads.append(command)
+        return {'success': True, 'data': {'result': args[0].endswith('return Boolean(!login && !challenge); })()')}}
+    monkeypatch.setattr(web_guard, 'classify', lambda _: None)
+    diagnostic = {}
+    assert resources.verify_account_page(SimpleNamespace(run=run), resource['web_account'],
+        require_marker=False, diagnostic=diagnostic) is allowed
+    if not allowed:
+        assert diagnostic['reason'] == 'verify_domain_mismatch'
+        assert not reads

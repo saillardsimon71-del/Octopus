@@ -2,7 +2,7 @@
   "TikTok": {"provider": "TikTok", "url": "https://www.tiktok.com/", "domains": ["www.tiktok.com", "tiktok.com"], "capabilities": ["social_content"]},
   "LinkedIn": {"provider": "LinkedIn", "url": "https://www.linkedin.com/", "domains": ["www.linkedin.com", "linkedin.com"], "capabilities": ["professional_network"]},
   "Netlify": {"provider": "Netlify", "url": "https://app.netlify.com/", "domains": ["app.netlify.com"], "capabilities": ["website_deployment"]},
-  "OVH Mail": {"provider": "OVHcloud Mail", "url": "https://mail.ovh.net/roundcube/", "domains": ["mail.ovh.net"], "capabilities": ["email"]},
+  "OVH Mail": {"provider": "OVHcloud Mail", "url": "https://www.ovhcloud.com/fr/mail/", "domains": ["www.ovhcloud.com"], "capabilities": ["email"]},
   "X": {"provider": "X", "url": "https://x.com/", "domains": ["x.com", "www.x.com"], "capabilities": ["social_content"]},
   "YouTube": {"provider": "YouTube", "url": "https://www.youtube.com/", "domains": ["www.youtube.com", "youtube.com"], "capabilities": ["video_content"]},
   "Autre": {"provider": "Autre", "url": "", "domains": [], "capabilities": []}
