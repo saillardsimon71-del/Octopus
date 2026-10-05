@@ -82,6 +82,8 @@ class FakeAccountSession:
             self.url = args[0]
             return ok({'url': self.url})
         if command == 'eval':
+            if 'octopus_commit_label' in args[0]:
+                return ok({'result': 'Publier'})
             if 'octopus_focus_identity' in args[0]:
                 assert '.value' not in args[0] and 'document.cookie' not in args[0]
                 return ok({'result': json.dumps(['id', 'ordinary-control'])})
@@ -169,9 +171,10 @@ def test_c_d_revocation_other_business_and_no_llm_grant():
             domains=['new-platform.example'], businesses=[BUSINESS], authenticated_text='Déconnexion')
 
 
-def test_e_connected_resource_grants_ordinary_actions_in_its_business(monkeypatch):
+def test_e_connected_resource_and_mandate_grant_scoped_actions(monkeypatch):
     account()
     resources.set_account_session('new-platform', 'connected')
+    own_grant(('read', 'edit', 'publish'))
     s = space(monkeypatch)
     try:
         assert s.navigate(URL)['ok']
@@ -201,7 +204,9 @@ def test_f_g_h_publication_finance_and_secrets(monkeypatch):
 
 
 @pytest.mark.parametrize('label', ['Pay', 'Rembourser', 'Payout', 'Modifier IBAN', 'Créer un compte',
-                                    'Créer API key', 'Accept paid subscription', 'Changer sécurité', 'OTP', 'Acheter', 'Signer un contrat'])
+                                    'Créer API key', 'Accept paid subscription', 'Changer sécurité', 'OTP', 'Acheter', 'Signer un contrat',
+                                    'Transfer ownership', 'Changer propriétaire', 'Billing',
+                                    'Supprimer définitivement le projet', 'Permanently delete workspace'])
 def test_sensitive_effects_cannot_be_delegated(label):
     cid = channel(URL)
     m = mandates.grant(BUSINESS, 'Contact', 'public_business', ['contact'], actor='human')
@@ -351,7 +356,7 @@ def test_human_public_login_dependencies_never_expand_agent_authority(monkeypatc
         assert web_guard.current() is parent_state and not parent_state.account_read
     configured = resources.get(key)['web_account']
     assert configured['domains'] == before['domains'] == ['account.example']
-    assert configured['businesses'] == before['businesses'] == [BUSINESS]
+    assert 'businesses' not in configured and 'businesses' not in before
     assert mandates.list_mandates(BUSINESS) == []
     assert not journal.query('SELECT * FROM channel_authority')
     assert not journal.query('SELECT * FROM economic_channels')
@@ -362,10 +367,12 @@ def test_human_public_login_dependencies_never_expand_agent_authority(monkeypatc
     assert [args[0] for c, args in human.commands if c == 'open'] == [verified]
 
     # Connected resources retain exactly the configured domains and business scope.
-    assert mandates.account_authority(BUSINESS, key, 'contact')
+    assert not mandates.account_authority(BUSINESS, key, 'contact')
+    own_grant(('read',), key=key)
     monkeypatch.setattr(agent_browser, 'Session', FakeAccountSession)
     from browser_evidence import qualify
     qualify('deepseek/flash')
+    qualify('openrouter/fixture/vision-alpha:free')
     calls = 0
     def respond(provider, request):
         nonlocal calls
@@ -673,7 +680,7 @@ def test_real_account_subtask_worker_handoff_restores_parent_network_and_task(mo
             assert repeated['task_id'] == result['task_id'] and len(seen) == 1
 
 
-def test_trusted_account_profile_autosave_needs_no_separate_edit_grant(monkeypatch):
+def test_account_profile_autosave_requires_edit_grant(monkeypatch):
     account()
     resources.set_account_session('new-platform', 'connected')
     own_grant()
@@ -681,6 +688,9 @@ def test_trusted_account_profile_autosave_needs_no_separate_edit_grant(monkeypat
     try:
         s.navigate(URL)
         s._refs['e5'] = {'role': 'textbox', 'name': 'Bio du profil'}
+        with pytest.raises(bw.Refused):
+            s.type('@e5', 'New bio')
+        own_grant(('read', 'edit'))
         assert s.type('@e5', 'New bio')['ok']
         assert len(journal.query('SELECT * FROM channel_actions')) == 1
     finally:
@@ -860,8 +870,10 @@ def test_hub_account_pursuit_long_synthesis_and_recovery(monkeypatch, transport,
 
     from browser_evidence import qualify
     qualify('deepseek/flash')
+    qualify('openrouter/fixture/vision-alpha:free')
 
     def respond(provider, request):
+        assert provider['api_key_env'] == 'OPENROUTER_API_KEY'
         maximum = request['max_tokens']
         messages = json.dumps(request['messages'], ensure_ascii=False)
         assert FakeAccountSession.secret not in messages
@@ -892,10 +904,10 @@ def test_hub_account_pursuit_long_synthesis_and_recovery(monkeypatch, transport,
                 assert 'authentifiées conservées' in messages.lower()
                 text = answer[:1600 * 4] if resume_truncated and not state['resumed'] else answer
                 return llm.TransportResult(text, Usage(prompt_tokens=100, completion_tokens=(len(text)+3)//4),
-                    request['model'], resolved_model=request['model'], resolved_provider='OfflineFake', provider_cost_usd=.002)
+                    request['model'], resolved_model=request['model'], resolved_provider='OfflineFake', provider_cost_usd=0.)
         text = json.dumps(output, ensure_ascii=False)
         return llm.TransportResult(text, Usage(prompt_tokens=100, completion_tokens=(len(text)+3)//4),
-            request['model'], resolved_model=request['model'], resolved_provider='OfflineFake', provider_cost_usd=.001)
+            request['model'], resolved_model=request['model'], resolved_provider='OfflineFake', provider_cost_usd=0.)
 
     transport.handler = respond
     oid = supervisor.start_pursuit(business=business)
@@ -904,7 +916,13 @@ def test_hub_account_pursuit_long_synthesis_and_recovery(monkeypatch, transport,
     old_grants = copy.deepcopy(mandates.list_mandates(business))
     old_account = copy.deepcopy(resources.get(key))
     if resume_truncated:
-        assert current['status'] == 'done_degraded'
+        assert current['status'] == 'waiting_human'
+        request = tasks.pending_human_requests(business)[0]
+        count = len(transport.calls)
+        tasks.answer(request['id'], 'Réessayer gratuitement sans changer les droits')
+        supervisor.run_pursuit(oid, business=business)
+        current = tasks.get(current['id'])
+        assert current['status'] == 'done_degraded' and len(transport.calls) == count
         previous = copy.deepcopy(current)
         old_calls = [dict(r) for r in journal.query('SELECT * FROM llm_calls ORDER BY id')]
         count = len(transport.calls)
@@ -936,3 +954,114 @@ def test_hub_account_pursuit_long_synthesis_and_recovery(monkeypatch, transport,
     for table in ('resources', 'events', 'tasks', 'human_requests', 'task_steps', 'llm_calls'):
         assert FakeAccountSession.secret not in str([dict(r) for r in journal.query('SELECT * FROM ' + table)])
     assert not journal.query('SELECT * FROM channel_actions')
+
+
+def test_declared_contact_cannot_lower_an_account_edit(monkeypatch):
+    account()
+    resources.set_account_session('new-platform', 'connected')
+    own_grant(('read', 'contact'))
+    s = space(monkeypatch)
+    try:
+        s.navigate(URL)
+        s._refs['e5'] = {'role': 'textbox', 'name': 'Bio du profil'}
+        with pytest.raises(bw.Refused):
+            s.type('@e5', 'New bio', effect='contact')
+        assert not journal.query('SELECT * FROM channel_actions')
+    finally:
+        s.close()
+
+
+def test_enter_cannot_publish_under_edit_grant(monkeypatch):
+    account()
+    resources.set_account_session('new-platform', 'connected')
+    own_grant(('read', 'edit'))
+    s = space(monkeypatch)
+    try:
+        s.navigate(URL)
+        with pytest.raises(bw.Refused):
+            s.press('Enter', effect='edit')
+        assert not any(command == 'press' for command, _ in s._session.commands)
+    finally:
+        s.close()
+
+
+def test_publish_revocation_is_rechecked_before_command(monkeypatch):
+    account()
+    resources.set_account_session('new-platform', 'connected')
+    own_grant(('read',))
+    mid = own_grant(('publish',))
+    s = space(monkeypatch)
+    try:
+        s.navigate(URL)
+        original, checks = s._channel, []
+        def recheck(channel_id, effect=None):
+            checks.append(effect)
+            if len(checks) == 2:
+                mandates.revoke(BUSINESS, mid, actor='human')
+            return original(channel_id, effect)
+        monkeypatch.setattr(s, '_channel', recheck)
+        with pytest.raises(bw.Refused):
+            s.click('@e1')
+        assert checks == ['publish', 'publish']
+        assert s._session.clicks == 0
+        row = journal.query('SELECT * FROM channel_actions')[0]
+        assert row['status'] == 'failed'
+        assert json.loads(row['payload'])['mandate_id'] == mid
+    finally:
+        s.close()
+
+
+def test_account_task_propagates_missing_free_browser_route(monkeypatch):
+    account()
+    resources.set_account_session('new-platform', 'connected')
+    own_grant(('read',))
+    monkeypatch.setattr(worker, 'run_one', lambda **kwargs: {'status': 'done_degraded',
+        'output': {'execution_status': 'human_required', 'synthesis_error': 'NoEligibleModel: payant non autorisé'}})
+    result = resources.account_task(BUSINESS, 'new-platform', 'Lire')
+    assert result['refused'] and result['human_required'] and 'payant' in result['reason']
+
+
+def test_two_accounts_on_same_url_cannot_share_mandates(monkeypatch):
+    for key, effects in [('first', ('read', 'publish')), ('second', ('read',))]:
+        account(key=key)
+        resources.set_account_session(key, 'connected')
+        own_grant(effects, key=key)
+    first, second = space(monkeypatch, key='first'), space(monkeypatch, key='second')
+    try:
+        first.navigate(URL)
+        second.navigate(URL)
+        bindings = journal.query('SELECT * FROM channel_authority ORDER BY channel_id')
+        assert [r['resource_key'] for r in bindings] == ['first', 'second']
+        with pytest.raises(bw.Refused):
+            second.click('@e1')
+        with pytest.raises(PermissionError):
+            mandates.bind_account(bindings[0]['channel_id'], BUSINESS, 'second')
+        assert second._session.clicks == 0
+        assert first.click('@e1')['ok']
+    finally:
+        first.close()
+        second.close()
+
+
+@pytest.mark.parametrize('keyboard', [False, True])
+def test_save_cannot_borrow_contact_effect(monkeypatch, keyboard):
+    account()
+    resources.set_account_session('new-platform', 'connected')
+    own_grant(('read', 'contact'))
+    original = FakeAccountSession.run
+    def run(session, command, args=(), **kwargs):
+        if command == 'eval' and 'octopus_commit_label' in args[0]:
+            return {'success': True, 'data': {'result': 'Enregistrer'}}
+        return original(session, command, args, **kwargs)
+    monkeypatch.setattr(FakeAccountSession, 'run', run)
+    s = space(monkeypatch)
+    try:
+        s.navigate(URL)
+        with pytest.raises(bw.Refused):
+            if keyboard:
+                s.press('Enter', effect='contact')
+            else:
+                s.click('@e4', effect='contact')
+        assert not journal.query('SELECT * FROM channel_actions')
+    finally:
+        s.close()

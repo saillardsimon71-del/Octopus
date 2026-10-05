@@ -498,7 +498,9 @@ def _browse(args):
     if public_only and state.account_read:
         raise web_guard.BrowseRefused("lecture publique refusée après lecture d'un compte connecté")
     anonymous_account_domains: tuple = ()
-    if account and not state.account_read and (public_only or not browser.profile_has_cookies(url)):
+    if account:
+        if state.account_read:
+            raise web_guard.BrowseRefused('lecture authentifiée réservée à account_task avec ressource et mandat read')
         # Domaine de compte lu anonymement : le mode public ignore le profil enregistré,
         # sinon l'absence de cookies pour cette origine est vérifiée.
         # L'acquisition est anonyme par construction (HTTP sans session ou contexte
@@ -530,75 +532,6 @@ def _browse(args):
             "vision_error": None,
         }
 
-    # --- Account path: temporary state transaction ---
-    # The guard must taint a *temporary* state during navigation so that anti-exfiltration
-    # holds within the account browser (public subrequests are refused).  The mission state
-    # is only committed after the navigation is verified successful.  A blocked/error page
-    # therefore never taints the mission, and subsequent public navigations remain allowed.
-    #
-    # The temporary state inherits the mission's current account_read flag so that a
-    # previously successful account read still blocks public subrequests in later navigations.
-    temp_state = web_guard.BrowseState(account_read=state.account_read)
-
-    b = browser.new_browser(
-        headless=False,
-        account=True,
-        guard=lambda u: _browser_request_allowed(u, temp_state, account_context=True),
-    )
-    try:
-        try:
-            b.goto(url)
-        except Exception as e:
-            if b.blocked:
-                raise web_guard.BrowseRefused(f"redirection refusée vers {b.blocked[-1][:120]}") from e
-            raise
-        final = b.url()
-        final_kind = web_guard.classify(final)
-
-        if not _account_read_succeeded(b, final):
-            # Navigation completed but the page is a block/error page.
-            # Discard temporary taint: mission state stays clean.
-            page_text = b.snapshot(6000)
-            return {
-                "url": final,
-                "source": "compte connecté (lecture seule)",
-                "texte": page_text,
-                "vision": None,
-                "vision_error": "page de compte bloquée ou en erreur",
-                "page": {
-                    "final_url": final,
-                    "main_text": page_text,
-                    "text_chars": len(page_text),
-                    "blocked": True,
-                    "error": "account_page_blocked_or_error",
-                    "extraction_method": "",
-                    "rendered": True,
-                    "http_status": None,
-                    "content_type": "text/html",
-                    "title": "",
-                    "raw_chars": 0,
-                    "truncated": False,
-                    "requested_url": url,
-                    "fetched_at": "",
-                },
-            }
-
-        # Successful account read: commit temporary taint to mission state.
-        # web_guard.record sets account_read=True for ACCOUNT-kind final URLs,
-        # preserving the historical anti-exfiltration property.
-        web_guard.record(final, final_kind, state)
-
-        seen = b.see(agent=_ROLE.get())
-        page_text = b.snapshot(6000)
-        return {
-            "url": final,
-            "source": "compte connecté (lecture seule)",
-            "texte": page_text,
-            "vision": seen["description"],
-            "vision_error": seen.get("vision_error"),
-        }
-    finally:
-        b.stop()
 
 
 def _ask_human(args):
@@ -668,13 +601,31 @@ def _record_observation(args):
     from octopus import strategy
     source = str(args.get("source_ref") or "").strip()
     observed = _seen_this_session(source)
+    nature = 'observed' if observed else 'unverified'
+    if args.get('source_type') == 'external_learning' and source:
+        from urllib.parse import urlsplit, parse_qs
+        parsed = urlsplit(source)
+        video_id = None
+        if parsed.hostname == 'youtu.be':
+            video_id = parsed.path.strip('/')
+        elif parsed.hostname in {'youtube.com', 'www.youtube.com', 'm.youtube.com'}:
+            video_id = parse_qs(parsed.query).get('v', [None])[0]
+            if parsed.path.startswith('/shorts/'):
+                video_id = parsed.path.split('/')[2]
+        if video_id and __import__('re').fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
+            source = 'https://www.youtube.com/watch?v=' + video_id
+        existing = journal.query('SELECT id FROM strategy_evidence WHERE business=? AND source_type=? '
+            'AND source_ref=? AND nature=? AND observation=? ORDER BY id LIMIT 1',
+            (_run_business(), 'external_learning', source, nature, str(args.get('observation', ''))))
+        if existing:
+            return {'evidence_id': existing[0]['id'], 'nature': nature, 'deduplicated': True}
     fields = {k: args[k] for k in ("metric", "unit") if args.get(k) not in (None, "")}
     fields.update(_ids(args, ("experiment_id", "channel_id")))
     if args.get("value") not in (None, ""):
         fields["value"] = float(args["value"])
     evidence_id = strategy.create(
         "evidence", _run_business(), str(args.get("summary") or args.get("observation", ""))[:200],
-        created_by=f"agent:{_ROLE.get()}", nature="observed" if observed else "unverified",
+        created_by=f"agent:{_ROLE.get()}", nature=nature,
         source_type=str(args.get("source_type") or "agent"), source_ref=source or None,
         captured_at=time.time() if observed else None, observation=str(args.get("observation", "")), **fields)
     return {"evidence_id": evidence_id, "nature": "observed" if observed else "unverified",
@@ -730,10 +681,10 @@ def _register_channel(args):
 
 def _resources_status(args):
     """Inventaire reel : ce qui existe, ce qui repond, ce qui manque. Aucune consigne d'usage."""
-    from octopus import resources
+    from octopus import resources, capabilities
     rows = resources.list_resources(capability=args.get("capability"), state=args.get("state"),
                                     business=_run_business(), include_global=True)
-    return {"overview": resources.overview(business=_run_business()),
+    return {"overview": resources.overview(business=_run_business()), "skills": capabilities.skill_cards(),
             "resources": [{k: r[k] for k in ("key", "kind", "label", "state", "access", "capabilities",
                                              "needs", "last_check_detail", "business", "web_account")} for r in rows[:40]]}
 
@@ -1335,6 +1286,11 @@ def build_prompts(role: str, goal: str, conversational: bool = False,
     if run is not None and run.business == "octopus":
         tool_text = tool_text.replace(", ex. bpifrance.fr", "")
     freshness_context = _freshness_context(run)
+    if not browser_details and 'resources_status' in described_tools:
+        from octopus import capabilities
+        freshness_context += ('Fiches de savoir-faire (métadonnées, jamais des permissions) : ' +
+            ', '.join(c['id'] for c in capabilities.skill_cards()) +
+            '. resources_status donne les prérequis, sorties et preuves. Choisis librement les fiches utiles.\n')
     if run and run.business not in {DEFAULT_BUSINESS, "octopus"}:
         from octopus import businesses
         declared = businesses.get(run.business)
@@ -1544,7 +1500,8 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
                     'failure_layer': 'TEMPORARY_UNAVAILABLE' if isinstance(exc, llm.NoEligibleModel) else 'PROVIDER',
                     'error_class': type(exc).__name__}) if browser_mode else None
                 return {"role": role, "steps": steps, "final": "MISSION INCOMPLÈTE — contrôleur browser indisponible" if browser_mode else "(LLM indisponible)",
-                        "execution_status": "browser_unqualified" if browser_mode else "llm_unavailable", "execution_error": error}
+                        "execution_status": "human_required" if getattr(exc, 'human_required', False) else
+                        "browser_unqualified" if browser_mode else "llm_unavailable", "execution_error": error}
         if '_protocol' not in r:
             r = TOOLS.parse_action(r)
         protocol_status = r.pop('_protocol', 'immediate')
@@ -1718,6 +1675,10 @@ def _run_agent(role: str, goal: str, max_steps: int, conversational: bool,
         steps.append(step_record)
         if checkpoint:
             checkpoint(steps)
+        if isinstance(result, dict) and result.get('human_required'):
+            reason = result.get('reason') or 'intervention humaine requise'
+            return {'role': role, 'steps': steps, 'final': reason,
+                    'execution_status': 'human_required', 'execution_error': reason}
     return {"role": role, "steps": steps, "final": "MISSION INCOMPLÈTE — limite d’étapes" if browser_mode else "(max steps atteint)", "execution_status": "step_limit"}
 
 
@@ -1896,7 +1857,8 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                                   reasoning="high", max_tokens=700 if economical else 2000,
                                   validate=_validate_plan_contract if economical else None)
         except llm.GatewayError as exc:
-            return _mission_unavailable([], [], "llm_unavailable", f"{type(exc).__name__}: {exc}")
+            return _mission_unavailable([], [], "human_required" if getattr(exc, 'human_required', False)
+                                        else "llm_unavailable", f"{type(exc).__name__}: {exc}")
     proposed = plan.get("tasks") if isinstance(plan.get("tasks"), list) else []
     # Garde-fou budgétaire, pas une consigne du prompt : au-delà de 5, chaque
     # sous-tâche coûte une boucle ReAct complète de plus.
@@ -1960,7 +1922,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
                      "execution_status": r.get("execution_status", "unknown"),
                      "execution_error": r.get("execution_error")}
         subresult.update({key: r[key] for key in ('browser_evidence', 'objective_completion_nature', 'missing') if key in r})
-        if r.get("execution_status") in {"cancelled", "timeout", "budget_exceeded", "llm_unavailable"}:
+        if r.get("execution_status") in {"cancelled", "timeout", "budget_exceeded", "llm_unavailable", "human_required"}:
             save_progress(r.get("steps"))
             return _mission_unavailable(tasks, results + [subresult], r["execution_status"],
                                         r.get("execution_error") or r.get("final"))
@@ -2032,7 +1994,7 @@ def _run_mission(goal: str, max_steps_per_agent: int, allowed_tools: set[str] | 
             "plan": tasks,
             "results": results,
             "rapport": rapport,
-            "execution_status": "synthesis_unavailable",
+            "execution_status": "human_required" if getattr(exc, 'human_required', False) else "synthesis_unavailable",
             "synthesis_status": "degraded",
             "synthesis_error": error,
         }

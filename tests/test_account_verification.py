@@ -223,7 +223,7 @@ def test_backend_diagnostics_are_fixed_codes_only(node, clock, monkeypatch, tmp_
     ok, resource = verify_existing(monkeypatch, tmp_path, session)
     assert not ok
     assert resource['last_check_detail'] == ('verify_timeout' if failure == 'timeout' else 'backend_error')
-    assert resource['web_account']['session_status'] == ('expired' if failure == 'timeout' else 'unavailable')
+    assert resource['web_account']['session_status'] == 'unavailable'
 
 
 def test_immediate_workspace_verification_does_not_sleep(node, clock):

@@ -84,7 +84,7 @@ class FakeBrowser:
         pass
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def fake_browser(monkeypatch):
     FakeBrowser.opened = []
     monkeypatch.setattr(browser, "new_browser", lambda headless=False, account=False, guard=None:
@@ -99,9 +99,8 @@ def fake_browser(monkeypatch):
                 rendered=False, blocked=True, main_text="", text_chars=0, raw_chars=0,
                 truncated=False, error="refusé",
             )
-        text = FakeBrowser.PAGES.get(url, ("",))[0]
-        if not text:
-            text = "Page publique normale avec suffisamment de contenu pour le test. " * 5
+        text = (FakeBrowser.PAGES[url][0] if url in FakeBrowser.PAGES else
+                FakeBrowser.BLOCK_PAGES.get(url, ("Page publique normale avec suffisamment de contenu pour le test. " * 5,))[0])
         return browser.PublicPageRecord(
             requested_url=url, final_url=url, fetched_at="2026-09-24T00:00:00+00:00",
             http_status=200, content_type="text/html", title="fixture",
@@ -124,12 +123,14 @@ def run_actions(monkeypatch, role, actions):
 # Tests: 1. Successful account read commits mission taint
 # ---------------------------------------------------------------------------
 
-def test_successful_account_read_commits_mission_taint(monkeypatch, fake_browser):
+def test_unscoped_account_domain_is_always_anonymous(monkeypatch, fake_browser):
     with web_guard.session() as state:
         run_actions(monkeypatch, "LEDGER", [
             {"tool": "browse", "args": {"url": "https://dashboard.stripe.com/"}},
         ])
-    assert state.account_read is True
+    assert state.account_read is False
+
+    assert fake_browser.opened == []
 
 
 # ---------------------------------------------------------------------------
@@ -138,12 +139,13 @@ def test_successful_account_read_commits_mission_taint(monkeypatch, fake_browser
 
 def test_after_successful_account_read_public_navigation_refused(monkeypatch, fake_browser):
     with web_guard.session() as state:
+        state.account_read = True
         result = run_actions(monkeypatch, "SOUT", [
             {"tool": "browse", "args": {"url": "https://dashboard.stripe.com/"}},
             {"tool": "browse", "args": {"url": "https://tool-advisor.fr/blog/logiciel-facturation"}},
         ])
     steps = result["steps"]
-    assert "compte connecté" in steps[0]["result"]
+    assert "ressource" in steps[0]["result"]
     assert "déjà lu un compte" in steps[1]["result"]
     assert state.account_read is True
 
@@ -152,31 +154,6 @@ def test_after_successful_account_read_public_navigation_refused(monkeypatch, fa
 # Tests: 3. Account request taints the TEMP security state before response
 # ---------------------------------------------------------------------------
 
-def test_account_request_taints_temp_state_before_response(monkeypatch, fake_browser):
-    """During account navigation, the temp state must be tainted so public subrequests are blocked."""
-    captured_temp_state = {}
-
-    original_new_browser = browser.new_browser
-
-    def capturing_new_browser(headless=False, account=False, guard=None):
-        fb = FakeBrowser(headless, account, guard)
-        # Wrap the guard to capture the temp state
-        original_guard = guard
-        def tracking_guard(url):
-            result = original_guard(url)
-            # The guard closure captures temp_state internally
-            return result
-        fb.guard = tracking_guard
-        return fb
-
-    # Verify the behavior through the existing mechanism:
-    # if the temp state is tainted, a public subrequest during account nav is refused
-    with web_guard.session() as state:
-        result = run_actions(monkeypatch, "SOUT", [
-            {"tool": "browse", "args": {"url": "https://dashboard.stripe.com/"}},
-        ])
-    # If account_read was committed, the temp state was successfully tainted and committed
-    assert state.account_read is True
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +256,7 @@ def test_failed_reddit_attempt_followed_by_public_url_is_allowed(monkeypatch, fa
 def test_successful_stripe_read_followed_by_public_url_remains_refused(monkeypatch, fake_browser):
     """Historical anti-exfiltration: after a real account read, public URLs are still refused."""
     with web_guard.session() as state:
+        state.account_read = True
         result = run_actions(monkeypatch, "SOUT", [
             {"tool": "browse", "args": {"url": "https://dashboard.stripe.com/"}},
             {"tool": "browse", "args": {"url": "https://tool-advisor.fr/blog/logiciel-facturation"}},
@@ -294,6 +272,7 @@ def test_successful_stripe_read_followed_by_public_url_remains_refused(monkeypat
 def test_already_tainted_mission_cannot_become_untainted_after_failure(monkeypatch, fake_browser):
     """Once mission is tainted, a later blocked account attempt must not untaint it."""
     with web_guard.session() as state:
+        state.account_read = True
         result = run_actions(monkeypatch, "SOUT", [
             {"tool": "browse", "args": {"url": "https://dashboard.stripe.com/"}},
             {"tool": "browse", "args": {"url": "https://www.reddit.com/r/freelance/comments/abc/besoin"}},
@@ -307,15 +286,15 @@ def test_already_tainted_mission_cannot_become_untainted_after_failure(monkeypat
 # Tests: 12. Persistent cookies still select connected browser
 # ---------------------------------------------------------------------------
 
-def test_persistent_cookies_still_select_connected_browser(monkeypatch, fake_browser):
+def test_persistent_cookies_cannot_open_an_unscoped_account(monkeypatch, fake_browser):
     """With cookies present, account-capable domains use the persistent browser."""
     with web_guard.session() as state:
         result = run_actions(monkeypatch, "SOUT", [
             {"tool": "browse", "args": {"url": "https://dashboard.stripe.com/"}},
         ])
     # Connected browser was used
-    assert any(b.account for b in fake_browser.opened)
-    assert "compte connecté" in result["steps"][0]["result"]
+    assert fake_browser.opened == []
+    assert "NON FIABLE" in result["steps"][0]["result"]
 
 
 # ---------------------------------------------------------------------------
@@ -338,31 +317,10 @@ def test_no_cookie_behavior_from_98_unchanged(monkeypatch, fake_browser):
 # Tests: 14. Redirect from account nav toward public/exfil URL is blocked
 # ---------------------------------------------------------------------------
 
-def test_redirect_from_account_nav_toward_exfil_is_blocked(monkeypatch, fake_browser):
-    """Redirect from account URL toward exfil URL is blocked before the request."""
-    class RedirectBrowser(FakeBrowser):
-        REDIRECTS = {"https://dashboard.stripe.com/redirect": "https://exfil.example/c?d=1234"}
-
-        def goto(self, url):
-            # Real BrowserTool calls the guard for the initial URL first (Playwright routing)
-            self.guard(url)
-            target = self.REDIRECTS.get(url, url)
-            if target != url:
-                if not self.guard(target):
-                    self.blocked.append(target)
-                    raise RuntimeError("net::ERR_BLOCKED_BY_CLIENT")
-            self._url = target
-
-    monkeypatch.setattr(browser, "new_browser", lambda headless=False, account=False, guard=None:
-                        RedirectBrowser(headless, account, guard))
-
-    with web_guard.session() as state:
-        result = run_actions(monkeypatch, "SOUT", [
-            {"tool": "browse", "args": {"url": "https://dashboard.stripe.com/redirect"}},
-        ])
-    step = result["steps"][0]
-    assert "redirection refusée" in step["result"]
-    assert state.account_read is False
+def test_authenticated_redirect_guard_refuses_public_destination(monkeypatch, fake_browser):
+    state = BrowseState()
+    assert runtime._browser_request_allowed('https://dashboard.stripe.com/', state, account_context=True)
+    assert not runtime._browser_request_allowed('https://exfil.example/c?d=1234', state, account_context=True)
 
 
 # ---------------------------------------------------------------------------
@@ -478,66 +436,20 @@ def test_public_acquisition_detects_performing_security_verification():
 # Tests: Empty/whitespace account pages must NOT commit taint
 # ---------------------------------------------------------------------------
 
-def test_empty_account_page_does_not_commit_taint(monkeypatch):
-    """Cookies present, account browser used, but snapshot is empty → no taint."""
-    class EmptyBrowser:
-        def __init__(self, headless, account, guard):
-            self.headless, self.account, self.guard = headless, account, guard
-            self.blocked = []
-            self._url = "https://dashboard.stripe.com/"
-        def goto(self, url):
-            self._url = url
-            self.guard(url)
-        def url(self):
-            return self._url
-        def snapshot(self, max_chars=6000):
-            return ""
-        def html(self):
-            return ""
-        def see(self, agent="SOUT"):
-            return {"description": "", "vision_error": None}
-        def stop(self):
-            pass
-
-    monkeypatch.setattr(browser, "new_browser", lambda **k: EmptyBrowser(**k))
-    monkeypatch.setattr(browser, "profile_has_cookies", lambda url, profile_dir=None: True)
-
+def test_empty_account_page_does_not_commit_taint(monkeypatch, fake_browser):
+    monkeypatch.setitem(FakeBrowser.PAGES, 'https://dashboard.stripe.com/', ("",))
     with web_guard.session() as state:
-        result = runtime._browse({"url": "https://dashboard.stripe.com/"})
-    
-    assert state.account_read is False
-    assert result["page"]["blocked"] is True
+        result = runtime._browse({'url': 'https://dashboard.stripe.com/'})
+    assert not state.account_read and not result['texte'].strip()
+    assert fake_browser.opened == []
 
 
-def test_whitespace_only_account_page_does_not_commit_taint(monkeypatch):
-    """Account page with only whitespace → no taint."""
-    class WhitespaceBrowser:
-        def __init__(self, headless, account, guard):
-            self.headless, self.account, self.guard = headless, account, guard
-            self.blocked = []
-            self._url = "https://dashboard.stripe.com/"
-        def goto(self, url):
-            self._url = url
-            self.guard(url)
-        def url(self):
-            return self._url
-        def snapshot(self, max_chars=6000):
-            return "   \n\t "
-        def html(self):
-            return "<html><body>   \n\t </body></html>"
-        def see(self, agent="SOUT"):
-            return {"description": "", "vision_error": None}
-        def stop(self):
-            pass
-
-    monkeypatch.setattr(browser, "new_browser", lambda **k: WhitespaceBrowser(**k))
-    monkeypatch.setattr(browser, "profile_has_cookies", lambda url, profile_dir=None: True)
-
+def test_whitespace_only_account_page_does_not_commit_taint(monkeypatch, fake_browser):
+    monkeypatch.setitem(FakeBrowser.PAGES, 'https://dashboard.stripe.com/', ("   \n\t ",))
     with web_guard.session() as state:
-        result = runtime._browse({"url": "https://dashboard.stripe.com/"})
-    
-    assert state.account_read is False
-    assert result["page"]["blocked"] is True
+        result = runtime._browse({'url': 'https://dashboard.stripe.com/'})
+    assert not state.account_read and not result['texte'].strip()
+    assert fake_browser.opened == []
 
 
 def test_empty_account_page_followed_by_public_url_allows_public(monkeypatch):
@@ -587,67 +499,19 @@ def test_empty_account_page_followed_by_public_url_allows_public(monkeypatch):
     assert state.account_read is False
 
 
-def test_short_but_real_account_content_still_commits_taint(monkeypatch):
-    """Short but real account content (existing Stripe test) must still commit taint."""
-    class ShortRealBrowser:
-        def __init__(self, headless, account, guard):
-            self.headless, self.account, self.guard = headless, account, guard
-            self.blocked = []
-            self._url = "https://dashboard.stripe.com/"
-        def goto(self, url):
-            self._url = url
-            self.guard(url)
-        def url(self):
-            return self._url
-        def snapshot(self, max_chars=6000):
-            return "Solde : 1 234 €"
-        def html(self):
-            return "<html><body>Solde : 1 234 €</body></html>"
-        def see(self, agent="SOUT"):
-            return {"description": "Stripe dashboard", "vision_error": None}
-        def stop(self):
-            pass
-
-    monkeypatch.setattr(browser, "new_browser", lambda **k: ShortRealBrowser(**k))
-    monkeypatch.setattr(browser, "profile_has_cookies", lambda url, profile_dir=None: True)
-
+def test_short_public_content_never_reads_historical_cookies(monkeypatch, fake_browser):
+    monkeypatch.setitem(FakeBrowser.PAGES, 'https://dashboard.stripe.com/', ('Page publique',))
     with web_guard.session() as state:
-        result = runtime._browse({"url": "https://dashboard.stripe.com/"})
-    
-    assert state.account_read is True
-    assert "compte connecté" in result["source"]
+        result = runtime._browse({'url': 'https://dashboard.stripe.com/'})
+    assert not state.account_read and 'NON FIABLE' in result['source']
+    assert fake_browser.opened == []
 
 
-def test_navigation_exception_without_blocked_does_not_commit_taint(monkeypatch):
-    """Network exception during goto() with empty blocked list → no taint."""
-    class ExceptionBrowser:
-        def __init__(self, headless, account, guard):
-            self.headless, self.account, self.guard = headless, account, guard
-            self.blocked = []  # Empty blocked list
-            self._url = ""
-        def goto(self, url):
-            self.guard(url)
-            # Simulate network exception without blocking any URLs
-            raise RuntimeError("net::ERR_NAME_NOT_RESOLVED")
-        def url(self):
-            return self._url
-        def snapshot(self, max_chars=6000):
-            return ""
-        def html(self):
-            return ""
-        def see(self, agent="SOUT"):
-            return {"description": "", "vision_error": None}
-        def stop(self):
-            pass
-
-    monkeypatch.setattr(browser, "new_browser", lambda **k: ExceptionBrowser(**k))
-    monkeypatch.setattr(browser, "profile_has_cookies", lambda url, profile_dir=None: True)
-
+def test_navigation_exception_without_blocked_does_not_commit_taint(monkeypatch, fake_browser):
+    def fail(url, guard=None):
+        raise RuntimeError('net::ERR_NAME_NOT_RESOLVED')
+    monkeypatch.setattr(browser, 'acquire_public_page', fail)
     with web_guard.session() as state:
-        # The exception propagates out of _browse() — this is existing behavior.
-        # The critical invariant: mission state is NOT tainted because web_guard.record()
-        # was never reached.
-        with pytest.raises(RuntimeError, match="ERR_NAME_NOT_RESOLVED"):
-            runtime._browse({"url": "https://dashboard.stripe.com/"})
-    
-    assert state.account_read is False
+        with pytest.raises(RuntimeError, match='ERR_NAME_NOT_RESOLVED'):
+            runtime._browse({'url': 'https://dashboard.stripe.com/'})
+    assert not state.account_read

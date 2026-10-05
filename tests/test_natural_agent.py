@@ -7,7 +7,7 @@ import pytest
 from agents import runtime
 from agents.tool_registry import ToolRegistry
 from octopus import actions, mandates, resources
-from test_delegated_resource_hub import BUSINESS, URL, account, channel, space
+from test_delegated_resource_hub import BUSINESS, URL, account, channel, own_grant, space
 
 
 @pytest.fixture
@@ -166,9 +166,11 @@ def test_protocol_errors_do_not_create_cognitive_failure_proofs():
 
 
 @pytest.mark.parametrize('effect', ['read', 'contact', 'publish', 'edit'])
-def test_connected_entrusted_resource_needs_no_effect_mandate(effect):
+def test_connected_entrusted_resource_requires_effect_mandate(effect):
     account()
     resources.set_account_session('new-platform', 'connected')
+    assert not mandates.account_authority(BUSINESS, 'new-platform', effect)
+    own_grant(effects=[effect])
     assert mandates.account_authority(BUSINESS, 'new-platform', effect)
     assert not mandates.account_authority('other-business', 'new-platform', effect)
     resources.disable_account('new-platform', actor='human')
@@ -176,9 +178,10 @@ def test_connected_entrusted_resource_needs_no_effect_mandate(effect):
 
 
 @pytest.mark.parametrize('verb', ['submit', 'publish', 'edit'])
-def test_ordinary_action_executes_once_without_micro_mandate(monkeypatch, verb):
+def test_ordinary_action_executes_once_with_resource_mandate(monkeypatch, verb):
     account()
     resources.set_account_session('new-platform', 'connected')
+    own_grant(effects=('read', 'contact', 'edit', 'publish'))
     cid = channel(URL)
     mandates.bind_account(cid, BUSINESS, 'new-platform')
     calls = []
@@ -221,6 +224,7 @@ def test_browser_report_keeps_model_claim_and_runtime_provenance():
 def test_browser_edit_does_not_need_an_effect_enum(monkeypatch):
     account()
     resources.set_account_session('new-platform', 'connected')
+    own_grant(effects=('read', 'edit'))
     browser = space(monkeypatch)
     try:
         browser.navigate(URL)
@@ -234,6 +238,7 @@ def test_browser_edit_does_not_need_an_effect_enum(monkeypatch):
 def test_unverified_submission_retains_identity_and_cannot_repeat(monkeypatch):
     account()
     resources.set_account_session('new-platform', 'connected')
+    own_grant(effects=('read', 'edit', 'publish'))
     browser = space(monkeypatch)
     try:
         browser.navigate(URL)
@@ -257,6 +262,7 @@ def test_distinct_same_named_submit_buttons_cannot_repeat_an_unconfirmed_submiss
     account()
     resources.set_account_session('new-platform', 'connected')
     real_run = FakeAccountSession.run
+    own_grant(effects=('read', 'publish'))
 
     def run(session, command, args=(), **kwargs):
         result = real_run(session, command, args, **kwargs)
@@ -327,6 +333,7 @@ def test_keyboard_submission_cannot_bypass_a_human_boundary(monkeypatch):
     from octopus import browser_workspace
     account()
     resources.set_account_session('new-platform', 'connected')
+    own_grant(effects=('read', 'publish'))
     browser = space(monkeypatch)
     try:
         browser.navigate(URL)
@@ -344,7 +351,7 @@ def test_keyboard_submission_cannot_bypass_a_human_boundary(monkeypatch):
 
 
 @pytest.mark.parametrize('label,blocked', [('Subscribe', True), ("S'inscrire", True), ('Delete account', True),
-                                         ('Ordinary button', False)])
+                                         ('Ordinary button', True), ('Publish', False)])
 def test_keyboard_probe_checks_actual_focused_label(monkeypatch, label, blocked):
     from octopus import browser_workspace
     node = shutil.which('node')
@@ -352,14 +359,15 @@ def test_keyboard_probe_checks_actual_focused_label(monkeypatch, label, blocked)
         pytest.skip('JavaScript runtime absent for DOM probe test')
     account()
     resources.set_account_session('new-platform', 'connected')
+    own_grant(effects=('read', 'publish'))
     browser = space(monkeypatch)
     try:
         browser.navigate(URL)
         original = browser._session.run
         def run(command, args=(), **kwargs):
-            if command == 'eval' and 'octopus_commit_boundary' in args[0]:
+            if command == 'eval' and any(marker in args[0] for marker in ('octopus_commit_boundary', 'octopus_commit_label')):
                 script = 'const document={activeElement:{tagName:"BUTTON", form:null, innerText:' + json.dumps(label)
-                script += ',getAttribute:()=>null,matches:()=>false}}; console.log(' + args[0] + ');'
+                script += ',getAttribute:()=>null,matches:()=>false}}; console.log(JSON.stringify(' + args[0] + '));'
                 result = subprocess.run([node, '-e', script], capture_output=True, text=True, check=True)
                 return {'success': True, 'data': {'result': json.loads(result.stdout)}}
             return original(command, args, **kwargs)

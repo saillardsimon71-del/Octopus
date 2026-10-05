@@ -132,7 +132,8 @@ class Script:
         usage = Usage(prompt_tokens=max(1, sum(len(m["content"]) for m in messages)//4),
                       completion_tokens=max(1, len(text)//4))
         assert usage.completion_tokens <= limit
-        return llm.TransportResult(text, usage, request["model"], resolved_provider="OfflineFake", provider_cost_usd=.001)
+        return llm.TransportResult(text, usage, request["model"], resolved_model=request['model'],
+                                   resolved_provider="OfflineFake", provider_cost_usd=0.)
 
 
 class InterruptedBeforeSynthesis(BaseException):
@@ -173,7 +174,7 @@ def test_1_cold_discovery_executes_the_model_plan_without_forced_replan(monkeypa
     assert len(output["business_signals"]) == 2
     assert len(output["strategy_assessment"]["considered"]) == 2
     assert all(purpose == search.SEARCH_PURPOSE_BUSINESS for _, purpose in script.searches)
-    assert read_snapshot()["token_cost_usd"] == pytest.approx(.008)
+    assert read_snapshot()["token_cost_usd"] == 0
     assert all(work["status"] == "done" for work in supervisor.work_tasks("octopus", oid))
     no_effects()
 
@@ -321,21 +322,21 @@ def test_discovery_recovery_after_all_sources_does_not_recollect(monkeypatch, tr
     no_effects()
 
 
-def test_discovery_can_exceed_old_llm_budget_without_human_permission(monkeypatch, transport, providers_up):
+def test_positive_cost_on_free_route_stops_at_human_boundary(monkeypatch, transport, providers_up):
     from octopus import pricing
     Script(monkeypatch, transport)
     original = transport.handler
     def expensive(provider, request):
         result = original(provider, request)
-        return llm.TransportResult(result.text, result.usage, request["model"], provider_cost_usd=.199)
+        return llm.TransportResult(result.text, result.usage, request["model"], resolved_model=request['model'],
+                                   resolved_provider='OfflineFake', provider_cost_usd=.199)
     monkeypatch.setattr(pricing, "estimate_max_cost", lambda *_: .002)
     transport.handler = expensive
     oid = supervisor.start_pursuit()
     supervisor.run_pursuit(oid)
-    assert len(transport.calls) > 1
-    assert supervisor.work_tasks("octopus", oid)[0]["status"] == "done"
-    assert read_snapshot()["token_cost_usd"] == pytest.approx(.199 * len(transport.calls))
-    assert not tasks.pending_human_requests("octopus")
+    assert transport.calls and all(request['model'].endswith(':free') for _, request in transport.calls)
+    assert supervisor.work_tasks("octopus", oid)[0]["status"] == "waiting_human"
+    assert tasks.pending_human_requests("octopus")
     assert not journal.query("SELECT id FROM spend_requests")
 
 

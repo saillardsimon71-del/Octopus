@@ -81,7 +81,8 @@ def test_brief_task_asks_before_feeding_sout_and_does_not_pay_twice(veille_env, 
     assert memory and "NON VÉRIFIÉ" in memory[0]["value"] and "Journal 1" in memory[0]["value"]
     call = journal.query("SELECT * FROM llm_calls")[0]
     assert (call["business"], call["task"], call["profile"]) == ("veille", "veille.brief", "low_cost")
-    assert json.loads(call["justification"])["paid_reason"] == "alternatives_ineligible"
+    assert call['cost_class'] == 'free_quota' and call['cost_usd'] == 0
+    assert 'paid_reason' not in json.loads(call['justification'])
     assert journal.query("SELECT budget_usd FROM runs WHERE kind='task:veille.brief'")[0]["budget_usd"] == 0.02
 
 

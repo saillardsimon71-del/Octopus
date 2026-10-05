@@ -115,7 +115,7 @@ def list_resources(*, state: str | None = None, kind: str | None = None, capabil
         sql += " AND kind=?"
         params.append(kind)
     if business:
-        sql += " AND (business=? OR business IS NULL)" if include_global else " AND business=?"
+        sql += " AND (business=? OR business IS NULL OR web_account<>'{}')" if include_global else " AND business=?"
         params.append(business)
     rows = [_row(r) for r in journal.query(sql + " ORDER BY kind, key", tuple(params))]
     if capability:
@@ -346,8 +346,26 @@ def render(rows: list[dict]) -> str:
 ACCOUNT_STATES = ('absent', 'connection_required', 'connected', 'expired', 'unavailable')
 
 
-def configure_account(key, *, actor, provider, label, url, domains, businesses, ownership='operator',
-                      dedicated=False, verify_url=None, authenticated_text='', enabled=True):
+def account_services():
+    return json.loads((Path(__file__).parent / 'config/web_accounts.json').read_text(encoding='utf-8'))
+
+
+def add_account(service, *, actor, label='', **overrides):
+    from uuid import uuid4
+    from . import mandates
+    mandates._human(actor)
+    defaults = account_services().get(service)
+    if defaults is None:
+        raise ResourceError('service inconnu')
+    data = dict(defaults, **overrides)
+    key = data.pop('key', None) or 'account-' + uuid4().hex[:16]
+    if get(key):
+        raise ResourceError('identifiant déjà utilisé')
+    return configure_account(key, actor=actor, label=label or service, **data)
+
+
+def configure_account(key, *, actor, provider, label, url, domains, businesses=(), ownership='operator',
+                      dedicated=False, verify_url=None, authenticated_text='', enabled=True, capabilities=None):
     from urllib.parse import urlsplit
     from . import mandates
     from agents import agent_browser
@@ -370,10 +388,10 @@ def configure_account(key, *, actor, provider, label, url, domains, businesses, 
         raise ResourceError('indice de connexion optionnel, court et sans secret')
     current = get(key)
     if not current:
-        declare(key, 'web_account', label, created_by=actor, locator=url)
+        declare(key, 'web_account', label, created_by=actor, locator=url, capabilities=capabilities, needs=['login'])
     old = (current or {}).get('web_account') or {}
     account = {'provider': str(provider)[:80], 'ownership': ownership, 'dedicated': bool(dedicated),
-               'domains': domain_set, 'businesses': sorted(set(businesses)), 'enabled': bool(enabled),
+               'domains': domain_set, 'enabled': bool(enabled),
                'verify_url': verify_url, 'authenticated_text': authenticated_text.strip(),
                'session_status': 'connection_required'}
     # Preserve a verified session only when the security and verification scope is identical.
@@ -383,9 +401,9 @@ def configure_account(key, *, actor, provider, label, url, domains, businesses, 
             account['verification'] = old['verification']
     if old.get('browser_kind'):
         account['browser_kind'] = old['browser_kind']
-    _write(key, {'web_account': json.dumps(account, ensure_ascii=False), 'locator': url, 'label': label})
+    _write(key, {'web_account': json.dumps(account, ensure_ascii=False), 'locator': url, 'label': label, 'business': None})
     with tasks._tx() as conn:
-        tasks._emit(conn, 'octopus', None, 'resource.account_configured', {'key': key, 'businesses': account['businesses']})
+        tasks._emit(conn, 'octopus', None, 'resource.account_configured', {'key': key})
     return get(key)
 
 
@@ -409,7 +427,8 @@ def set_account_session(key, status, *, detail='', verification=None):
     account['session_status'] = status
     if verification is not None:
         account['verification'] = verification
-    elif status != 'connected':
+    elif status != 'connected' and detail not in ('backend_error', 'backend_unavailable', 'semantic_backend_error',
+                                                'semantic_browser_unqualified', 'verify_timeout'):
         account.pop('verification', None)
     _write(key, {'capabilities': json.dumps(sorted(set(r['capabilities']) | ({'browser_account_read'} if status == 'connected' else set()))),
                  'web_account': json.dumps(account, ensure_ascii=False), 'last_check_at': time.time(),
@@ -475,7 +494,7 @@ def stable_chrome_executable():
         candidate = Path(root) / 'Google/Chrome/Application/chrome.exe' if root else None
         if candidate and candidate.is_file():
             return str(candidate.resolve())
-    raise ResourceError('Google Chrome stable introuvable ; installez-le puis rouvrez la connexion')
+    raise ResourceError('Google Chrome stable introuvable ; installez-le puis vérifiez de nouveau')
 
 
 def account_profile_busy(key):
@@ -506,7 +525,7 @@ def account_browser_options(key):
     try:
         executable = stable_chrome_executable()
     except ResourceError:
-        set_account_session(key, 'unavailable', detail='Chrome stable absent ; session non réutilisable')
+        set_account_session(key, 'unavailable', detail='backend_unavailable')
         raise
     return {'executable_path': executable, 'inherit_extra_args': False}
 
@@ -577,7 +596,8 @@ class HumanConnection:
         if not account.get('enabled') or tuple(account['domains']) != self.domains:
             raise ResourceError('configuration modifiée pendant la connexion ; reconnectez')
         # No command, DOM read or CDP while the native human browser is running.
-        account_browser_options(self.key)
+        if account_profile_busy(self.key):
+            raise ResourceError('Fermez toutes les fenêtres Chrome de cette identité avant de vérifier ou reprendre')
         self.close()
         return verify_account_connection(self.key, actor='human', session_factory=self.session_factory)
 
@@ -596,7 +616,8 @@ def verify_account_connection(key, *, actor, session_factory=None):
     account = (get(key) or {}).get('web_account') or {}
     if not account.get('enabled') or account.get('browser_kind') != 'chrome_stable':
         raise ResourceError('Ouvrez la connexion Chrome stable avant de vérifier')
-    options = account_browser_options(key)  # Always recheck the native profile lock.
+    if account_profile_busy(key):
+        raise ResourceError('Fermez toutes les fenêtres Chrome de cette identité avant de vérifier ou reprendre')
     def guard(url):
         from urllib.parse import urlsplit
         try:
@@ -608,6 +629,7 @@ def verify_account_connection(key, *, actor, session_factory=None):
     proxy = None
     ok = False
     try:
+        options = account_browser_options(key)
         proxy = web_guard.GuardProxy(guard).start()
         session = (session_factory or agent_browser.Session)('verify-' + account_profile(key).name,
             proxy_url=proxy.url, profile_dir=account_profile(key), headed=True, **options)
@@ -624,8 +646,11 @@ def verify_account_connection(key, *, actor, session_factory=None):
                 verification = {'method': 'human_hint', 'state': 'authenticated'}
         reason = diagnostic['reason']
         status = ('connected' if ok else 'connection_required' if reason in ('challenge_detected', 'semantic_uncertain', 'sensitive_surface')
-                  else 'unavailable' if reason in ('backend_error', 'semantic_backend_error', 'semantic_browser_unqualified') else 'expired')
+                  else 'unavailable' if reason in ('backend_error', 'semantic_backend_error', 'semantic_browser_unqualified', 'verify_timeout') else 'expired')
         set_account_session(key, status, detail=reason, verification=verification)
+    except (agent_browser.BackendUnavailable, ResourceError):
+        ok = False
+        set_account_session(key, 'unavailable', detail='backend_unavailable')
     except Exception:
         ok = False
         set_account_session(key, 'unavailable', detail='backend_error')
@@ -868,7 +893,7 @@ def account_task(business, key, goal, *, parent_id=None):
     from . import mandates, worker
     from agents import cancel
     if not mandates.account_authority(business, key, 'read'):
-        raise PermissionError('compte non connecté, non ouvert au business ou lecture non mandatée')
+        raise PermissionError('compte non connecté ou lecture non mandatée')
     cancel.checkpoint()
     r = get(key)
     tid = tasks.enqueue(business, 'resources.account_work', {
@@ -885,5 +910,10 @@ def account_task(business, key, goal, *, parent_id=None):
     worker.load_handlers(['octopus.builtin_handlers'])
     result = worker.run_one(task_id=tid, log=lambda _message: None) or tasks.get(tid)
     cancel.checkpoint()
-    return {'task_id': tid, 'status': result['status'], 'observations': result.get('output') or {},
+    observations = result.get('output') or {}
+    boundary = observations.get('execution_status') == 'human_required'
+    return {'task_id': tid, 'status': result['status'], 'observations': observations,
+            **({'refused': True, 'human_required': True,
+                'reason': observations.get('synthesis_error') or observations.get('execution_error') or
+                          'aucune route navigateur gratuite qualifiée ; intervention humaine requise'} if boundary else {}),
             'error': 'Sous-tâche compte interrompue ; examiner son état' if result.get('error') else None}

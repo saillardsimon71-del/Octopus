@@ -171,7 +171,8 @@ def test_no_fabricated_session_when_reuse_fails(native, monkeypatch, failure):
     if failure == 'missing-stable':
         def missing(): raise resources.ResourceError('stable absent')
         monkeypatch.setattr(resources, 'stable_chrome_executable', missing)
-        with pytest.raises(resources.ResourceError): connection.verify()
+        assert connection.verify() is False
+        assert resources.get('account')['last_check_detail'] == 'backend_unavailable'
     else:
         connection.session_factory = factory
         assert not connection.verify()
@@ -282,7 +283,7 @@ def test_real_account_task_runtime_captcha_propagates_without_synthesis(native, 
         return llm.TransportResult(json.dumps(output), Usage(prompt_tokens=10, completion_tokens=10),
             request['model'], resolved_model=request['model'], resolved_provider='OfflineFake', provider_cost_usd=0.)
     from browser_evidence import qualify
-    qualify('deepseek/flash')
+    qualify('openrouter/fixture/vision-alpha:free')
     transport.handler = response
     result = resources.account_task('b2b', 'account', 'Observer le compte')
     assert result['status'] == 'waiting_human' and len(transport.calls) == 2

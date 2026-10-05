@@ -682,10 +682,10 @@ def test_private_ip_and_account_context_do_not_use_public_tavily_extract(monkeyp
     monkeypatch.setattr(browser, "acquire_public_page", lambda *a, **k: pytest.fail("pas de browse public"))
     monkeypatch.setattr(browser, "new_browser", lambda *a, **k: AccountBrowser())
 
-    with web_guard.session():
-        result = runtime._browse({"url": "https://account.example.org/file.pdf"})
-
-    assert result["source"] == "compte connecté (lecture seule)"
+    with web_guard.session() as state:
+        state.account_read = True
+        with pytest.raises(web_guard.BrowseRefused, match='account_task'):
+            runtime._browse({"url": "https://account.example.org/file.pdf"})
 
 
 def test_usable_browse_count_uses_text_acquisition_contract():

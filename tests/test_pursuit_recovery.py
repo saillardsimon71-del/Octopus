@@ -61,15 +61,15 @@ def test_complete_synthesis_beyond_old_1600_token_limit(monkeypatch, transport, 
             text = json.dumps({"final": "Observation conservée"} if acquired else
                               {"tool": "browse", "args": {"url": url}})
         else:
-            assert request["model"] == "deepseek-flash"
+            assert request["model"].endswith(':free')
             # Approximate token units exist only in this fake transport. The old quota
             # cuts the JSON before determination; the production parser stays strict.
             effective_maximum = min(maximum, 1600) if resume_truncated and not resumed else maximum
             text = complete[:effective_maximum * 4]
         completion_tokens = (len(text) + 3) // 4
-        cost = completion_tokens * .000001 if request["model"] == "deepseek-flash" else 0.
         return llm.TransportResult(text, Usage(prompt_tokens=100, completion_tokens=completion_tokens),
-                                   request["model"], resolved_provider="OfflineFake", provider_cost_usd=cost)
+                                   request["model"], resolved_model=request['model'],
+                                   resolved_provider="OfflineFake", provider_cost_usd=0.)
 
     transport.handler = respond
     monkeypatch.setitem(runtime.TOOLS, "browse", {**runtime.TOOLS["browse"], "fn": browse})
@@ -77,16 +77,20 @@ def test_complete_synthesis_beyond_old_1600_token_limit(monkeypatch, transport, 
     supervisor.run_pursuit(oid)
     previous = supervisor.work_tasks(BUSINESS, oid)[0]
     if resume_truncated:
-        assert previous["status"] == "done_degraded"
-        assert previous["output"]["execution_status"] == "synthesis_unavailable"
+        assert previous["status"] == "waiting_human"
+        previous['output'] = tasks.step_value(previous['id'], 'determination')
+        assert previous["output"]["execution_status"] == "human_required"
         assert tasks.step_value(previous["id"], "pursuit.progress")["collect_complete"] is True
         history = [dict(row) for row in journal.query("SELECT * FROM llm_calls ORDER BY id")]
-        assert history[-1]["status"] == "invalid"
-        assert history[-1]["completion_tokens"] == 1600
-        assert "objet JSON introuvable" in history[-1]["error"]
+        invalid = [row for row in history if row['status'] == 'invalid']
+        assert invalid and all(row['completion_tokens'] == 1600 for row in invalid)
+        assert all('objet JSON introuvable' in row['error'] for row in invalid)
         old_results = copy.deepcopy(previous["output"]["results"])
         resumed = True
         count = len(transport.calls)
+        tasks.answer(tasks.pending_human_requests(BUSINESS)[0]['id'], 'Réessayer gratuitement')
+        worker.run_one(task_id=previous['id'], log=lambda _: None)
+        previous = tasks.get(previous['id'])
         assert supervisor.start_pursuit(objective_id=oid) == oid
         supervisor.run_pursuit(oid)
         current = supervisor.work_tasks(BUSINESS, oid)[-1]
@@ -516,21 +520,35 @@ def test_real_gateway_supervisor_path_recovers_without_live_provider(monkeypatch
     monkeypatch.setitem(runtime.TOOLS["search"], "fn", search)
     oid = supervisor.start_pursuit()
     supervisor.run_pursuit(oid)
+    if failure in ('429', 'provider_down'):
+        assert supervisor.work_tasks(BUSINESS, oid)[-1]['status'] == 'waiting_human'
+        delays = [float(value) for row in journal.query('SELECT justification FROM llm_calls')
+                  for key, value in json.loads(row['justification'] or '{}').items()
+                  if key.endswith('cooldown_s') and value]
+        retry_time = time.time() + max(delays) + 1
+        monkeypatch.setattr(llm.time, 'time', lambda: retry_time)
+        llm._rate_limit_cooldowns.clear()
+        llm._provider_cooldowns.clear()
+        llm._health.clear()
+        tasks.answer(tasks.pending_human_requests(BUSINESS)[0]['id'], 'Réessayer gratuitement')
+        worker.run_one(task_id=supervisor.work_tasks(BUSINESS, oid)[-1]['id'], log=lambda _: None)
+        supervisor.start_pursuit(objective_id=oid)
+        supervisor.run_pursuit(oid)
     assert supervisor.work_tasks(BUSINESS, oid)[-1]["status"] == "done"
     assert len(searches) == 1
     assert tasks.pending_human_requests(BUSINESS) == []
     assert len(transport.calls) < 15
     assert read_snapshot()["token_cost_usd"] == 0
-    assert all(request["model"].endswith(":free") or provider["base_url"].startswith("https://api.deepseek")
+    assert all(request["model"].endswith(":free")
                for provider, request in transport.calls)
 
 
 @pytest.mark.parametrize("checkpoint_present", [True, False], ids=["checkpoint", "raw-output-only"])
-def test_paused_degraded_pursuit_resumes_only_synthesis_with_real_gateway_and_fake_transport(
+def test_paused_free_boundary_resumes_only_synthesis_with_real_gateway_and_fake_transport(
         monkeypatch, transport, providers_up, checkpoint_present):
     """Same isolated DataRoot, real gateway/worker, simulated Web and provider only."""
     from browser_evidence import qualify
-    qualify('deepseek/flash')
+    qualify('openrouter/fixture/vision-alpha:free')
     monkeypatch.setattr(supervisor, "PURSUIT_SIGNAL_TARGET", 1)
     from agents import agent_browser
 
@@ -542,7 +560,7 @@ def test_paused_degraded_pursuit_resumes_only_synthesis_with_real_gateway_and_fa
     assert llm._repair_json_control_chars(malformed) is None
 
     def respond(provider, request):
-        assert request["model"] == "deepseek-flash"
+        assert request["model"].endswith(':free')
         if request["max_tokens"] == 700:
             stages.append("plan")
             assert not resumed, "La reprise ne doit pas replanifier la collecte terminée"
@@ -558,10 +576,10 @@ def test_paused_degraded_pursuit_resumes_only_synthesis_with_real_gateway_and_fa
             assert request["max_tokens"] == 4000
             content = json.dumps(request["messages"], ensure_ascii=False)
             assert "Observation Web fixture" in content and all(url in content for url in sources)
-            text = json.dumps(determination()) if resumed and "response_format" not in request else malformed
+            text = json.dumps(determination()) if resumed else malformed
         return llm.TransportResult(text, Usage(prompt_tokens=10, completion_tokens=5),
                                    request["model"], resolved_model=request["model"],
-                                   resolved_provider="OfflineFake", provider_cost_usd=.001)
+                                   resolved_provider="OfflineFake", provider_cost_usd=0.)
 
     def navigate(method, **kwargs):
         assert not resumed, "Une navigation terminée ne doit jamais être rejouée"
@@ -575,20 +593,23 @@ def test_paused_degraded_pursuit_resumes_only_synthesis_with_real_gateway_and_fa
     oid = supervisor.start_pursuit()
     supervisor.run_pursuit(oid)
     works = supervisor.work_tasks(BUSINESS, oid)
-    assert len(works) == supervisor.PURSUIT_ROUNDS == 3
-    assert all(work["status"] == "done_degraded" for work in works)
-    assert all(work["output"]["execution_status"] == "synthesis_unavailable" for work in works)
-    assert strategy.get("objective", oid, BUSINESS)["status"] == "paused"
-    assert stages.count("plan") == 1 and stages.count("agent") == 4 and stages.count("synthesis") == 6
+    assert len(works) == 1
+    assert works[0]['status'] == 'waiting_human'
+    works[0]['output'] = tasks.step_value(works[0]['id'], 'determination')
+    assert works[0]['output']['execution_status'] == 'human_required'
+    assert strategy.get("objective", oid, BUSINESS)["status"] == "active"
+    assert tasks.pending_human_requests(BUSINESS)
+    assert stages.count("plan") == 1 and stages.count("synthesis") == 3
+    agent_calls = stages.count('agent')
     assert navigations == sources
     last = works[-1]
     observations = copy.deepcopy(last["output"]["results"])
     assert tasks.step_value(last["id"], "pursuit.progress")["collect_complete"] is True
     before_calls = [dict(row) for row in journal.query("SELECT * FROM llm_calls ORDER BY id")]
     before_cost = read_snapshot(BUSINESS)["token_cost_usd"]
-    assert before_cost == pytest.approx(.011)
-    assert [row["status"] for row in before_calls][-6:] == ["invalid"] * 6
-    assert all("JSONDecodeError" in row["error"] for row in before_calls[-6:])
+    assert before_cost == 0
+    invalid = [row for row in before_calls if row['status'] == 'invalid']
+    assert len(invalid) == 3 and all('JSONDecodeError' in row['error'] for row in invalid)
     if not checkpoint_present:
         # Historical degraded output also contains plan/results; production already knows this recovery path.
         with tasks._tx() as connection:
@@ -596,6 +617,8 @@ def test_paused_degraded_pursuit_resumes_only_synthesis_with_real_gateway_and_fa
 
     resumed = True
     request_count = len(transport.calls)
+    tasks.answer(tasks.pending_human_requests(BUSINESS)[0]['id'], 'Réessayer gratuitement')
+    worker.run_one(task_id=last['id'], log=lambda _: None)
     assert supervisor.start_pursuit(objective_id=oid) == oid
     supervisor.run_pursuit(oid)
     current = supervisor.work_tasks(BUSINESS, oid)[-1]
@@ -603,17 +626,14 @@ def test_paused_degraded_pursuit_resumes_only_synthesis_with_real_gateway_and_fa
     assert current["status"] == "done" and current["output"]["synthesis_status"] == "validated"
     assert current["output"]["results"] == observations
     assert tasks.get(last["id"])["output"]["results"] == observations
-    assert navigations == sources and stages.count("plan") == 1 and stages.count("agent") == 4
-    assert len(transport.calls) == request_count + 2
+    assert navigations == sources and stages.count("plan") == 1 and stages.count("agent") == agent_calls
+    assert len(transport.calls) == request_count + 1
     retry_requests = [request for _, request in transport.calls[request_count:]]
     assert all(request["max_tokens"] == 4000 for request in retry_requests)
-    assert retry_requests[0]["response_format"] == {"type": "json_object"}
-    assert "response_format" not in retry_requests[1]
     after_calls = [dict(row) for row in journal.query("SELECT * FROM llm_calls ORDER BY id")]
     assert after_calls[:len(before_calls)] == before_calls
-    assert [row["status"] for row in after_calls[-2:]] == ["invalid", "ok"]
-    assert read_snapshot(BUSINESS)["token_cost_usd"] == pytest.approx(before_cost + .002)
-    assert sum(call["fallback"] for call in read_snapshot(BUSINESS)["llm_calls"]) == 1
+    assert after_calls[-1]['status'] == 'ok'
+    assert read_snapshot(BUSINESS)["token_cost_usd"] == 0
     assert strategy.get("objective", oid, BUSINESS)["status"] == "paused"
     assert tasks.pending_human_requests(BUSINESS) == []
     assert not journal.query("SELECT id FROM channel_actions")

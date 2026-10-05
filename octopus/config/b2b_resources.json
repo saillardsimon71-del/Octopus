@@ -1,0 +1,26 @@
+{
+  "description": "Services B2B et produits digitaux autour de l'automatisation IA, gestion et opérations, acquisition/qualification de leads, sites et landing pages, maquettes/démos, SEO/GEO/CRO, contenu/motion/vidéo courte, formations et services adjacents économiquement pertinents. OCTOPUS choisit offre, niche secondaire, canal, message, expérience et itération. Prospection proactive : une maquette, un audit, une démo ou un prototype peuvent être proposés spontanément, sur ressources explicitement confiées, connectées et mandatées. Aucune tromperie, faux témoignage, faux résultat, usurpation, faux compte, contournement de protections ou spam manifestement illégal. Aucune dépense, achat, paiement, retrait, modification sécurité/2FA/secrets, création de compte ni engagement contractuel irréversible délégués.",
+  "mandate_proposal": {
+    "target": "owned_account",
+    "effects": ["read", "contact", "edit", "publish"],
+    "resource_keys": ["ovh-mail-pro", "netlify-sitequivend", "linkedin-b2b", "tiktok-b2b"],
+    "label": "Opérations B2B, démos, audits, prototypes et contenus sans finance/sécurité/contrat",
+    "state": "proposal_only"
+  },
+  "accounts": [
+    {"key": "ovh-mail-pro", "provider": "OVHcloud Mail", "label": "Mail pro - simon@sitequivend.fr",
+     "url": "https://www.ovhcloud.com/fr/mail/", "domains": ["www.ovhcloud.com", "mail.ovh.net"],
+     "verify_url": "https://mail.ovh.net/roundcube/", "ownership": "operator", "dedicated": true},
+    {"key": "netlify-sitequivend", "provider": "Netlify", "label": "Netlify - sitequivend.fr",
+     "url": "https://app.netlify.com/", "domains": ["app.netlify.com"],
+     "verify_url": "https://app.netlify.com/", "ownership": "operator", "dedicated": false},
+    {"key": "linkedin-b2b", "provider": "LinkedIn", "label": "LinkedIn dédié B2B",
+     "url": "https://www.linkedin.com/", "domains": ["www.linkedin.com", "linkedin.com"],
+     "verify_url": "https://www.linkedin.com/", "ownership": "business", "dedicated": true},
+    {"key": "tiktok-b2b", "provider": "TikTok", "label": "TikTok dédié B2B",
+     "url": "https://www.tiktok.com/", "domains": ["www.tiktok.com", "tiktok.com"],
+     "verify_url": "https://www.tiktok.com/", "ownership": "business", "dedicated": true}
+  ],
+  "site": {"key": "sitequivend-site", "kind": "website", "label": "Domaine et site sitequivend.fr",
+           "locator": "https://sitequivend.fr/", "notes": "Offre, contenu, design, SEO et landing pages. Administration et déploiement via netlify-sitequivend après connexion et mandat humains. Aucun droit sur facturation, propriété ou sécurité."}
+}

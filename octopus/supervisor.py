@@ -72,7 +72,7 @@ PURSUIT_CRITERION = "bounded_determination"
 FINALITY = "Obtenir, maintenir et améliorer une performance économique réelle."
 # Borne l'exécution de ce démarrage. Ne borne pas les stratégies que pursuit peut envisager :
 # la pertinence économique est annotée à part par strategy_separation.
-PURSUIT_TOOLS = frozenset({"search", "browse", "resources_status", "economy_status",
+PURSUIT_TOOLS = frozenset({"search", "browse", "record_observation", "resources_status", "economy_status",
                            "browser_navigate", "browser_snapshot", "browser_screenshot", "browser_scroll", "browser_back",
                            "account_task", "request_account", "create_artifact", "register_channel", "act_on_channel",
                            "browser_click", "browser_type", "browser_select", "browser_check", "browser_press",
@@ -304,9 +304,10 @@ def _pursuit_mission(ctx, objective):
         raise SupervisorError("Observations précédentes hors de l'activité")
     prior = (previous or {}).get("output") or tasks.step_value((previous or {}).get("id", 0), "determination", {})
     progress = tasks.step_value(ctx.id, "pursuit.progress", {})
-    if not progress and previous and previous["status"] in {"failed", "cancelled", "done_degraded"}:
+    if not progress and previous and (previous["status"] in {"failed", "cancelled", "done_degraded"}
+            or previous['status'] == 'done' and prior.get('execution_status') == 'human_required'):
         progress = tasks.step_value(previous["id"], "pursuit.progress", {})
-        if not progress and prior.get("execution_status") == "synthesis_unavailable":
+        if not progress and prior.get("execution_status") in {"synthesis_unavailable", "human_required"}:
             progress = {"plan": prior.get("plan") or [], "results": prior.get("results") or []}
     if progress:
         prior = {**prior, "results": progress.get("results") or prior.get("results") or []}
@@ -453,7 +454,7 @@ def execute_pursuit(ctx) -> dict:
     if model_permission and technical_refusal(str(model_permission)):
         technical_reasons.append(str(model_permission))
         model_permission = None
-    execution_permission = None
+    execution_permission = result.get('synthesis_error') if result.get('execution_status') == 'human_required' else None
     for subtask in result.get("results") or []:
         for step in subtask.get("steps") or []:
             data = step.get("result_data") or {}
@@ -1131,7 +1132,7 @@ def work_output(business: str, objective: dict, criterion: dict | None, result: 
 
     # Ces statuts incluent InvalidOutput et les cooldowns : seul le plafond explicite requiert l'humain.
     error = str(result.get("synthesis_error") or "")
-    boundary = ("plafond LLM atteint" if execution_status == "budget_exceeded"
+    boundary = (error if execution_status == 'human_required' else "plafond LLM atteint" if execution_status == "budget_exceeded"
                 or (execution_status in {"llm_unavailable", "synthesis_unavailable"}
                     and error.startswith("BudgetExceeded:")) else None)
     if ambiguous_browser and not (objective_result or {}).get("success"):

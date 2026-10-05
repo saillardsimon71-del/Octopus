@@ -199,7 +199,7 @@ def test_corrupted_cache_cannot_activate_stored_free_flag(monkeypatch):
     assert catalog.load().model(MID) is None
 
 
-def test_new_canonical_identity_cannot_inherit_general_or_browser_proof(monkeypatch, transport, providers_up):
+def test_new_canonical_identity_requires_browser_proof_but_generic_compatibility_suffices(monkeypatch, transport, providers_up):
     install(monkeypatch, entry())
     prove('agent.plan', MID)
     qualify(MID)
@@ -207,8 +207,10 @@ def test_new_canonical_identity_cannot_inherit_general_or_browser_proof(monkeypa
     install(monkeypatch, entry(canonical_slug='vendor/new-version'))
     assert not llm.browser_quality(catalog.load().model(MID))['eligible']
     with pytest.raises(llm.NoEligibleModel):
-        llm.complete('agent.plan', [], profile='zero_cost')
+        llm.complete('browser.react_step', [], profile='zero_cost')
     assert not transport.calls
+    transport.reply('{}')
+    assert llm.complete('agent.plan', [], profile='zero_cost').model == MID
 
 
 def test_removed_slug_is_not_executable_even_when_pinned(monkeypatch, transport):
@@ -262,11 +264,10 @@ def test_cli_marks_technical_candidates_separately(monkeypatch, capsys):
     assert 'omniroute/' not in output
 
 
-def test_economical_requires_real_general_proof(monkeypatch, transport, providers_up):
+def test_economical_accepts_compatible_free_model_without_general_proof(monkeypatch, transport, providers_up):
     install(monkeypatch, entry())
     transport.reply('{}')
     result = llm.complete('agent.plan', [], profile='economical')
-    assert result.model == 'deepseek/flash'
-    prove('octopus.plan', MID)
+    assert result.model == MID and result.cost_usd == 0
     result = llm.complete('agent.plan', [], profile='economical')
     assert result.model == MID and result.cost_usd == 0

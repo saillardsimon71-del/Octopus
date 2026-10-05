@@ -69,10 +69,11 @@ s'arrêter, adapter sa stratégie ou demander l'autorisation nécessaire.
   génération vidéo ou installation autonome.
 - Un canal déjà autorisé dans les données ne débloque pas d'autre outil ici.
 - Deux routes gratuites et trois requêtes gratuites au plus par appel logique,
-  puis DeepSeek seul sous plafond. Une incompatibilité structurée autorise une
-  seconde méthode du même modèle. Sans route disponible, la panne technique
-  reste bornée aux trois cycles puis l'objectif est mis en pause ; elle ne crée
-  pas de demande de permission. Les anciens blocages pursuit dus uniquement au plafond
+  sans repli payant. Une incompatibilité structurée autorise une seconde méthode
+  du même modèle. Les tâches génériques exigent compatibilité, santé et coût
+  OpenRouter attesté nul ; aucun banc par tâche. `browser.react_step` conserve
+  sa qualification spécifique. Sans gratuit utilisable, une demande humaine
+  explicite précède tout changement de profil et budget. Les anciens blocages pursuit dus uniquement au plafond
   LLM sont réconciliés lors d'une reprise explicite ; aucun droit d'action n'est accordé.
   Désactiver la passerelle bloque le démarrage, sans appel direct.
 - Une réponse dans "Humain" ne modifie ni droits, ni budget. Les permissions

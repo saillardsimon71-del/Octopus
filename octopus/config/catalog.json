@@ -87,7 +87,7 @@
       "description": "OpenRouter gratuit uniquement. Aucun appel payant automatique.",
       "honor_pins": false,
       "allowed_cost_classes": ["free_quota"],
-      "require_evidence": true,
+      "require_evidence": false,
       "fallback": true
     },
     "low_cost": {
@@ -98,13 +98,11 @@
       "fallback": true
     },
     "economical": {
-      "description": "Au plus deux routes gratuites et trois requetes gratuites, puis DeepSeek seul sous plafond LLM du run.",
+      "description": "FREE FIRST : deux routes gratuites et trois requetes au plus. Frontiere humaine avant tout appel payant.",
       "honor_pins": false,
-      "allowed_cost_classes": ["free_quota", "paid"],
-      "allowed_paid_providers": ["deepseek"],
+      "allowed_cost_classes": ["free_quota"],
       "max_free_attempts": 2,
-      "paid_timeout_s": 90,
-      "require_evidence": true,
+      "require_evidence": false,
       "fallback": true
     },
     "flash_fallback": {
